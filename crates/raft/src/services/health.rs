@@ -180,7 +180,7 @@ impl HealthService for HealthServiceImpl {
         details.insert("startup".to_string(), self.health_state.startup_check().to_string());
         details.insert("liveness".to_string(), self.health_state.liveness_check().to_string());
         details.insert("readiness".to_string(), self.health_state.readiness_check().to_string());
-        details.insert("phase".to_string(), format!("{:?}", self.health_state.phase()));
+        details.insert("phase".to_string(), self.health_state.phase().as_str().to_string());
 
         // Run dependency health checks if configured
         let deps_healthy = if let Some(checker) = &self.dependency_checker {
@@ -219,6 +219,9 @@ impl HealthService for HealthServiceImpl {
                     }
                 }
                 (HealthStatus::Degraded, "Node is starting up")
+            },
+            crate::graceful_shutdown::NodePhase::Draining => {
+                (HealthStatus::Unavailable, "Node is draining — not accepting new writes")
             },
             crate::graceful_shutdown::NodePhase::ShuttingDown => {
                 (HealthStatus::Unavailable, "Node is shutting down")

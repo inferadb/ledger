@@ -32,7 +32,8 @@ use std::{
 
 use inferadb_ledger_proto::proto::{
     RaftAppendEntriesRequest, RaftAppendEntriesResponse, RaftInstallSnapshotRequest,
-    RaftInstallSnapshotResponse, RaftVoteRequest, RaftVoteResponse,
+    RaftInstallSnapshotResponse, RaftVoteRequest, RaftVoteResponse, TriggerElectionRequest,
+    TriggerElectionResponse,
     raft_service_server::{RaftService, RaftServiceServer},
 };
 use parking_lot::Mutex;
@@ -188,6 +189,16 @@ impl RaftService for SplitBrainDetectionService {
         _request: Request<RaftInstallSnapshotRequest>,
     ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
         Ok(Response::new(RaftInstallSnapshotResponse { vote: None }))
+    }
+
+    async fn trigger_election(
+        &self,
+        _request: Request<TriggerElectionRequest>,
+    ) -> Result<Response<TriggerElectionResponse>, Status> {
+        Ok(Response::new(TriggerElectionResponse {
+            accepted: true,
+            message: "Election triggered".to_string(),
+        }))
     }
 }
 
@@ -354,6 +365,16 @@ fn test_write_fails_in_minority_partition() {
         ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
             Ok(Response::new(RaftInstallSnapshotResponse { vote: None }))
         }
+
+        async fn trigger_election(
+            &self,
+            _request: Request<TriggerElectionRequest>,
+        ) -> Result<Response<TriggerElectionResponse>, Status> {
+            Ok(Response::new(TriggerElectionResponse {
+                accepted: true,
+                message: "Election triggered".to_string(),
+            }))
+        }
     }
 
     let partition_flag = Arc::new(Mutex::new(false));
@@ -518,6 +539,16 @@ fn test_consistency_after_partition_heals() {
             _request: Request<RaftInstallSnapshotRequest>,
         ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
             Ok(Response::new(RaftInstallSnapshotResponse { vote: None }))
+        }
+
+        async fn trigger_election(
+            &self,
+            _request: Request<TriggerElectionRequest>,
+        ) -> Result<Response<TriggerElectionResponse>, Status> {
+            Ok(Response::new(TriggerElectionResponse {
+                accepted: true,
+                message: "Election triggered".to_string(),
+            }))
         }
     }
 
@@ -688,6 +719,16 @@ fn test_network_delay_request_completion() {
             _request: Request<RaftInstallSnapshotRequest>,
         ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
             Ok(Response::new(RaftInstallSnapshotResponse { vote: None }))
+        }
+
+        async fn trigger_election(
+            &self,
+            _request: Request<TriggerElectionRequest>,
+        ) -> Result<Response<TriggerElectionResponse>, Status> {
+            Ok(Response::new(TriggerElectionResponse {
+                accepted: true,
+                message: "Election triggered".to_string(),
+            }))
         }
     }
 

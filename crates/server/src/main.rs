@@ -128,6 +128,7 @@ async fn main() -> Result<(), ServerError> {
 
     // Spawn shutdown handler
     let raft_for_shutdown = node.raft.clone();
+    let graceful_shutdown = graceful_shutdown.with_raft(node.raft.clone());
     let shutdown_handle = tokio::spawn(async move {
         shutdown::shutdown_signal().await;
         graceful_shutdown

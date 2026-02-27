@@ -6,11 +6,13 @@
 #   Phase 1: Boot a 3-node cluster, write data, verify replication
 #   Phase 2: Add a 4th node (--join), verify it catches up with all data
 #   Phase 3: Write data via the 4th node, verify all 4 nodes agree
-#   Phase 4: Shut down the original 3 nodes, write data to the survivor
-#   Phase 5: Boot 2 new nodes, verify the new 3-node cluster has all data
+#   Phase 4: Graceful leader handoff via TransferLeadership RPC
+#   Phase 5: Shut down the original 3 nodes, write data to the survivor
+#   Phase 6: Boot 2 new nodes, verify the new 3-node cluster has all data
 #
 # This exercises: coordinated bootstrap, Raft log replication, dynamic
-# membership changes, snapshot transfer, leader failover, and catch-up.
+# membership changes, snapshot transfer, leader failover, graceful leader
+# transfer, and catch-up.
 #
 # Usage:
 #   ./scripts/cluster-lifecycle-test.sh                  # Full test
@@ -934,10 +936,87 @@ sleep 2
 verify_data_consistency "Phase 3 — all 4 nodes after writes via node 4" 1 2 3 4
 
 # ===========================================================================
-# Phase 4: Shut down original 3 nodes, write data to survivor
+# Phase 4: Graceful leader handoff via TransferLeadership RPC
 # ===========================================================================
 
-log_phase "Phase 4: Shut down original 3 nodes"
+log_phase "Phase 4: Graceful leader handoff"
+
+# Step 1: Identify the current leader
+OLD_LEADER=$(find_leader 1 2 3 4)
+if [[ -z "$OLD_LEADER" ]]; then
+  log_error "No leader found for transfer test"
+  exit 1
+fi
+OLD_LEADER_ID=$(get_node_id "$OLD_LEADER")
+log_info "Current leader: node $OLD_LEADER (ID: $OLD_LEADER_ID)"
+
+# Step 2: Send TransferLeadership RPC with target_node_id=0 (auto-pick best follower)
+log_step "Sending TransferLeadership RPC to node $OLD_LEADER..."
+TRANSFER_ADDR=$(node_addr "$OLD_LEADER")
+TRANSFER_RESULT=$(grpcurl -plaintext \
+  -d '{"target_node_id": 0, "timeout_ms": 10000}' \
+  "$TRANSFER_ADDR" \
+  ledger.v1.AdminService/TransferLeadership 2>&1) || true
+
+# Step 3: Verify the response
+TRANSFER_SUCCESS=$(echo "$TRANSFER_RESULT" | jq -r '.success // false' 2>/dev/null || echo "false")
+NEW_LEADER_ID=$(echo "$TRANSFER_RESULT" | jq -r '.newLeaderId // "0"' 2>/dev/null || echo "0")
+
+if [[ "$TRANSFER_SUCCESS" != "true" ]]; then
+  log_error "TransferLeadership failed: $TRANSFER_RESULT"
+  exit 1
+fi
+log_success "TransferLeadership succeeded"
+
+if [[ "$NEW_LEADER_ID" == "$OLD_LEADER_ID" || "$NEW_LEADER_ID" == "0" ]]; then
+  log_error "New leader ID ($NEW_LEADER_ID) should differ from old leader ($OLD_LEADER_ID)"
+  exit 1
+fi
+log_success "New leader ID: $NEW_LEADER_ID (differs from old: $OLD_LEADER_ID)"
+
+# Step 4: Verify via GetClusterInfo on a different node
+# Pick a node that isn't the old leader for an independent view
+VERIFY_NODE=1
+[[ "$OLD_LEADER" -eq 1 ]] && VERIFY_NODE=2
+
+# Wait briefly for the new leader to be reported by all nodes
+sleep 2
+
+VERIFY_ADDR=$(node_addr "$VERIFY_NODE")
+CLUSTER_INFO=$(grpcurl -plaintext "$VERIFY_ADDR" ledger.v1.AdminService/GetClusterInfo 2>/dev/null || true)
+REPORTED_LEADER=$(echo "$CLUSTER_INFO" | jq -r '.leaderId // "0"' 2>/dev/null || echo "0")
+
+if [[ "$REPORTED_LEADER" != "$NEW_LEADER_ID" ]]; then
+  log_error "Node $VERIFY_NODE reports leader $REPORTED_LEADER, expected $NEW_LEADER_ID"
+  exit 1
+fi
+log_success "Node $VERIFY_NODE confirms new leader: $REPORTED_LEADER"
+
+# Step 5: Find the new leader's node number and write through it
+NEW_LEADER=$(find_leader 1 2 3 4)
+if [[ -z "$NEW_LEADER" ]]; then
+  log_error "Cannot find new leader node number"
+  exit 1
+fi
+log_info "New leader is node $NEW_LEADER — writing data through it..."
+write_entity "$NEW_LEADER" "user:transfer-test" "written-after-leader-transfer"
+
+# Step 6: Verify the old leader (now a follower) can serve reads
+sleep 2
+OLD_LEADER_VALUE=$(read_entity "$OLD_LEADER" "user:transfer-test")
+if [[ "$OLD_LEADER_VALUE" != "written-after-leader-transfer" ]]; then
+  log_error "Old leader (node $OLD_LEADER) failed to serve read: got '$OLD_LEADER_VALUE'"
+  exit 1
+fi
+log_success "Old leader (node $OLD_LEADER) serving reads as follower"
+
+verify_data_consistency "Phase 4 — all 4 nodes after leader transfer" 1 2 3 4
+
+# ===========================================================================
+# Phase 5: Shut down original 3 nodes, write data to survivor
+# ===========================================================================
+
+log_phase "Phase 5: Shut down original 3 nodes"
 
 # Remove original nodes from cluster before killing (best-effort).
 # This ensures the surviving node doesn't wait for dead peers.
@@ -989,15 +1068,15 @@ done
 # This replaces a blind sleep — the election timeout is non-deterministic.
 wait_for_leader 4
 
-log_info "Writing Phase 4 data to surviving node 4..."
-write_entity 4 "user:frank" "Frank from Phase 4"
+log_info "Writing Phase 5 data to surviving node 4..."
+write_entity 4 "user:frank" "Frank from Phase 5"
 write_entity 4 "event:migration" "original-3-shutdown"
 
 # ===========================================================================
-# Phase 5: Boot 2 new nodes, verify full cluster state
+# Phase 6: Boot 2 new nodes, verify full cluster state
 # ===========================================================================
 
-log_phase "Phase 5: Boot 2 new nodes and verify full replication"
+log_phase "Phase 6: Boot 2 new nodes and verify full replication"
 
 log_info "Starting nodes 5 and 6 in join mode..."
 start_node_join 5
@@ -1018,7 +1097,7 @@ sleep 3
 
 # Final verification: all 3 nodes (4, 5, 6) should have ALL data
 # from every phase
-verify_data_consistency "Phase 5 — new 3-node cluster has all data" 4 5 6
+verify_data_consistency "Phase 6 — new 3-node cluster has all data" 4 5 6
 
 # ===========================================================================
 # Summary
@@ -1030,7 +1109,8 @@ log_phase "All phases passed!"
 echo -e "${GREEN}  Phase 1:${NC} 3-node cluster boot + initial writes + replication   ✓"
 echo -e "${GREEN}  Phase 2:${NC} 4th node join + full catch-up verification            ✓"
 echo -e "${GREEN}  Phase 3:${NC} Write via 4th node + 4-node consistency               ✓"
-echo -e "${GREEN}  Phase 4:${NC} Original 3 nodes shutdown + survivor writes            ✓"
-echo -e "${GREEN}  Phase 5:${NC} 2 new nodes join + full data replication               ✓"
+echo -e "${GREEN}  Phase 4:${NC} Graceful leader handoff via TransferLeadership        ✓"
+echo -e "${GREEN}  Phase 5:${NC} Original 3 nodes shutdown + survivor writes            ✓"
+echo -e "${GREEN}  Phase 6:${NC} 2 new nodes join + full data replication               ✓"
 echo ""
 log_success "Cluster lifecycle test completed successfully!"

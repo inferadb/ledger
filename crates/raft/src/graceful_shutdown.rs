@@ -34,20 +34,24 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use inferadb_ledger_types::config::ShutdownConfig;
+use openraft::Raft;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
+use crate::types::LedgerTypeConfig;
+
 /// Node lifecycle phase.
 ///
-/// Transitions: `Starting` → `Ready` → `ShuttingDown`.
-/// These are one-way transitions; a node never goes back to `Starting` or `Ready`
-/// from a later state.
+/// Transitions: `Starting` → `Ready` → `Draining` → `ShuttingDown`.
+/// These are one-way transitions; a node never goes back to an earlier state.
+/// The `Draining` phase signals: stop sending new writes, but existing in-flight
+/// requests complete and the node is still alive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum NodePhase {
@@ -55,8 +59,10 @@ pub enum NodePhase {
     Starting = 0,
     /// Node is fully operational and serving traffic.
     Ready = 1,
+    /// Node is draining — rejecting new proposals but still serving reads.
+    Draining = 2,
     /// Node is shutting down and draining connections.
-    ShuttingDown = 2,
+    ShuttingDown = 3,
 }
 
 impl NodePhase {
@@ -64,8 +70,19 @@ impl NodePhase {
         match val {
             0 => Self::Starting,
             1 => Self::Ready,
-            2 => Self::ShuttingDown,
+            2 => Self::Draining,
+            3 => Self::ShuttingDown,
             _ => Self::Starting,
+        }
+    }
+
+    /// Returns a lowercase, snake_case string for the phase.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Draining => "draining",
+            Self::ShuttingDown => "shutting_down",
         }
     }
 }
@@ -270,6 +287,28 @@ impl HealthState {
             .is_ok()
     }
 
+    /// Transitions to the `Draining` phase.
+    ///
+    /// Only succeeds if the current phase is `Ready`. Returns `true` on success.
+    pub fn mark_draining(&self) -> bool {
+        self.phase
+            .compare_exchange(
+                NodePhase::Ready as u8,
+                NodePhase::Draining as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Returns `true` when the node is accepting new proposals.
+    ///
+    /// Only `Ready` phase accepts proposals. `Draining` and `ShuttingDown`
+    /// reject new writes to allow leadership transfer and clean shutdown.
+    pub fn is_accepting_proposals(&self) -> bool {
+        self.phase() == NodePhase::Ready
+    }
+
     /// Transitions to the `ShuttingDown` phase.
     ///
     /// Succeeds from any phase (idempotent).
@@ -313,7 +352,9 @@ impl HealthState {
 
     /// Readiness probe: passes when the node can serve traffic.
     ///
-    /// Returns `true` when startup is complete AND the node is not shutting down.
+    /// Returns `true` only when the node is in the `Ready` phase.
+    /// Both `Draining` and `ShuttingDown` fail readiness so load balancers
+    /// stop routing traffic to this node.
     pub fn readiness_check(&self) -> bool {
         self.phase() == NodePhase::Ready
     }
@@ -332,6 +373,10 @@ pub struct GracefulShutdown {
     health_state: HealthState,
     /// Sender to signal the gRPC server to stop accepting connections.
     server_shutdown_tx: watch::Sender<bool>,
+    /// Raft handle for leader transfer during shutdown.
+    raft: Option<Arc<Raft<LedgerTypeConfig>>>,
+    /// Lock to prevent concurrent leader transfer attempts.
+    transfer_lock: Arc<AtomicBool>,
 }
 
 impl GracefulShutdown {
@@ -341,7 +386,23 @@ impl GracefulShutdown {
     /// use with `serve_with_shutdown()`.
     pub fn new(config: ShutdownConfig, health_state: HealthState) -> (Self, watch::Receiver<bool>) {
         let (tx, rx) = watch::channel(false);
-        (Self { config, health_state, server_shutdown_tx: tx }, rx)
+        (
+            Self {
+                config,
+                health_state,
+                server_shutdown_tx: tx,
+                raft: None,
+                transfer_lock: Arc::new(AtomicBool::new(false)),
+            },
+            rx,
+        )
+    }
+
+    /// Attaches a Raft handle for leader transfer during shutdown.
+    #[must_use]
+    pub fn with_raft(mut self, raft: Arc<Raft<LedgerTypeConfig>>) -> Self {
+        self.raft = Some(raft);
+        self
     }
 
     /// Executes the graceful shutdown sequence.
@@ -358,8 +419,34 @@ impl GracefulShutdown {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
+        // Pre-phase: Drain and attempt leader transfer
+        info!("Graceful shutdown initiated, entering draining phase");
+        self.health_state.mark_draining();
+
+        if let Some(raft) = &self.raft {
+            let timeout = Duration::from_secs(self.config.leader_transfer_timeout_secs);
+            if !timeout.is_zero() {
+                let config = crate::leader_transfer::LeaderTransferConfig::builder()
+                    .timeout(timeout)
+                    .build();
+                match crate::leader_transfer::transfer_leadership(
+                    raft,
+                    None,
+                    &self.transfer_lock,
+                    &config,
+                )
+                .await
+                {
+                    Ok(new_leader) => info!(new_leader, "Leadership transferred during shutdown"),
+                    Err(e) => {
+                        warn!(error = %e, "Leadership transfer failed, proceeding with shutdown")
+                    },
+                }
+            }
+        }
+
         // Phase 1: Mark readiness as failing
-        info!("Graceful shutdown initiated, marking readiness as failing");
+        info!("Marking node as shutting down");
         self.health_state.mark_shutting_down();
 
         // Phase 2: Pre-stop delay (K8s endpoint removal)
@@ -557,6 +644,76 @@ mod tests {
     }
 
     #[test]
+    fn test_health_state_mark_draining() {
+        let state = HealthState::new();
+        assert!(state.mark_ready());
+        assert!(state.mark_draining());
+        assert_eq!(state.phase(), NodePhase::Draining);
+        assert!(state.startup_check()); // startup complete
+        assert!(state.liveness_check()); // still alive
+        assert!(!state.readiness_check()); // not accepting traffic
+        assert!(!state.is_accepting_proposals()); // not accepting proposals
+    }
+
+    #[test]
+    fn test_health_state_mark_draining_only_from_ready() {
+        let state = HealthState::new();
+        // Cannot drain from Starting
+        assert!(!state.mark_draining());
+        assert_eq!(state.phase(), NodePhase::Starting);
+    }
+
+    #[test]
+    fn test_health_state_mark_draining_not_from_shutting_down() {
+        let state = HealthState::new();
+        state.mark_shutting_down();
+        assert!(!state.mark_draining());
+        assert_eq!(state.phase(), NodePhase::ShuttingDown);
+    }
+
+    #[test]
+    fn test_health_state_draining_to_shutting_down() {
+        let state = HealthState::new();
+        assert!(state.mark_ready());
+        assert!(state.mark_draining());
+        state.mark_shutting_down();
+        assert_eq!(state.phase(), NodePhase::ShuttingDown);
+        assert!(!state.readiness_check());
+        assert!(!state.is_accepting_proposals());
+    }
+
+    #[test]
+    fn test_health_state_cannot_mark_ready_after_draining() {
+        let state = HealthState::new();
+        assert!(state.mark_ready());
+        assert!(state.mark_draining());
+        assert!(!state.mark_ready());
+        assert_eq!(state.phase(), NodePhase::Draining);
+    }
+
+    #[test]
+    fn test_health_state_is_accepting_proposals() {
+        let state = HealthState::new();
+        // Starting: not accepting
+        assert!(!state.is_accepting_proposals());
+        // Ready: accepting
+        assert!(state.mark_ready());
+        assert!(state.is_accepting_proposals());
+        // Draining: not accepting
+        assert!(state.mark_draining());
+        assert!(!state.is_accepting_proposals());
+        // ShuttingDown: not accepting
+        state.mark_shutting_down();
+        assert!(!state.is_accepting_proposals());
+    }
+
+    #[test]
+    fn test_node_phase_from_u8_draining() {
+        assert_eq!(NodePhase::from_u8(2), NodePhase::Draining);
+        assert_eq!(NodePhase::from_u8(3), NodePhase::ShuttingDown);
+    }
+
+    #[test]
     fn test_health_state_default() {
         let state = HealthState::default();
         assert_eq!(state.phase(), NodePhase::Starting);
@@ -751,6 +908,7 @@ mod tests {
             pre_stop_delay_secs: 0,
             pre_shutdown_timeout_secs: 10,
             watchdog_multiplier: 2,
+            leader_transfer_timeout_secs: 0,
         }
     }
 
@@ -862,6 +1020,7 @@ mod tests {
             pre_stop_delay_secs: 0,
             pre_shutdown_timeout_secs: 5,
             watchdog_multiplier: 2,
+            leader_transfer_timeout_secs: 0,
         };
         let (shutdown, mut rx) = GracefulShutdown::new(config, health.clone());
 
@@ -892,6 +1051,7 @@ mod tests {
             pre_stop_delay_secs: 1,
             pre_shutdown_timeout_secs: 10,
             watchdog_multiplier: 2,
+            leader_transfer_timeout_secs: 0,
         };
         let (shutdown, _rx) = GracefulShutdown::new(config, health.clone());
 

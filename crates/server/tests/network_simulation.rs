@@ -18,7 +18,8 @@ use std::{
 
 use inferadb_ledger_proto::proto::{
     RaftAppendEntriesRequest, RaftAppendEntriesResponse, RaftInstallSnapshotRequest,
-    RaftInstallSnapshotResponse, RaftVoteRequest, RaftVoteResponse,
+    RaftInstallSnapshotResponse, RaftVoteRequest, RaftVoteResponse, TriggerElectionRequest,
+    TriggerElectionResponse,
     raft_service_server::{RaftService, RaftServiceServer},
 };
 use tonic::{Request, Response, Status, transport::Server};
@@ -68,6 +69,16 @@ impl RaftService for MinimalRaftService {
         _request: Request<RaftInstallSnapshotRequest>,
     ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
         Ok(Response::new(RaftInstallSnapshotResponse { vote: None }))
+    }
+
+    async fn trigger_election(
+        &self,
+        _request: Request<TriggerElectionRequest>,
+    ) -> Result<Response<TriggerElectionResponse>, Status> {
+        Ok(Response::new(TriggerElectionResponse {
+            accepted: true,
+            message: "Election triggered".to_string(),
+        }))
     }
 }
 
@@ -268,6 +279,16 @@ fn test_majority_partition_continues_operating() {
             _request: Request<RaftInstallSnapshotRequest>,
         ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
             Ok(Response::new(RaftInstallSnapshotResponse { vote: None }))
+        }
+
+        async fn trigger_election(
+            &self,
+            _request: Request<TriggerElectionRequest>,
+        ) -> Result<Response<TriggerElectionResponse>, Status> {
+            Ok(Response::new(TriggerElectionResponse {
+                accepted: true,
+                message: "Election triggered".to_string(),
+            }))
         }
     }
 
@@ -522,6 +543,16 @@ fn test_intermittent_connectivity() {
             _request: Request<RaftInstallSnapshotRequest>,
         ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
             Ok(Response::new(RaftInstallSnapshotResponse { vote: None }))
+        }
+
+        async fn trigger_election(
+            &self,
+            _request: Request<TriggerElectionRequest>,
+        ) -> Result<Response<TriggerElectionResponse>, Status> {
+            Ok(Response::new(TriggerElectionResponse {
+                accepted: true,
+                message: "Election triggered".to_string(),
+            }))
         }
     }
 

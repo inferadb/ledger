@@ -72,6 +72,9 @@ pub struct MultiShardWriteService {
     /// Node ID for handler-phase event attribution.
     #[builder(default)]
     node_id: Option<u64>,
+    /// Health state for drain-phase write rejection.
+    #[builder(default)]
+    health_state: Option<crate::graceful_shutdown::HealthState>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -234,6 +237,8 @@ impl WriteService for MultiShardWriteService {
     ) -> Result<Response<WriteResponse>, Status> {
         // Reject requests with insufficient remaining deadline
         crate::deadline::check_near_deadline(&request)?;
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         let start = Instant::now();
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
@@ -583,6 +588,8 @@ impl WriteService for MultiShardWriteService {
     ) -> Result<Response<BatchWriteResponse>, Status> {
         // Reject requests with insufficient remaining deadline
         crate::deadline::check_near_deadline(&request)?;
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         let start = Instant::now();
         let trace_ctx = trace_context::extract_or_generate(request.metadata());

@@ -1415,6 +1415,13 @@ impl AdminService for MockAdminService {
     ) -> Result<Response<proto::RestoreBackupResponse>, Status> {
         Err(Status::unimplemented("Restore not supported in mock"))
     }
+
+    async fn transfer_leadership(
+        &self,
+        _request: Request<proto::TransferLeadershipRequest>,
+    ) -> Result<Response<proto::TransferLeadershipResponse>, Status> {
+        Err(Status::unimplemented("Leader transfer not supported in mock"))
+    }
 }
 
 // =============================================================================

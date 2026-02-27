@@ -126,6 +126,7 @@ impl MultiShardLedgerServer {
             .rate_limiter(self.organization_rate_limiter.clone())
             .hot_key_detector(self.hot_key_detector.clone())
             .proposal_timeout(self.proposal_timeout)
+            .health_state(Some(self.health_state.clone()))
             .build();
 
         // Admin, Health, and Discovery services use the system shard
@@ -142,7 +143,8 @@ impl MultiShardLedgerServer {
             .block_archive(Some(system_shard.block_archive().clone()))
             .listen_addr(self.addr)
             .proposal_timeout(self.proposal_timeout)
-            .build();
+            .build()
+            .with_health_state(self.health_state.clone());
 
         // Extract connection tracker before health_state is moved into HealthServiceImpl
         let connection_tracker = self.health_state.connection_tracker().clone();

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use inferadb_ledger_proto::proto::{
     RaftAppendEntriesRequest, RaftAppendEntriesResponse, RaftInstallSnapshotRequest,
     RaftInstallSnapshotResponse, RaftLogId, RaftVoteRequest, RaftVoteResponse,
-    raft_service_server::RaftService,
+    TriggerElectionRequest, TriggerElectionResponse, raft_service_server::RaftService,
 };
 use inferadb_ledger_types::decode;
 use openraft::{Raft, Vote, raft::AppendEntriesRequest};
@@ -178,6 +178,37 @@ impl RaftService for RaftServiceImpl {
             .map_err(|e| Status::internal(format!("InstallSnapshot failed: {}", e)))?;
 
         Ok(Response::new(RaftInstallSnapshotResponse { vote: Some((&response.vote).into()) }))
+    }
+
+    async fn trigger_election(
+        &self,
+        request: Request<TriggerElectionRequest>,
+    ) -> Result<Response<TriggerElectionResponse>, Status> {
+        let req = request.into_inner();
+
+        let current_term = {
+            let metrics = self.raft.metrics().borrow().clone();
+            metrics.current_term
+        };
+
+        if req.leader_term < current_term {
+            crate::metrics::record_trigger_election(false);
+            return Err(Status::failed_precondition(format!(
+                "Stale leader term: request term {} < current term {}",
+                req.leader_term, current_term
+            )));
+        }
+
+        self.raft.trigger().elect().await.map_err(|e| {
+            crate::metrics::record_trigger_election(false);
+            Status::internal(format!("Failed to trigger election: {}", e))
+        })?;
+
+        crate::metrics::record_trigger_election(true);
+        Ok(Response::new(TriggerElectionResponse {
+            accepted: true,
+            message: "Election triggered".to_string(),
+        }))
     }
 }
 
@@ -356,6 +387,40 @@ impl RaftService for MultiShardRaftService {
             .map_err(|e| Status::internal(format!("InstallSnapshot failed: {}", e)))?;
 
         Ok(Response::new(RaftInstallSnapshotResponse { vote: Some((&response.vote).into()) }))
+    }
+
+    async fn trigger_election(
+        &self,
+        request: Request<TriggerElectionRequest>,
+    ) -> Result<Response<TriggerElectionResponse>, Status> {
+        let req = request.into_inner();
+
+        // TriggerElection is a cluster-wide operation, always routes to system shard (0).
+        let raft = self.resolve_shard(Some(0))?;
+
+        let current_term = {
+            let metrics = raft.metrics().borrow().clone();
+            metrics.current_term
+        };
+
+        if req.leader_term < current_term {
+            crate::metrics::record_trigger_election(false);
+            return Err(Status::failed_precondition(format!(
+                "Stale leader term: request term {} < current term {}",
+                req.leader_term, current_term
+            )));
+        }
+
+        raft.trigger().elect().await.map_err(|e| {
+            crate::metrics::record_trigger_election(false);
+            Status::internal(format!("Failed to trigger election: {}", e))
+        })?;
+
+        crate::metrics::record_trigger_election(true);
+        Ok(Response::new(TriggerElectionResponse {
+            accepted: true,
+            message: "Election triggered".to_string(),
+        }))
     }
 }
 

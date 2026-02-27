@@ -61,7 +61,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `config/node.rs` (49 lines) — `NodeConfig`, `PeerConfig`
   - `config/storage.rs` (628 lines) — `StorageConfig`, `BTreeCompactionConfig`, `IntegrityConfig`, `BackupConfig`, `TieredStorageConfig`
   - `config/raft.rs` (370 lines) — `RaftConfig`, `BatchConfig`, `ClientSequenceEvictionConfig`
-  - `config/resilience.rs` (725 lines) — `RateLimitConfig`, `ShutdownConfig`, `HealthCheckConfig`, `ValidationConfig`, `SagaConfig`, `CleanupConfig`
+  - `config/resilience.rs` (740 lines) — `RateLimitConfig`, `ShutdownConfig` (with `leader_transfer_timeout_secs`, default 10, 0 disables), `HealthCheckConfig`, `ValidationConfig`, `SagaConfig`, `CleanupConfig`
   - `config/observability.rs` — `HotKeyConfig`, `MetricsCardinalityConfig` (note: `AuditConfig` previously here was removed — replaced by `EventConfig` in `events.rs`)
   - `config/runtime.rs` (333 lines) — `RuntimeConfig`, `RuntimeEventsConfig`, `ConfigChange`, `NonReconfigurableField`, `OrganizationQuota`
 - **Key Types/Functions**:
@@ -623,17 +623,20 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - 58+ unit tests + 5 proptests validating round-trip conversions (including events)
 - **Insights**: Deduplication effort (Phase 2 Task 15) removed duplicate helper functions. Events proto conversion flattens Rust's data-carrying enums (`EventOutcome::Failed { code, detail }`) into separate proto fields (outcome enum + optional error_code + error_detail). Comprehensive test coverage prevents serialization bugs.
 
-#### `generated/ledger.v1.rs` (6914 lines)
+#### `generated/ledger.v1.rs` (8045 lines)
 
 - **Purpose**: prost-generated Rust code from proto definitions
 - **Key Types/Functions**:
   - All gRPC message types: ReadRequest, WriteRequest, CreateVaultRequest, VaultSlug, etc.
   - Service traits: ReadService, WriteService, AdminService, EventsService, HealthService, DiscoveryService, RaftService
+  - AdminService leader transfer RPCs: `TransferLeadership(TransferLeadershipRequest) -> TransferLeadershipResponse`
+  - RaftService internal RPCs: `TriggerElection(TriggerElectionRequest) -> TriggerElectionResponse`
+  - Leader transfer messages: `TransferLeadershipRequest` (target_node_id, timeout_ms), `TransferLeadershipResponse` (success, new_leader_id, message), `TriggerElectionRequest` (leader_term, leader_id), `TriggerElectionResponse` (accepted, message)
   - EventsService RPCs: `ListEvents`, `GetEvent`, `CountEvents`, `IngestEvents`
   - Events messages: `EventEntry`, `EventFilter`, `ListEventsRequest/Response`, `GetEventRequest/Response`, `CountEventsRequest/Response`, `IngestEventEntry`, `IngestEventsRequest/Response`, `RejectedEvent`
   - Events enums: `EventScope`, `EventOutcome`, `EventEmissionPath`
   - Proto `VaultSlug { uint64 slug }` replaces former `VaultId { int64 id }` in all external-facing RPCs
-- **Insights**: Large generated file. Regular updates needed when .proto changes. EventsService is the newest addition (4 RPCs).
+- **Insights**: Large generated file. Regular updates needed when .proto changes. Leader transfer added `TransferLeadership` to AdminService and `TriggerElection` to RaftService (internal).
 
 ---
 
@@ -651,8 +654,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Key Types/Functions**:
   - Re-exports: `LedgerServer`, `LedgerTypeConfig`, `LedgerNodeId`, `RaftPayload`, `RaftLogStore`, `RateLimiter`, `HotKeyDetector`, `GracefulShutdown`, `EventsGarbageCollector`, `SagaOrchestrator`, `OrphanCleanupJob`, `IntegrityScrubberJob`, etc.
   - Note: `LedgerRequest` is NOT re-exported (access via `types::LedgerRequest`). `RaftPayload` wraps `LedgerRequest` with `proposed_at` for deterministic timestamps.
-  - 30+ `#[doc(hidden)] pub mod` declarations for server-internal infrastructure (includes `event_writer`, `events_gc`, `snapshot`)
-- **Insights**: Phase 2 Task 2 cleaned up public API. 3 stable modules + many doc-hidden modules. `snapshot` module added for streaming file-based snapshot infrastructure. Excellent encapsulation.
+  - 30+ `#[doc(hidden)] pub mod` declarations for server-internal infrastructure (includes `event_writer`, `events_gc`, `snapshot`, `leader_transfer`)
+- **Insights**: Phase 2 Task 2 cleaned up public API. 3 stable modules + many doc-hidden modules. `leader_transfer` module added for graceful leadership handoff. Excellent encapsulation.
 
 #### `log_storage/` (~11,700 lines across 6 submodules)
 
@@ -685,17 +688,30 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `validate_table_id()`: Guards against unknown table IDs during restore
 - **Insights**: Replaces the old `CombinedSnapshot` (in-memory postcard blob) with streaming file-based snapshots. Enables O(1) memory snapshots regardless of state size. The async/sync split (`SnapshotWriter`/`SyncSnapshotReader`) is necessary because openraft's `install_snapshot` callback runs in a sync context. SHA-256 checksum covers the entire compressed payload for tamper detection.
 
-#### `server.rs` (381 lines)
+#### `leader_transfer.rs` (283 lines) — NEW
+
+- **Purpose**: Graceful leader transfer coordination — orchestrates leadership handoff before shutdown or maintenance
+- **Key Types/Functions**:
+  - `LeaderTransferConfig`: bon `#[derive(Builder)]` with `timeout` (10s), `poll_interval` (50ms), `replication_timeout` (5s)
+  - `LeaderTransferError`: snafu error with 8 variants (NotLeader, NoTarget, TransferInProgress, ReplicationTimeout, TargetRejected, Timeout, Connection, Rpc)
+  - `TransferGuard<'a>`: RAII guard over `&AtomicBool` — `compare_exchange(false, true)` on entry, `store(false)` on `Drop` for cleanup even on early `?` returns
+  - `transfer_leadership(raft, target, transfer_lock, config) -> Result<u64, LeaderTransferError>`: Core coordination function
+  - Algorithm: verify leader → select best target (most caught-up follower via `metrics.replication`) → wait for replication catch-up → send `TriggerElection` RPC to target → poll until leader changes or timeout
+  - 5 unit tests: config defaults, custom config, guard reset, concurrent lock prevention, error display
+- **Insights**: Composes transfer from openraft primitives (no built-in `transfer_leader()` API). Accepts *any* new leader (not just requested target) — pragmatic for "stop being leader before shutdown." Concurrency guard shared between AdminService RPC and GracefulShutdown.
+
+#### `server.rs` (401 lines)
 
 - **Purpose**: LedgerServer builder with all gRPC services and Raft integration
 - **Key Types/Functions**:
   - `LedgerServer::builder()`: bon-based builder with 20+ config options
   - `serve(addr) -> Result<()>`: Start gRPC server with all services
   - `serve_with_shutdown(addr, shutdown_signal) -> Result<()>`: Graceful shutdown support
+  - `health_state: HealthState` field — threaded to `WriteServiceImpl`, `MultiShardWriteService`, and `AdminServiceImpl` for drain-phase proposal rejection
   - Optional `events_db: Option<EventsDatabase<FileBackend>>` for EventsService registration
   - Optional `event_handle: Option<EventHandle<FileBackend>>` for handler-phase event recording in services
   - Integrates: Raft node, all services, metrics, tracing, event logging, health checks
-- **Insights**: Central wiring point. Excellent builder pattern. Supports graceful shutdown with connection draining. When `events_db` is present, `EventsServiceServer` is registered on the router with `api_version_interceptor`.
+- **Insights**: Central wiring point. Excellent builder pattern. Supports graceful shutdown with connection draining. Threads `HealthState` to write and admin services for drain guard enforcement. When `events_db` is present, `EventsServiceServer` is registered on the router with `api_version_interceptor`.
 
 #### `types.rs`
 
@@ -722,27 +738,31 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 ### Service Layer (15 files)
 
-#### `services/admin.rs` (2929 lines)
+#### `services/admin.rs` (3044 lines)
 
-- **Purpose**: AdminService gRPC implementation (organization/vault/shard management, runtime config, backup/restore)
+- **Purpose**: AdminService gRPC implementation (organization/vault/shard management, runtime config, backup/restore, leader transfer)
 - **Key Types/Functions**:
   - `create_organization()`, `delete_organization()`, `list_organizations()`
   - `create_vault()`, `delete_vault()`, `list_vaults()`
+  - `transfer_leadership()`: Leader transfer RPC — validates timeout (cap 60s, default 10s), calls `leader_transfer::transfer_leadership()`, records metrics, emits canonical log line. Error mapping: NotLeader/NoTarget/TargetRejected→FAILED_PRECONDITION, TransferInProgress→ABORTED, ReplicationTimeout/Timeout→DEADLINE_EXCEEDED, Connection/Rpc→INTERNAL
   - `update_config()`, `get_config()`: Runtime reconfiguration RPCs
   - `create_backup()`, `list_backups()`, `restore_backup()`: Backup/restore RPCs
+  - `health_state: Option<HealthState>` field — drain guard on 10 mutating RPCs (create/delete org/vault, join/leave cluster, recover_vault, force_gc, update_config, restore_backup). `transfer_leadership` exempt (must work during drain)
+  - `transfer_lock: Arc<AtomicBool>` — shared concurrency guard with `GracefulShutdown`
   - `event_handle: Option<EventHandle<B>>` for handler-phase events (ConfigurationChanged, SnapshotCreated, BackupCreated, BackupRestored, IntegrityChecked, VaultRecovered, quota denial)
-- **Insights**: Largest service file — includes admin CRUD, runtime config, backup management, and comprehensive tests. Handler-phase events replace the former `AuditLogger`.
+- **Insights**: Largest service file — includes admin CRUD, runtime config, backup management, leader transfer, and comprehensive tests. Handler-phase events replace the former `AuditLogger`.
 
-#### `services/write.rs` (1503 lines)
+#### `services/write.rs` (1772 lines)
 
 - **Purpose**: WriteService gRPC implementation (entity/relationship mutations)
 - **Key Types/Functions**:
   - `write()`, `batch_write()`: Entity/relationship mutations
   - `create_relationship()`, `delete_relationship()`: Authorization tuple mutations
+  - `health_state: Option<HealthState>` field — drain guard via `check_not_draining()` before proposal submission in `write()` and `batch_write()`
   - Rate limiting, hot key detection, validation, quota enforcement
   - `event_handle: Option<EventHandle<B>>` for handler-phase denial events (rate limit, validation, quota)
   - Error classification via `classify_batch_error()`
-- **Insights**: Core data path. Rate limiting + hot key detection protect cluster. Batch writes go through BatchWriter. Includes extensive inline tests.
+- **Insights**: Core data path. Rate limiting + hot key detection protect cluster. Drain guard returns `UNAVAILABLE` during Draining phase (clients retry on another node). Batch writes go through BatchWriter. Includes extensive inline tests.
 
 #### `services/read.rs` (1535 lines)
 
@@ -754,23 +774,25 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Pagination support via PageToken
 - **Insights**: Read path with pagination. Permission checks use dual indexes for efficiency. Includes comprehensive inline tests.
 
-#### `services/health.rs` (237 lines)
+#### `services/health.rs` (246 lines)
 
 - **Purpose**: HealthService with readiness/liveness/startup probes
 - **Key Types/Functions**:
   - `check(type: ProbeType) -> HealthCheckResponse`
-  - Probes: readiness (Raft ready, dependencies healthy), liveness (process alive), startup (data_dir writable)
+  - Probes: readiness (Raft ready, dependencies healthy — returns `false` for both Draining and ShuttingDown), liveness (process alive), startup (data_dir writable)
+  - Phase reporting via `NodePhase::as_str()` in details map: `"starting"`, `"ready"`, `"draining"`, `"shutting_down"`
   - DependencyHealthChecker: disk writability, Raft lag, peer reachability
-- **Insights**: Three-probe pattern for Kubernetes. Readiness gates traffic, liveness triggers restart, startup delays initial traffic.
+- **Insights**: Three-probe pattern for Kubernetes. Readiness gates traffic (fails during Draining — removes pod from Service endpoints without restarting), liveness triggers restart, startup delays initial traffic.
 
-#### `services/helpers.rs`
+#### `services/helpers.rs` (471 lines)
 
-- **Purpose**: Shared service utilities (rate limiting, validation, metadata extraction)
+- **Purpose**: Shared service utilities (rate limiting, validation, metadata extraction, drain guard)
 - **Key Types/Functions**:
+  - `check_not_draining(health_state: Option<&HealthState>) -> Result<(), Status>`: Returns `UNAVAILABLE` if node is in Draining or ShuttingDown phase. Used by write, multi-shard write, and admin services before proposal submission.
   - `check_rate_limit()`: Rate limit check with rich ErrorDetails
   - `validation_status()`: Wraps validation errors with gRPC status
   - `extract_organization_from_request()`: Common metadata extraction
-- **Insights**: Phase 2 Task 1 extracted shared code from write/multi-shard/admin services. Former `emit_audit_event()` and `build_audit_event()` helpers removed (replaced by `EventHandle::record_handler_event()`).
+- **Insights**: Phase 2 Task 1 extracted shared code from write/multi-shard/admin services. `check_not_draining()` added for leader transfer sprint — centralizes the drain guard pattern.
 
 #### `services/metadata.rs` (219 lines)
 
@@ -783,11 +805,11 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### Additional Services
 
-- `services/raft.rs`: RaftService (inter-node Raft RPCs)
+- `services/raft.rs` (1204 lines): RaftService (inter-node Raft RPCs) including `TriggerElection` RPC handler — validates leader term (rejects stale), calls `raft.trigger().elect()`, records metrics via `record_trigger_election()`. Implemented on both `RaftServiceImpl` (single-shard) and `MultiShardRaftService` (routes to system shard).
 - `services/discovery.rs`: DiscoveryService (cluster membership)
 - `services/forward_client.rs`: Leader forwarding
 - `services/multi_shard_read.rs`: Multi-shard read coordination
-- `services/multi_shard_write.rs`: Multi-shard write coordination (2PC + saga). Now holds `manager: Option<Arc<MultiRaftManager>>` for automatic write forwarding — `resolve_with_forward()` detects remote-shard organizations and forwards raw requests via `ForwardClient` (destination resolves vault slugs).
+- `services/multi_shard_write.rs` (1010 lines): Multi-shard write coordination (2PC + saga). `health_state: Option<HealthState>` field with drain guard at outermost layer (before shard resolution). Holds `manager: Option<Arc<MultiRaftManager>>` for automatic write forwarding — `resolve_with_forward()` detects remote-shard organizations and forwards raw requests via `ForwardClient` (destination resolves vault slugs).
 - `services/events.rs` (~1785 lines): `EventsServiceImpl` — EventsService gRPC implementation with 4 RPCs (`ListEvents`, `GetEvent`, `CountEvents`, `IngestEvents`). `GetEvent` uses O(log n) `EventStore::get_by_id()` via secondary index (replaces former O(n) full-org scan with `COUNT_SCAN_LIMIT` cap, eliminating false-not-found for orgs with >100k events). `ListEvents` supports HMAC-signed `EventPageToken` pagination with in-memory filtering (actions, event_type_prefix, principal, outcome, emission_path, correlation_id). `IngestEvents` implements 10-step pipeline: master switch → source allow-list → batch size → rate limit → org resolution → validation → write → metrics → log. 30+ unit tests.
 - `services/slug_resolver.rs` (280 lines): Organization and vault slug ↔ internal ID resolution at gRPC boundary. `SlugResolver` wraps `AppliedStateAccessor`. Organization methods: `extract_slug`, `resolve`, `resolve_slug`, `extract_and_resolve`, `extract_and_resolve_optional`. Vault methods: `extract_vault_slug`, `resolve_vault`, `resolve_vault_slug`, `extract_and_resolve_vault`, `extract_and_resolve_vault_optional`. Events method: `extract_and_resolve_for_events()` (slug=0 → system org bypass). 37 unit tests (14 org + 19 vault + 4 events).
 - `services/shard_resolver.rs`: Organization→shard routing
@@ -803,12 +825,13 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `pagination.rs`: HMAC-signed page tokens. Includes `EventPageToken` (version, organization_id, last_key, query_hash) with encode/decode/validate methods on `PageTokenCodec`.
 - `rate_limit.rs`: 3-tier token bucket rate limiter
 - `hot_key_detector.rs`: Count-Min Sketch with rotating windows
-- `metrics.rs`: Prometheus metrics with SLI histograms. Events metrics: `ledger_event_writes_total` (emission/scope/action labels), `ledger_events_gc_*` (entries*deleted, cycle_duration, cycles), `ledger_events_ingest*\*` (total, batch_size, rate_limited, duration).
+- `metrics.rs` (1208 lines): Prometheus metrics with SLI histograms. Leader transfer metrics: `ledger_leader_transfers_total` (status label), `ledger_leader_transfer_latency_seconds` (histogram), `ledger_trigger_elections_total` (result label). Events metrics: `ledger_event_writes_total` (emission/scope/action labels), `ledger_events_gc_*` (entries_deleted, cycle_duration, cycles), `ledger_events_ingest_*` (total, batch_size, rate_limited, duration). Recording functions: `record_leader_transfer(success, latency_secs)`, `record_trigger_election(accepted)`.
 - `otel.rs` (580 lines): OpenTelemetry tracing setup and OTLP exporter configuration. `SpanAttributes` uses `vault_slug` key.
 
 #### Enterprise Features
 
-- `graceful_shutdown.rs`: 6-phase shutdown coordinator
+- `graceful_shutdown.rs` (1065 lines): Shutdown coordinator with `NodePhase` (4 states: Starting → Ready → Draining → ShuttingDown), `HealthState` (AtomicU8 with `mark_draining()`, `is_accepting_proposals()`, `as_str()`), pre-phases for drain + leader transfer before the 6-phase shutdown flow, `GracefulShutdown` with `raft`/`transfer_lock` fields and `with_raft()` builder. 39 unit tests.
+- `leader_transfer.rs` (283 lines): Graceful leader transfer coordination — `LeaderTransferConfig` (bon builder), `LeaderTransferError` (8 snafu variants), `TransferGuard` (RAII concurrency lock), `transfer_leadership()` (5-step algorithm: verify leader → select target → wait for replication → send TriggerElection → poll for leader change). 5 unit tests.
 - `runtime_config.rs`: Hot-reload via UpdateConfig RPC + ArcSwap
 - `backup.rs`: Snapshot-based backups with S3/GCS/Azure
 - `auto_recovery.rs`: Automatic divergence recovery
@@ -832,7 +855,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 #### Advanced Features
 
 - `multi_raft.rs`: Multi-Raft orchestration
-- `multi_shard_server.rs`: Multi-shard LedgerServer (with optional `events_db` for EventsService registration)
+- `multi_shard_server.rs` (241 lines): Multi-shard LedgerServer (with optional `events_db` for EventsService registration, threads `HealthState` to multi-shard write service)
 - `raft_network.rs`: gRPC-based Raft transport
 - `proto_compat.rs`: Orphan rule workarounds (`organization_status_to_proto`)
 - `trace_context.rs`: W3C Trace Context
@@ -995,7 +1018,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `next_sequence() -> u64`: Monotonic sequence
 - **Insights**: Client-side sequence numbers. Server deduplicates via IdempotencyCache.
 
-#### `mock.rs` (2452 lines)
+#### `mock.rs` (2493 lines)
 
 - **Purpose**: MockLedgerClient for testing
 - **Key Types/Functions**:
@@ -1013,12 +1036,12 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 ### Files
 
-#### `main.rs` (254 lines)
+#### `main.rs` (242 lines)
 
 - **Purpose**: CLI with clap, config loading, server startup
 - **Key Types/Functions**:
   - `Cli`: clap command-line args (config path, node-id, bootstrap, etc.)
-  - `main()`: Parse args, load config, call bootstrap
+  - `main()`: Parse args, load config, call bootstrap. Wires `node.raft` into `GracefulShutdown` via `with_raft()` for leader transfer during shutdown.
   - Subcommands: `start`, `export-schema`, `config-diff` (Phase 2 Task 14)
 - **Insights**: Clean CLI. Supports TOML config file + env var overrides. Subcommands for schema export and config diff.
 
@@ -1219,7 +1242,7 @@ The codebase has exceptional test coverage:
 - **Chaos testing**: Integration tests cover network partitions, node crashes, Byzantine faults. 22 in-process unit tests for Byzantine scenarios.
 - **Benchmarks**: Criterion benchmarks for B+ tree, read/write operations, whitepaper validation. CI tracks regressions via benchmark.yml workflow.
 - **Integration tests**: 19 integration test files in server crate (12,547 lines total) covering replication, failover, multi-shard, backup/restore, rate limiting, cancellation, circuit breaker, API version, quotas, resource metrics, dependency health, canonical log lines, config reload, externalized state persistence, and streaming snapshots.
-- **Unit tests**: 2,332 `#[test]` functions across all crates. Coverage target: 90%+.
+- **Unit tests**: ~2,457 `#[test]` and `#[tokio::test]` functions across all crates. Coverage target: 90%+.
 
 ### 4. Security Practices
 
@@ -1250,7 +1273,7 @@ The codebase has comprehensive observability:
 
 The codebase includes 40+ production-ready features:
 
-- **Graceful shutdown**: 6-phase shutdown (health drain, Raft snapshot, job stop, Raft shutdown, connection drain, service stop). ConnectionTracker and BackgroundJobWatchdog.
+- **Graceful shutdown with leader transfer**: Pre-phases (mark Draining → attempt leader transfer) before 6-phase shutdown (health drain, Raft snapshot, job stop, Raft shutdown, connection drain, service stop). NodePhase: Starting → Ready → Draining → ShuttingDown. Draining phase rejects new proposals via `check_not_draining()` while allowing in-flight requests to complete. Leader transfer is best-effort (failure falls back to election timeout). ConnectionTracker and BackgroundJobWatchdog. Configurable via `leader_transfer_timeout_secs` (default 10, 0 disables).
 - **Runtime reconfiguration**: UpdateConfig/GetConfig RPCs, lock-free reads via ArcSwap.
 - **Backup & restore**: Snapshot-based backups with zstd compression, chain verification, S3/GCS/Azure backends.
 - **Circuit breaker**: Per-endpoint state machine (Closed→Open→HalfOpen) in SDK. Prevents cascade failures.
@@ -1305,13 +1328,13 @@ Two previously identified large-file concerns have been resolved:
 
 InferaDB Ledger is a **production-grade blockchain database** with exceptional engineering quality:
 
-- **8 crates**, 193 Rust source files, ~137,600 lines of Rust, 2,332 test functions, 90%+ coverage
+- **8 crates**, 197 Rust source files, ~137,500 lines of Rust, 2,457 test functions, 90%+ coverage
 - **Zero `unsafe` code**, comprehensive error handling (snafu), structured error taxonomy
 - **Custom B+ tree engine** with ACID transactions, crash recovery, compaction
 - **Raft consensus** via openraft, batching, idempotency, multi-shard horizontal scaling
-- **Enterprise features**: graceful shutdown, circuit breaker, rate limiting, hot key detection, quota enforcement, backup/restore, tiered storage with multipart upload, API versioning, deadline propagation, dependency health checks, runtime reconfiguration, organization-scoped event logging, externalized state persistence, streaming snapshots, automatic write forwarding, and 30+ more
+- **Enterprise features**: graceful shutdown with leader transfer (Draining phase, best-effort handoff before election timeout), circuit breaker, rate limiting, hot key detection, quota enforcement, backup/restore, tiered storage with multipart upload, API versioning, deadline propagation, dependency health checks, runtime reconfiguration, organization-scoped event logging, externalized state persistence, streaming snapshots, automatic write forwarding, and 30+ more
 - **Excellent observability**: OpenTelemetry tracing, Prometheus metrics, canonical log lines, structured request logging, SDK-side metrics, queryable event audit trails via gRPC EventsService
-- **Comprehensive testing**: 2,332 test functions, property-based tests (proptest), crash recovery tests, chaos tests, 19 integration test files, benchmarks with CI tracking
+- **Comprehensive testing**: 2,457 test functions, property-based tests (proptest), crash recovery tests, chaos tests, 19 integration test files, benchmarks with CI tracking
 - **Security practices**: No unsafe, constant-time comparison, input validation, deterministic event replication via leader-assigned timestamps, event logging with audit trails, TLS/mTLS, rate limiting, quotas
 - **Documentation**: 10 ADRs, invariant specs, module docs, rustdoc examples, 19 operations guides, 7 client guides, error code reference, events architecture doc, Grafana dashboard templates
 

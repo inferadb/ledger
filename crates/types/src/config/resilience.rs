@@ -193,6 +193,10 @@ const fn default_watchdog_multiplier() -> u64 {
     2
 }
 
+const fn default_leader_transfer_timeout_secs() -> u64 {
+    10
+}
+
 /// Minimum grace period in seconds.
 const MIN_GRACE_PERIOD_SECS: u64 = 1;
 
@@ -258,6 +262,13 @@ pub struct ShutdownConfig {
     /// Default: 2 (2x the job's expected cycle time).
     #[serde(default = "default_watchdog_multiplier")]
     pub watchdog_multiplier: u64,
+    /// Maximum seconds to wait for leader transfer during graceful shutdown.
+    ///
+    /// If this node is the Raft leader, it attempts to transfer leadership
+    /// before shutting down. Set to 0 to disable leader transfer.
+    /// Default: 10 seconds.
+    #[serde(default = "default_leader_transfer_timeout_secs")]
+    pub leader_transfer_timeout_secs: u64,
 }
 
 impl Default for ShutdownConfig {
@@ -268,6 +279,7 @@ impl Default for ShutdownConfig {
             pre_stop_delay_secs: default_pre_stop_delay_secs(),
             pre_shutdown_timeout_secs: default_pre_shutdown_timeout_secs(),
             watchdog_multiplier: default_watchdog_multiplier(),
+            leader_transfer_timeout_secs: default_leader_transfer_timeout_secs(),
         }
     }
 }
@@ -289,6 +301,8 @@ impl ShutdownConfig {
         #[builder(default = default_pre_stop_delay_secs())] pre_stop_delay_secs: u64,
         #[builder(default = default_pre_shutdown_timeout_secs())] pre_shutdown_timeout_secs: u64,
         #[builder(default = default_watchdog_multiplier())] watchdog_multiplier: u64,
+        #[builder(default = default_leader_transfer_timeout_secs())]
+        leader_transfer_timeout_secs: u64,
     ) -> Result<Self, ConfigError> {
         let config = Self {
             grace_period_secs,
@@ -296,6 +310,7 @@ impl ShutdownConfig {
             pre_stop_delay_secs,
             pre_shutdown_timeout_secs,
             watchdog_multiplier,
+            leader_transfer_timeout_secs,
         };
         config.validate()?;
         Ok(config)

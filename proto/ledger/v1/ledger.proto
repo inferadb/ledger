@@ -768,6 +768,11 @@ service AdminService {
   // each other's Snowflake IDs and determine who should bootstrap.
   rpc GetNodeInfo(GetNodeInfoRequest) returns (GetNodeInfoResponse);
 
+  // Transfer leadership to a specific node before shutdown or maintenance.
+  // If target_node_id is 0, the leader picks the most caught-up follower.
+  // Returns once the target has won the election or the timeout expires.
+  rpc TransferLeadership(TransferLeadershipRequest) returns (TransferLeadershipResponse);
+
   // ==========================================================================
   // Maintenance Operations
   // ==========================================================================
@@ -1604,6 +1609,11 @@ service RaftService {
 
   // Install snapshot on a follower that is too far behind.
   rpc InstallSnapshot(RaftInstallSnapshotRequest) returns (RaftInstallSnapshotResponse);
+
+  // Trigger an immediate leader election on this node.
+  // Called by the current leader during leadership transfer.
+  // This is an internal RPC — not exposed to external clients.
+  rpc TriggerElection(TriggerElectionRequest) returns (TriggerElectionResponse);
 }
 
 // Raft vote (term + node_id + committed flag).
@@ -1683,4 +1693,35 @@ message RaftMembership {
 message RaftMembershipConfig {
   // Map of node_id -> address
   map<uint64, string> members = 1;
+}
+
+// ==========================================================================
+// Leader Transfer
+// ==========================================================================
+
+message TransferLeadershipRequest {
+  // Target node ID. If 0, the leader picks the best candidate.
+  uint64 target_node_id = 1;
+  // Maximum time to wait for the transfer to complete (milliseconds).
+  // Default: 10000 (10 seconds). Capped at 60000 (60 seconds).
+  uint32 timeout_ms = 2;
+}
+
+message TransferLeadershipResponse {
+  bool success = 1;
+  // Node ID that became the new leader (0 if transfer failed).
+  uint64 new_leader_id = 2;
+  string message = 3;
+}
+
+message TriggerElectionRequest {
+  // Term the current leader is in. Target rejects if stale.
+  uint64 leader_term = 1;
+  // Node ID of the leader requesting the transfer.
+  uint64 leader_id = 2;
+}
+
+message TriggerElectionResponse {
+  bool accepted = 1;
+  string message = 2;
 }

@@ -202,6 +202,8 @@ impl LedgerServer {
         } else {
             write_service
         };
+        // Wire health state for drain-phase write rejection
+        let write_service = write_service.with_health_state(self.health_state.clone());
         let admin_service = AdminServiceImpl::builder()
             .raft(self.raft.clone())
             .state(self.state.clone())
@@ -235,6 +237,8 @@ impl LedgerServer {
         } else {
             admin_service
         };
+        // Wire health state for drain-phase write rejection
+        let admin_service = admin_service.with_health_state(self.health_state.clone());
         // Extract connection tracker before health_state is moved into HealthServiceImpl
         let connection_tracker = self.health_state.connection_tracker().clone();
         let health_service = HealthServiceImpl::new(

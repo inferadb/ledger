@@ -71,6 +71,8 @@ pub mod idempotency;
 #[doc(hidden)]
 pub mod integrity_scrubber;
 #[doc(hidden)]
+pub mod leader_transfer;
+#[doc(hidden)]
 pub mod log_storage;
 #[doc(hidden)]
 pub mod logging;

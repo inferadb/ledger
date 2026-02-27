@@ -108,6 +108,9 @@ pub struct WriteServiceImpl {
     /// per forwarded write.
     #[builder(default)]
     leader_channel_cache: LeaderChannelCache,
+    /// Health state for drain-phase write rejection.
+    #[builder(default)]
+    health_state: Option<crate::graceful_shutdown::HealthState>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -184,6 +187,7 @@ impl WriteServiceImpl {
             quota_checker: None,
             event_handle: None,
             leader_channel_cache: LeaderChannelCache::new(),
+            health_state: None,
         };
 
         (service, run_future)
@@ -253,6 +257,16 @@ impl WriteServiceImpl {
         handle: crate::event_writer::EventHandle<FileBackend>,
     ) -> Self {
         self.event_handle = Some(handle);
+        self
+    }
+
+    /// Attaches health state for drain-phase write rejection.
+    #[must_use]
+    pub fn with_health_state(
+        mut self,
+        health_state: crate::graceful_shutdown::HealthState,
+    ) -> Self {
+        self.health_state = Some(health_state);
         self
     }
 
@@ -521,6 +535,8 @@ impl WriteService for WriteServiceImpl {
     ) -> Result<Response<WriteResponse>, Status> {
         // Reject requests with insufficient remaining deadline
         crate::deadline::check_near_deadline(&request)?;
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         // Extract trace context and transport metadata from gRPC headers before consuming
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
@@ -1028,6 +1044,8 @@ impl WriteService for WriteServiceImpl {
     ) -> Result<Response<BatchWriteResponse>, Status> {
         // Reject requests with insufficient remaining deadline
         crate::deadline::check_near_deadline(&request)?;
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         // Extract trace context and transport metadata from gRPC headers before consuming
         let trace_ctx = trace_context::extract_or_generate(request.metadata());

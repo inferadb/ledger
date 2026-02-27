@@ -1946,6 +1946,42 @@ pub struct RaftMembershipConfig {
     #[prost(map = "uint64, string", tag = "1")]
     pub members: ::std::collections::HashMap<u64, ::prost::alloc::string::String>,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TransferLeadershipRequest {
+    /// Target node ID. If 0, the leader picks the best candidate.
+    #[prost(uint64, tag = "1")]
+    pub target_node_id: u64,
+    /// Maximum time to wait for the transfer to complete (milliseconds).
+    /// Default: 10000 (10 seconds). Capped at 60000 (60 seconds).
+    #[prost(uint32, tag = "2")]
+    pub timeout_ms: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TransferLeadershipResponse {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+    /// Node ID that became the new leader (0 if transfer failed).
+    #[prost(uint64, tag = "2")]
+    pub new_leader_id: u64,
+    #[prost(string, tag = "3")]
+    pub message: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TriggerElectionRequest {
+    /// Term the current leader is in. Target rejects if stale.
+    #[prost(uint64, tag = "1")]
+    pub leader_term: u64,
+    /// Node ID of the leader requesting the transfer.
+    #[prost(uint64, tag = "2")]
+    pub leader_id: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TriggerElectionResponse {
+    #[prost(bool, tag = "1")]
+    pub accepted: bool,
+    #[prost(string, tag = "2")]
+    pub message: ::prost::alloc::string::String,
+}
 /// User account status (lifecycle state machine)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -4471,6 +4507,33 @@ pub mod admin_service_client {
                 .insert(GrpcMethod::new("ledger.v1.AdminService", "GetNodeInfo"));
             self.inner.unary(req, path, codec).await
         }
+        /// Transfer leadership to a specific node before shutdown or maintenance.
+        /// If target_node_id is 0, the leader picks the most caught-up follower.
+        /// Returns once the target has won the election or the timeout expires.
+        pub async fn transfer_leadership(
+            &mut self,
+            request: impl tonic::IntoRequest<super::TransferLeadershipRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TransferLeadershipResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/TransferLeadership",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "TransferLeadership"));
+            self.inner.unary(req, path, codec).await
+        }
         /// Trigger snapshot
         pub async fn create_snapshot(
             &mut self,
@@ -4849,6 +4912,16 @@ pub mod admin_service_server {
             request: tonic::Request<super::GetNodeInfoRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetNodeInfoResponse>,
+            tonic::Status,
+        >;
+        /// Transfer leadership to a specific node before shutdown or maintenance.
+        /// If target_node_id is 0, the leader picks the most caught-up follower.
+        /// Returns once the target has won the election or the timeout expires.
+        async fn transfer_leadership(
+            &self,
+            request: tonic::Request<super::TransferLeadershipRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TransferLeadershipResponse>,
             tonic::Status,
         >;
         /// Trigger snapshot
@@ -5546,6 +5619,52 @@ pub mod admin_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetNodeInfoSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/TransferLeadership" => {
+                    #[allow(non_camel_case_types)]
+                    struct TransferLeadershipSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::TransferLeadershipRequest>
+                    for TransferLeadershipSvc<T> {
+                        type Response = super::TransferLeadershipResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::TransferLeadershipRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::transfer_leadership(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = TransferLeadershipSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -7549,6 +7668,33 @@ pub mod raft_service_client {
                 .insert(GrpcMethod::new("ledger.v1.RaftService", "InstallSnapshot"));
             self.inner.unary(req, path, codec).await
         }
+        /// Trigger an immediate leader election on this node.
+        /// Called by the current leader during leadership transfer.
+        /// This is an internal RPC — not exposed to external clients.
+        pub async fn trigger_election(
+            &mut self,
+            request: impl tonic::IntoRequest<super::TriggerElectionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TriggerElectionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.RaftService/TriggerElection",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.RaftService", "TriggerElection"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -7586,6 +7732,16 @@ pub mod raft_service_server {
             request: tonic::Request<super::RaftInstallSnapshotRequest>,
         ) -> std::result::Result<
             tonic::Response<super::RaftInstallSnapshotResponse>,
+            tonic::Status,
+        >;
+        /// Trigger an immediate leader election on this node.
+        /// Called by the current leader during leadership transfer.
+        /// This is an internal RPC — not exposed to external clients.
+        async fn trigger_election(
+            &self,
+            request: tonic::Request<super::TriggerElectionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TriggerElectionResponse>,
             tonic::Status,
         >;
     }
@@ -7787,6 +7943,51 @@ pub mod raft_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = InstallSnapshotSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.RaftService/TriggerElection" => {
+                    #[allow(non_camel_case_types)]
+                    struct TriggerElectionSvc<T: RaftService>(pub Arc<T>);
+                    impl<
+                        T: RaftService,
+                    > tonic::server::UnaryService<super::TriggerElectionRequest>
+                    for TriggerElectionSvc<T> {
+                        type Response = super::TriggerElectionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::TriggerElectionRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RaftService>::trigger_election(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = TriggerElectionSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

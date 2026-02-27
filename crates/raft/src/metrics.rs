@@ -1022,6 +1022,25 @@ const EVENTS_GC_CYCLE_DURATION_SECONDS: &str = "ledger_events_gc_cycle_duration_
 /// Labels: `result` = success | failure.
 const EVENTS_GC_CYCLES_TOTAL: &str = "ledger_events_gc_cycles_total";
 
+// ---------------------------------------------------------------------------
+// Leader Transfer
+// ---------------------------------------------------------------------------
+
+/// Total leader transfer attempts (counter).
+///
+/// Labels: `status` = success | failure.
+const LEADER_TRANSFERS_TOTAL: &str = "ledger_leader_transfers_total";
+
+/// Leader transfer latency in seconds (histogram).
+///
+/// Labels: `status` = success | failure.
+const LEADER_TRANSFER_LATENCY: &str = "ledger_leader_transfer_latency_seconds";
+
+/// Total trigger election requests received (counter).
+///
+/// Labels: `result` = accepted | rejected.
+const TRIGGER_ELECTIONS_TOTAL: &str = "ledger_trigger_elections_total";
+
 /// Records the number of expired event entries deleted in a GC cycle.
 #[inline]
 pub fn record_events_gc_entries_deleted(count: u64) {
@@ -1042,6 +1061,25 @@ pub fn record_events_gc_cycle(result: &str) {
         "result" => result.to_string()
     )
     .increment(1);
+}
+
+// ---------------------------------------------------------------------------
+// Leader Transfer
+// ---------------------------------------------------------------------------
+
+/// Records a leader transfer attempt with its outcome and latency.
+#[inline]
+pub fn record_leader_transfer(success: bool, latency_secs: f64) {
+    let status = if success { "success" } else { "failure" };
+    counter!(LEADER_TRANSFERS_TOTAL, "status" => status).increment(1);
+    histogram!(LEADER_TRANSFER_LATENCY, "status" => status).record(latency_secs);
+}
+
+/// Records a trigger election request received by this node.
+#[inline]
+pub fn record_trigger_election(accepted: bool) {
+    let result = if accepted { "accepted" } else { "rejected" };
+    counter!(TRIGGER_ELECTIONS_TOTAL, "result" => result).increment(1);
 }
 
 #[cfg(test)]

@@ -825,6 +825,7 @@ mod tests {
             pre_stop_delay_secs: 5,
             pre_shutdown_timeout_secs: 60,
             watchdog_multiplier: 2,
+            leader_transfer_timeout_secs: 10,
         };
         assert!(config.validate().is_err());
     }

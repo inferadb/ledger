@@ -16,7 +16,8 @@ use inferadb_ledger_proto::proto::{
     ListBackupsRequest, ListBackupsResponse, ListOrganizationsRequest, ListOrganizationsResponse,
     ListVaultsRequest, ListVaultsResponse, NodeId, OrganizationSlug, RecoverVaultRequest,
     RecoverVaultResponse, RestoreBackupRequest, RestoreBackupResponse, ShardId,
-    UpdateConfigRequest, UpdateConfigResponse, VaultHealthProto, VaultSlug as ProtoVaultSlug,
+    TransferLeadershipRequest, TransferLeadershipResponse, UpdateConfigRequest,
+    UpdateConfigResponse, VaultHealthProto, VaultSlug as ProtoVaultSlug,
     admin_service_server::AdminService,
 };
 use inferadb_ledger_state::{BlockArchive, StateLayer};
@@ -98,6 +99,12 @@ pub struct AdminServiceImpl {
     /// Handler-phase event handle for recording denial events.
     #[builder(default)]
     event_handle: Option<crate::event_writer::EventHandle<inferadb_ledger_store::FileBackend>>,
+    /// Health state for drain-phase write rejection.
+    #[builder(default)]
+    health_state: Option<crate::graceful_shutdown::HealthState>,
+    /// Lock to prevent concurrent leader transfer attempts.
+    #[builder(default = Arc::new(std::sync::atomic::AtomicBool::new(false)))]
+    transfer_lock: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AdminServiceImpl {
@@ -158,6 +165,16 @@ impl AdminServiceImpl {
         self
     }
 
+    /// Attaches health state for drain-phase write rejection.
+    #[must_use]
+    pub fn with_health_state(
+        mut self,
+        health_state: crate::graceful_shutdown::HealthState,
+    ) -> Self {
+        self.health_state = Some(health_state);
+        self
+    }
+
     /// Records a handler-phase event (best-effort).
     fn record_handler_event(&self, entry: inferadb_ledger_types::events::EventEntry) {
         if let Some(ref handle) = self.event_handle {
@@ -174,6 +191,8 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<CreateOrganizationResponse>, Status> {
         // Reject requests with insufficient remaining deadline
         crate::deadline::check_near_deadline(&request)?;
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
@@ -295,6 +314,8 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<DeleteOrganizationResponse>, Status> {
         // Reject requests with insufficient remaining deadline
         crate::deadline::check_near_deadline(&request)?;
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
@@ -515,6 +536,8 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<CreateVaultResponse>, Status> {
         // Reject requests with insufficient remaining deadline
         crate::deadline::check_near_deadline(&request)?;
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
@@ -691,6 +714,8 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<DeleteVaultResponse>, Status> {
         // Reject requests with insufficient remaining deadline
         crate::deadline::check_near_deadline(&request)?;
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
@@ -1284,6 +1309,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<JoinClusterRequest>,
     ) -> Result<Response<JoinClusterResponse>, Status> {
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
@@ -1487,6 +1514,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<LeaveClusterRequest>,
     ) -> Result<Response<LeaveClusterResponse>, Status> {
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
@@ -1688,6 +1717,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<RecoverVaultRequest>,
     ) -> Result<Response<RecoverVaultResponse>, Status> {
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
@@ -2184,6 +2215,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<inferadb_ledger_proto::proto::ForceGcRequest>,
     ) -> Result<Response<inferadb_ledger_proto::proto::ForceGcResponse>, Status> {
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
@@ -2336,6 +2369,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<UpdateConfigRequest>,
     ) -> Result<Response<UpdateConfigResponse>, Status> {
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
         let inner = request.into_inner();
 
         let runtime_config = self.runtime_config.as_ref().ok_or_else(|| {
@@ -2625,6 +2660,8 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<RestoreBackupRequest>,
     ) -> Result<Response<RestoreBackupResponse>, Status> {
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
@@ -2741,6 +2778,87 @@ impl AdminService for AdminServiceImpl {
         }
 
         Ok(Response::new(RestoreBackupResponse { success: true, message, restored_height }))
+    }
+
+    async fn transfer_leadership(
+        &self,
+        request: Request<TransferLeadershipRequest>,
+    ) -> Result<Response<TransferLeadershipResponse>, Status> {
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = RequestContext::new("AdminService", "transfer_leadership");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.extract_transport_metadata(&grpc_metadata);
+        ctx.set_admin_action("transfer_leadership");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
+
+        // Validate and default timeout
+        let timeout_ms = if req.timeout_ms == 0 { 10_000u32 } else { req.timeout_ms.min(60_000) };
+
+        let target = if req.target_node_id == 0 { None } else { Some(req.target_node_id) };
+
+        let config = crate::leader_transfer::LeaderTransferConfig::builder()
+            .timeout(std::time::Duration::from_millis(u64::from(timeout_ms)))
+            .build();
+
+        let start = std::time::Instant::now();
+        let result = crate::leader_transfer::transfer_leadership(
+            &self.raft,
+            target,
+            &self.transfer_lock,
+            &config,
+        )
+        .await;
+
+        let latency = start.elapsed().as_secs_f64();
+
+        match result {
+            Ok(new_leader) => {
+                metrics::record_leader_transfer(true, latency);
+                ctx.set_success();
+                Ok(Response::new(TransferLeadershipResponse {
+                    success: true,
+                    new_leader_id: new_leader,
+                    message: String::new(),
+                }))
+            },
+            Err(e) => {
+                metrics::record_leader_transfer(false, latency);
+                ctx.set_error("LeaderTransferError", &e.to_string());
+                let status = match &e {
+                    crate::leader_transfer::LeaderTransferError::NotLeader
+                    | crate::leader_transfer::LeaderTransferError::NoTarget
+                    | crate::leader_transfer::LeaderTransferError::TargetRejected { .. } => {
+                        Status::failed_precondition(e.to_string())
+                    },
+                    crate::leader_transfer::LeaderTransferError::TransferInProgress => {
+                        Status::aborted(e.to_string())
+                    },
+                    crate::leader_transfer::LeaderTransferError::ReplicationTimeout
+                    | crate::leader_transfer::LeaderTransferError::Timeout { .. } => {
+                        Status::deadline_exceeded(e.to_string())
+                    },
+                    crate::leader_transfer::LeaderTransferError::Connection { .. }
+                    | crate::leader_transfer::LeaderTransferError::Rpc { .. } => {
+                        Status::internal(e.to_string())
+                    },
+                };
+                Err(status)
+            },
+        }
     }
 }
 

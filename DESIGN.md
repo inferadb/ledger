@@ -431,7 +431,8 @@ When failures occur, Ledger degrades gracefully rather than failing completely:
 | Single node down (3-node)     | ✓ Available        | ✓ Available       | Automatic failover                  |
 | Minority nodes down           | ✓ Available        | ✓ Available       | Reduced redundancy, monitor closely |
 | Majority nodes down           | ✗ Unavailable      | ✓ Stale reads     | Manual intervention required        |
-| Leader network isolated       | ✓ After election   | ✓ Available       | New leader elected (~10s)           |
+| Leader network isolated       | ✓ After election   | ✓ Available       | New leader elected (~300-600ms)     |
+| Leader planned shutdown       | ✓ Near-instant     | ✓ Available       | Leadership transferred, then exit   |
 | State root divergence (vault) | ✗ Vault halted     | ✓ Available       | Rebuild vault from snapshot         |
 | Disk full                     | ✗ Unavailable      | ✓ Available       | Expand storage, compact logs        |
 
@@ -443,7 +444,7 @@ When failures occur, Ledger degrades gracefully rather than failing completely:
 
 **Backup and restore**: Operators can create on-demand backups via `CreateBackup` RPC, list available backups via `ListBackups`, and restore via `RestoreBackup` (with explicit confirmation). Automated periodic backups are available via `BackupConfig`. See `crates/raft/src/backup.rs`.
 
-**Graceful shutdown**: A 6-phase shutdown sequence ensures in-flight requests complete: mark readiness failing → pre-stop delay (for load balancer updates) → grace period → connection drain (via `ConnectionTracker`) → pre-shutdown tasks with timeout (Raft snapshot) → server stop. Configurable via `ShutdownConfig`.
+**Graceful shutdown**: A multi-phase shutdown sequence ensures in-flight requests complete and leadership transfers cleanly: mark Draining (reject new proposals) → leader transfer (best-effort) → mark ShuttingDown → pre-stop delay (for load balancer updates) → grace period → connection drain (via `ConnectionTracker`) → pre-shutdown tasks with timeout (Raft snapshot) → server stop. Configurable via `ShutdownConfig`.
 
 ---
 
@@ -512,13 +513,49 @@ Replicated to all nodes via dedicated Raft group. All nodes can route requests w
 ### Node Leave (Graceful)
 
 ```
-[1] Operator initiates removal
-[2] If leader: trigger final snapshot (openraft 0.9 has no transfer_leader();
-    re-election happens automatically after shutdown)
-[3] Graceful shutdown: mark readiness failing → drain connections → pre-shutdown tasks
-[4] Remove from Raft group via joint consensus
-[5] Node shuts down
+[1] Operator initiates removal (SIGTERM or API call)
+[2] Enter Draining phase — reject new write proposals (UNAVAILABLE)
+[3] If leader: transfer leadership to most caught-up follower (see Leader Transfer)
+[4] Mark ShuttingDown — pre-stop delay → connection drain → final snapshot
+[5] Remove from Raft group via joint consensus
+[6] Node shuts down
 ```
+
+### Leader Transfer
+
+Graceful leader transfer eliminates election timeout delays during planned shutdowns. The departing leader hands off to a caught-up follower via a triggered election, reducing write unavailability from 300-600ms (election timeout) to one round-trip.
+
+**Protocol** (5 steps, implemented in `leader_transfer.rs`):
+
+```
+[1] Verify this node is the current leader
+[2] Select target: explicit node or auto-pick most caught-up follower
+[3] Wait for replication — target's match_index reaches leader's last_log_id
+[4] Send TriggerElection internal RPC to target
+[5] Poll until target wins election or timeout expires
+```
+
+**Concurrency**: An `AtomicBool` transfer lock ensures only one transfer runs at a time. Concurrent requests receive `ABORTED`.
+
+**Phase transitions during shutdown**:
+
+```
+Ready ──→ Draining ──→ ShuttingDown
+           │              │
+           │ reject writes │ drain connections
+           │ transfer lead │ final snapshot
+           └──────────────→└──→ exit
+```
+
+During `Draining`, all mutating RPCs (write, batch_write, create/delete org/vault, join/leave cluster, etc.) return `UNAVAILABLE`. The `TransferLeadership` RPC itself is exempt — it is the mechanism enabling the drain. Reads continue uninterrupted.
+
+**Best-effort**: Transfer failure (timeout, no eligible target, connection error) logs a warning and falls back to standard shutdown. The cluster recovers via election timeout.
+
+**RPCs**:
+- `AdminService/TransferLeadership` — client-facing, accepts `target_node_id` (0 = auto) and `timeout_ms` (default 10s, max 60s)
+- `RaftService/TriggerElection` — internal, called by leader on the target node
+
+**Configuration**: `ShutdownConfig.leader_transfer_timeout_secs` (default 10, set to 0 to disable).
 
 ---
 
@@ -697,7 +734,7 @@ Three-probe pattern following Kubernetes conventions:
 
 - **Startup**: Data directory exists and is writable; database opens successfully
 - **Liveness**: Async runtime responsive; all background jobs heartbeating within expected intervals (via `BackgroundJobWatchdog`)
-- **Readiness**: Node in `Ready` phase (not `Starting` or `ShuttingDown`); dependency checks pass:
+- **Readiness**: Node in `Ready` phase (not `Starting`, `Draining`, or `ShuttingDown`); dependency checks pass:
   - Disk is writable (touch + delete probe file)
   - At least one Raft peer reachable
   - Raft log not too far behind leader (configurable `max_raft_lag`, default 1000)

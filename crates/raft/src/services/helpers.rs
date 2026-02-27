@@ -10,7 +10,20 @@ use inferadb_ledger_types::{OrganizationId, VaultId, config::ValidationConfig, v
 use tonic::Status;
 use tracing::warn;
 
-use crate::{metrics, rate_limit::RateLimiter};
+use crate::{graceful_shutdown::HealthState, metrics, rate_limit::RateLimiter};
+
+/// Rejects the request if the node is draining (not accepting new proposals).
+///
+/// Returns `Status::unavailable` so clients retry on a different node.
+/// If `health_state` is `None`, the check is a no-op (accepts everything).
+pub(crate) fn check_not_draining(health_state: Option<&HealthState>) -> Result<(), Status> {
+    if let Some(hs) = health_state
+        && !hs.is_accepting_proposals()
+    {
+        return Err(Status::unavailable("Node is draining \u{2014} not accepting new proposals"));
+    }
+    Ok(())
+}
 
 /// Checks all rate limit tiers (backpressure, organization, client).
 ///
