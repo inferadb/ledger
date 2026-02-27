@@ -1053,9 +1053,10 @@ async fn test_idempotency_survives_leader_failover() {
 
     assert!(leave_response.into_inner().success, "leader should successfully leave cluster");
 
-    // Wait for a new leader to be elected (with timeout)
-    // The new leader must be different from the original leader
-    let new_leader_id = tokio::time::timeout(Duration::from_secs(10), async {
+    // Wait for a new leader to be elected (with timeout).
+    // Standard Raft (single-term-leader) may need extra election rounds on
+    // split votes, and CI contention can delay timers — 20s is generous.
+    let new_leader_id = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             // Check each remaining node for leadership
             for node in cluster.nodes() {

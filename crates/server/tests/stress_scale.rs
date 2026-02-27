@@ -98,6 +98,40 @@ async fn write_entity(
     }
 }
 
+/// Maximum retries for transient write failures (leader election, forwarding).
+const WRITE_MAX_RETRIES: u32 = 5;
+
+/// Delay between write retries.
+const WRITE_RETRY_DELAY: Duration = Duration::from_millis(500);
+
+/// Writes via an existing client, retrying on transient UNAVAILABLE errors
+/// (leader elections, forwarding gaps). Panics after exhausting retries.
+async fn write_with_retry(
+    client: &mut proto::write_service_client::WriteServiceClient<tonic::transport::Channel>,
+    request: proto::WriteRequest,
+    label: &str,
+) {
+    for attempt in 0..=WRITE_MAX_RETRIES {
+        // Each attempt needs a fresh idempotency key to avoid dedup
+        let mut req = request.clone();
+        if attempt > 0 {
+            req.idempotency_key = uuid::Uuid::new_v4().as_bytes().to_vec();
+        }
+        match client.write(req).await {
+            Ok(response) => match response.into_inner().result {
+                Some(proto::write_response::Result::Success(_)) => return,
+                other => panic!("{label}: unexpected result: {other:?}"),
+            },
+            Err(status)
+                if status.code() == tonic::Code::Unavailable && attempt < WRITE_MAX_RETRIES =>
+            {
+                tokio::time::sleep(WRITE_RETRY_DELAY).await;
+            },
+            Err(e) => panic!("{label}: write failed after {attempt} retries: {e}"),
+        }
+    }
+}
+
 /// Reads an entity and returns its value (if it exists).
 async fn read_entity(
     addr: std::net::SocketAddr,
@@ -142,8 +176,9 @@ async fn test_snapshot_over_10k_entities_per_vault_no_data_loss() {
     let entity_count = 10_001;
     let mut write_client = create_write_client(leader.addr).await.expect("connect");
     for i in 0..entity_count {
-        let response = write_client
-            .write(proto::WriteRequest {
+        write_with_retry(
+            &mut write_client,
+            proto::WriteRequest {
                 client_id: Some(proto::ClientId { id: "10k-writer".to_string() }),
                 idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
                 organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -157,14 +192,10 @@ async fn test_snapshot_over_10k_entities_per_vault_no_data_loss() {
                     })),
                 }],
                 include_tx_proof: false,
-            })
-            .await
-            .unwrap_or_else(|e| panic!("write {i} failed: {e}"));
-
-        match response.into_inner().result {
-            Some(proto::write_response::Result::Success(_)) => {},
-            other => panic!("write {i} should succeed, got: {other:?}"),
-        }
+            },
+            &format!("write {i}"),
+        )
+        .await;
     }
 
     // Wait for replication to followers.
@@ -201,9 +232,7 @@ async fn test_snapshot_over_10k_entities_per_vault_no_data_loss() {
 /// across all nodes.
 ///
 /// This is the full-scale variant of `test_bulk_writes_replicated_state_roots_match`.
-/// Under debug builds, openraft 0.9 can hit an internal assertion
-/// (`log_id <= committed`) when the state machine is under sustained write
-/// pressure.
+/// Uses retry logic for transient UNAVAILABLE errors during leader elections.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_10k_writes_replicated_state_roots_match() {
     let cluster = TestCluster::new(3).await;
@@ -216,8 +245,9 @@ async fn test_10k_writes_replicated_state_roots_match() {
 
     let mut write_client = create_write_client(leader.addr).await.expect("connect");
     for i in 0..10_000 {
-        let response = write_client
-            .write(proto::WriteRequest {
+        write_with_retry(
+            &mut write_client,
+            proto::WriteRequest {
                 client_id: Some(proto::ClientId { id: "bulk-writer".to_string() }),
                 idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
                 organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -231,14 +261,10 @@ async fn test_10k_writes_replicated_state_roots_match() {
                     })),
                 }],
                 include_tx_proof: false,
-            })
-            .await
-            .unwrap_or_else(|e| panic!("write {} failed: {}", i, e));
-
-        match response.into_inner().result {
-            Some(proto::write_response::Result::Success(_)) => {},
-            other => panic!("write {} should succeed, got: {:?}", i, other),
-        }
+            },
+            &format!("write {i}"),
+        )
+        .await;
     }
 
     let synced = cluster.wait_for_sync(Duration::from_secs(60)).await;

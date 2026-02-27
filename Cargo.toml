@@ -38,7 +38,7 @@ prost-types = "0.14"
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout"] }
 
 # Raft consensus
-openraft = { version = "0.9", features = ["serde", "tracing-log", "loosen-follower-log-revert"] }
+openraft = { version = "0.9", features = ["serde", "tracing-log", "loosen-follower-log-revert", "single-term-leader"] }
 validit = "0.2"
 
 # Crypto
@@ -157,9 +157,9 @@ debug = true
 [profile.test]
 opt-level = 1
 
-# openraft 0.9.21 has a debug_assert! race in apply_to_state_machine
-# (raft_core.rs:744) where last_applied can momentarily exceed committed
-# under heavy concurrent load. This is benign — release builds are unaffected.
-# Disable debug assertions for openraft only to prevent spurious test failures.
+# openraft 0.9's Valid<T> wrapper validates full RaftState on every
+# Deref/DerefMut, adding overhead that causes leader election timeouts
+# in failover tests. Disable debug assertions for openraft only.
 [profile.test.package.openraft]
 debug-assertions = false
+

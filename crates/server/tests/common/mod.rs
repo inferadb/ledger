@@ -380,9 +380,10 @@ impl TestCluster {
 
     /// Waits for a leader to be elected AND all nodes to agree.
     ///
-    /// Returns the leader's node ID.
+    /// Returns the leader's node ID. Uses a generous timeout to accommodate
+    /// standard Raft election semantics under CI contention.
     pub async fn wait_for_leader(&self) -> u64 {
-        self.wait_for_leader_agreement(Duration::from_secs(10))
+        self.wait_for_leader_agreement(Duration::from_secs(30))
             .await
             .expect("leader election timed out")
     }

@@ -50,7 +50,7 @@ impl From<&Vote<LedgerNodeId>> for proto::RaftVote {
     fn from(vote: &Vote<LedgerNodeId>) -> Self {
         proto::RaftVote {
             term: vote.leader_id.term,
-            node_id: vote.leader_id.node_id,
+            node_id: vote.leader_id.voted_for().unwrap_or(0),
             committed: vote.committed,
         }
     }
@@ -770,7 +770,7 @@ mod tests {
         let vote: Vote<LedgerNodeId> = proto.into();
 
         assert_eq!(vote.leader_id.term, 7);
-        assert_eq!(vote.leader_id.node_id, 123);
+        assert_eq!(vote.leader_id.voted_for().unwrap_or(0), 123);
         assert!(!vote.committed);
     }
 
@@ -780,7 +780,7 @@ mod tests {
         let vote: Vote<LedgerNodeId> = proto.into();
 
         assert_eq!(vote.leader_id.term, 15);
-        assert_eq!(vote.leader_id.node_id, 456);
+        assert_eq!(vote.leader_id.voted_for().unwrap_or(0), 456);
         assert!(vote.committed);
     }
 
@@ -792,7 +792,10 @@ mod tests {
         let recovered: Vote<LedgerNodeId> = proto.into();
 
         assert_eq!(original.leader_id.term, recovered.leader_id.term);
-        assert_eq!(original.leader_id.node_id, recovered.leader_id.node_id);
+        assert_eq!(
+            original.leader_id.voted_for().unwrap_or(0),
+            recovered.leader_id.voted_for().unwrap_or(0)
+        );
         assert_eq!(original.committed, recovered.committed);
 
         // Committed roundtrip
@@ -801,7 +804,10 @@ mod tests {
         let recovered_committed: Vote<LedgerNodeId> = proto_committed.into();
 
         assert_eq!(original_committed.leader_id.term, recovered_committed.leader_id.term);
-        assert_eq!(original_committed.leader_id.node_id, recovered_committed.leader_id.node_id);
+        assert_eq!(
+            original_committed.leader_id.voted_for().unwrap_or(0),
+            recovered_committed.leader_id.voted_for().unwrap_or(0)
+        );
         assert_eq!(original_committed.committed, recovered_committed.committed);
     }
 

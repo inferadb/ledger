@@ -708,7 +708,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         // Get the committed_index from the last entry (for ShardBlock metadata)
         let committed_index = entries.last().map_or(0, |e| e.log_id.index);
         // Term is stored in the leader_id
-        let term = entries.last().map(|e| e.log_id.leader_id.get_term()).unwrap_or(0);
+        let term = entries.last().map(|e| e.log_id.leader_id.term).unwrap_or(0);
 
         for entry in entries {
             state.last_applied = Some(entry.log_id);
