@@ -36,8 +36,7 @@ pub mod proto {
 pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("ledger_v1_descriptor");
 
 #[cfg(use_pregenerated_proto)]
-pub const FILE_DESCRIPTOR_SET: &[u8] =
-    include_bytes!("generated/ledger_v1_descriptor.bin");
+pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/ledger_v1_descriptor.bin");
 
 /// Bidirectional conversions between domain and protobuf types.
 pub mod convert;
