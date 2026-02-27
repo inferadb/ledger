@@ -39,6 +39,11 @@ SETTLE_TIME=5
 SYNC_TIMEOUT=30
 JOIN_TIMEOUT=60
 
+# Bulk write tuning — operations per Write RPC in write_batch.
+# Each RPC = one Raft log entry, so smaller values create more entries
+# and stress replication catch-up harder.
+BATCH_CHUNK_SIZE=10
+
 # Tracking
 ALL_PIDS=()
 ACTIVE_PIDS=()
@@ -648,6 +653,65 @@ write_entity() {
   log_step "Wrote '$key' = '$value' (block $block_height) via node $node_num"
 }
 
+# Write a numbered batch of entities via multi-operation Write RPCs.
+# Entities are keyed as {prefix}:001 .. {prefix}:{count} with values
+# "{value_prefix} item 001" etc. Operations are chunked into groups of
+# BATCH_CHUNK_SIZE to produce multiple Raft log entries (better for
+# stressing replication catch-up).
+# Args: node_number key_prefix count value_prefix
+write_batch() {
+  local node_num=$1
+  local key_prefix=$2
+  local count=$3
+  local value_prefix=$4
+  local addr
+  addr=$(node_addr "$node_num")
+
+  local total_written=0
+  while [[ $total_written -lt $count ]]; do
+    local chunk_size=$(( count - total_written ))
+    [[ $chunk_size -gt $BATCH_CHUNK_SIZE ]] && chunk_size=$BATCH_CHUNK_SIZE
+
+    local idem_key
+    idem_key=$(generate_idempotency_key $IDEM_COUNTER)
+    IDEM_COUNTER=$((IDEM_COUNTER + 1))
+
+    # Build operations JSON array for this chunk
+    local ops=""
+    for i in $(seq 1 "$chunk_size"); do
+      local idx=$(( total_written + i ))
+      local key="${key_prefix}:$(printf '%03d' $idx)"
+      local value_b64
+      value_b64=$(echo -n "${value_prefix} item $(printf '%03d' $idx)" | base64)
+      [[ -n "$ops" ]] && ops+=","
+      ops+="{\"setEntity\":{\"key\":\"$key\",\"value\":\"$value_b64\"}}"
+    done
+
+    local result
+    result=$(grpcurl -plaintext \
+      -d "{
+        \"organization\": {\"slug\": \"$ORG_SLUG\"},
+        \"vault\": {\"slug\": \"$VAULT_SLUG\"},
+        \"clientId\": {\"id\": \"lifecycle-test\"},
+        \"idempotencyKey\": \"$idem_key\",
+        \"operations\": [$ops]
+      }" \
+      "$addr" \
+      ledger.v1.WriteService/Write 2>&1) || true
+
+    local block_height
+    block_height=$(echo "$result" | jq -r '.success.blockHeight // empty' 2>/dev/null)
+    if [[ -z "$block_height" ]]; then
+      log_error "Batch write failed for prefix '$key_prefix' (items $((total_written+1))-$((total_written+chunk_size))): $result"
+      return 1
+    fi
+
+    total_written=$((total_written + chunk_size))
+  done
+
+  log_step "Wrote $count entities with prefix '$key_prefix' (block $block_height) via node $node_num"
+}
+
 # Read an entity from a specific node. Returns the value to stdout.
 # Args: node_number key
 read_entity() {
@@ -750,6 +814,27 @@ get_tip() {
 # ---------------------------------------------------------------------------
 # Verification functions
 # ---------------------------------------------------------------------------
+
+# Point-read a specific key on every specified node and assert the value.
+# This catches silent data loss and replication corruption that list-based
+# comparison alone cannot detect (all nodes could agree on "nothing").
+# Args: key expected_value node_numbers...
+verify_read_on_nodes() {
+  local key=$1
+  local expected=$2
+  shift 2
+  local nodes=("$@")
+
+  for node_num in "${nodes[@]}"; do
+    local value
+    value=$(read_entity "$node_num" "$key")
+    if [[ "$value" != "$expected" ]]; then
+      log_error "Node $node_num: read '$key' = '$value', expected '$expected'"
+      return 1
+    fi
+  done
+  log_step "Verified '$key' on nodes: ${nodes[*]}"
+}
 
 # Wait for replication to converge across nodes, then verify data consistency.
 # Args: description node_numbers...
@@ -924,19 +1009,34 @@ log_success "Leader is node $LEADER"
 create_org "$LEADER" "lifecycle-test-org"
 create_vault "$LEADER"
 
-# Write initial batch of data (Phase 1 data)
-log_info "Writing Phase 1 data..."
+# Write initial data (Phase 1: named entities + bulk data)
+log_info "Writing Phase 1 named entities..."
 write_entity "$LEADER" "user:alice" "Alice from Phase 1"
 write_entity "$LEADER" "user:bob" "Bob from Phase 1"
 write_entity "$LEADER" "user:charlie" "Charlie from Phase 1"
 write_entity "$LEADER" "config:version" "v1.0.0"
 write_entity "$LEADER" "session:s001" "active"
 
+log_info "Writing Phase 1 bulk data (50 entities)..."
+write_batch "$LEADER" "p1-data" 50 "Phase 1 batch"
+
 # Allow replication to propagate
 sleep 2
 
 # Verify all 3 nodes have identical data
-verify_data_consistency "Phase 1 — initial 3-node replication" 1 2 3
+verify_data_consistency "Phase 1 — initial 3-node replication (55 entities)" 1 2 3
+
+# Point-read sentinel values on follower nodes
+log_info "Verifying point reads on follower nodes..."
+PHASE1_FOLLOWERS=()
+for n in 1 2 3; do
+  [[ "$n" -ne "$LEADER" ]] && PHASE1_FOLLOWERS+=("$n")
+done
+verify_read_on_nodes "user:alice" "Alice from Phase 1" "${PHASE1_FOLLOWERS[@]}"
+verify_read_on_nodes "p1-data:001" "Phase 1 batch item 001" "${PHASE1_FOLLOWERS[@]}"
+verify_read_on_nodes "p1-data:025" "Phase 1 batch item 025" "${PHASE1_FOLLOWERS[@]}"
+verify_read_on_nodes "p1-data:050" "Phase 1 batch item 050" "${PHASE1_FOLLOWERS[@]}"
+log_success "Follower point reads verified for Phase 1"
 
 # ===========================================================================
 # Phase 2: Add 4th node, verify it catches up
@@ -959,7 +1059,17 @@ wait_for_voter 4 4 "$LEADER"
 sleep 3
 
 # Verify all 4 nodes have identical data (including the Phase 1 data)
-verify_data_consistency "Phase 2 — 4th node caught up with all data" 1 2 3 4
+verify_data_consistency "Phase 2 — 4th node caught up with all data (55 entities)" 1 2 3 4
+
+# Point-read Phase 1 data specifically from node 4 (catch-up verification)
+log_info "Verifying point reads on newly joined node 4..."
+verify_read_on_nodes "user:alice" "Alice from Phase 1" 4
+verify_read_on_nodes "user:charlie" "Charlie from Phase 1" 4
+verify_read_on_nodes "config:version" "v1.0.0" 4
+verify_read_on_nodes "p1-data:001" "Phase 1 batch item 001" 4
+verify_read_on_nodes "p1-data:025" "Phase 1 batch item 025" 4
+verify_read_on_nodes "p1-data:050" "Phase 1 batch item 050" 4
+log_success "Node 4 catch-up verified with point reads"
 
 # ===========================================================================
 # Phase 3: Write data via the 4th node, verify all 4 agree
@@ -972,14 +1082,31 @@ log_phase "Phase 3: Write data via 4th node"
 LEADER=$(find_leader 1 2 3 4)
 log_info "Current leader is node $LEADER"
 
-log_info "Writing Phase 3 data via node 4..."
+log_info "Writing Phase 3 named entities via node 4..."
 write_entity 4 "user:diana" "Diana from Phase 3"
 write_entity 4 "user:edward" "Edward from Phase 3"
 write_entity 4 "config:version" "v2.0.0"
 
+log_info "Writing Phase 3 bulk data via node 4 (30 entities)..."
+write_batch 4 "p3-data" 30 "Phase 3 batch"
+
 sleep 2
 
-verify_data_consistency "Phase 3 — all 4 nodes after writes via node 4" 1 2 3 4
+verify_data_consistency "Phase 3 — all 4 nodes after writes via node 4 (87 entities)" 1 2 3 4
+
+# Point-read Phase 3 data on non-leader nodes (tests forwarded-write replication)
+log_info "Verifying point reads on non-leader nodes..."
+PHASE3_FOLLOWERS=()
+for n in 1 2 3 4; do
+  [[ "$n" -ne "$LEADER" ]] && PHASE3_FOLLOWERS+=("$n")
+done
+verify_read_on_nodes "user:diana" "Diana from Phase 3" "${PHASE3_FOLLOWERS[@]}"
+verify_read_on_nodes "p3-data:001" "Phase 3 batch item 001" "${PHASE3_FOLLOWERS[@]}"
+verify_read_on_nodes "p3-data:015" "Phase 3 batch item 015" "${PHASE3_FOLLOWERS[@]}"
+verify_read_on_nodes "p3-data:030" "Phase 3 batch item 030" "${PHASE3_FOLLOWERS[@]}"
+# Verify the config update propagated (overwrite, not just insert)
+verify_read_on_nodes "config:version" "v2.0.0" "${PHASE3_FOLLOWERS[@]}"
+log_success "Follower point reads verified for Phase 3"
 
 # ===========================================================================
 # Phase 4: Graceful leader handoff via TransferLeadership RPC
@@ -1116,6 +1243,9 @@ log_info "Writing Phase 5 data to surviving node 4..."
 write_entity 4 "user:frank" "Frank from Phase 5"
 write_entity 4 "event:migration" "original-3-shutdown"
 
+log_info "Writing Phase 5 bulk data (20 entities)..."
+write_batch 4 "p5-data" 20 "Phase 5 batch"
+
 # ===========================================================================
 # Phase 6: Boot 2 new nodes, verify full cluster state
 # ===========================================================================
@@ -1141,7 +1271,38 @@ sleep 3
 
 # Final verification: all 3 nodes (4, 5, 6) should have ALL data
 # from every phase
-verify_data_consistency "Phase 6 — new 3-node cluster has all data" 4 5 6
+verify_data_consistency "Phase 6 — new 3-node cluster has all data (110 entities)" 4 5 6
+
+# Comprehensive point reads on new nodes — verify full historical catch-up.
+# Nodes 5 and 6 must have data from every prior phase.
+log_info "Verifying full historical catch-up on nodes 5 and 6..."
+
+# Phase 1 data
+verify_read_on_nodes "user:alice" "Alice from Phase 1" 5 6
+verify_read_on_nodes "user:bob" "Bob from Phase 1" 5 6
+verify_read_on_nodes "p1-data:001" "Phase 1 batch item 001" 5 6
+verify_read_on_nodes "p1-data:025" "Phase 1 batch item 025" 5 6
+verify_read_on_nodes "p1-data:050" "Phase 1 batch item 050" 5 6
+
+# Phase 3 data (written via non-leader forwarding)
+verify_read_on_nodes "user:diana" "Diana from Phase 3" 5 6
+verify_read_on_nodes "p3-data:001" "Phase 3 batch item 001" 5 6
+verify_read_on_nodes "p3-data:015" "Phase 3 batch item 015" 5 6
+verify_read_on_nodes "p3-data:030" "Phase 3 batch item 030" 5 6
+
+# Phase 4 data (written after leader transfer)
+verify_read_on_nodes "user:transfer-test" "written-after-leader-transfer" 5 6
+
+# Phase 5 data (written to sole survivor)
+verify_read_on_nodes "user:frank" "Frank from Phase 5" 5 6
+verify_read_on_nodes "p5-data:001" "Phase 5 batch item 001" 5 6
+verify_read_on_nodes "p5-data:010" "Phase 5 batch item 010" 5 6
+verify_read_on_nodes "p5-data:020" "Phase 5 batch item 020" 5 6
+
+# Config should reflect latest update (v2.0.0 from Phase 3)
+verify_read_on_nodes "config:version" "v2.0.0" 5 6
+
+log_success "Full historical catch-up verified on nodes 5 and 6"
 
 # ===========================================================================
 # Summary
@@ -1150,11 +1311,11 @@ verify_data_consistency "Phase 6 — new 3-node cluster has all data" 4 5 6
 echo ""
 log_phase "All phases passed!"
 
-echo -e "${GREEN}  Phase 1:${NC} 3-node cluster boot + initial writes + replication   ✓"
-echo -e "${GREEN}  Phase 2:${NC} 4th node join + full catch-up verification            ✓"
-echo -e "${GREEN}  Phase 3:${NC} Write via 4th node + 4-node consistency               ✓"
+echo -e "${GREEN}  Phase 1:${NC} 3-node boot + 55 entities + follower point reads        ✓"
+echo -e "${GREEN}  Phase 2:${NC} 4th node join + catch-up point reads (55 entities)    ✓"
+echo -e "${GREEN}  Phase 3:${NC} Writes via non-leader + 87 entities + follower reads  ✓"
 echo -e "${GREEN}  Phase 4:${NC} Graceful leader handoff via TransferLeadership        ✓"
-echo -e "${GREEN}  Phase 5:${NC} Original 3 nodes shutdown + survivor writes            ✓"
-echo -e "${GREEN}  Phase 6:${NC} 2 new nodes join + full data replication               ✓"
+echo -e "${GREEN}  Phase 5:${NC} Original 3 shutdown + 110 entities on survivor        ✓"
+echo -e "${GREEN}  Phase 6:${NC} 2 new nodes + full historical catch-up reads          ✓"
 echo ""
 log_success "Cluster lifecycle test completed successfully!"
