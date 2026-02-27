@@ -212,7 +212,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     vault_meta.last_write_timestamp = last_tx.timestamp.timestamp() as u64;
                     // Re-serialize after in-place mutation
                     if let Ok(blob) = encode(vault_meta) {
-                        pending.vaults.push((vault_meta.vault_id, blob));
+                        pending.vaults.push((vault_meta.vault, blob));
                     }
                 }
 
@@ -282,8 +282,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 } else {
                     *entry = entry.saturating_sub(storage_delta.unsigned_abs());
                 }
-                crate::metrics::set_organization_storage_bytes(organization.value(), *entry);
-                crate::metrics::record_organization_operation(organization.value(), "write");
+                crate::metrics::set_organization_storage_bytes(*organization, *entry);
+                crate::metrics::record_organization_operation(*organization, "write");
 
                 // Mirror updated OrganizationMeta (with new storage_bytes) to pending
                 if let Some(org_meta) = state.organizations.get_mut(organization) {
@@ -298,8 +298,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let block_hash = self.compute_vault_block_hash(&vault_entry);
 
                 // Emit WriteCommitted event
-                let org_slug = state.id_to_slug.get(organization).map(|s| s.value());
-                let vault_slug = state.vault_id_to_slug.get(vault).map(|s| s.value());
+                let org_slug = state.id_to_slug.get(organization).copied();
+                let vault_slug = state.vault_id_to_slug.get(vault).copied();
                 let ops_count: u32 = transactions.iter().map(|tx| tx.operations.len() as u32).sum();
                 let mut emitter = ApplyPhaseEmitter::for_organization(
                     EventAction::WriteCommitted,
@@ -355,7 +355,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let assigned_shard =
                     shard_id.unwrap_or_else(|| select_least_loaded_shard(&state.organizations));
                 let org_meta = OrganizationMeta {
-                    organization_id,
+                    organization: organization_id,
                     slug: *slug,
                     name: name.clone(),
                     shard_id: assigned_shard,
@@ -486,8 +486,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 state.vault_health.insert(key, VaultHealthStatus::Healthy);
                 pending.vault_health.push((key, VaultHealthStatus::Healthy));
                 let vault_meta = VaultMeta {
-                    organization_id: *organization,
-                    vault_id,
+                    organization: *organization,
+                    vault: vault_id,
                     slug: *slug,
                     name: name.clone(),
                     deleted: false,
@@ -505,14 +505,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 pending.vault_slug_index.push((*slug, vault_id));
 
                 // Emit VaultCreated event
-                let org_slug = state.id_to_slug.get(organization).map(|s| s.value());
+                let org_slug = state.id_to_slug.get(organization).copied();
                 events.push(
                     ApplyPhaseEmitter::for_organization(
                         EventAction::VaultCreated,
                         *organization,
                         org_slug,
                     )
-                    .vault(slug.value())
+                    .vault(*slug)
                     .detail("vault_name", name.as_deref().unwrap_or(""))
                     .outcome(EventOutcome::Success)
                     .build(block_height, *op_index, block_timestamp, ttl_days),
@@ -524,7 +524,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             LedgerRequest::DeleteOrganization { organization } => {
                 // Capture slug before deletion (may be removed from index)
-                let org_slug = state.id_to_slug.get(organization).map(|s| s.value());
+                let org_slug = state.id_to_slug.get(organization).copied();
                 // Count active vaults at deletion time (for audit context)
                 let active_vault_count = state
                     .vaults
@@ -632,7 +632,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     vault_meta.deleted = true;
                     // Re-serialize vault meta after in-place mutation
                     if let Ok(blob) = encode(vault_meta) {
-                        pending.vaults.push((vault_meta.vault_id, blob));
+                        pending.vaults.push((vault_meta.vault, blob));
                     }
 
                     // Clean up vault slug index
@@ -679,7 +679,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 // Emit VaultDeleted event on successful deletion
                 if matches!(response, LedgerResponse::VaultDeleted { success: true }) {
-                    let org_slug = state.id_to_slug.get(organization).map(|s| s.value());
+                    let org_slug = state.id_to_slug.get(organization).copied();
                     events.push(
                         ApplyPhaseEmitter::for_organization(
                             EventAction::VaultDeleted,
@@ -702,7 +702,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             },
 
             LedgerRequest::SuspendOrganization { organization, reason } => {
-                let org_slug = state.id_to_slug.get(organization).map(|s| s.value());
+                let org_slug = state.id_to_slug.get(organization).copied();
                 let response = if let Some(org) = state.organizations.get_mut(organization) {
                     match org.status {
                         OrganizationStatus::Deleted => LedgerResponse::Error {
@@ -748,7 +748,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             },
 
             LedgerRequest::ResumeOrganization { organization } => {
-                let org_slug = state.id_to_slug.get(organization).map(|s| s.value());
+                let org_slug = state.id_to_slug.get(organization).copied();
                 let response = if let Some(org) = state.organizations.get_mut(organization) {
                     match org.status {
                         OrganizationStatus::Suspended => {
@@ -930,11 +930,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     let status = VaultHealthStatus::Healthy;
                     state.vault_health.insert(key, status.clone());
                     pending.vault_health.push((key, status));
-                    crate::metrics::set_vault_health(
-                        organization.value(),
-                        vault.value(),
-                        "healthy",
-                    );
+                    crate::metrics::set_vault_health(*organization, *vault, "healthy");
                     tracing::info!(
                         organization_id = organization.value(),
                         vault_id = vault.value(),
@@ -950,11 +946,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     };
                     state.vault_health.insert(key, status.clone());
                     pending.vault_health.push((key, status));
-                    crate::metrics::set_vault_health(
-                        organization.value(),
-                        vault.value(),
-                        "recovering",
-                    );
+                    crate::metrics::set_vault_health(*organization, *vault, "recovering");
                     tracing::info!(
                         organization_id = organization.value(),
                         vault_id = vault.value(),
@@ -969,11 +961,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     let status = VaultHealthStatus::Diverged { expected, computed, at_height };
                     state.vault_health.insert(key, status.clone());
                     pending.vault_health.push((key, status));
-                    crate::metrics::set_vault_health(
-                        organization.value(),
-                        vault.value(),
-                        "diverged",
-                    );
+                    crate::metrics::set_vault_health(*organization, *vault, "diverged");
                     tracing::warn!(
                         organization_id = organization.value(),
                         vault_id = vault.value(),
@@ -982,8 +970,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     );
                 }
                 // Emit VaultHealthUpdated event
-                let org_slug = state.id_to_slug.get(organization).map(|s| s.value());
-                let vault_slug = state.vault_id_to_slug.get(vault).map(|s| s.value());
+                let org_slug = state.id_to_slug.get(organization).copied();
+                let vault_slug = state.vault_id_to_slug.get(vault).copied();
                 let health_status = if *healthy {
                     "healthy"
                 } else if recovery_attempt.is_some() && recovery_started_at.is_some() {
@@ -1140,8 +1128,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 // Emit BatchWriteCommitted event for the batch itself
                 if let Some(ref ve) = last_vault_entry {
-                    let org_slug = state.id_to_slug.get(&ve.organization).map(|s| s.value());
-                    let vault_slug = state.vault_id_to_slug.get(&ve.vault).map(|s| s.value());
+                    let org_slug = state.id_to_slug.get(&ve.organization).copied();
+                    let vault_slug = state.vault_id_to_slug.get(&ve.vault).copied();
                     let mut emitter = ApplyPhaseEmitter::for_organization(
                         EventAction::BatchWriteCommitted,
                         ve.organization,
@@ -1174,14 +1162,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
     #[allow(dead_code)] // reserved for block hash computation in state machine
     pub(super) fn compute_block_hash(
         &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         height: u64,
     ) -> Hash {
         use inferadb_ledger_types::sha256;
         let mut data = Vec::new();
-        data.extend_from_slice(&organization_id.value().to_le_bytes());
-        data.extend_from_slice(&vault_id.value().to_le_bytes());
+        data.extend_from_slice(&organization.value().to_le_bytes());
+        data.extend_from_slice(&vault.value().to_le_bytes());
         data.extend_from_slice(&height.to_le_bytes());
         sha256(&data)
     }

@@ -146,18 +146,18 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         let all_vaults = self.applied_state.all_vaults();
         let mut needs_recovery = Vec::new();
 
-        for ((organization_id, vault_id), _meta) in all_vaults {
-            let health = self.applied_state.vault_health(organization_id, vault_id);
+        for ((organization, vault), _meta) in all_vaults {
+            let health = self.applied_state.vault_health(organization, vault);
 
             match &health {
                 VaultHealthStatus::Diverged { .. } => {
-                    needs_recovery.push((organization_id, vault_id, health));
+                    needs_recovery.push((organization, vault, health));
                 },
                 VaultHealthStatus::Recovering { started_at, attempt } => {
                     if *attempt < MAX_RECOVERY_ATTEMPTS
                         && self.is_ready_for_retry(*started_at, *attempt)
                     {
-                        needs_recovery.push((organization_id, vault_id, health));
+                        needs_recovery.push((organization, vault, health));
                     }
                 },
                 VaultHealthStatus::Healthy => {
@@ -177,8 +177,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
     /// 3. Verifying the computed state_root matches expected
     async fn attempt_recovery(
         &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         current_health: &VaultHealthStatus,
     ) -> RecoveryResult {
         // Determine current attempt number
@@ -190,8 +190,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
 
         if attempt > MAX_RECOVERY_ATTEMPTS {
             crate::metrics::record_recovery_attempt(
-                organization_id.value(),
-                vault_id.value(),
+                organization,
+                vault,
                 attempt,
                 "max_attempts_exceeded",
             );
@@ -202,8 +202,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         let now = chrono::Utc::now().timestamp();
         if let Err(e) = self
             .propose_health_update(
-                organization_id,
-                vault_id,
+                organization,
+                vault,
                 false,
                 None,
                 None,
@@ -214,25 +214,25 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
             .await
         {
             warn!(
-                organization_id = organization_id.value(),
-                vault_id = vault_id.value(),
+                organization = organization.value(),
+                vault = vault.value(),
                 attempt,
                 error = %e,
                 "Failed to transition vault to Recovering state"
             );
             crate::metrics::record_recovery_attempt(
-                organization_id.value(),
-                vault_id.value(),
+                organization,
+                vault,
                 attempt,
                 "transition_failed",
             );
             return RecoveryResult::TransientFailure(e.to_string());
         }
 
-        crate::metrics::set_vault_health(organization_id.value(), vault_id.value(), "recovering");
+        crate::metrics::set_vault_health(organization, vault, "recovering");
         info!(
-            organization_id = organization_id.value(),
-            vault_id = vault_id.value(),
+            organization = organization.value(),
+            vault = vault.value(),
             attempt,
             max_attempts = MAX_RECOVERY_ATTEMPTS,
             "Recovery attempt started"
@@ -251,10 +251,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         };
 
         // Attempt the actual recovery
-        match self
-            .replay_vault_state(organization_id, vault_id, expected_root, diverged_height)
-            .await
-        {
+        match self.replay_vault_state(organization, vault, expected_root, diverged_height).await {
             Ok(computed_root) => {
                 if computed_root == expected_root
                     || expected_root == inferadb_ledger_types::ZERO_HASH
@@ -262,8 +259,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                     // Recovery successful — transition to healthy
                     if let Err(e) = self
                         .propose_health_update(
-                            organization_id,
-                            vault_id,
+                            organization,
+                            vault,
                             true,
                             None,
                             None,
@@ -274,33 +271,29 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                         .await
                     {
                         warn!(
-                            organization_id = organization_id.value(),
-                            vault_id = vault_id.value(),
+                            organization = organization.value(),
+                            vault = vault.value(),
                             error = %e,
                             "Failed to mark vault as healthy after recovery"
                         );
                         crate::metrics::record_recovery_attempt(
-                            organization_id.value(),
-                            vault_id.value(),
+                            organization,
+                            vault,
                             attempt,
                             "health_update_failed",
                         );
                         return RecoveryResult::TransientFailure(e.to_string());
                     }
-                    crate::metrics::set_vault_health(
-                        organization_id.value(),
-                        vault_id.value(),
-                        "healthy",
-                    );
+                    crate::metrics::set_vault_health(organization, vault, "healthy");
                     crate::metrics::record_recovery_attempt(
-                        organization_id.value(),
-                        vault_id.value(),
+                        organization,
+                        vault,
                         attempt,
                         "success",
                     );
                     info!(
-                        organization_id = organization_id.value(),
-                        vault_id = vault_id.value(),
+                        organization = organization.value(),
+                        vault = vault.value(),
                         attempt,
                         "Recovery completed successfully, vault restored to healthy"
                     );
@@ -308,21 +301,18 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                 } else {
                     // Divergence reproduced — determinism bug
                     error!(
-                        organization_id = organization_id.value(),
-                        vault_id = vault_id.value(),
+                        organization = organization.value(),
+                        vault = vault.value(),
                         ?expected_root,
                         ?computed_root,
                         diverged_height,
                         attempt,
                         "Recovery reproduced divergence — determinism bug detected, manual intervention required"
                     );
-                    crate::metrics::record_determinism_bug(
-                        organization_id.value(),
-                        vault_id.value(),
-                    );
+                    crate::metrics::record_determinism_bug(organization, vault);
                     crate::metrics::record_recovery_attempt(
-                        organization_id.value(),
-                        vault_id.value(),
+                        organization,
+                        vault,
                         attempt,
                         "determinism_bug",
                     );
@@ -331,16 +321,16 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
             },
             Err(e) => {
                 warn!(
-                    organization_id = organization_id.value(),
-                    vault_id = vault_id.value(),
+                    organization = organization.value(),
+                    vault = vault.value(),
                     attempt,
                     max_attempts = MAX_RECOVERY_ATTEMPTS,
                     error = %e,
                     "Recovery attempt failed, will retry with backoff"
                 );
                 crate::metrics::record_recovery_attempt(
-                    organization_id.value(),
-                    vault_id.value(),
+                    organization,
+                    vault,
                     attempt,
                     "transient_failure",
                 );
@@ -352,8 +342,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
     /// Replay vault state from snapshot/genesis to verify state root.
     async fn replay_vault_state(
         &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         _expected_root: inferadb_ledger_types::Hash,
         _diverged_height: u64,
     ) -> Result<inferadb_ledger_types::Hash, RecoveryError> {
@@ -365,14 +355,14 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
 
         // Find starting point (snapshot or genesis)
         let (start_height, mut computed_root) =
-            self.find_recovery_start_point(organization_id, vault_id)?;
+            self.find_recovery_start_point(organization, vault)?;
 
         // Get current tip height
-        let tip_height = self.applied_state.vault_height(organization_id, vault_id);
+        let tip_height = self.applied_state.vault_height(organization, vault);
 
         debug!(
-            organization_id = organization_id.value(),
-            vault_id = vault_id.value(),
+            organization = organization.value(),
+            vault = vault.value(),
             start_height,
             tip_height,
             "Replaying vault state for recovery"
@@ -381,12 +371,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         // Replay blocks from start_height to tip
         for height in start_height..=tip_height {
             let shard_height = archive
-                .find_shard_height(organization_id, vault_id, height)
-                .context(IndexLookupSnafu {
-                    organization_id: organization_id.value(),
-                    vault_id: vault_id.value(),
-                    height,
-                })?;
+                .find_shard_height(organization, vault, height)
+                .context(IndexLookupSnafu { organization, vault, height })?;
 
             let shard_height = match shard_height {
                 Some(h) => h,
@@ -397,7 +383,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                 archive.read_block(shard_height).context(BlockReadSnafu { shard_height })?;
 
             let vault_entry = shard_block.vault_entries.iter().find(|e| {
-                e.organization == organization_id && e.vault == vault_id && e.vault_height == height
+                e.organization == organization && e.vault == vault && e.vault_height == height
             });
 
             if let Some(entry) = vault_entry {
@@ -405,15 +391,15 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                 // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
                 for tx in &entry.transactions {
                     self.state
-                        .apply_operations(vault_id, &tx.operations, height)
+                        .apply_operations(vault, &tx.operations, height)
                         .context(ApplyOperationsSnafu { height })?;
                 }
 
                 // Compute state root after applying
                 computed_root = self
                     .state
-                    .compute_state_root(vault_id)
-                    .context(StateRootComputationSnafu { vault_id: vault_id.value() })?;
+                    .compute_state_root(vault)
+                    .context(StateRootComputationSnafu { vault })?;
             }
         }
 
@@ -423,8 +409,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
     /// Finds the optimal starting point for recovery.
     fn find_recovery_start_point(
         &self,
-        _organization_id: OrganizationId,
-        vault_id: VaultId,
+        _organization: OrganizationId,
+        vault: VaultId,
     ) -> Result<(u64, inferadb_ledger_types::Hash), RecoveryError> {
         // Try to find a snapshot to start from
         if let Some(snapshot_manager) = &self.snapshot_manager
@@ -433,7 +419,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
             for &shard_height in snapshots.iter().rev() {
                 if let Ok(snapshot) = snapshot_manager.load(shard_height)
                     && let Some(vault_state) =
-                        snapshot.header.vault_states.iter().find(|v| v.vault_id == vault_id)
+                        snapshot.header.vault_states.iter().find(|v| v.vault == vault)
                 {
                     return Ok((vault_state.vault_height + 1, vault_state.state_root));
                 }
@@ -448,8 +434,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
     #[allow(clippy::too_many_arguments)]
     async fn propose_health_update(
         &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         healthy: bool,
         expected_root: Option<inferadb_ledger_types::Hash>,
         computed_root: Option<inferadb_ledger_types::Hash>,
@@ -458,8 +444,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         recovery_started_at: Option<i64>,
     ) -> Result<(), RecoveryError> {
         let request = LedgerRequest::UpdateVaultHealth {
-            organization: organization_id,
-            vault: vault_id,
+            organization,
+            vault,
             healthy,
             expected_root,
             computed_root,
@@ -542,16 +528,16 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                         );
                     }
 
-                    for (organization_id, vault_id, health) in vaults {
-                        let result = self.attempt_recovery(organization_id, vault_id, &health).await;
+                    for (organization, vault, health) in vaults {
+                        let result = self.attempt_recovery(organization, vault, &health).await;
 
                         match result {
                             RecoveryResult::Success => {
-                                crate::metrics::record_recovery_success(organization_id.value(), vault_id.value());
+                                crate::metrics::record_recovery_success(organization, vault);
                                 vaults_recovered += 1;
                             }
                             RecoveryResult::TransientFailure(ref msg) => {
-                                crate::metrics::record_recovery_failure(organization_id.value(), vault_id.value(), msg);
+                                crate::metrics::record_recovery_failure(organization, vault, msg);
                                 had_failure = true;
                             }
                             RecoveryResult::DeterminismBug => {
@@ -559,18 +545,18 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                                 had_failure = true;
                                 error!(
                                     trace_id = %trace_ctx.trace_id,
-                                    organization_id = organization_id.value(),
-                                    vault_id = vault_id.value(),
+                                    organization = organization.value(),
+                                    vault = vault.value(),
                                     "Circuit breaker: vault requires manual intervention due to determinism bug"
                                 );
                             }
                             RecoveryResult::MaxAttemptsExceeded => {
-                                crate::metrics::set_vault_health(organization_id.value(), vault_id.value(), "diverged");
+                                crate::metrics::set_vault_health(organization, vault, "diverged");
                                 had_failure = true;
                                 error!(
                                     trace_id = %trace_ctx.trace_id,
-                                    organization_id = organization_id.value(),
-                                    vault_id = vault_id.value(),
+                                    organization = organization.value(),
+                                    vault = vault.value(),
                                     max_attempts = MAX_RECOVERY_ATTEMPTS,
                                     "Circuit breaker tripped: vault exceeded max recovery attempts, manual intervention required"
                                 );

@@ -10,17 +10,19 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
+use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+
 use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
 // ============================================================================
 // Test Helpers
 // ============================================================================
 
-/// Creates a organization and return its ID.
+/// Creates an organization and returns its slug.
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
-) -> Result<i64, Box<dyn std::error::Error>> {
+) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
@@ -30,25 +32,25 @@ async fn create_organization(
         })
         .await?;
 
-    let organization_id = response
+    let organization = response
         .into_inner()
         .slug
-        .map(|n| n.slug as i64)
-        .ok_or("No organization_id in response")?;
+        .map(|n| OrganizationSlug::new(n.slug))
+        .ok_or("No organization slug in response")?;
 
-    Ok(organization_id)
+    Ok(organization)
 }
 
-/// Creates a vault in a organization and return its ID.
+/// Creates a vault in an organization and returns its slug.
 async fn create_vault(
     addr: std::net::SocketAddr,
-    organization_id: i64,
-) -> Result<u64, Box<dyn std::error::Error>> {
+    organization: OrganizationSlug,
+) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization_id as u64,
+                slug: organization.value(),
             }),
             replication_factor: 0,
             initial_nodes: vec![],
@@ -56,7 +58,11 @@ async fn create_vault(
         })
         .await?;
 
-    let vault = response.into_inner().vault.map(|v| v.slug).ok_or("No vault in response")?;
+    let vault = response
+        .into_inner()
+        .vault
+        .map(|v| VaultSlug::new(v.slug))
+        .ok_or("No vault in response")?;
 
     Ok(vault)
 }
@@ -64,8 +70,8 @@ async fn create_vault(
 /// Writes an entity with optional TTL.
 async fn write_entity_with_ttl(
     addr: std::net::SocketAddr,
-    organization_id: i64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
     key: &str,
     value: &[u8],
     expires_at: Option<u64>,
@@ -75,9 +81,9 @@ async fn write_entity_with_ttl(
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization_id as u64,
+            slug: organization.value(),
         }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -109,17 +115,17 @@ async fn write_entity_with_ttl(
 /// Reads an entity from a vault.
 async fn read_entity(
     addr: std::net::SocketAddr,
-    organization_id: i64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::ReadRequest {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization_id as u64,
+            slug: organization.value(),
         }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
     };
@@ -131,15 +137,15 @@ async fn read_entity(
 /// Force a GC cycle via admin RPC.
 async fn force_gc(
     addr: std::net::SocketAddr,
-    organization_id: Option<i64>,
-    vault: Option<u64>,
+    organization: Option<OrganizationSlug>,
+    vault: Option<VaultSlug>,
 ) -> Result<(u64, u64), Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::ForceGcRequest {
-        organization: organization_id
-            .map(|id| inferadb_ledger_proto::proto::OrganizationSlug { slug: id as u64 }),
-        vault: vault.map(|slug| inferadb_ledger_proto::proto::VaultSlug { slug }),
+        organization: organization
+            .map(|o| inferadb_ledger_proto::proto::OrganizationSlug { slug: o.value() }),
+        vault: vault.map(|v| inferadb_ledger_proto::proto::VaultSlug { slug: v.value() }),
     };
 
     let response = client.force_gc(request).await?.into_inner();
@@ -165,8 +171,8 @@ async fn test_force_gc_removes_expired_entities() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let ns_id = create_organization(leader.addr, "ttl-gc-test").await.expect("create organization");
-    let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let org = create_organization(leader.addr, "ttl-gc-test").await.expect("create organization");
+    let vault = create_vault(leader.addr, org).await.expect("create vault");
 
     // Get current time
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
@@ -175,7 +181,7 @@ async fn test_force_gc_removes_expired_entities() {
     let expired_at = now - 3600;
     write_entity_with_ttl(
         leader.addr,
-        ns_id,
+        org,
         vault,
         "expired-key",
         b"expired-value",
@@ -188,7 +194,7 @@ async fn test_force_gc_removes_expired_entities() {
     // Write a non-expiring entity
     write_entity_with_ttl(
         leader.addr,
-        ns_id,
+        org,
         vault,
         "permanent-key",
         b"permanent-value",
@@ -202,7 +208,7 @@ async fn test_force_gc_removes_expired_entities() {
     let future_expires = now + 3600;
     write_entity_with_ttl(
         leader.addr,
-        ns_id,
+        org,
         vault,
         "future-key",
         b"future-value",
@@ -215,34 +221,33 @@ async fn test_force_gc_removes_expired_entities() {
     // Before GC: All entities should be readable (expired entities are lazy-filtered)
     // Note: Read filters out expired entities by default, but they're still in state
     let _expired_before =
-        read_entity(leader.addr, ns_id, vault, "expired-key").await.expect("read expired key");
+        read_entity(leader.addr, org, vault, "expired-key").await.expect("read expired key");
     // Read may return None for expired entities due to lazy filtering
     // The key here is that the entity is still IN state storage
 
     let permanent_before =
-        read_entity(leader.addr, ns_id, vault, "permanent-key").await.expect("read permanent key");
+        read_entity(leader.addr, org, vault, "permanent-key").await.expect("read permanent key");
     assert!(permanent_before.is_some(), "permanent entity should be readable before GC");
 
     let future_before =
-        read_entity(leader.addr, ns_id, vault, "future-key").await.expect("read future key");
+        read_entity(leader.addr, org, vault, "future-key").await.expect("read future key");
     assert!(future_before.is_some(), "future entity should be readable before GC");
 
     // Run GC
     let (expired_count, vaults_scanned) =
-        force_gc(leader.addr, Some(ns_id), Some(vault)).await.expect("force gc");
+        force_gc(leader.addr, Some(org), Some(vault)).await.expect("force gc");
 
     assert_eq!(expired_count, 1, "should have expired 1 entity");
     assert_eq!(vaults_scanned, 1, "should have scanned 1 vault");
 
     // After GC: Permanent and future entities should still be readable
-    let permanent_after = read_entity(leader.addr, ns_id, vault, "permanent-key")
+    let permanent_after = read_entity(leader.addr, org, vault, "permanent-key")
         .await
         .expect("read permanent key after gc");
     assert!(permanent_after.is_some(), "permanent entity should still exist after GC");
 
-    let future_after = read_entity(leader.addr, ns_id, vault, "future-key")
-        .await
-        .expect("read future key after gc");
+    let future_after =
+        read_entity(leader.addr, org, vault, "future-key").await.expect("read future key after gc");
     assert!(future_after.is_some(), "future entity should still exist after GC");
 }
 
@@ -254,13 +259,12 @@ async fn test_force_gc_empty_vault() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let ns_id =
-        create_organization(leader.addr, "empty-gc-test").await.expect("create organization");
-    let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let org = create_organization(leader.addr, "empty-gc-test").await.expect("create organization");
+    let vault = create_vault(leader.addr, org).await.expect("create vault");
 
     // Run GC on empty vault
     let (expired_count, vaults_scanned) =
-        force_gc(leader.addr, Some(ns_id), Some(vault)).await.expect("force gc on empty vault");
+        force_gc(leader.addr, Some(org), Some(vault)).await.expect("force gc on empty vault");
 
     assert_eq!(expired_count, 0, "should have no expired entities");
     assert_eq!(vaults_scanned, 1, "should have scanned 1 vault");
@@ -274,10 +278,10 @@ async fn test_force_gc_all_vaults() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and multiple vaults
-    let ns_id =
+    let org =
         create_organization(leader.addr, "multi-vault-gc-test").await.expect("create organization");
-    let vault1 = create_vault(leader.addr, ns_id).await.expect("create vault 1");
-    let vault2 = create_vault(leader.addr, ns_id).await.expect("create vault 2");
+    let vault1 = create_vault(leader.addr, org).await.expect("create vault 1");
+    let vault2 = create_vault(leader.addr, org).await.expect("create vault 2");
 
     // Write expired entities to both vaults
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
@@ -285,7 +289,7 @@ async fn test_force_gc_all_vaults() {
 
     write_entity_with_ttl(
         leader.addr,
-        ns_id,
+        org,
         vault1,
         "expired-1",
         b"value-1",
@@ -297,7 +301,7 @@ async fn test_force_gc_all_vaults() {
 
     write_entity_with_ttl(
         leader.addr,
-        ns_id,
+        org,
         vault2,
         "expired-2",
         b"value-2",
@@ -325,9 +329,9 @@ async fn test_force_gc_multiple_ttl_timings() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let ns_id =
+    let org =
         create_organization(leader.addr, "multi-ttl-test").await.expect("create organization");
-    let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let vault = create_vault(leader.addr, org).await.expect("create vault");
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
@@ -345,25 +349,25 @@ async fn test_force_gc_multiple_ttl_timings() {
         ("future-1h", Some(future_1h)),
         ("future-1d", Some(future_1d)),
     ] {
-        write_entity_with_ttl(leader.addr, ns_id, vault, key, b"data", ttl, "ttl-client")
+        write_entity_with_ttl(leader.addr, org, vault, key, b"data", ttl, "ttl-client")
             .await
             .expect("write entity");
     }
 
     // Run GC
     let (expired_count, vaults_scanned) =
-        force_gc(leader.addr, Some(ns_id), Some(vault)).await.expect("force gc");
+        force_gc(leader.addr, Some(org), Some(vault)).await.expect("force gc");
 
     assert_eq!(expired_count, 3, "should expire exactly 3 entities");
     assert_eq!(vaults_scanned, 1, "should scan 1 vault");
 
     // Verify future entities still exist
     let future_1h_val =
-        read_entity(leader.addr, ns_id, vault, "future-1h").await.expect("read future-1h");
+        read_entity(leader.addr, org, vault, "future-1h").await.expect("read future-1h");
     assert!(future_1h_val.is_some(), "future-1h entity should still exist");
 
     let future_1d_val =
-        read_entity(leader.addr, ns_id, vault, "future-1d").await.expect("read future-1d");
+        read_entity(leader.addr, org, vault, "future-1d").await.expect("read future-1d");
     assert!(future_1d_val.is_some(), "future-1d entity should still exist");
 }
 
@@ -377,16 +381,16 @@ async fn test_force_gc_idempotent() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let ns_id =
+    let org =
         create_organization(leader.addr, "idempotent-gc-test").await.expect("create organization");
-    let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let vault = create_vault(leader.addr, org).await.expect("create vault");
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
     // Write expired entity
     write_entity_with_ttl(
         leader.addr,
-        ns_id,
+        org,
         vault,
         "expired-once",
         b"value",
@@ -397,12 +401,12 @@ async fn test_force_gc_idempotent() {
     .expect("write expired");
 
     // First GC run
-    let (count1, _) = force_gc(leader.addr, Some(ns_id), Some(vault)).await.expect("first gc");
+    let (count1, _) = force_gc(leader.addr, Some(org), Some(vault)).await.expect("first gc");
     assert_eq!(count1, 1, "first GC should expire 1 entity");
 
     // Second GC run — nothing to expire
     let (count2, scanned2) =
-        force_gc(leader.addr, Some(ns_id), Some(vault)).await.expect("second gc");
+        force_gc(leader.addr, Some(org), Some(vault)).await.expect("second gc");
     assert_eq!(count2, 0, "second GC should expire 0 entities");
     assert_eq!(scanned2, 1, "should still scan the vault");
 }
@@ -417,16 +421,16 @@ async fn test_expired_entity_not_returned_by_read() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let ns_id =
+    let org =
         create_organization(leader.addr, "read-filter-test").await.expect("create organization");
-    let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let vault = create_vault(leader.addr, org).await.expect("create vault");
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
     // Write entity that is already expired (1 hour ago)
     write_entity_with_ttl(
         leader.addr,
-        ns_id,
+        org,
         vault,
         "already-expired",
         b"ghost",
@@ -437,9 +441,8 @@ async fn test_expired_entity_not_returned_by_read() {
     .expect("write expired entity");
 
     // Read should NOT return the expired entity (lazy filtering)
-    let result = read_entity(leader.addr, ns_id, vault, "already-expired")
-        .await
-        .expect("read expired entity");
+    let result =
+        read_entity(leader.addr, org, vault, "already-expired").await.expect("read expired entity");
 
     assert!(result.is_none(), "expired entity should not be returned by read (lazy TTL filtering)");
 }

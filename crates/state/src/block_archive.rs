@@ -232,18 +232,21 @@ impl<B: StorageBackend> BlockArchive<B> {
 
     /// Finds the shard height containing a specific vault block.
     ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns [`BlockArchiveError::Store`] if the read transaction fails.
     pub fn find_shard_height(
         &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         vault_height: u64,
     ) -> Result<Option<u64>> {
         let txn = self.db.read().context(StoreSnafu)?;
 
-        let key = encode_vault_block_index_key(organization_id, vault_id, vault_height);
+        let key = encode_vault_block_index_key(organization, vault, vault_height);
 
         match txn.get::<tables::VaultBlockIndex>(&key.to_vec()).context(StoreSnafu)? {
             Some(data) => {
@@ -502,15 +505,18 @@ impl<B: StorageBackend> BlockArchive<B> {
 
 /// Encodes vault block index key.
 ///
-/// Format: {organization_id:8BE}{vault_id:8BE}{vault_height:8BE}
+/// * `organization` - Internal organization identifier (`OrganizationId`).
+/// * `vault` - Internal vault identifier (`VaultId`).
+///
+/// Format: {organization:8BE}{vault:8BE}{vault_height:8BE}
 fn encode_vault_block_index_key(
-    organization_id: OrganizationId,
-    vault_id: VaultId,
+    organization: OrganizationId,
+    vault: VaultId,
     vault_height: u64,
 ) -> [u8; 24] {
     let mut key = [0u8; 24];
-    key[0..8].copy_from_slice(&organization_id.value().to_be_bytes());
-    key[8..16].copy_from_slice(&vault_id.value().to_be_bytes());
+    key[0..8].copy_from_slice(&organization.value().to_be_bytes());
+    key[8..16].copy_from_slice(&vault.value().to_be_bytes());
     key[16..24].copy_from_slice(&vault_height.to_be_bytes());
     key
 }

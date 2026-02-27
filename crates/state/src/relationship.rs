@@ -34,20 +34,22 @@ pub struct RelationshipStore;
 impl RelationshipStore {
     /// Returns a relationship by its components, or `None` if not found.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `RelationshipError::Storage` if the read transaction fails.
     /// Returns `RelationshipError::Codec` if deserialization of the stored relationship fails.
     pub fn get<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         resource: &str,
         relation: &str,
         subject: &str,
     ) -> Result<Option<Relationship>> {
         let rel = Relationship::new(resource, relation, subject);
         let local_key = rel.to_key();
-        let storage_key = encode_storage_key(vault_id, local_key.as_bytes());
+        let storage_key = encode_storage_key(vault, local_key.as_bytes());
 
         match txn.get::<tables::Relationships>(&storage_key).context(StorageSnafu)? {
             Some(data) => {
@@ -60,19 +62,21 @@ impl RelationshipStore {
 
     /// Checks if a relationship exists in the vault.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `RelationshipError::Storage` if the read transaction fails.
     pub fn exists<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         resource: &str,
         relation: &str,
         subject: &str,
     ) -> Result<bool> {
         let rel = Relationship::new(resource, relation, subject);
         let local_key = rel.to_key();
-        let storage_key = encode_storage_key(vault_id, local_key.as_bytes());
+        let storage_key = encode_storage_key(vault, local_key.as_bytes());
 
         Ok(txn.get::<tables::Relationships>(&storage_key).context(StorageSnafu)?.is_some())
     }
@@ -81,6 +85,8 @@ impl RelationshipStore {
     ///
     /// Returns `true` if the relationship was created, `false` if it already existed.
     /// The caller must commit the transaction after this call.
+    ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// Note: This does not update the dual indexes ([`IndexManager`](crate::IndexManager)).
     /// [`StateLayer::apply_operations`](crate::StateLayer::apply_operations) handles
@@ -92,14 +98,14 @@ impl RelationshipStore {
     /// Returns `RelationshipError::Codec` if serialization of the relationship fails.
     pub fn create<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         resource: &str,
         relation: &str,
         subject: &str,
     ) -> Result<bool> {
         let rel = Relationship::new(resource, relation, subject);
         let local_key = rel.to_key();
-        let storage_key = encode_storage_key(vault_id, local_key.as_bytes());
+        let storage_key = encode_storage_key(vault, local_key.as_bytes());
 
         // Check if already exists
         if txn.get::<tables::Relationships>(&storage_key).context(StorageSnafu)?.is_some() {
@@ -118,6 +124,8 @@ impl RelationshipStore {
     /// Returns `true` if the relationship existed and was deleted, `false` if not found.
     /// The caller must commit the transaction after this call.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// Note: This does not update the dual indexes. See [`create`](Self::create) for details.
     ///
     /// # Errors
@@ -125,14 +133,14 @@ impl RelationshipStore {
     /// Returns `RelationshipError::Storage` if the delete operation fails.
     pub fn delete<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         resource: &str,
         relation: &str,
         subject: &str,
     ) -> Result<bool> {
         let rel = Relationship::new(resource, relation, subject);
         let local_key = rel.to_key();
-        let storage_key = encode_storage_key(vault_id, local_key.as_bytes());
+        let storage_key = encode_storage_key(vault, local_key.as_bytes());
 
         let existed = txn.delete::<tables::Relationships>(&storage_key).context(StorageSnafu)?;
         Ok(existed)
@@ -142,17 +150,19 @@ impl RelationshipStore {
     ///
     /// Returns up to `limit` relationships starting from `offset`.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `RelationshipError::Storage` if the iterator or read transaction fails.
     /// Returns `RelationshipError::Codec` if deserialization of any relationship fails.
     pub fn list_in_vault<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<Relationship>> {
-        let prefix = vault_prefix(vault_id);
+        let prefix = vault_prefix(vault);
         let mut relationships = Vec::new();
         let mut count = 0;
 
@@ -183,14 +193,16 @@ impl RelationshipStore {
 
     /// Counts all relationships in a vault.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `RelationshipError::Storage` if the iterator or read transaction fails.
     pub fn count_in_vault<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
     ) -> Result<usize> {
-        let prefix = vault_prefix(vault_id);
+        let prefix = vault_prefix(vault);
         let mut count = 0;
 
         for (key_bytes, _) in txn.iter::<tables::Relationships>().context(StorageSnafu)? {
@@ -215,17 +227,19 @@ impl RelationshipStore {
     /// returning up to `limit` matches. Because keys are distributed across buckets
     /// by hash, a full vault scan is performed internally.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `RelationshipError::Storage` if the iterator or read transaction fails.
     /// Returns `RelationshipError::Codec` if deserialization of any relationship fails.
     pub fn list_for_resource<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         resource: &str,
         limit: usize,
     ) -> Result<Vec<Relationship>> {
-        let prefix = vault_prefix(vault_id);
+        let prefix = vault_prefix(vault);
         let rel_prefix = format!("rel:{}#", resource);
         let mut relationships = Vec::new();
 

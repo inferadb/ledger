@@ -137,13 +137,15 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Execute a function with mutable access to a vault's commitment.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// Creates the commitment if it doesn't exist.
-    fn with_commitment<F, R>(&self, vault_id: VaultId, f: F) -> R
+    fn with_commitment<F, R>(&self, vault: VaultId, f: F) -> R
     where
         F: FnOnce(&mut VaultCommitment) -> R,
     {
         let mut map = self.vault_commitments.write();
-        let commitment = map.entry(vault_id).or_default();
+        let commitment = map.entry(vault).or_default();
         f(commitment)
     }
 
@@ -165,7 +167,7 @@ impl<B: StorageBackend> StateLayer<B> {
     /// provided transaction. No condition checking, version tracking, or dirty
     /// key tracking — snapshot restoration replaces the entire entity table.
     ///
-    /// The key must be a full storage key (vault_id + bucket_id + local_key),
+    /// The key must be a full storage key (vault + bucket_id + local_key),
     /// as produced by [`encode_storage_key`](crate::encode_storage_key).
     ///
     /// # Errors
@@ -192,10 +194,12 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Returns [`StateError::Codec`] if entity serialization or deserialization fails.
     /// Returns [`StateError::Index`] if a relationship index update fails.
     /// Returns [`StateError::PreconditionFailed`] if a conditional write check fails.
+    ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn apply_operations_in_txn(
         &self,
         txn: &mut WriteTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         operations: &[Operation],
         block_height: u64,
     ) -> Result<(Vec<WriteStatus>, Vec<Vec<u8>>)> {
@@ -206,7 +210,7 @@ impl<B: StorageBackend> StateLayer<B> {
             let status = match op {
                 Operation::SetEntity { key, value, condition, expires_at } => {
                     let local_key = key.as_bytes();
-                    let storage_key = encode_storage_key(vault_id, local_key);
+                    let storage_key = encode_storage_key(vault, local_key);
 
                     let existing = txn.get::<tables::Entities>(&storage_key).context(StoreSnafu)?;
 
@@ -251,7 +255,7 @@ impl<B: StorageBackend> StateLayer<B> {
 
                 Operation::DeleteEntity { key } => {
                     let local_key = key.as_bytes();
-                    let storage_key = encode_storage_key(vault_id, local_key);
+                    let storage_key = encode_storage_key(vault, local_key);
 
                     let existed =
                         txn.delete::<tables::Entities>(&storage_key).context(StoreSnafu)?;
@@ -266,7 +270,7 @@ impl<B: StorageBackend> StateLayer<B> {
 
                 Operation::ExpireEntity { key, .. } => {
                     let local_key = key.as_bytes();
-                    let storage_key = encode_storage_key(vault_id, local_key);
+                    let storage_key = encode_storage_key(vault, local_key);
 
                     let existed =
                         txn.delete::<tables::Entities>(&storage_key).context(StoreSnafu)?;
@@ -283,7 +287,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     let rel = Relationship::new(resource, relation, subject);
                     let rel_key = rel.to_key();
                     let local_key = rel_key.as_bytes();
-                    let storage_key = encode_storage_key(vault_id, local_key);
+                    let storage_key = encode_storage_key(vault, local_key);
 
                     let already_exists = txn
                         .get::<tables::Relationships>(&storage_key)
@@ -298,11 +302,11 @@ impl<B: StorageBackend> StateLayer<B> {
                             .context(StoreSnafu)?;
 
                         IndexManager::add_to_obj_index(
-                            &mut *txn, vault_id, resource, relation, subject,
+                            &mut *txn, vault, resource, relation, subject,
                         )
                         .context(IndexSnafu)?;
                         IndexManager::add_to_subj_index(
-                            &mut *txn, vault_id, resource, relation, subject,
+                            &mut *txn, vault, resource, relation, subject,
                         )
                         .context(IndexSnafu)?;
 
@@ -315,18 +319,18 @@ impl<B: StorageBackend> StateLayer<B> {
                     let rel = Relationship::new(resource, relation, subject);
                     let rel_key = rel.to_key();
                     let local_key = rel_key.as_bytes();
-                    let storage_key = encode_storage_key(vault_id, local_key);
+                    let storage_key = encode_storage_key(vault, local_key);
 
                     let existed =
                         txn.delete::<tables::Relationships>(&storage_key).context(StoreSnafu)?;
 
                     if existed {
                         IndexManager::remove_from_obj_index(
-                            &mut *txn, vault_id, resource, relation, subject,
+                            &mut *txn, vault, resource, relation, subject,
                         )
                         .context(IndexSnafu)?;
                         IndexManager::remove_from_subj_index(
-                            &mut *txn, vault_id, resource, relation, subject,
+                            &mut *txn, vault, resource, relation, subject,
                         )
                         .context(IndexSnafu)?;
 
@@ -348,8 +352,10 @@ impl<B: StorageBackend> StateLayer<B> {
     ///
     /// Call this after committing a [`WriteTransaction`] that was used with
     /// [`apply_operations_in_txn`](Self::apply_operations_in_txn).
-    pub fn mark_dirty_keys(&self, vault_id: VaultId, dirty_keys: &[Vec<u8>]) {
-        self.with_commitment(vault_id, |commitment| {
+    ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    pub fn mark_dirty_keys(&self, vault: VaultId, dirty_keys: &[Vec<u8>]) {
+        self.with_commitment(vault, |commitment| {
             for key in dirty_keys {
                 commitment.mark_dirty_by_key(key);
             }
@@ -389,21 +395,25 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Returns [`StateError::Codec`] if entity serialization or deserialization fails.
     /// Returns [`StateError::Index`] if a relationship index update fails.
     /// Returns [`StateError::PreconditionFailed`] if a conditional write check fails.
+    ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn apply_operations(
         &self,
-        vault_id: VaultId,
+        vault: VaultId,
         operations: &[Operation],
         block_height: u64,
     ) -> Result<Vec<WriteStatus>> {
         let mut txn = self.begin_write()?;
         let (statuses, dirty_keys) =
-            self.apply_operations_in_txn(&mut txn, vault_id, operations, block_height)?;
+            self.apply_operations_in_txn(&mut txn, vault, operations, block_height)?;
         txn.commit().context(StoreSnafu)?;
-        self.mark_dirty_keys(vault_id, &dirty_keys);
+        self.mark_dirty_keys(vault, &dirty_keys);
         Ok(statuses)
     }
 
     /// Clears all entities and relationships for a vault.
+    ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// Used during vault recovery to reset state before replay.
     ///
@@ -411,11 +421,11 @@ impl<B: StorageBackend> StateLayer<B> {
     ///
     /// Returns [`StateError::Store`] if any storage operation (iteration, delete,
     /// or commit) fails.
-    pub fn clear_vault(&self, vault_id: VaultId) -> Result<()> {
+    pub fn clear_vault(&self, vault: VaultId) -> Result<()> {
         use crate::keys::vault_prefix;
 
         let mut txn = self.db.write().context(StoreSnafu)?;
-        let prefix = vault_prefix(vault_id);
+        let prefix = vault_prefix(vault);
 
         // Delete all entities for this vault
         let mut keys_to_delete = Vec::new();
@@ -425,10 +435,10 @@ impl<B: StorageBackend> StateLayer<B> {
                 break;
             }
             let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-            if key_vault_id < vault_id.value() {
+            if key_vault_id < vault.value() {
                 continue;
             }
-            if key_vault_id != vault_id.value() {
+            if key_vault_id != vault.value() {
                 break;
             }
             keys_to_delete.push(key_bytes);
@@ -445,10 +455,10 @@ impl<B: StorageBackend> StateLayer<B> {
                 break;
             }
             let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-            if key_vault_id < vault_id.value() {
+            if key_vault_id < vault.value() {
                 continue;
             }
-            if key_vault_id != vault_id.value() {
+            if key_vault_id != vault.value() {
                 break;
             }
             keys_to_delete.push(key_bytes);
@@ -498,19 +508,21 @@ impl<B: StorageBackend> StateLayer<B> {
         txn.commit().context(StoreSnafu)?;
 
         // Reset commitment tracking for this vault
-        self.vault_commitments.write().remove(&vault_id);
+        self.vault_commitments.write().remove(&vault);
 
         Ok(())
     }
 
     /// Returns an entity by key.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the read transaction fails.
     /// Returns [`StateError::Codec`] if deserialization of the stored entity fails.
-    pub fn get_entity(&self, vault_id: VaultId, key: &[u8]) -> Result<Option<Entity>> {
-        let storage_key = encode_storage_key(vault_id, key);
+    pub fn get_entity(&self, vault: VaultId, key: &[u8]) -> Result<Option<Entity>> {
+        let storage_key = encode_storage_key(vault, key);
         let txn = self.db.read().context(StoreSnafu)?;
 
         match txn.get::<tables::Entities>(&storage_key).context(StoreSnafu)? {
@@ -524,19 +536,21 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Checks if a relationship exists.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the read transaction fails.
     pub fn relationship_exists(
         &self,
-        vault_id: VaultId,
+        vault: VaultId,
         resource: &str,
         relation: &str,
         subject: &str,
     ) -> Result<bool> {
         let rel = Relationship::new(resource, relation, subject);
         let local_key = rel.to_key();
-        let storage_key = encode_storage_key(vault_id, local_key.as_bytes());
+        let storage_key = encode_storage_key(vault, local_key.as_bytes());
 
         let txn = self.db.read().context(StoreSnafu)?;
 
@@ -545,6 +559,8 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Computes state root for a vault, updating dirty bucket roots.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// This scans only the dirty buckets and recomputes their roots,
     /// then returns SHA-256(bucket_roots[0..256]).
     ///
@@ -552,11 +568,11 @@ impl<B: StorageBackend> StateLayer<B> {
     ///
     /// Returns [`StateError::Store`] if the read transaction or iteration fails.
     /// Returns [`StateError::Codec`] if deserialization of any entity in a dirty bucket fails.
-    pub fn compute_state_root(&self, vault_id: VaultId) -> Result<Hash> {
+    pub fn compute_state_root(&self, vault: VaultId) -> Result<Hash> {
         // First check if dirty and get the dirty buckets list (brief read lock)
         let dirty_buckets: Vec<u8> = {
             let map = self.vault_commitments.read();
-            match map.get(&vault_id) {
+            match map.get(&vault) {
                 Some(commitment) if commitment.is_dirty() => {
                     commitment.dirty_buckets().iter().copied().collect()
                 },
@@ -567,7 +583,7 @@ impl<B: StorageBackend> StateLayer<B> {
                 None => {
                     // No commitment yet, create default and return its state root
                     drop(map);
-                    return Ok(self.with_commitment(vault_id, |c| c.compute_state_root()));
+                    return Ok(self.with_commitment(vault, |c| c.compute_state_root()));
                 },
             }
         };
@@ -577,7 +593,7 @@ impl<B: StorageBackend> StateLayer<B> {
         let mut bucket_roots: Vec<(u8, Hash)> = Vec::with_capacity(dirty_buckets.len());
 
         for bucket in dirty_buckets {
-            let _prefix = bucket_prefix(vault_id, bucket);
+            let _prefix = bucket_prefix(vault, bucket);
             let mut builder = BucketRootBuilder::new(bucket);
 
             // Scan all entities in this bucket
@@ -587,10 +603,10 @@ impl<B: StorageBackend> StateLayer<B> {
                     continue;
                 }
                 let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-                if key_vault_id < vault_id.value() {
+                if key_vault_id < vault.value() {
                     continue;
                 }
-                if key_vault_id > vault_id.value() {
+                if key_vault_id > vault.value() {
                     break;
                 }
 
@@ -610,7 +626,7 @@ impl<B: StorageBackend> StateLayer<B> {
         }
 
         // Update commitment with computed bucket roots (brief write lock)
-        Ok(self.with_commitment(vault_id, |commitment| {
+        Ok(self.with_commitment(vault, |commitment| {
             for (bucket, root) in bucket_roots {
                 commitment.set_bucket_root(bucket, root);
             }
@@ -621,16 +637,20 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Loads bucket roots from stored vault metadata.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// Called during startup/recovery to restore commitment state.
-    pub fn load_vault_commitment(&self, vault_id: VaultId, bucket_roots: [Hash; NUM_BUCKETS]) {
+    pub fn load_vault_commitment(&self, vault: VaultId, bucket_roots: [Hash; NUM_BUCKETS]) {
         self.vault_commitments
             .write()
-            .insert(vault_id, VaultCommitment::from_bucket_roots(bucket_roots));
+            .insert(vault, VaultCommitment::from_bucket_roots(bucket_roots));
     }
 
     /// Returns the current bucket roots for a vault (for persistence).
-    pub fn get_bucket_roots(&self, vault_id: VaultId) -> Option<[Hash; NUM_BUCKETS]> {
-        self.vault_commitments.read().get(&vault_id).map(|c| *c.bucket_roots())
+    ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    pub fn get_bucket_roots(&self, vault: VaultId) -> Option<[Hash; NUM_BUCKETS]> {
+        self.vault_commitments.read().get(&vault).map(|c| *c.bucket_roots())
     }
 
     /// Compacts all B+ tree tables, merging underfull leaf nodes.
@@ -649,21 +669,25 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Lists subjects for a given resource and relation.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the read transaction fails.
     /// Returns [`StateError::Index`] if the index lookup fails.
     pub fn list_subjects(
         &self,
-        vault_id: VaultId,
+        vault: VaultId,
         resource: &str,
         relation: &str,
     ) -> Result<Vec<String>> {
         let txn = self.db.read().context(StoreSnafu)?;
-        IndexManager::get_subjects(&txn, vault_id, resource, relation).context(IndexSnafu)
+        IndexManager::get_subjects(&txn, vault, resource, relation).context(IndexSnafu)
     }
 
     /// Lists resource-relation pairs for a given subject.
+    ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// # Errors
     ///
@@ -671,14 +695,16 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Returns [`StateError::Index`] if the index lookup fails.
     pub fn list_resources_for_subject(
         &self,
-        vault_id: VaultId,
+        vault: VaultId,
         subject: &str,
     ) -> Result<Vec<(String, String)>> {
         let txn = self.db.read().context(StoreSnafu)?;
-        IndexManager::get_resources(&txn, vault_id, subject).context(IndexSnafu)
+        IndexManager::get_resources(&txn, vault, subject).context(IndexSnafu)
     }
 
     /// Lists all entities in a vault with optional prefix filter.
+    ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// Returns up to `limit` entities. Use `start_after` for pagination.
     ///
@@ -688,7 +714,7 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Returns [`StateError::Codec`] if deserialization of any entity fails.
     pub fn list_entities(
         &self,
-        vault_id: VaultId,
+        vault: VaultId,
         prefix: Option<&str>,
         start_after: Option<&str>,
         limit: usize,
@@ -700,18 +726,18 @@ impl<B: StorageBackend> StateLayer<B> {
         let mut entities = Vec::with_capacity(limit.min(1000));
 
         // Build the range start key.
-        // Note: Keys are ordered by (vault_id, bucket_id, local_key), where bucket_id
+        // Note: Keys are ordered by (vault, bucket_id, local_key), where bucket_id
         // is a hash of the local key. This means keys with the same prefix can be
         // scattered across different buckets. For prefix scans, we must start from
         // the beginning of the vault and filter by prefix in the loop.
         let start_key: Vec<u8> = if let Some(after) = start_after {
             // Pagination: start after this specific key
-            let mut k = encode_storage_key(vault_id, after.as_bytes());
+            let mut k = encode_storage_key(vault, after.as_bytes());
             k.push(0); // Advance past the exact key
             k
         } else {
             // For prefix scans or full vault scans, start from the vault prefix
-            vault_prefix(vault_id).to_vec()
+            vault_prefix(vault).to_vec()
         };
 
         for (key_bytes, value) in txn.iter::<tables::Entities>().context(StoreSnafu)? {
@@ -729,7 +755,7 @@ impl<B: StorageBackend> StateLayer<B> {
                 break;
             }
             let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-            if key_vault_id != vault_id.value() {
+            if key_vault_id != vault.value() {
                 break;
             }
 
@@ -753,6 +779,8 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Lists all relationships in a vault.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// Returns up to `limit` relationships. Use `start_after` for pagination.
     ///
     /// # Errors
@@ -761,7 +789,7 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Returns [`StateError::Codec`] if deserialization of any relationship fails.
     pub fn list_relationships(
         &self,
-        vault_id: VaultId,
+        vault: VaultId,
         start_after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Relationship>> {
@@ -772,15 +800,15 @@ impl<B: StorageBackend> StateLayer<B> {
         let mut relationships = Vec::with_capacity(limit.min(1000));
 
         // Build the range start key.
-        // Note: Keys are ordered by (vault_id, bucket_id, local_key). For full
+        // Note: Keys are ordered by (vault, bucket_id, local_key). For full
         // vault scans without start_after, we use the 8-byte vault prefix to
         // iterate from the very first key in the vault (bucket 0).
         let start_key = if let Some(after) = start_after {
-            let mut k = encode_storage_key(vault_id, after.as_bytes());
+            let mut k = encode_storage_key(vault, after.as_bytes());
             k.push(0);
             k
         } else {
-            vault_prefix(vault_id).to_vec()
+            vault_prefix(vault).to_vec()
         };
 
         for (key_bytes, value) in txn.iter::<tables::Relationships>().context(StoreSnafu)? {
@@ -798,7 +826,7 @@ impl<B: StorageBackend> StateLayer<B> {
                 break;
             }
             let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-            if key_vault_id != vault_id.value() {
+            if key_vault_id != vault.value() {
                 break;
             }
 
@@ -837,7 +865,7 @@ mod tests {
     #[test]
     fn test_set_and_get_entity() {
         let state = create_test_state();
-        let vault_id = VaultId::new(1);
+        let vault = VaultId::new(1);
 
         let ops = vec![Operation::SetEntity {
             key: "test_key".to_string(),
@@ -846,10 +874,10 @@ mod tests {
             expires_at: None,
         }];
 
-        let statuses = state.apply_operations(vault_id, &ops, 1).unwrap();
+        let statuses = state.apply_operations(vault, &ops, 1).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Created]);
 
-        let entity = state.get_entity(vault_id, b"test_key").unwrap();
+        let entity = state.get_entity(vault, b"test_key").unwrap();
         assert!(entity.is_some());
         let e = entity.unwrap();
         assert_eq!(e.value, b"test_value");
@@ -859,7 +887,7 @@ mod tests {
     #[test]
     fn test_set_entity_must_not_exist() {
         let state = create_test_state();
-        let vault_id = VaultId::new(1);
+        let vault = VaultId::new(1);
 
         // First set
         let ops = vec![Operation::SetEntity {
@@ -868,7 +896,7 @@ mod tests {
             condition: Some(SetCondition::MustNotExist),
             expires_at: None,
         }];
-        let statuses = state.apply_operations(vault_id, &ops, 1).unwrap();
+        let statuses = state.apply_operations(vault, &ops, 1).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Created]);
 
         // Second set should fail with error (batch atomicity)
@@ -878,7 +906,7 @@ mod tests {
             condition: Some(SetCondition::MustNotExist),
             expires_at: None,
         }];
-        let result = state.apply_operations(vault_id, &ops, 2);
+        let result = state.apply_operations(vault, &ops, 2);
 
         // Should return PreconditionFailed error with current state details
         match result {
@@ -901,7 +929,7 @@ mod tests {
     #[test]
     fn test_delete_entity() {
         let state = create_test_state();
-        let vault_id = VaultId::new(1);
+        let vault = VaultId::new(1);
 
         // Set then delete
         let ops = vec![Operation::SetEntity {
@@ -910,24 +938,24 @@ mod tests {
             condition: None,
             expires_at: None,
         }];
-        state.apply_operations(vault_id, &ops, 1).unwrap();
+        state.apply_operations(vault, &ops, 1).unwrap();
 
         let ops = vec![Operation::DeleteEntity { key: "key".to_string() }];
-        let statuses = state.apply_operations(vault_id, &ops, 2).unwrap();
+        let statuses = state.apply_operations(vault, &ops, 2).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Deleted]);
 
         // Should not exist now
-        assert!(state.get_entity(vault_id, b"key").unwrap().is_none());
+        assert!(state.get_entity(vault, b"key").unwrap().is_none());
 
         // Delete again should be NotFound
-        let statuses = state.apply_operations(vault_id, &ops, 3).unwrap();
+        let statuses = state.apply_operations(vault, &ops, 3).unwrap();
         assert_eq!(statuses, vec![WriteStatus::NotFound]);
     }
 
     #[test]
     fn test_create_relationship() {
         let state = create_test_state();
-        let vault_id = VaultId::new(1);
+        let vault = VaultId::new(1);
 
         let ops = vec![Operation::CreateRelationship {
             resource: "doc:123".to_string(),
@@ -935,20 +963,20 @@ mod tests {
             subject: "user:alice".to_string(),
         }];
 
-        let statuses = state.apply_operations(vault_id, &ops, 1).unwrap();
+        let statuses = state.apply_operations(vault, &ops, 1).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Created]);
 
-        assert!(state.relationship_exists(vault_id, "doc:123", "viewer", "user:alice").unwrap());
+        assert!(state.relationship_exists(vault, "doc:123", "viewer", "user:alice").unwrap());
 
         // Create again should return AlreadyExists
-        let statuses = state.apply_operations(vault_id, &ops, 2).unwrap();
+        let statuses = state.apply_operations(vault, &ops, 2).unwrap();
         assert_eq!(statuses, vec![WriteStatus::AlreadyExists]);
     }
 
     #[test]
     fn test_delete_relationship() {
         let state = create_test_state();
-        let vault_id = VaultId::new(1);
+        let vault = VaultId::new(1);
 
         // Create
         let ops = vec![Operation::CreateRelationship {
@@ -956,7 +984,7 @@ mod tests {
             relation: "viewer".to_string(),
             subject: "user:alice".to_string(),
         }];
-        state.apply_operations(vault_id, &ops, 1).unwrap();
+        state.apply_operations(vault, &ops, 1).unwrap();
 
         // Delete
         let ops = vec![Operation::DeleteRelationship {
@@ -964,10 +992,10 @@ mod tests {
             relation: "viewer".to_string(),
             subject: "user:alice".to_string(),
         }];
-        let statuses = state.apply_operations(vault_id, &ops, 2).unwrap();
+        let statuses = state.apply_operations(vault, &ops, 2).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Deleted]);
 
-        assert!(!state.relationship_exists(vault_id, "doc:123", "viewer", "user:alice").unwrap());
+        assert!(!state.relationship_exists(vault, "doc:123", "viewer", "user:alice").unwrap());
     }
 
     /// Regression test for list_relationships bug where using encode_storage_key
@@ -982,7 +1010,7 @@ mod tests {
         use inferadb_ledger_types::bucket_id;
 
         let state = create_test_state();
-        let vault_id = VaultId::new(1);
+        let vault = VaultId::new(1);
 
         // Create relationships with resource names chosen to land in different buckets.
         // We want at least some in buckets < 185 to catch the regression.
@@ -1024,11 +1052,11 @@ mod tests {
             })
             .collect();
 
-        let statuses = state.apply_operations(vault_id, &ops, 1).unwrap();
+        let statuses = state.apply_operations(vault, &ops, 1).unwrap();
         assert!(statuses.iter().all(|s| *s == WriteStatus::Created));
 
         // List all relationships without start_after - this is the bug scenario
-        let listed = state.list_relationships(vault_id, None, 100).unwrap();
+        let listed = state.list_relationships(vault, None, 100).unwrap();
 
         // Must return all relationships, not just those in buckets >= 185
         assert_eq!(
@@ -1065,7 +1093,7 @@ mod tests {
         use inferadb_ledger_types::bucket_id;
 
         let state = create_test_state();
-        let vault_id = VaultId::new(20_000_002_690_000); // Same vault ID pattern as integration tests
+        let vault = VaultId::new(20_000_002_690_000); // Same vault ID pattern as integration tests
 
         // First: sequential write (like Engine test does)
         let seq_ops = vec![Operation::CreateRelationship {
@@ -1073,13 +1101,13 @@ mod tests {
             relation: "viewer".to_string(),
             subject: "user:seq-test".to_string(),
         }];
-        let statuses = state.apply_operations(vault_id, &seq_ops, 1).unwrap();
+        let statuses = state.apply_operations(vault, &seq_ops, 1).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Created]);
 
         // Verify sequential write via direct read
         assert!(
             state
-                .relationship_exists(vault_id, "document:seq-test", "viewer", "user:seq-test")
+                .relationship_exists(vault, "document:seq-test", "viewer", "user:seq-test")
                 .unwrap()
         );
 
@@ -1096,7 +1124,7 @@ mod tests {
                     relation: "viewer".to_string(),
                     subject: format!("user:concurrent-{}", i),
                 }];
-                state.apply_operations(vault_id, &ops, (i + 2) as u64).unwrap()
+                state.apply_operations(vault, &ops, (i + 2) as u64).unwrap()
             });
             handles.push(handle);
         }
@@ -1112,7 +1140,7 @@ mod tests {
             assert!(
                 state_arc
                     .relationship_exists(
-                        vault_id,
+                        vault,
                         &format!("document:concurrent-{}", i),
                         "viewer",
                         &format!("user:concurrent-{}", i)
@@ -1133,7 +1161,7 @@ mod tests {
         }
 
         // Now: list all relationships (the operation that fails in integration tests)
-        let all_relationships = state_arc.list_relationships(vault_id, None, 100).unwrap();
+        let all_relationships = state_arc.list_relationships(vault, None, 100).unwrap();
 
         eprintln!("=== Listed {} relationships ===", all_relationships.len());
         for rel in &all_relationships {
@@ -1167,9 +1195,9 @@ mod tests {
     #[test]
     fn test_state_root_changes_on_writes() {
         let state = create_test_state();
-        let vault_id = VaultId::new(1);
+        let vault = VaultId::new(1);
 
-        let root1 = state.compute_state_root(vault_id).unwrap();
+        let root1 = state.compute_state_root(vault).unwrap();
 
         let ops = vec![Operation::SetEntity {
             key: "key".to_string(),
@@ -1177,16 +1205,16 @@ mod tests {
             condition: None,
             expires_at: None,
         }];
-        state.apply_operations(vault_id, &ops, 1).unwrap();
+        state.apply_operations(vault, &ops, 1).unwrap();
 
-        let root2 = state.compute_state_root(vault_id).unwrap();
+        let root2 = state.compute_state_root(vault).unwrap();
         assert_ne!(root1, root2);
 
         // Deleting should change root again
         let ops = vec![Operation::DeleteEntity { key: "key".to_string() }];
-        state.apply_operations(vault_id, &ops, 2).unwrap();
+        state.apply_operations(vault, &ops, 2).unwrap();
 
-        let root3 = state.compute_state_root(vault_id).unwrap();
+        let root3 = state.compute_state_root(vault).unwrap();
         assert_ne!(root2, root3);
         // After deleting, should be back to empty state
         assert_eq!(root1, root3);
@@ -1216,7 +1244,7 @@ mod tests {
     #[test]
     fn test_clear_vault() {
         let state = create_test_state();
-        let vault_id = VaultId::new(1);
+        let vault = VaultId::new(1);
 
         // Create entities and relationships
         let ops = vec![
@@ -1238,7 +1266,7 @@ mod tests {
                 subject: "user:alice".to_string(),
             },
         ];
-        state.apply_operations(vault_id, &ops, 1).unwrap();
+        state.apply_operations(vault, &ops, 1).unwrap();
 
         // Also add data to vault 2 to ensure isolation
         let ops_vault2 = vec![Operation::SetEntity {
@@ -1250,25 +1278,25 @@ mod tests {
         state.apply_operations(VaultId::new(2), &ops_vault2, 1).unwrap();
 
         // Verify data exists in vault 1
-        assert!(state.get_entity(vault_id, b"entity1").unwrap().is_some());
-        assert!(state.get_entity(vault_id, b"entity2").unwrap().is_some());
-        assert!(state.relationship_exists(vault_id, "doc:1", "viewer", "user:alice").unwrap());
+        assert!(state.get_entity(vault, b"entity1").unwrap().is_some());
+        assert!(state.get_entity(vault, b"entity2").unwrap().is_some());
+        assert!(state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
 
         // Clear vault 1
-        state.clear_vault(vault_id).unwrap();
+        state.clear_vault(vault).unwrap();
 
         // Verify vault 1 data is gone
-        assert!(state.get_entity(vault_id, b"entity1").unwrap().is_none());
-        assert!(state.get_entity(vault_id, b"entity2").unwrap().is_none());
-        assert!(!state.relationship_exists(vault_id, "doc:1", "viewer", "user:alice").unwrap());
+        assert!(state.get_entity(vault, b"entity1").unwrap().is_none());
+        assert!(state.get_entity(vault, b"entity2").unwrap().is_none());
+        assert!(!state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
 
         // Verify vault 2 data is still there (isolation)
         assert!(state.get_entity(VaultId::new(2), b"entity_v2").unwrap().is_some());
 
         // State root should be back to empty
-        let empty_root = state.compute_state_root(vault_id).unwrap();
+        let empty_root = state.compute_state_root(vault).unwrap();
         let fresh_state = create_test_state();
-        let expected_empty = fresh_state.compute_state_root(vault_id).unwrap();
+        let expected_empty = fresh_state.compute_state_root(vault).unwrap();
         assert_eq!(empty_root, expected_empty);
     }
 
@@ -1277,7 +1305,7 @@ mod tests {
     #[test]
     fn test_many_sequential_writes_then_verify() {
         let state = create_test_state();
-        let vault_id = VaultId::new(1);
+        let vault = VaultId::new(1);
 
         // Write 500 entities sequentially
         let num_keys = 500;
@@ -1291,7 +1319,7 @@ mod tests {
                 expires_at: None,
             }];
 
-            let statuses = state.apply_operations(vault_id, &ops, i as u64 + 1).unwrap();
+            let statuses = state.apply_operations(vault, &ops, i as u64 + 1).unwrap();
             assert_eq!(statuses, vec![WriteStatus::Created], "Failed to create key {}", i);
         }
 
@@ -1300,7 +1328,7 @@ mod tests {
         for i in 0..num_keys {
             let key = format!("stress-key-{}", i);
             let expected = format!("stress-value-{}", i).into_bytes();
-            match state.get_entity(vault_id, key.as_bytes()).unwrap() {
+            match state.get_entity(vault, key.as_bytes()).unwrap() {
                 Some(entity) => {
                     assert_eq!(entity.value, expected, "Value mismatch for key {}", i);
                 },
@@ -1325,7 +1353,7 @@ mod tests {
         use std::{sync::Arc, thread};
 
         let state = Arc::new(create_test_state());
-        let vault_id = VaultId::new(1);
+        let vault = VaultId::new(1);
         let num_threads = 4;
         let writes_per_thread = 50;
 
@@ -1345,7 +1373,7 @@ mod tests {
 
                     // Each write gets a unique block height
                     let block_height = (thread_id * writes_per_thread + i + 1) as u64;
-                    state.apply_operations(vault_id, &ops, block_height).unwrap();
+                    state.apply_operations(vault, &ops, block_height).unwrap();
                 }
             });
             handles.push(handle);
@@ -1362,7 +1390,7 @@ mod tests {
             for i in 0..writes_per_thread {
                 let key = format!("key-{}-{}", thread_id, i);
                 let expected = format!("value-{}-{}", thread_id, i).into_bytes();
-                match state.get_entity(vault_id, key.as_bytes()).unwrap() {
+                match state.get_entity(vault, key.as_bytes()).unwrap() {
                     Some(entity) => {
                         assert_eq!(entity.value, expected, "Value mismatch for key {}", key);
                     },
@@ -1463,7 +1491,7 @@ mod tests {
             fn state_determinism_same_operations(
                 operations in arb_operation_sequence()
             ) {
-                let vault_id = VaultId::new(1);
+                let vault = VaultId::new(1);
 
                 // Create two independent StateLayer instances
                 let state1 = create_test_state();
@@ -1472,13 +1500,13 @@ mod tests {
                 // Apply the same operations to both
                 for (idx, op) in operations.iter().enumerate() {
                     let block_height = (idx + 1) as u64;
-                    let _ = state1.apply_operations(vault_id, std::slice::from_ref(op), block_height);
-                    let _ = state2.apply_operations(vault_id, std::slice::from_ref(op), block_height);
+                    let _ = state1.apply_operations(vault, std::slice::from_ref(op), block_height);
+                    let _ = state2.apply_operations(vault, std::slice::from_ref(op), block_height);
                 }
 
                 // State roots must be identical
-                let root1 = state1.compute_state_root(vault_id).unwrap();
-                let root2 = state2.compute_state_root(vault_id).unwrap();
+                let root1 = state1.compute_state_root(vault).unwrap();
+                let root2 = state2.compute_state_root(vault).unwrap();
 
                 prop_assert_eq!(
                     root1, root2,
@@ -1499,22 +1527,22 @@ mod tests {
             fn state_determinism_batch_vs_individual(
                 operations in arb_operation_sequence()
             ) {
-                let vault_id = VaultId::new(1);
+                let vault = VaultId::new(1);
                 let block_height: u64 = 1; // Same height for both
 
                 // Apply one-by-one at the SAME block height
                 let state_individual = create_test_state();
                 for op in operations.iter() {
-                    let _ = state_individual.apply_operations(vault_id, std::slice::from_ref(op), block_height);
+                    let _ = state_individual.apply_operations(vault, std::slice::from_ref(op), block_height);
                 }
 
                 // Apply as batch at the same block height
                 let state_batch = create_test_state();
-                let _ = state_batch.apply_operations(vault_id, &operations, block_height);
+                let _ = state_batch.apply_operations(vault, &operations, block_height);
 
                 // State roots must be identical
-                let root_individual = state_individual.compute_state_root(vault_id).unwrap();
-                let root_batch = state_batch.compute_state_root(vault_id).unwrap();
+                let root_individual = state_individual.compute_state_root(vault).unwrap();
+                let root_batch = state_batch.compute_state_root(vault).unwrap();
 
                 prop_assert_eq!(
                     root_individual, root_batch,
@@ -1528,16 +1556,16 @@ mod tests {
             fn state_root_idempotent(
                 operations in arb_operation_sequence()
             ) {
-                let vault_id = VaultId::new(1);
+                let vault = VaultId::new(1);
                 let state = create_test_state();
 
                 // Apply operations
-                let _ = state.apply_operations(vault_id, &operations, 1);
+                let _ = state.apply_operations(vault, &operations, 1);
 
                 // Compute state root multiple times
-                let root1 = state.compute_state_root(vault_id).unwrap();
-                let root2 = state.compute_state_root(vault_id).unwrap();
-                let root3 = state.compute_state_root(vault_id).unwrap();
+                let root1 = state.compute_state_root(vault).unwrap();
+                let root2 = state.compute_state_root(vault).unwrap();
+                let root3 = state.compute_state_root(vault).unwrap();
 
                 prop_assert_eq!(root1, root2, "First and second computation differ");
                 prop_assert_eq!(root2, root3, "Second and third computation differ");
@@ -1556,16 +1584,16 @@ mod tests {
                 // Only test when sequences are actually different
                 prop_assume!(ops1 != ops2);
 
-                let vault_id = VaultId::new(1);
+                let vault = VaultId::new(1);
 
                 let state1 = create_test_state();
                 let state2 = create_test_state();
 
-                let _ = state1.apply_operations(vault_id, &ops1, 1);
-                let _ = state2.apply_operations(vault_id, &ops2, 1);
+                let _ = state1.apply_operations(vault, &ops1, 1);
+                let _ = state2.apply_operations(vault, &ops2, 1);
 
-                let root1 = state1.compute_state_root(vault_id).unwrap();
-                let root2 = state2.compute_state_root(vault_id).unwrap();
+                let root1 = state1.compute_state_root(vault).unwrap();
+                let root2 = state2.compute_state_root(vault).unwrap();
 
                 // Hash collisions are possible but extremely unlikely.
                 // If this fails repeatedly, there's a bug in hashing.
@@ -1671,7 +1699,7 @@ mod tests {
     #[test]
     fn test_compact_tables_preserves_data() {
         let state = create_test_state();
-        let vault_id = VaultId::new(1);
+        let vault = VaultId::new(1);
 
         // Insert many entities
         for i in 0..100 {
@@ -1681,13 +1709,13 @@ mod tests {
                 condition: None,
                 expires_at: None,
             }];
-            state.apply_operations(vault_id, &ops, i as u64 + 1).unwrap();
+            state.apply_operations(vault, &ops, i as u64 + 1).unwrap();
         }
 
         // Delete most to create sparse leaves
         for i in 0..80 {
             let ops = vec![Operation::DeleteEntity { key: format!("ckey-{:04}", i) }];
-            state.apply_operations(vault_id, &ops, 200 + i as u64).unwrap();
+            state.apply_operations(vault, &ops, 200 + i as u64).unwrap();
         }
 
         // Run compaction
@@ -1695,14 +1723,14 @@ mod tests {
 
         // Verify remaining data is intact
         for i in 80..100 {
-            let entity = state.get_entity(vault_id, format!("ckey-{:04}", i).as_bytes()).unwrap();
+            let entity = state.get_entity(vault, format!("ckey-{:04}", i).as_bytes()).unwrap();
             assert!(entity.is_some(), "Entity ckey-{:04} missing after compaction", i);
             assert_eq!(entity.unwrap().value, format!("cval-{:04}", i).into_bytes());
         }
 
         // Verify deleted keys are still gone
         for i in 0..80 {
-            let entity = state.get_entity(vault_id, format!("ckey-{:04}", i).as_bytes()).unwrap();
+            let entity = state.get_entity(vault, format!("ckey-{:04}", i).as_bytes()).unwrap();
             assert!(entity.is_none());
         }
 

@@ -19,8 +19,9 @@ use std::time::Duration;
 
 use inferadb_ledger_proto::{
     proto,
-    proto::{ClientId, OrganizationSlug, VaultSlug, WriteRequest},
+    proto::{ClientId, WriteRequest},
 };
+use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
 use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
@@ -32,7 +33,7 @@ use crate::common::{TestCluster, create_admin_client, create_read_client, create
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
-) -> Result<u64, Box<dyn std::error::Error>> {
+) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_organization(proto::CreateOrganizationRequest {
@@ -41,33 +42,38 @@ async fn create_organization(
             quota: None,
         })
         .await?;
-    let slug = response.into_inner().slug.map(|n| n.slug).ok_or("No organization slug")?;
+    let slug = response
+        .into_inner()
+        .slug
+        .map(|n| OrganizationSlug::new(n.slug))
+        .ok_or("No organization slug")?;
     Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
     addr: std::net::SocketAddr,
-    organization: u64,
-) -> Result<u64, Box<dyn std::error::Error>> {
+    organization: OrganizationSlug,
+) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(proto::CreateVaultRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization }),
+            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
         })
         .await?;
-    let slug = response.into_inner().vault.map(|v| v.slug).ok_or("No vault slug")?;
+    let slug =
+        response.into_inner().vault.map(|v| VaultSlug::new(v.slug)).ok_or("No vault slug")?;
     Ok(slug)
 }
 
 /// Writes an entity and returns the assigned sequence number.
 async fn write_entity(
     addr: std::net::SocketAddr,
-    organization: u64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
     key: &str,
     value: &[u8],
     client_id: &str,
@@ -77,8 +83,8 @@ async fn write_entity(
         .write(proto::WriteRequest {
             client_id: Some(proto::ClientId { id: client_id.to_string() }),
             idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-            organization: Some(proto::OrganizationSlug { slug: organization }),
-            vault: Some(proto::VaultSlug { slug: vault }),
+            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+            vault: Some(proto::VaultSlug { slug: vault.value() }),
             operations: vec![proto::Operation {
                 op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
                     key: key.to_string(),
@@ -102,15 +108,15 @@ async fn write_entity(
 /// Reads an entity and returns its value (if it exists).
 async fn read_entity(
     addr: std::net::SocketAddr,
-    organization: u64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
     key: &str,
 ) -> Option<Vec<u8>> {
     let mut client = create_read_client(addr).await.ok()?;
     let response = client
         .read(proto::ReadRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization }),
-            vault: Some(proto::VaultSlug { slug: vault }),
+            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+            vault: Some(proto::VaultSlug { slug: vault.value() }),
             key: key.to_string(),
             consistency: 0,
         })
@@ -121,15 +127,15 @@ async fn read_entity(
 
 /// Helper to create a write request with a single SetEntity operation.
 fn make_write_request(
-    organization: u64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
     key: &str,
     value: &[u8],
     client_id: &str,
 ) -> WriteRequest {
     WriteRequest {
-        organization: Some(OrganizationSlug { slug: organization }),
-        vault: Some(VaultSlug { slug: vault }),
+        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+        vault: Some(proto::VaultSlug { slug: vault.value() }),
         client_id: Some(ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![proto::Operation {
@@ -281,8 +287,8 @@ async fn test_bulk_writes_replicated_state_roots_match() {
             .write(proto::WriteRequest {
                 client_id: Some(proto::ClientId { id: "bulk-writer".to_string() }),
                 idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-                organization: Some(proto::OrganizationSlug { slug: organization }),
-                vault: Some(proto::VaultSlug { slug: vault }),
+                organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                vault: Some(proto::VaultSlug { slug: vault.value() }),
                 operations: vec![proto::Operation {
                     op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
                         key: format!("entity-{:05}", i),
@@ -428,8 +434,8 @@ async fn test_snapshot_determinism_all_nodes_identical_state() {
                         id: format!("det-writer-{org_idx}-{vault_idx}"),
                     }),
                     idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-                    organization: Some(proto::OrganizationSlug { slug: *organization }),
-                    vault: Some(proto::VaultSlug { slug: *vault }),
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    vault: Some(proto::VaultSlug { slug: vault.value() }),
                     operations: vec![proto::Operation {
                         op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
                             key: key.clone(),

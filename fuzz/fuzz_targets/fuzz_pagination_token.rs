@@ -8,6 +8,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use inferadb_ledger_raft::pagination::{PageToken, PageTokenCodec};
+use inferadb_ledger_types::{OrganizationId, VaultId};
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {
@@ -50,25 +51,25 @@ fn fuzz_roundtrip(data: &[u8]) {
         return;
     }
 
-    let organization_id = i64::from_le_bytes([
+    let organization = OrganizationId::new(i64::from_le_bytes([
         data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-    ]);
-    let vault_id = i64::from_le_bytes([
+    ]));
+    let vault = VaultId::new(i64::from_le_bytes([
         data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
-    ]);
+    ]));
     let at_height = u64::from_le_bytes([
         data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
     ]);
-    let query_hash_bytes: [u8; 8] = [0u8; 8]; // Fixed for simplicity
+    let query_hash: [u8; 8] = [0u8; 8]; // Fixed for simplicity
     let last_key = data[24..].to_vec();
 
     let token = PageToken {
         version: 1,
-        organization_id,
-        vault_id,
+        organization,
+        vault,
         last_key,
         at_height,
-        query_hash: query_hash_bytes,
+        query_hash,
     };
 
     let key = [42u8; 32];

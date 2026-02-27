@@ -2,7 +2,7 @@
 //!
 //! This module implements a bounded, TTL-based cache that stores the results
 //! of recently committed transactions. When a client retries a request with
-//! the same `(organization_id, vault_id, client_id, idempotency_key)` tuple, we return the
+//! the same `(organization, vault, client_id, idempotency_key)` tuple, we return the
 //! cached result instead of reprocessing.
 //!
 //! Per ADR server-assigned-sequences:
@@ -17,6 +17,7 @@
 use std::time::Duration;
 
 use inferadb_ledger_proto::proto::WriteSuccess;
+use inferadb_ledger_types::types::{OrganizationId, VaultId};
 use moka::sync::Cache;
 
 /// Maximum number of entries in the cache.
@@ -27,14 +28,14 @@ const ENTRY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Composite key for idempotency cache.
 ///
-/// Per ADR: Cache key is `(organization_id, vault_id, client_id, idempotency_key)`.
+/// Per ADR: Cache key is `(organization, vault, client_id, idempotency_key)`.
 /// The idempotency_key is a 16-byte UUID provided by the client.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IdempotencyKey {
-    /// Organization ID.
-    pub organization_id: i64,
-    /// Vault ID (0 if not specified).
-    pub vault_id: i64,
+    /// Organization internal ID.
+    pub organization: OrganizationId,
+    /// Vault internal ID (0 if not specified).
+    pub vault: VaultId,
     /// Client identifier.
     pub client_id: String,
     /// Client-provided idempotency key (16-byte UUID).
@@ -44,12 +45,12 @@ pub struct IdempotencyKey {
 impl IdempotencyKey {
     /// Creates a new idempotency key.
     pub fn new(
-        organization_id: i64,
-        vault_id: i64,
+        organization: OrganizationId,
+        vault: VaultId,
         client_id: String,
         idempotency_key: [u8; 16],
     ) -> Self {
-        Self { organization_id, vault_id, client_id, idempotency_key }
+        Self { organization, vault, client_id, idempotency_key }
     }
 }
 
@@ -81,7 +82,7 @@ pub struct CachedResult {
 
 /// Thread-safe idempotency cache with bounded size and TTL eviction.
 ///
-/// The cache maps `(organization_id, vault_id, client_id, idempotency_key) -> CachedResult`.
+/// The cache maps `(organization, vault, client_id, idempotency_key) -> CachedResult`.
 ///
 /// Behavior:
 /// - New key: Process write, cache result
@@ -112,14 +113,13 @@ impl IdempotencyCache {
     /// - `KeyReused` if the key exists but the payload hash differs
     pub fn check(
         &self,
-        organization_id: i64,
-        vault_id: i64,
+        organization: OrganizationId,
+        vault: VaultId,
         client_id: &str,
         idempotency_key: [u8; 16],
         request_hash: u64,
     ) -> IdempotencyCheckResult {
-        let key =
-            IdempotencyKey::new(organization_id, vault_id, client_id.to_string(), idempotency_key);
+        let key = IdempotencyKey::new(organization, vault, client_id.to_string(), idempotency_key);
         match self.cache.get(&key) {
             Some(entry) => {
                 if entry.request_hash == request_hash {
@@ -137,14 +137,14 @@ impl IdempotencyCache {
     /// Capacity management and TTL eviction are handled automatically by moka.
     pub fn insert(
         &self,
-        organization_id: i64,
-        vault_id: i64,
+        organization: OrganizationId,
+        vault: VaultId,
         client_id: String,
         idempotency_key: [u8; 16],
         request_hash: u64,
         result: WriteSuccess,
     ) {
-        let key = IdempotencyKey::new(organization_id, vault_id, client_id, idempotency_key);
+        let key = IdempotencyKey::new(organization, vault, client_id, idempotency_key);
         self.cache.insert(key, CachedResult { request_hash, result });
     }
 
@@ -156,8 +156,8 @@ impl IdempotencyCache {
     /// - `KeyReused` if the key exists but the payload hash differs
     pub fn check_and_insert(
         &self,
-        organization_id: i64,
-        vault_id: i64,
+        organization: OrganizationId,
+        vault: VaultId,
         client_id: &str,
         idempotency_key: [u8; 16],
         request_hash: u64,
@@ -165,13 +165,13 @@ impl IdempotencyCache {
     ) -> IdempotencyCheckResult {
         // First check for existing entry
         let check_result =
-            self.check(organization_id, vault_id, client_id, idempotency_key, request_hash);
+            self.check(organization, vault, client_id, idempotency_key, request_hash);
 
         if matches!(check_result, IdempotencyCheckResult::NewRequest) {
             // Not in cache, insert the new result
             self.insert(
-                organization_id,
-                vault_id,
+                organization,
+                vault,
                 client_id.to_string(),
                 idempotency_key,
                 request_hash,
@@ -215,6 +215,14 @@ mod tests {
 
     use super::*;
 
+    fn org(n: i64) -> OrganizationId {
+        OrganizationId::new(n)
+    }
+
+    fn vault(n: i64) -> VaultId {
+        VaultId::new(n)
+    }
+
     fn make_result(block_height: u64, assigned_sequence: u64) -> WriteSuccess {
         WriteSuccess {
             tx_id: Some(TxId { id: vec![0u8; 16] }),
@@ -239,7 +247,8 @@ mod tests {
         let request_hash = 12345u64;
 
         // First request should not be a duplicate
-        let check = cache.check_and_insert(1, 1, "client-1", idem_key, request_hash, result);
+        let check =
+            cache.check_and_insert(org(1), vault(1), "client-1", idem_key, request_hash, result);
         assert!(matches!(check, IdempotencyCheckResult::NewRequest));
 
         // Force sync to ensure entry is visible
@@ -257,10 +266,10 @@ mod tests {
         let request_hash = 12345u64;
 
         // Insert first request
-        cache.insert(1, 1, "client-1".to_string(), idem_key, request_hash, result);
+        cache.insert(org(1), vault(1), "client-1".to_string(), idem_key, request_hash, result);
 
         // Retry with same key and hash should return cached result
-        let check = cache.check(1, 1, "client-1", idem_key, request_hash);
+        let check = cache.check(org(1), vault(1), "client-1", idem_key, request_hash);
         match check {
             IdempotencyCheckResult::Duplicate(cached) => {
                 assert_eq!(cached.block_height, 100);
@@ -279,10 +288,10 @@ mod tests {
         let request_hash_2 = 99999u64; // Different payload
 
         // Insert first request
-        cache.insert(1, 1, "client-1".to_string(), idem_key, request_hash_1, result);
+        cache.insert(org(1), vault(1), "client-1".to_string(), idem_key, request_hash_1, result);
 
         // Retry with same key but different hash should return KeyReused
-        let check = cache.check(1, 1, "client-1", idem_key, request_hash_2);
+        let check = cache.check(org(1), vault(1), "client-1", idem_key, request_hash_2);
         assert!(matches!(check, IdempotencyCheckResult::KeyReused));
     }
 
@@ -295,10 +304,10 @@ mod tests {
         let request_hash = 12345u64;
 
         // Insert with key 1
-        cache.insert(1, 1, "client-1".to_string(), idem_key_1, request_hash, result);
+        cache.insert(org(1), vault(1), "client-1".to_string(), idem_key_1, request_hash, result);
 
         // Check with key 2 should be new request
-        let check = cache.check(1, 1, "client-1", idem_key_2, request_hash);
+        let check = cache.check(org(1), vault(1), "client-1", idem_key_2, request_hash);
         assert!(matches!(check, IdempotencyCheckResult::NewRequest));
     }
 
@@ -310,10 +319,10 @@ mod tests {
         let request_hash = 12345u64;
 
         // Insert for client-1
-        cache.insert(1, 1, "client-1".to_string(), idem_key, request_hash, result);
+        cache.insert(org(1), vault(1), "client-1".to_string(), idem_key, request_hash, result);
 
         // Same key for different client should be new request
-        let check = cache.check(1, 1, "client-2", idem_key, request_hash);
+        let check = cache.check(org(1), vault(1), "client-2", idem_key, request_hash);
         assert!(matches!(check, IdempotencyCheckResult::NewRequest));
     }
 
@@ -326,27 +335,34 @@ mod tests {
         let request_hash = 12345u64;
 
         // Insert for vault 1
-        cache.insert(1, 1, "client-1".to_string(), idem_key, request_hash, result.clone());
+        cache.insert(
+            org(1),
+            vault(1),
+            "client-1".to_string(),
+            idem_key,
+            request_hash,
+            result.clone(),
+        );
 
         // Same client, same key, but different vault should be new request
-        let check = cache.check(1, 2, "client-1", idem_key, request_hash);
+        let check = cache.check(org(1), vault(2), "client-1", idem_key, request_hash);
         assert!(
             matches!(check, IdempotencyCheckResult::NewRequest),
             "different vault should be new request"
         );
 
         // Now insert for vault 2
-        cache.insert(1, 2, "client-1".to_string(), idem_key, request_hash, result);
+        cache.insert(org(1), vault(2), "client-1".to_string(), idem_key, request_hash, result);
         cache.run_pending_tasks();
         assert_eq!(cache.len(), 2, "should have entries for both vaults");
 
         // Both should now return duplicate
         assert!(matches!(
-            cache.check(1, 1, "client-1", idem_key, request_hash),
+            cache.check(org(1), vault(1), "client-1", idem_key, request_hash),
             IdempotencyCheckResult::Duplicate(_)
         ));
         assert!(matches!(
-            cache.check(1, 2, "client-1", idem_key, request_hash),
+            cache.check(org(1), vault(2), "client-1", idem_key, request_hash),
             IdempotencyCheckResult::Duplicate(_)
         ));
     }
@@ -360,10 +376,10 @@ mod tests {
         let request_hash = 12345u64;
 
         // Insert for organization 1
-        cache.insert(1, 1, "client-1".to_string(), idem_key, request_hash, result);
+        cache.insert(org(1), vault(1), "client-1".to_string(), idem_key, request_hash, result);
 
         // Same client, same vault, same key, but different organization should be new request
-        let check = cache.check(2, 1, "client-1", idem_key, request_hash);
+        let check = cache.check(org(2), vault(1), "client-1", idem_key, request_hash);
         assert!(
             matches!(check, IdempotencyCheckResult::NewRequest),
             "different organization should be new request"
@@ -379,10 +395,10 @@ mod tests {
 
         // Insert with assigned_sequence = 42
         let result = make_result(100, 42);
-        cache.insert(1, 1, "client-1".to_string(), idem_key, request_hash, result);
+        cache.insert(org(1), vault(1), "client-1".to_string(), idem_key, request_hash, result);
 
         // Retrieve should have same assigned_sequence
-        let check = cache.check(1, 1, "client-1", idem_key, request_hash);
+        let check = cache.check(org(1), vault(1), "client-1", idem_key, request_hash);
         match check {
             IdempotencyCheckResult::Duplicate(cached) => {
                 assert_eq!(cached.assigned_sequence, 42);
@@ -402,7 +418,14 @@ mod tests {
             let idem_key = make_key(i);
             let result = make_result(100 + i as u64, i as u64 + 1);
 
-            let check = cache.check_and_insert(1, 1, "client-1", idem_key, request_hash, result);
+            let check = cache.check_and_insert(
+                org(1),
+                vault(1),
+                "client-1",
+                idem_key,
+                request_hash,
+                result,
+            );
             assert!(matches!(check, IdempotencyCheckResult::NewRequest));
         }
 
@@ -412,7 +435,7 @@ mod tests {
         // Each should be retrievable with its assigned sequence
         for i in 0..5 {
             let idem_key = make_key(i);
-            let check = cache.check(1, 1, "client-1", idem_key, request_hash);
+            let check = cache.check(org(1), vault(1), "client-1", idem_key, request_hash);
             match check {
                 IdempotencyCheckResult::Duplicate(cached) => {
                     assert_eq!(cached.assigned_sequence, i as u64 + 1);
@@ -460,8 +483,8 @@ mod tests {
 
             handles.push(thread::spawn(move || {
                 let check = cache.check_and_insert(
-                    1,
-                    1,
+                    org(1),
+                    vault(1),
                     "thundering-herd-client",
                     idem_key,
                     request_hash,
@@ -514,7 +537,8 @@ mod tests {
         assert_eq!(cache.len(), 1, "Cache should have exactly one entry");
 
         // A subsequent check must return Duplicate with correct data
-        let final_check = cache.check(1, 1, "thundering-herd-client", idem_key, request_hash);
+        let final_check =
+            cache.check(org(1), vault(1), "thundering-herd-client", idem_key, request_hash);
         match final_check {
             IdempotencyCheckResult::Duplicate(cached) => {
                 assert_eq!(cached.assigned_sequence, 42);
@@ -540,7 +564,14 @@ mod tests {
             key[0] = (i >> 8) as u8;
             key[1] = (i & 0xFF) as u8;
             let result = make_result(i as u64, i as u64);
-            cache.insert(i as i64, 0, format!("prefill-client-{i}"), key, i as u64, result);
+            cache.insert(
+                org(i as i64),
+                vault(0),
+                format!("prefill-client-{i}"),
+                key,
+                i as u64,
+                result,
+            );
         }
         cache.run_pending_tasks();
 
@@ -554,8 +585,13 @@ mod tests {
                     let mut key = [0u8; 16];
                     key[0] = (i >> 8) as u8;
                     key[1] = (i & 0xFF) as u8;
-                    let check =
-                        cache.check(i as i64, 0, &format!("prefill-client-{i}"), key, i as u64);
+                    let check = cache.check(
+                        org(i as i64),
+                        vault(0),
+                        &format!("prefill-client-{i}"),
+                        key,
+                        i as u64,
+                    );
                     // Entry may have been evicted by moka's TinyLFU policy, so
                     // either Duplicate (still cached) or NewRequest (evicted) is valid.
                     match check {
@@ -587,8 +623,8 @@ mod tests {
                     key[1] = (idx & 0xFF) as u8;
                     let result = make_result(idx as u64, idx as u64);
                     cache.insert(
-                        idx as i64,
-                        0,
+                        org(idx as i64),
+                        vault(0),
                         format!("new-client-{idx}"),
                         key,
                         idx as u64,

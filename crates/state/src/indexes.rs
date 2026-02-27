@@ -64,6 +64,8 @@ pub struct IndexManager;
 impl IndexManager {
     /// Adds a subject to the object index.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// Key: `{vault_id}{bucket_id}obj_idx:{resource}#{relation}`
     /// Value: serialized list of subjects
     ///
@@ -73,13 +75,13 @@ impl IndexManager {
     /// Returns `IndexError::Storage` if the write transaction fails.
     pub fn add_to_obj_index<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         resource: &str,
         relation: &str,
         subject: &str,
     ) -> Result<()> {
         let local_key = encode_obj_index_key(resource, relation);
-        let storage_key = encode_storage_key(vault_id, &local_key);
+        let storage_key = encode_storage_key(vault, &local_key);
 
         let mut set: SubjectSet = match txn.get::<tables::ObjIndex>(&storage_key) {
             Ok(Some(data)) => decode(&data).unwrap_or_default(),
@@ -100,19 +102,21 @@ impl IndexManager {
 
     /// Removes a subject from the object index.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `IndexError::Codec` if serialization of the updated subject set fails.
     /// Returns `IndexError::Storage` if the write transaction fails.
     pub fn remove_from_obj_index<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         resource: &str,
         relation: &str,
         subject: &str,
     ) -> Result<()> {
         let local_key = encode_obj_index_key(resource, relation);
-        let storage_key = encode_storage_key(vault_id, &local_key);
+        let storage_key = encode_storage_key(vault, &local_key);
 
         let existing_set: Option<SubjectSet> = match txn.get::<tables::ObjIndex>(&storage_key) {
             Ok(Some(data)) => Some(decode(&data).unwrap_or_default()),
@@ -138,6 +142,8 @@ impl IndexManager {
 
     /// Adds a resource-relation pair to the subject index.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// Key: `{vault_id}{bucket_id}subj_idx:{subject}`
     /// Value: serialized list of (resource, relation) pairs
     ///
@@ -147,13 +153,13 @@ impl IndexManager {
     /// Returns `IndexError::Storage` if the write transaction fails.
     pub fn add_to_subj_index<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         resource: &str,
         relation: &str,
         subject: &str,
     ) -> Result<()> {
         let local_key = encode_subj_index_key(subject);
-        let storage_key = encode_storage_key(vault_id, &local_key);
+        let storage_key = encode_storage_key(vault, &local_key);
 
         let mut set: ResourceRelationSet = match txn.get::<tables::SubjIndex>(&storage_key) {
             Ok(Some(data)) => decode(&data).unwrap_or_default(),
@@ -174,19 +180,21 @@ impl IndexManager {
 
     /// Removes a resource-relation pair from the subject index.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `IndexError::Codec` if serialization of the updated resource-relation set fails.
     /// Returns `IndexError::Storage` if the write transaction fails.
     pub fn remove_from_subj_index<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         resource: &str,
         relation: &str,
         subject: &str,
     ) -> Result<()> {
         let local_key = encode_subj_index_key(subject);
-        let storage_key = encode_storage_key(vault_id, &local_key);
+        let storage_key = encode_storage_key(vault, &local_key);
 
         let existing_set: Option<ResourceRelationSet> =
             match txn.get::<tables::SubjIndex>(&storage_key) {
@@ -214,18 +222,20 @@ impl IndexManager {
 
     /// Returns subjects for a resource and relation (object index lookup).
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `IndexError::Storage` if the read transaction fails.
     /// Returns `IndexError::Codec` if deserialization of the subject set fails.
     pub fn get_subjects<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         resource: &str,
         relation: &str,
     ) -> Result<Vec<String>> {
         let local_key = encode_obj_index_key(resource, relation);
-        let storage_key = encode_storage_key(vault_id, &local_key);
+        let storage_key = encode_storage_key(vault, &local_key);
 
         let data = txn.get::<tables::ObjIndex>(&storage_key).context(StorageSnafu)?;
         match data {
@@ -239,17 +249,19 @@ impl IndexManager {
 
     /// Returns resource-relation pairs for a subject (subject index lookup).
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `IndexError::Storage` if the read transaction fails.
     /// Returns `IndexError::Codec` if deserialization of the resource-relation set fails.
     pub fn get_resources<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         subject: &str,
     ) -> Result<Vec<(String, String)>> {
         let local_key = encode_subj_index_key(subject);
-        let storage_key = encode_storage_key(vault_id, &local_key);
+        let storage_key = encode_storage_key(vault, &local_key);
 
         let data = txn.get::<tables::SubjIndex>(&storage_key).context(StorageSnafu)?;
         match data {

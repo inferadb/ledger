@@ -6,7 +6,7 @@
 //! ## Architecture
 //!
 //! ```text
-//! Request(organization_id) -> ShardResolver -> Raft instance
+//! Request(organization) -> ShardResolver -> Raft instance
 //!                                  |
 //!                    +-------------+-------------+
 //!                    |                           |
@@ -68,8 +68,8 @@ pub struct ShardContext {
 pub struct RemoteShardInfo {
     /// The shard hosting the organization.
     pub shard_id: ShardId,
-    /// The organization being accessed.
-    pub organization_id: OrganizationId,
+    /// The organization being accessed (internal identifier).
+    pub organization: OrganizationId,
     /// Routing information including node addresses and leader hint.
     pub routing: RoutingInfo,
 }
@@ -104,7 +104,9 @@ impl std::fmt::Debug for ShardContext {
 /// Implementors provide the mapping from organization to the resources
 /// needed to handle requests for that organization.
 pub trait ShardResolver: Send + Sync {
-    /// Resolves a organization to its shard context.
+    /// Resolves an organization to its shard context.
+    ///
+    /// * `organization` - Organization internal identifier (`OrganizationId`).
     ///
     /// Returns the Raft instance, state layer, and other resources
     /// for the shard that handles the given organization.
@@ -114,9 +116,9 @@ pub trait ShardResolver: Send + Sync {
     /// Returns an error if:
     /// - The organization is not found in routing tables
     /// - The shard is on a remote node and forwarding is not supported
-    fn resolve(&self, organization_id: OrganizationId) -> Result<ShardContext, Status>;
+    fn resolve(&self, organization: OrganizationId) -> Result<ShardContext, Status>;
 
-    /// Resolves a organization, supporting remote shards.
+    /// Resolves an organization, supporting remote shards.
     ///
     /// Unlike `resolve()`, this method can return forwarding information
     /// when the organization is on a remote shard, allowing services to
@@ -130,12 +132,9 @@ pub trait ShardResolver: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the organization is not found in routing tables.
-    fn resolve_with_forward(
-        &self,
-        organization_id: OrganizationId,
-    ) -> Result<ResolveResult, Status> {
+    fn resolve_with_forward(&self, organization: OrganizationId) -> Result<ResolveResult, Status> {
         // Default implementation: just try local resolution
-        self.resolve(organization_id).map(ResolveResult::Local)
+        self.resolve(organization).map(ResolveResult::Local)
     }
 
     /// Returns the system shard context.
@@ -176,7 +175,7 @@ impl SingleShardResolver {
 }
 
 impl ShardResolver for SingleShardResolver {
-    fn resolve(&self, _organization_id: OrganizationId) -> Result<ShardContext, Status> {
+    fn resolve(&self, _organization: OrganizationId) -> Result<ShardContext, Status> {
         // Single shard handles all organizations
         // Note: block_announcements is None because single-shard setups manage
         // the channel externally in LedgerServer
@@ -222,27 +221,27 @@ impl MultiShardResolver {
 }
 
 impl ShardResolver for MultiShardResolver {
-    fn resolve(&self, organization_id: OrganizationId) -> Result<ShardContext, Status> {
+    fn resolve(&self, organization: OrganizationId) -> Result<ShardContext, Status> {
         // System organization (0) always goes to system shard
-        if organization_id == OrganizationId::new(0) {
+        if organization == OrganizationId::new(0) {
             return self.system_shard();
         }
 
         // Look up the shard for this organization
-        let shard = self.manager.route_organization(organization_id).ok_or_else(|| {
+        let shard = self.manager.route_organization(organization).ok_or_else(|| {
             // Check if it's a routing issue or the shard is on another node
-            if let Some(shard_id) = self.manager.get_organization_shard(organization_id) {
+            if let Some(shard_id) = self.manager.get_organization_shard(organization) {
                 // Shard exists but not on this node - use resolve_with_forward instead
                 Status::unavailable(format!(
                     "Organization {} is on shard {} which is not available locally. \
                      Use resolve_with_forward() for forwarding support.",
-                    organization_id, shard_id
+                    organization, shard_id
                 ))
             } else {
                 // Organization not found in routing table
                 Status::not_found(format!(
                     "Organization {} not found in routing table",
-                    organization_id
+                    organization
                 ))
             }
         })?;
@@ -256,17 +255,14 @@ impl ShardResolver for MultiShardResolver {
         })
     }
 
-    fn resolve_with_forward(
-        &self,
-        organization_id: OrganizationId,
-    ) -> Result<ResolveResult, Status> {
+    fn resolve_with_forward(&self, organization: OrganizationId) -> Result<ResolveResult, Status> {
         // System organization (0) always goes to system shard
-        if organization_id == OrganizationId::new(0) {
+        if organization == OrganizationId::new(0) {
             return self.system_shard().map(ResolveResult::Local);
         }
 
         // First, try local resolution
-        if let Some(shard) = self.manager.route_organization(organization_id) {
+        if let Some(shard) = self.manager.route_organization(organization) {
             return Ok(ResolveResult::Local(ShardContext {
                 raft: shard.raft().clone(),
                 state: shard.state().clone(),
@@ -281,12 +277,12 @@ impl ShardResolver for MultiShardResolver {
             self.router().ok_or_else(|| Status::unavailable("Shard router not initialized"))?;
 
         // Get routing info from the ShardRouter
-        let routing = router.get_routing(organization_id).map_err(|e| match e {
+        let routing = router.get_routing(organization).map_err(|e| match e {
             crate::shard_router::RoutingError::OrganizationNotFound { .. } => Status::not_found(
-                format!("Organization {} not found in routing table", organization_id),
+                format!("Organization {} not found in routing table", organization),
             ),
             crate::shard_router::RoutingError::OrganizationUnavailable { status, .. } => {
-                Status::unavailable(format!("Organization {} is {:?}", organization_id, status))
+                Status::unavailable(format!("Organization {} is {:?}", organization, status))
             },
             _ => Status::internal(format!("Routing error: {}", e)),
         })?;
@@ -294,7 +290,7 @@ impl ShardResolver for MultiShardResolver {
         // Return forwarding info
         Ok(ResolveResult::Remote(RemoteShardInfo {
             shard_id: routing.shard_id,
-            organization_id,
+            organization,
             routing,
         }))
     }
@@ -346,12 +342,12 @@ mod tests {
 
         let remote_info = RemoteShardInfo {
             shard_id: ShardId::new(1),
-            organization_id: OrganizationId::new(42),
+            organization: OrganizationId::new(42),
             routing: routing.clone(),
         };
 
         assert_eq!(remote_info.shard_id, ShardId::new(1));
-        assert_eq!(remote_info.organization_id, OrganizationId::new(42));
+        assert_eq!(remote_info.organization, OrganizationId::new(42));
         assert_eq!(remote_info.routing.shard_id, ShardId::new(1));
         assert_eq!(remote_info.routing.member_nodes.len(), 2);
         assert_eq!(remote_info.routing.leader_hint, Some("node-1".to_string()));
@@ -374,7 +370,7 @@ mod tests {
 
         let remote = RemoteShardInfo {
             shard_id: ShardId::new(2),
-            organization_id: OrganizationId::new(100),
+            organization: OrganizationId::new(100),
             routing,
         };
 
@@ -384,7 +380,7 @@ mod tests {
             ResolveResult::Local(_) => unreachable!("Expected Remote variant"),
             ResolveResult::Remote(info) => {
                 assert_eq!(info.shard_id, ShardId::new(2));
-                assert_eq!(info.organization_id, OrganizationId::new(100));
+                assert_eq!(info.organization, OrganizationId::new(100));
                 assert_eq!(info.routing.member_nodes.len(), 1);
             },
         }
@@ -404,7 +400,7 @@ mod tests {
             "{:?}",
             RemoteShardInfo {
                 shard_id: ShardId::new(1),
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 routing: RoutingInfo {
                     shard_id: ShardId::new(1),
                     member_nodes: vec![],
@@ -426,7 +422,7 @@ mod tests {
 
         let remote_info = RemoteShardInfo {
             shard_id: ShardId::new(1),
-            organization_id: OrganizationId::new(42),
+            organization: OrganizationId::new(42),
             routing,
         };
 
@@ -434,6 +430,6 @@ mod tests {
         let debug_output = format!("{:?}", result);
         assert!(debug_output.contains("Remote"));
         assert!(debug_output.contains("shard_id"));
-        assert!(debug_output.contains("organization_id"));
+        assert!(debug_output.contains("organization"));
     }
 }

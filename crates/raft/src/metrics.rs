@@ -10,6 +10,7 @@
 
 use std::time::Instant;
 
+use inferadb_ledger_types::{OrganizationId, VaultId};
 use metrics::{counter, gauge, histogram};
 
 // =============================================================================
@@ -116,8 +117,9 @@ pub fn record_batch_write(success: bool, batch_size: usize, latency_secs: f64) {
 
 /// Records a rate limit exceeded event for a single organization.
 #[inline]
-pub fn record_rate_limit_exceeded(organization_id: i64) {
-    counter!(RATE_LIMIT_EXCEEDED, "organization_id" => organization_id.to_string()).increment(1);
+pub fn record_rate_limit_exceeded(organization: OrganizationId) {
+    counter!(RATE_LIMIT_EXCEEDED, "organization_id" => organization.value().to_string())
+        .increment(1);
 }
 
 /// Records a rate limit rejection with level and reason labels.
@@ -209,16 +211,16 @@ pub fn set_is_leader(is_leader: bool) {
 
 /// Records a state root computation.
 #[inline]
-pub fn record_state_root_computation(vault_id: i64, latency_secs: f64) {
-    let vault_label = vault_id.to_string();
+pub fn record_state_root_computation(vault: VaultId, latency_secs: f64) {
+    let vault_label = vault.value().to_string();
     counter!(STATE_ROOT_COMPUTATIONS, "vault_id" => vault_label.clone()).increment(1);
     histogram!(STATE_ROOT_LATENCY, "vault_id" => vault_label).record(latency_secs);
 }
 
 /// Sets the number of dirty buckets for a vault.
 #[inline]
-pub fn set_dirty_buckets(vault_id: i64, count: usize) {
-    let vault_label = vault_id.to_string();
+pub fn set_dirty_buckets(vault: VaultId, count: usize) {
+    let vault_label = vault.value().to_string();
     gauge!(DIRTY_BUCKETS, "vault_id" => vault_label).set(count as f64);
 }
 
@@ -393,22 +395,22 @@ pub fn record_timeout_commit() {
 
 /// Records a successful vault recovery.
 #[inline]
-pub fn record_recovery_success(organization_id: i64, vault_id: i64) {
+pub fn record_recovery_success(organization: OrganizationId, vault: VaultId) {
     counter!(
         RECOVERY_SUCCESS_TOTAL,
-        "organization_id" => organization_id.to_string(),
-        "vault_id" => vault_id.to_string()
+        "organization_id" => organization.value().to_string(),
+        "vault_id" => vault.value().to_string()
     )
     .increment(1);
 }
 
 /// Records a failed vault recovery attempt.
 #[inline]
-pub fn record_recovery_failure(organization_id: i64, vault_id: i64, reason: &str) {
+pub fn record_recovery_failure(organization: OrganizationId, vault: VaultId, reason: &str) {
     counter!(
         RECOVERY_FAILURE_TOTAL,
-        "organization_id" => organization_id.to_string(),
-        "vault_id" => vault_id.to_string(),
+        "organization_id" => organization.value().to_string(),
+        "vault_id" => vault.value().to_string(),
         "reason" => reason.to_string()
     )
     .increment(1);
@@ -416,22 +418,27 @@ pub fn record_recovery_failure(organization_id: i64, vault_id: i64, reason: &str
 
 /// Records a determinism bug detection (critical alert).
 #[inline]
-pub fn record_determinism_bug(organization_id: i64, vault_id: i64) {
+pub fn record_determinism_bug(organization: OrganizationId, vault: VaultId) {
     counter!(
         DETERMINISM_BUG_TOTAL,
-        "organization_id" => organization_id.to_string(),
-        "vault_id" => vault_id.to_string()
+        "organization_id" => organization.value().to_string(),
+        "vault_id" => vault.value().to_string()
     )
     .increment(1);
 }
 
 /// Records a divergence recovery attempt with outcome.
 #[inline]
-pub fn record_recovery_attempt(organization_id: i64, vault_id: i64, attempt: u8, outcome: &str) {
+pub fn record_recovery_attempt(
+    organization: OrganizationId,
+    vault: VaultId,
+    attempt: u8,
+    outcome: &str,
+) {
     counter!(
         RECOVERY_ATTEMPTS_TOTAL,
-        "organization_id" => organization_id.to_string(),
-        "vault_id" => vault_id.to_string(),
+        "organization_id" => organization.value().to_string(),
+        "vault_id" => vault.value().to_string(),
         "attempt" => attempt.to_string(),
         "outcome" => outcome.to_string()
     )
@@ -442,7 +449,7 @@ pub fn record_recovery_attempt(organization_id: i64, vault_id: i64, attempt: u8,
 ///
 /// State values: 0 = healthy, 1 = diverged, 2 = recovering.
 #[inline]
-pub fn set_vault_health(organization_id: i64, vault_id: i64, state: &str) {
+pub fn set_vault_health(organization: OrganizationId, vault: VaultId, state: &str) {
     let value = match state {
         "healthy" => 0.0,
         "diverged" => 1.0,
@@ -451,8 +458,8 @@ pub fn set_vault_health(organization_id: i64, vault_id: i64, state: &str) {
     };
     gauge!(
         VAULT_HEALTH,
-        "organization_id" => organization_id.to_string(),
-        "vault_id" => vault_id.to_string(),
+        "organization_id" => organization.value().to_string(),
+        "vault_id" => vault.value().to_string(),
         "state" => state.to_string()
     )
     .set(value);
@@ -570,15 +577,11 @@ const HOT_KEY_DETECTED_TOTAL: &str = "ledger_hot_key_detected_total";
 /// Labels include vault_id and a hash of the key (not the key itself,
 /// to avoid high-cardinality label explosion).
 #[inline]
-pub fn record_hot_key_detected(
-    vault_id: inferadb_ledger_types::VaultId,
-    key: &str,
-    ops_per_sec: f64,
-) {
+pub fn record_hot_key_detected(vault: VaultId, key: &str, ops_per_sec: f64) {
     let key_hash = format!("{:016x}", seahash::hash(key.as_bytes()));
     counter!(
         HOT_KEY_DETECTED_TOTAL,
-        "vault_id" => vault_id.value().to_string(),
+        "vault_id" => vault.value().to_string(),
         "key_hash" => key_hash,
         "ops_per_sec" => format!("{:.0}", ops_per_sec)
     )
@@ -804,8 +807,8 @@ const ORGANIZATION_LATENCY_SECONDS: &str = "ledger_organization_latency_seconds"
 /// Cardinality is bounded by the number of organizations, which is
 /// operator-controlled (typically < 100 in production).
 #[inline]
-pub fn set_organization_storage_bytes(organization_id: i64, bytes: u64) {
-    gauge!(ORGANIZATION_STORAGE_BYTES, "organization_id" => organization_id.to_string())
+pub fn set_organization_storage_bytes(organization: OrganizationId, bytes: u64) {
+    gauge!(ORGANIZATION_STORAGE_BYTES, "organization_id" => organization.value().to_string())
         .set(bytes as f64);
 }
 
@@ -813,10 +816,10 @@ pub fn set_organization_storage_bytes(organization_id: i64, bytes: u64) {
 ///
 /// Increments `ledger_organization_operations_total{organization_id, operation}`.
 #[inline]
-pub fn record_organization_operation(organization_id: i64, operation: &str) {
+pub fn record_organization_operation(organization: OrganizationId, operation: &str) {
     counter!(
         ORGANIZATION_OPERATIONS_TOTAL,
-        "organization_id" => organization_id.to_string(),
+        "organization_id" => organization.value().to_string(),
         "operation" => operation.to_string()
     )
     .increment(1);
@@ -826,10 +829,14 @@ pub fn record_organization_operation(organization_id: i64, operation: &str) {
 ///
 /// Records into `ledger_organization_latency_seconds{organization_id, operation}`.
 #[inline]
-pub fn record_organization_latency(organization_id: i64, operation: &str, latency_secs: f64) {
+pub fn record_organization_latency(
+    organization: OrganizationId,
+    operation: &str,
+    latency_secs: f64,
+) {
     histogram!(
         ORGANIZATION_LATENCY_SECONDS,
-        "organization_id" => organization_id.to_string(),
+        "organization_id" => organization.value().to_string(),
         "operation" => operation.to_string()
     )
     .record(latency_secs);

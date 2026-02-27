@@ -358,12 +358,22 @@ where
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use inferadb_ledger_types::{OrganizationId, VaultId};
+
     use super::*;
 
-    fn make_request(organization_id: i64, vault_id: i64) -> LedgerRequest {
+    fn org(n: i64) -> OrganizationId {
+        OrganizationId::new(n)
+    }
+
+    fn vault(n: i64) -> VaultId {
+        VaultId::new(n)
+    }
+
+    fn make_request(organization: OrganizationId, vault: VaultId) -> LedgerRequest {
         LedgerRequest::Write {
-            organization: inferadb_ledger_types::OrganizationId::new(organization_id),
-            vault: inferadb_ledger_types::VaultId::new(vault_id),
+            organization,
+            vault,
             transactions: vec![],
             idempotency_key: [0; 16],
             request_hash: 0,
@@ -400,9 +410,9 @@ mod tests {
         let writer_task = tokio::spawn(writer.run());
 
         // Submit some writes
-        let rx1 = handle.submit(make_request(1, 1));
-        let rx2 = handle.submit(make_request(1, 2));
-        let rx3 = handle.submit(make_request(1, 3));
+        let rx1 = handle.submit(make_request(org(1), vault(1)));
+        let rx2 = handle.submit(make_request(org(1), vault(2)));
+        let rx3 = handle.submit(make_request(org(1), vault(3)));
 
         // Wait for batch timeout
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -447,9 +457,9 @@ mod tests {
         let writer_task = tokio::spawn(writer.run());
 
         // Submit exactly max_batch_size writes
-        let rx1 = handle.submit(make_request(1, 1));
-        let rx2 = handle.submit(make_request(1, 2));
-        let rx3 = handle.submit(make_request(1, 3));
+        let rx1 = handle.submit(make_request(org(1), vault(1)));
+        let rx2 = handle.submit(make_request(org(1), vault(2)));
+        let rx3 = handle.submit(make_request(org(1), vault(3)));
 
         // Should flush immediately due to size
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -479,7 +489,7 @@ mod tests {
         // Add one write
         let (tx1, _rx1) = oneshot::channel();
         state.push(PendingWrite {
-            request: make_request(1, 1),
+            request: make_request(org(1), vault(1)),
             response_tx: tx1,
             queued_at: Instant::now(),
         });
@@ -489,7 +499,7 @@ mod tests {
         // Add another to reach max size
         let (tx2, _rx2) = oneshot::channel();
         state.push(PendingWrite {
-            request: make_request(1, 2),
+            request: make_request(org(1), vault(2)),
             response_tx: tx2,
             queued_at: Instant::now(),
         });
@@ -527,7 +537,7 @@ mod tests {
         // Add one write
         let (tx1, _rx1) = oneshot::channel();
         state.push(PendingWrite {
-            request: make_request(1, 1),
+            request: make_request(org(1), vault(1)),
             response_tx: tx1,
             queued_at: Instant::now(),
         });
@@ -546,7 +556,7 @@ mod tests {
         // Now add another write to simulate more incoming
         let (tx2, _rx2) = oneshot::channel();
         state.push(PendingWrite {
-            request: make_request(1, 2),
+            request: make_request(org(1), vault(2)),
             response_tx: tx2,
             queued_at: Instant::now(),
         });
@@ -588,7 +598,7 @@ mod tests {
         let writer_task = tokio::spawn(writer.run());
 
         // Submit a single write
-        let rx1 = handle.submit(make_request(1, 1));
+        let rx1 = handle.submit(make_request(org(1), vault(1)));
 
         // With eager_commit, should flush quickly (within ~2 ticks) instead of
         // waiting for the 10 second timeout

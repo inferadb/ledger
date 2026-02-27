@@ -36,7 +36,7 @@ pub struct QuotaExceeded {
     /// Maximum allowed value.
     pub limit: u64,
     /// The organization that exceeded its quota.
-    pub organization_id: OrganizationId,
+    pub organization: OrganizationId,
 }
 
 /// The type of resource that exceeded its quota.
@@ -62,7 +62,7 @@ impl std::fmt::Display for QuotaExceeded {
         write!(
             f,
             "Organization {} exceeded {} quota: current={}, limit={}",
-            self.organization_id, self.resource, self.current, self.limit
+            self.organization, self.resource, self.current, self.limit
         )
     }
 }
@@ -80,9 +80,11 @@ impl QuotaChecker {
     ///
     /// Returns the per-organization override if set, otherwise the server-wide
     /// default from `RuntimeConfig`, or `None` if neither is configured.
-    pub fn effective_quota(&self, organization_id: OrganizationId) -> Option<OrganizationQuota> {
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    pub fn effective_quota(&self, organization: OrganizationId) -> Option<OrganizationQuota> {
         // Per-organization override takes priority
-        if let Some(quota) = self.applied_state.organization_quota(organization_id) {
+        if let Some(quota) = self.applied_state.organization_quota(organization) {
             return Some(quota);
         }
 
@@ -101,22 +103,24 @@ impl QuotaChecker {
     ///
     /// Returns `Ok(())` if the vault can be created or no quota is configured.
     ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    ///
     /// # Errors
     ///
     /// Returns [`QuotaExceeded`] if the organization has reached its maximum vault count.
-    pub fn check_vault_count(&self, organization_id: OrganizationId) -> Result<(), QuotaExceeded> {
-        let quota = match self.effective_quota(organization_id) {
+    pub fn check_vault_count(&self, organization: OrganizationId) -> Result<(), QuotaExceeded> {
+        let quota = match self.effective_quota(organization) {
             Some(q) => q,
             None => return Ok(()),
         };
 
-        let current = self.applied_state.vault_count(organization_id);
+        let current = self.applied_state.vault_count(organization);
         if current >= quota.max_vaults {
             return Err(QuotaExceeded {
                 resource: QuotaResource::VaultCount,
                 current: u64::from(current),
                 limit: u64::from(quota.max_vaults),
-                organization_id,
+                organization,
             });
         }
 
@@ -133,28 +137,30 @@ impl QuotaChecker {
     /// `estimated_bytes` is the sum of key + value sizes for all operations
     /// in the write request.
     ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    ///
     /// # Errors
     ///
     /// Returns [`QuotaExceeded`] if `current_usage + estimated_bytes` exceeds
     /// the organization's `max_storage_bytes` quota.
     pub fn check_storage_estimate(
         &self,
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         estimated_bytes: u64,
     ) -> Result<(), QuotaExceeded> {
-        let quota = match self.effective_quota(organization_id) {
+        let quota = match self.effective_quota(organization) {
             Some(q) => q,
             None => return Ok(()),
         };
 
-        let current_usage = self.applied_state.organization_storage_bytes(organization_id);
+        let current_usage = self.applied_state.organization_storage_bytes(organization);
         let projected = current_usage.saturating_add(estimated_bytes);
         if projected > quota.max_storage_bytes {
             return Err(QuotaExceeded {
                 resource: QuotaResource::StorageBytes,
                 current: current_usage,
                 limit: quota.max_storage_bytes,
-                organization_id,
+                organization,
             });
         }
 
@@ -209,7 +215,7 @@ mod tests {
         state.organizations.insert(
             ns,
             OrganizationMeta {
-                organization_id: ns,
+                organization: ns,
                 slug: OrganizationSlug::new(1),
                 name: "test".to_owned(),
                 shard_id: ShardId::new(0),
@@ -243,7 +249,7 @@ mod tests {
         state.organizations.insert(
             ns,
             OrganizationMeta {
-                organization_id: ns,
+                organization: ns,
                 slug: OrganizationSlug::new(1),
                 name: "test".to_owned(),
                 shard_id: ShardId::new(0),
@@ -269,8 +275,8 @@ mod tests {
             state.vaults.insert(
                 (ns, vid),
                 VaultMeta {
-                    organization_id: ns,
-                    vault_id: vid,
+                    organization: ns,
+                    vault: vid,
                     slug: VaultSlug::new(vid.value() as u64),
                     name: None,
                     deleted: false,
@@ -296,7 +302,7 @@ mod tests {
         state.organizations.insert(
             ns,
             OrganizationMeta {
-                organization_id: ns,
+                organization: ns,
                 slug: OrganizationSlug::new(1),
                 name: "test".to_owned(),
                 shard_id: ShardId::new(0),
@@ -320,8 +326,8 @@ mod tests {
         state.vaults.insert(
             (ns, VaultId::new(1)),
             VaultMeta {
-                organization_id: ns,
-                vault_id: VaultId::new(1),
+                organization: ns,
+                vault: VaultId::new(1),
                 slug: VaultSlug::new(1),
                 name: None,
                 deleted: false,
@@ -332,8 +338,8 @@ mod tests {
         state.vaults.insert(
             (ns, VaultId::new(2)),
             VaultMeta {
-                organization_id: ns,
-                vault_id: VaultId::new(2),
+                organization: ns,
+                vault: VaultId::new(2),
                 slug: VaultSlug::new(2),
                 name: None,
                 deleted: true,
@@ -353,7 +359,7 @@ mod tests {
         state.organizations.insert(
             ns,
             OrganizationMeta {
-                organization_id: ns,
+                organization: ns,
                 slug: OrganizationSlug::new(1),
                 name: "test".to_owned(),
                 shard_id: ShardId::new(0),
@@ -388,7 +394,7 @@ mod tests {
         state.organizations.insert(
             ns,
             OrganizationMeta {
-                organization_id: ns,
+                organization: ns,
                 slug: OrganizationSlug::new(1),
                 name: "test".to_owned(),
                 shard_id: ShardId::new(0),
@@ -424,7 +430,7 @@ mod tests {
             resource: QuotaResource::VaultCount,
             current: 10,
             limit: 5,
-            organization_id: OrganizationId::new(42),
+            organization: OrganizationId::new(42),
         };
         let display = format!("{}", exceeded);
         assert!(display.contains("42"));
@@ -441,7 +447,7 @@ mod tests {
         state.organizations.insert(
             ns,
             OrganizationMeta {
-                organization_id: ns,
+                organization: ns,
                 slug: OrganizationSlug::new(1),
                 name: "test".to_owned(),
                 shard_id: ShardId::new(0),

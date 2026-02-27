@@ -387,8 +387,8 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
                     slug: Some(OrganizationSlug {
                         slug: self
                             .applied_state
-                            .resolve_id_to_slug(ns.organization_id)
-                            .map_or(ns.organization_id.value() as u64, |s| s.value()),
+                            .resolve_id_to_slug(ns.organization)
+                            .map_or(ns.organization.value() as u64, |s| s.value()),
                     }),
                     name: ns.name,
                     shard_id: Some(ShardId { id: ns.shard_id.value() }),

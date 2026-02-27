@@ -74,9 +74,11 @@ impl SystemKeys {
 
     /// Primary key for an organization registry entry.
     ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    ///
     /// Pattern: `org:{organization_id}`
-    pub fn organization_key(organization_id: OrganizationId) -> String {
-        format!("org:{}", organization_id.value())
+    pub fn organization_key(organization: OrganizationId) -> String {
+        format!("org:{}", organization.value())
     }
 
     /// Parses an organization ID from an organization key.

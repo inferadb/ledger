@@ -23,8 +23,8 @@ use inferadb_ledger_proto::proto::{
 use inferadb_ledger_state::{BlockArchive, StateLayer};
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{
-    OrganizationId as DomainOrganizationId, ShardId as DomainShardId, VaultEntry,
-    VaultId as DomainVaultId, ZERO_HASH,
+    OrganizationId as DomainOrganizationId, OrganizationSlug as DomainOrganizationSlug,
+    ShardId as DomainShardId, VaultEntry, VaultId as DomainVaultId, VaultSlug, ZERO_HASH,
     config::ValidationConfig,
     events::{EventAction, EventOutcome as EventOutcomeType},
     hash_eq, validation,
@@ -185,6 +185,9 @@ impl AdminServiceImpl {
 
 #[tonic::async_trait]
 impl AdminService for AdminServiceImpl {
+    /// Creates a new organization, generates a Snowflake slug, and assigns it to a shard via Raft.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn create_organization(
         &self,
         request: Request<CreateOrganizationRequest>,
@@ -285,12 +288,8 @@ impl AdminService for AdminServiceImpl {
             LedgerResponse::OrganizationCreated { organization: organization_id, shard_id } => {
                 ctx.set_organization(slug.value());
                 ctx.set_success();
-                metrics::record_organization_operation(organization_id.value(), "admin");
-                metrics::record_organization_latency(
-                    organization_id.value(),
-                    "admin",
-                    ctx.elapsed_secs(),
-                );
+                metrics::record_organization_operation(organization_id, "admin");
+                metrics::record_organization_latency(organization_id, "admin", ctx.elapsed_secs());
                 let organization = slug_resolver.resolve_slug(organization_id)?;
                 Ok(Response::new(CreateOrganizationResponse {
                     slug: Some(OrganizationSlug { slug: organization.value() }),
@@ -308,6 +307,9 @@ impl AdminService for AdminServiceImpl {
         }
     }
 
+    /// Deletes an organization and all its vaults via Raft consensus.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn delete_organization(
         &self,
         request: Request<DeleteOrganizationRequest>,
@@ -392,9 +394,9 @@ impl AdminService for AdminServiceImpl {
             LedgerResponse::OrganizationDeleted { success, blocking_vault_ids } => {
                 if success {
                     ctx.set_success();
-                    metrics::record_organization_operation(organization_id.value(), "admin");
+                    metrics::record_organization_operation(organization_id, "admin");
                     metrics::record_organization_latency(
-                        organization_id.value(),
+                        organization_id,
                         "admin",
                         ctx.elapsed_secs(),
                     );
@@ -425,6 +427,9 @@ impl AdminService for AdminServiceImpl {
         }
     }
 
+    /// Retrieves organization metadata by slug, including shard assignment and status.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn get_organization(
         &self,
         request: Request<GetOrganizationRequest>,
@@ -470,7 +475,7 @@ impl AdminService for AdminServiceImpl {
                 ctx.set_organization(organization_slug_val);
                 ctx.set_success();
                 let status = crate::proto_compat::organization_status_to_proto(org.status);
-                let organization = slug_resolver.resolve_slug(org.organization_id)?;
+                let organization = slug_resolver.resolve_slug(org.organization)?;
                 Ok(Response::new(GetOrganizationResponse {
                     slug: Some(OrganizationSlug { slug: organization.value() }),
                     name: org.name,
@@ -488,6 +493,9 @@ impl AdminService for AdminServiceImpl {
         }
     }
 
+    /// Lists all organizations across all shards with their metadata.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn list_organizations(
         &self,
         _request: Request<ListOrganizationsRequest>,
@@ -510,7 +518,7 @@ impl AdminService for AdminServiceImpl {
             .into_iter()
             .map(|org| {
                 let status = crate::proto_compat::organization_status_to_proto(org.status);
-                let organization = slug_resolver.resolve_slug(org.organization_id)?;
+                let organization = slug_resolver.resolve_slug(org.organization)?;
                 Ok(inferadb_ledger_proto::proto::GetOrganizationResponse {
                     slug: Some(OrganizationSlug { slug: organization.value() }),
                     name: org.name,
@@ -530,6 +538,10 @@ impl AdminService for AdminServiceImpl {
         Ok(Response::new(ListOrganizationsResponse { organizations, next_page_token: None }))
     }
 
+    /// Creates a new vault within an organization, generating a Snowflake slug and initializing
+    /// its blockchain via Raft.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn create_vault(
         &self,
         request: Request<CreateVaultRequest>,
@@ -581,7 +593,7 @@ impl AdminService for AdminServiceImpl {
                     crate::event_writer::HandlerPhaseEmitter::for_organization(
                         inferadb_ledger_types::events::EventAction::QuotaExceeded,
                         organization_id,
-                        req.organization.as_ref().map(|n| n.slug),
+                        req.organization.as_ref().map(|n| DomainOrganizationSlug::new(n.slug)),
                         self.node_id.unwrap_or(0),
                     )
                     .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
@@ -657,12 +669,8 @@ impl AdminService for AdminServiceImpl {
             LedgerResponse::VaultCreated { vault: vault_id, slug } => {
                 ctx.set_vault(slug.value());
                 ctx.set_success();
-                metrics::record_organization_operation(organization_id.value(), "admin");
-                metrics::record_organization_latency(
-                    organization_id.value(),
-                    "admin",
-                    ctx.elapsed_secs(),
-                );
+                metrics::record_organization_operation(organization_id, "admin");
+                metrics::record_organization_latency(organization_id, "admin", ctx.elapsed_secs());
                 // Get Raft metrics for leader_id and term
                 let metrics = self.raft.metrics().borrow().clone();
                 let leader_id = metrics.current_leader.unwrap_or(metrics.id);
@@ -708,6 +716,9 @@ impl AdminService for AdminServiceImpl {
         }
     }
 
+    /// Deletes a vault and its associated blockchain data via Raft consensus.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn delete_vault(
         &self,
         request: Request<DeleteVaultRequest>,
@@ -799,9 +810,9 @@ impl AdminService for AdminServiceImpl {
             LedgerResponse::VaultDeleted { success } => {
                 if success {
                     ctx.set_success();
-                    metrics::record_organization_operation(organization_id.value(), "admin");
+                    metrics::record_organization_operation(organization_id, "admin");
                     metrics::record_organization_latency(
-                        organization_id.value(),
+                        organization_id,
                         "admin",
                         ctx.elapsed_secs(),
                     );
@@ -826,6 +837,9 @@ impl AdminService for AdminServiceImpl {
         }
     }
 
+    /// Retrieves vault metadata by organization and vault slug, including block height and status.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn get_vault(
         &self,
         request: Request<GetVaultRequest>,
@@ -897,6 +911,9 @@ impl AdminService for AdminServiceImpl {
         }
     }
 
+    /// Lists all vaults across all organizations with their block heights.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn list_vaults(
         &self,
         _request: Request<ListVaultsRequest>,
@@ -920,8 +937,8 @@ impl AdminService for AdminServiceImpl {
             .keys()
             .filter_map(|(org_id, vault_id)| {
                 self.applied_state.get_vault(*org_id, *vault_id).map(|v| {
-                    let height = self.applied_state.vault_height(v.organization_id, v.vault_id);
-                    let organization = slug_resolver.resolve_slug(v.organization_id)?;
+                    let height = self.applied_state.vault_height(v.organization, v.vault);
+                    let organization = slug_resolver.resolve_slug(v.organization)?;
                     Ok(inferadb_ledger_proto::proto::GetVaultResponse {
                         organization: Some(OrganizationSlug { slug: organization.value() }),
                         vault: Some(ProtoVaultSlug { slug: v.slug.value() }),
@@ -943,6 +960,7 @@ impl AdminService for AdminServiceImpl {
         Ok(Response::new(ListVaultsResponse { vaults }))
     }
 
+    /// Triggers a Raft snapshot and returns the current block height.
     async fn create_snapshot(
         &self,
         request: Request<CreateSnapshotRequest>,
@@ -1005,6 +1023,10 @@ impl AdminService for AdminServiceImpl {
         }))
     }
 
+    /// Verifies vault state integrity by recomputing block hashes and state roots against the
+    /// stored blockchain.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn check_integrity(
         &self,
         request: Request<CheckIntegrityRequest>,
@@ -1036,12 +1058,13 @@ impl AdminService for AdminServiceImpl {
         );
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
-        let organization_slug_val = req.organization.as_ref().map(|n| n.slug);
+        let organization_slug_val =
+            req.organization.as_ref().map(|n| DomainOrganizationSlug::new(n.slug));
         let organization_id = slug_resolver.extract_and_resolve_optional(&req.organization)?;
         let vault_id = slug_resolver.extract_and_resolve_vault_optional(&req.vault)?;
 
         if let Some(slug_val) = organization_slug_val {
-            ctx.set_organization(slug_val);
+            ctx.set_organization(slug_val.value());
         }
         if let Some(ref v) = req.vault {
             ctx.set_vault(v.slug);
@@ -1290,7 +1313,7 @@ impl AdminService for AdminServiceImpl {
             .trace_id(&trace_ctx.trace_id)
             .outcome(outcome);
             if let Some(ref v) = req.vault {
-                emitter = emitter.vault(v.slug);
+                emitter = emitter.vault(VaultSlug::new(v.slug));
             }
             self.record_handler_event(
                 emitter
@@ -1305,6 +1328,7 @@ impl AdminService for AdminServiceImpl {
     // Cluster Membership
     // =========================================================================
 
+    /// Adds a node to the Raft cluster as a learner, then promotes it to voter.
     async fn join_cluster(
         &self,
         request: Request<JoinClusterRequest>,
@@ -1510,6 +1534,7 @@ impl AdminService for AdminServiceImpl {
         }))
     }
 
+    /// Removes a node from the Raft cluster membership.
     async fn leave_cluster(
         &self,
         request: Request<LeaveClusterRequest>,
@@ -1591,6 +1616,7 @@ impl AdminService for AdminServiceImpl {
         }
     }
 
+    /// Returns current cluster membership, leader ID, and Raft term.
     async fn get_cluster_info(
         &self,
         _request: Request<GetClusterInfoRequest>,
@@ -1713,6 +1739,9 @@ impl AdminService for AdminServiceImpl {
     // Vault Recovery
     // =========================================================================
 
+    /// Recovers a diverged vault by replaying its blockchain to rebuild state.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn recover_vault(
         &self,
         request: Request<RecoverVaultRequest>,
@@ -2007,10 +2036,10 @@ impl AdminService for AdminServiceImpl {
                     crate::event_writer::HandlerPhaseEmitter::for_organization(
                         EventAction::VaultRecovered,
                         organization_id,
-                        Some(organization_slug_val),
+                        Some(DomainOrganizationSlug::new(organization_slug_val)),
                         node_id,
                     )
-                    .vault(vault_val)
+                    .vault(VaultSlug::new(vault_val))
                     .detail("recovery_method", "replay")
                     .detail("final_height", &expected_height.to_string())
                     .trace_id(&trace_ctx.trace_id)
@@ -2064,10 +2093,10 @@ impl AdminService for AdminServiceImpl {
                     crate::event_writer::HandlerPhaseEmitter::for_organization(
                         EventAction::VaultRecovered,
                         organization_id,
-                        Some(organization_slug_val),
+                        Some(DomainOrganizationSlug::new(organization_slug_val)),
                         node_id,
                     )
-                    .vault(vault_val)
+                    .vault(VaultSlug::new(vault_val))
                     .detail("recovery_method", "replay")
                     .detail("final_height", &expected_height.to_string())
                     .trace_id(&trace_ctx.trace_id)
@@ -2211,6 +2240,9 @@ impl AdminService for AdminServiceImpl {
         }
     }
 
+    /// Forces TTL garbage collection on all vaults, removing expired entities.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn force_gc(
         &self,
         request: Request<inferadb_ledger_proto::proto::ForceGcRequest>,
@@ -2365,6 +2397,8 @@ impl AdminService for AdminServiceImpl {
         }))
     }
 
+    /// Updates runtime configuration (rate limits, hot key detection, compaction, validation)
+    /// with optional dry-run support.
     async fn update_config(
         &self,
         request: Request<UpdateConfigRequest>,
@@ -2438,6 +2472,7 @@ impl AdminService for AdminServiceImpl {
         }))
     }
 
+    /// Returns the current runtime configuration as JSON.
     async fn get_config(
         &self,
         _request: Request<GetConfigRequest>,
@@ -2452,6 +2487,7 @@ impl AdminService for AdminServiceImpl {
         Ok(Response::new(GetConfigResponse { config_json }))
     }
 
+    /// Creates a point-in-time backup by snapshotting the current Raft state.
     async fn create_backup(
         &self,
         request: Request<CreateBackupRequest>,
@@ -2606,6 +2642,7 @@ impl AdminService for AdminServiceImpl {
         }))
     }
 
+    /// Lists available backups, optionally filtered by organization slug.
     async fn list_backups(
         &self,
         request: Request<ListBackupsRequest>,
@@ -2656,6 +2693,7 @@ impl AdminService for AdminServiceImpl {
         Ok(Response::new(ListBackupsResponse { backups: backup_infos }))
     }
 
+    /// Restores state from a backup, requiring explicit confirmation.
     async fn restore_backup(
         &self,
         request: Request<RestoreBackupRequest>,
@@ -2780,6 +2818,7 @@ impl AdminService for AdminServiceImpl {
         Ok(Response::new(RestoreBackupResponse { success: true, message, restored_height }))
     }
 
+    /// Transfers Raft leadership to a target node, or the best candidate if unspecified.
     async fn transfer_leadership(
         &self,
         request: Request<TransferLeadershipRequest>,

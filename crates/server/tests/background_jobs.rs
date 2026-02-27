@@ -17,6 +17,7 @@
 use std::time::Duration;
 
 use inferadb_ledger_proto::proto;
+use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
 use crate::common::{ExternalCluster, create_admin_client_from_url, create_health_client_from_url};
 
@@ -100,12 +101,13 @@ async fn test_vault_health_tracking() {
         .await
         .expect("create organization");
 
-    let organization_id = ns_response.into_inner().slug.map(|n| n.slug as i64).unwrap();
+    let organization =
+        ns_response.into_inner().slug.map(|n| OrganizationSlug::new(n.slug)).unwrap();
 
     // Create vault
     let vault_response = admin_client
         .create_vault(proto::CreateVaultRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization_id as u64 }),
+            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
@@ -113,8 +115,8 @@ async fn test_vault_health_tracking() {
         .await
         .expect("create vault");
 
-    let vault = vault_response.into_inner().vault.map(|v| v.slug).unwrap();
-    assert!(vault > 0, "vault should have valid ID");
+    let vault = vault_response.into_inner().vault.map(|v| VaultSlug::new(v.slug)).unwrap();
+    assert!(vault.value() > 0, "vault should have valid ID");
 
     // Wait for auto-recovery job to potentially scan the new vault
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -195,7 +197,7 @@ async fn test_learner_cache_initialization() {
 
     let leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
 
-    // Create a organization via the leader
+    // Create an organization via the leader
     let mut admin_client =
         create_admin_client_from_url(&leader_ep).await.expect("connect to admin");
 
@@ -210,7 +212,8 @@ async fn test_learner_cache_initialization() {
         .await
         .expect("create organization");
 
-    let organization_id = ns_response.into_inner().slug.map(|n| n.slug as i64).unwrap();
+    let organization =
+        ns_response.into_inner().slug.map(|n| OrganizationSlug::new(n.slug)).unwrap();
 
     // Wait for replication
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -221,7 +224,7 @@ async fn test_learner_cache_initialization() {
 
         let response = client
             .get_organization(proto::GetOrganizationRequest {
-                slug: Some(proto::OrganizationSlug { slug: organization_id as u64 }),
+                slug: Some(proto::OrganizationSlug { slug: organization.value() }),
             })
             .await
             .unwrap_or_else(|e| panic!("get_organization from {} failed: {}", endpoint, e));
@@ -258,11 +261,12 @@ async fn test_concurrent_background_jobs() {
         .await
         .expect("create organization");
 
-    let organization_id = ns_response.into_inner().slug.map(|n| n.slug as i64).unwrap();
+    let organization =
+        ns_response.into_inner().slug.map(|n| OrganizationSlug::new(n.slug)).unwrap();
 
     let _vault_response = admin_client
         .create_vault(proto::CreateVaultRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization_id as u64 }),
+            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,

@@ -48,14 +48,14 @@ pub enum ShardError {
     Entity { source: crate::entity::EntityError },
 
     /// Requested vault does not exist in this shard.
-    #[snafu(display("Vault {vault_id} not found"))]
-    VaultNotFound { vault_id: VaultId },
+    #[snafu(display("Vault {vault} not found"))]
+    VaultNotFound { vault: VaultId },
 
     /// Computed state root does not match expected value from block.
     #[snafu(display(
-        "State root mismatch for vault {vault_id}: expected {expected:?}, computed {computed:?}"
+        "State root mismatch for vault {vault}: expected {expected:?}, computed {computed:?}"
     ))]
-    StateRootMismatch { vault_id: VaultId, expected: Hash, computed: Hash },
+    StateRootMismatch { vault: VaultId, expected: Hash, computed: Hash },
 }
 
 /// Result type for shard operations.
@@ -72,8 +72,8 @@ fn compute_snapshot_header_hash(header: &crate::snapshot::SnapshotHeader) -> Has
 /// Per-vault metadata tracked by the shard.
 #[derive(Debug, Clone)]
 pub struct VaultMeta {
-    /// Organization owning this vault.
-    pub organization_id: OrganizationId,
+    /// Organization owning this vault (`OrganizationId`).
+    pub organization: OrganizationId,
     /// Current vault height.
     pub height: u64,
     /// Latest state root.
@@ -142,8 +142,10 @@ impl<B: StorageBackend> ShardManager<B> {
     }
 
     /// Returns vault metadata.
-    pub fn get_vault_meta(&self, vault_id: VaultId) -> Option<VaultMeta> {
-        self.vault_meta.read().get(&vault_id).cloned()
+    ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    pub fn get_vault_meta(&self, vault: VaultId) -> Option<VaultMeta> {
+        self.vault_meta.read().get(&vault).cloned()
     }
 
     /// Lists all vaults in this shard.
@@ -152,8 +154,10 @@ impl<B: StorageBackend> ShardManager<B> {
     }
 
     /// Returns vault health status.
-    pub fn vault_health(&self, vault_id: VaultId) -> Option<VaultHealth> {
-        self.vault_meta.read().get(&vault_id).map(|m| m.health.clone())
+    ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    pub fn vault_health(&self, vault: VaultId) -> Option<VaultHealth> {
+        self.vault_meta.read().get(&vault).map(|m| m.health.clone())
     }
 
     /// Returns a reference to the state layer.
@@ -167,12 +171,15 @@ impl<B: StorageBackend> ShardManager<B> {
     }
 
     /// Registers a new vault in this shard.
-    pub fn register_vault(&self, organization_id: OrganizationId, vault_id: VaultId) {
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    pub fn register_vault(&self, organization: OrganizationId, vault: VaultId) {
         let mut meta = self.vault_meta.write();
         meta.insert(
-            vault_id,
+            vault,
             VaultMeta {
-                organization_id,
+                organization,
                 height: 0,
                 state_root: EMPTY_HASH,
                 previous_hash: inferadb_ledger_types::ZERO_HASH,
@@ -240,7 +247,7 @@ impl<B: StorageBackend> ShardManager<B> {
             if computed_root != entry.state_root {
                 // Mark vault as diverged
                 let meta = vault_meta.entry(entry.vault).or_insert_with(|| VaultMeta {
-                    organization_id: entry.organization,
+                    organization: entry.organization,
                     height: 0,
                     state_root: EMPTY_HASH,
                     previous_hash: inferadb_ledger_types::ZERO_HASH,
@@ -254,7 +261,7 @@ impl<B: StorageBackend> ShardManager<B> {
                 };
 
                 return Err(ShardError::StateRootMismatch {
-                    vault_id: entry.vault,
+                    vault: entry.vault,
                     expected: entry.state_root,
                     computed: computed_root,
                 });
@@ -262,7 +269,7 @@ impl<B: StorageBackend> ShardManager<B> {
 
             // Update vault metadata
             let meta = vault_meta.entry(entry.vault).or_insert_with(|| VaultMeta {
-                organization_id: entry.organization,
+                organization: entry.organization,
                 height: 0,
                 state_root: EMPTY_HASH,
                 previous_hash: inferadb_ledger_types::ZERO_HASH,
@@ -410,9 +417,9 @@ impl<B: StorageBackend> ShardManager<B> {
         // Restore vault metadata and commitments
         for vault_state in &snapshot.header.vault_states {
             vault_meta.insert(
-                vault_state.vault_id,
+                vault_state.vault,
                 VaultMeta {
-                    organization_id: OrganizationId::new(0), // Would need to be stored in snapshot
+                    organization: OrganizationId::new(0), // Would need to be stored in snapshot
                     height: vault_state.vault_height,
                     state_root: vault_state.state_root,
                     previous_hash: inferadb_ledger_types::ZERO_HASH, // Would need snapshot
@@ -422,7 +429,7 @@ impl<B: StorageBackend> ShardManager<B> {
 
             // Restore bucket roots for state commitment
             if let Some(bucket_roots) = vault_state.bucket_roots_array() {
-                self.state.load_vault_commitment(vault_state.vault_id, bucket_roots);
+                self.state.load_vault_commitment(vault_state.vault, bucket_roots);
             }
         }
 

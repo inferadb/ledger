@@ -880,7 +880,7 @@ mod tests {
 
     fn create_test_snapshot(height: u64) -> Snapshot {
         let vault_states = vec![VaultSnapshotMeta {
-            vault_id: VaultId::new(1),
+            vault: VaultId::new(1),
             vault_height: height / 2,
             state_root: [height as u8; 32],
             bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),

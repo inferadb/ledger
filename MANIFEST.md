@@ -147,7 +147,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Core domain types for the organization-scoped event logging system
 - **Key Types/Functions**:
-  - `EventEntry`: Canonical audit record with ~20 fields (`emission` first for snapshot thin deserialization, `expires_at` second for GC efficiency, `event_id`, `source_service`, `event_type`, `timestamp`, `scope`, `action`, `principal`, `organization_id`, `organization_slug`, `vault_slug`, `outcome`, `details`, `block_height`, `trace_id`, `correlation_id`, `operations_count`)
+  - `EventEntry`: Canonical audit record with ~20 fields (`emission` first for snapshot thin deserialization, `expires_at` second for GC efficiency, `event_id`, `source_service`, `event_type`, `timestamp`, `scope`, `action`, `principal`, `organization_id: OrganizationId`, `organization: Option<OrganizationSlug>`, `vault: Option<VaultSlug>`, `outcome`, `details`, `block_height`, `trace_id`, `correlation_id`, `operations_count`)
   - `EmissionMeta`: Thin deserialization target for `scan_apply_phase()` — reads only the `emission` discriminant (~2 bytes) to filter handler-phase events without full deserialization
   - `EventMeta`: Thin GC wrapper — postcard deserializes `emission` (field 1) and `expires_at` (field 2) to check expiry without full deserialization
   - `EventScope`: `System` (org_id=0) or `Organization` — compile-time mapped from `EventAction`
@@ -395,8 +395,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: StateLayer applies blocks, computes state roots using bucket-based incremental hashing
 - **Key Types/Functions**:
   - `StateLayer::new(db) -> Self`: Initialize with 256-bucket vault commitment system
-  - `apply_operations(vault_id, operations, block_height) -> Result<Hash>`: Apply operations and compute new state root
-  - `compute_state_root(vault_id) -> Result<Hash>`: Current state root (SHA-256 of 256 bucket roots)
+  - `apply_operations(vault, operations, block_height) -> Result<Hash>`: Apply operations and compute new state root
+  - `compute_state_root(vault) -> Result<Hash>`: Current state root (SHA-256 of 256 bucket roots)
   - `get_entity()`, `relationship_exists()`, `list_entities()`, `list_relationships()`: Read queries
   - `clear_vault()`, `compact_tables()`, `list_subjects()`, `list_resources_for_subject()`: Management operations
   - `restore_entity(txn, storage_key, encoded_value) -> Result<()>`: Re-insert entity during snapshot installation
@@ -413,7 +413,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
     - `get(txn, org_id, timestamp_ns, event_id)`: Point lookup by primary key
     - `get_by_id(txn, org_id, event_id)`: O(log n) lookup via `EventIndex` — two B+ tree lookups (index → reconstruct primary key → primary fetch). Returns `None` for orphaned index entries.
     - `list(txn, org_id, start_ns, end_ns, limit, after_key)` → `(Vec<EventEntry>, Option<Vec<u8>>)`: Cursor-based pagination with time-range scan
-    - `delete_expired(read_txn, write_txn, now_unix, max_batch)`: Thin `EventMeta` deserialization to check expiry, full deserialization for expired entries to get `event_id`/`organization_id` for index cleanup. Removes from both `Events` and `EventIndex`.
+    - `delete_expired(read_txn, write_txn, now_unix, max_batch)`: Thin `EventMeta` deserialization to check expiry, full deserialization for expired entries to get `event_id`/`organization` for index cleanup. Removes from both `Events` and `EventIndex`.
     - `count(txn, org_id)`: Prefix scan count
     - `scan_apply_phase(txn, max_entries)`: For Raft snapshots — uses `EmissionMeta` thin deserialization to filter handler-phase events (~55%) without full decode, then fully deserializes apply-phase entries. Returns most-recent N apply-phase events, newest-first.
     - `scan_apply_phase_ranged(txn, org_ids, cutoff_timestamp_ns, max_entries)`: Per-org range scan using B+ tree bounds instead of sort-then-truncate. Returns raw postcard bytes to avoid re-serialization overhead.
@@ -445,10 +445,10 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: Entity CRUD operations (zero-sized type with static methods)
 - **Key Types/Functions**:
   - `EntityStore` — zero-sized struct with static methods (generic over `StorageBackend`)
-  - `get(tx, vault_id, key) -> Option<Entity>`: Retrieve entity
-  - `set(tx, vault_id, key, value, ...)`: Insert/update entity
-  - `delete(tx, vault_id, key) -> bool`: Remove entity
-  - `exists()`, `list_in_vault()`, `list_in_bucket()`, `count_in_vault()`, `scan_prefix()`: Query methods
+  - `get(tx, vault, key) -> Option<Entity>`: Retrieve entity
+  - `set(tx, vault, key, value, ...)`: Insert/update entity
+  - `delete(tx, vault, key) -> bool`: Remove entity
+  - `exists()`, `list_in_vault()`, `list_in_bucket()`, `count_in_vault()`, `scan_prefix()`: Query methods (all accept `vault: VaultId`)
 - **Insights**: Zero-sized type avoids unnecessary allocations. Static methods generic over backend enable reuse across file and in-memory stores.
 
 #### `relationship.rs` (511 lines)
@@ -456,21 +456,23 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: Relationship CRUD operations with dual indexing (object and subject)
 - **Key Types/Functions**:
   - `RelationshipStore` — zero-sized struct with static methods (generic over `StorageBackend`)
-  - `create(tx, vault_id, resource, relation, subject)`: Insert relationship
-  - `exists(tx, vault_id, resource, relation, subject) -> bool`: Permission check
-  - `delete(tx, vault_id, resource, relation, subject) -> bool`: Remove relationship
-  - `list_for_resource(tx, vault_id, resource)`: List relationships for a resource
+  - `create(tx, vault, resource, relation, subject)`: Insert relationship
+  - `exists(tx, vault, resource, relation, subject) -> bool`: Permission check
+  - `delete(tx, vault, resource, relation, subject) -> bool`: Remove relationship
+  - `list_for_resource(tx, vault, resource)`: List relationships for a resource
   - `list_in_vault()`, `count_in_vault()`, `get()`: Additional query methods
 - **Insights**: Dual indexing (object + subject) via `IndexManager` enables efficient queries in both directions (who can access X? what can Y access?). Critical for authorization.
 
 #### `keys.rs` (129 lines)
 
-- **Purpose**: Key encoding for storage layer (organization, vault, bucket, local key)
+- **Purpose**: Key encoding for storage layer (vault prefix, bucket prefix, storage keys)
 - **Key Types/Functions**:
-  - `entity_key(organization_id, vault_id, bucket_id, key) -> Vec<u8>`: Encode entity key
-  - `relationship_key(organization_id, vault_id, bucket_id, resource, relation, subject) -> Vec<u8>`
-  - `parse_entity_key(&[u8]) -> (OrganizationId, VaultId, u8, Vec<u8>)`: Decode
-- **Insights**: Fixed-size prefix (8-byte vault_id + 1-byte bucket_id) enables range scans. Big-endian for lexicographic ordering.
+  - `encode_storage_key(vault: VaultId, local_key) -> Vec<u8>`: Encode vault-scoped storage key (8-byte vault + 1-byte bucket + local key)
+  - `vault_prefix(vault: VaultId) -> [u8; 8]`: Vault-scoped key prefix for range scans
+  - `bucket_prefix(vault: VaultId, bucket_id) -> [u8; 9]`: Vault + bucket prefix for bucket-scoped scans
+  - `decode_storage_key(&[u8]) -> Option<StorageKey>`: Decode key into components
+  - `encode_obj_index_key()`, `encode_subj_index_key()`: Relationship index key constructors
+- **Insights**: Fixed-size prefix (8-byte vault + 1-byte bucket_id) enables range scans. Big-endian for lexicographic ordering.
 
 #### `indexes.rs` (379 lines)
 
@@ -485,7 +487,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: VaultCommitment with 256 buckets, dirty tracking, incremental state root computation
 - **Key Types/Functions**:
-  - `VaultCommitment::new(vault_id)`: Initialize with 256 buckets
+  - `VaultCommitment::new()`: Initialize with 256 buckets
   - `update_bucket(bucket_id, key, value)`: Mark bucket dirty, update local state
   - `compute_state_root() -> Sha256Hash`: Recompute only dirty buckets, SHA-256(bucket_roots)
   - `commit()`: Flush dirty buckets to storage
@@ -506,16 +508,17 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: ShardManager coordinates multiple vaults within a shard
 - **Key Types/Functions**:
   - `ShardManager::new(engine, shard_id) -> Self`
-  - `create_vault(organization_id, vault_name) -> Result<VaultId>`
-  - `get_vault(organization_id, vault_id) -> Result<Option<Vault>>`
-  - `list_vaults(organization_id) -> Result<Vec<Vault>>`
+  - `register_vault(organization, vault)`: Register vault in shard
+  - `get_vault_meta(vault) -> Option<VaultMeta>`: Get vault metadata
+  - `vault_health(vault) -> Option<VaultHealth>`: Get vault health status
+  - `list_vaults() -> Vec<VaultId>`: List all vaults in shard
 - **Insights**: Shard = collection of organizations sharing a Raft group. ShardManager is coordination layer above StateLayer.
 
 #### `snapshot.rs` (830 lines)
 
 - **Purpose**: Point-in-time snapshots with zstd compression, chain verification
 - **Key Types/Functions**:
-  - `VaultSnapshotMeta`: Per-vault metadata within a snapshot (bucket_roots, entities, entity_count)
+  - `VaultSnapshotMeta`: Per-vault metadata within a snapshot (`vault: VaultId`, bucket_roots, entities, entity_count)
   - `Snapshot`: Point-in-time snapshot with shard_height, vault metadata, and optional bucket roots
   - `write_to_file(path) -> Result<()>`, `read_from_file(path) -> Result<Self>`: Serialization with zstd compression
   - `SnapshotManager`: Manages snapshot directory with rotation (`save()`, `load()`, `load_latest()`, `list_snapshots()`, `find_snapshot_at_or_before()`)
@@ -566,7 +569,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `get_organization_by_slug(slug: OrganizationSlug)`: Slug-based lookup (replaces name-based)
   - `update_organization_status()`, `assign_organization_to_shard()`
   - `register_vault_slug()`, `remove_vault_slug()`, `get_vault_id_by_slug()`: Vault slug index operations
-- **Insights**: Slug index always created alongside organization registration. Vault slug index uses entity-storage pattern (`_idx:vault:slug:{slug}` → vault_id). Name-based lookup removed (organization names are not unique).
+- **Insights**: Slug index always created alongside organization registration. Vault slug index uses entity-storage pattern (`_idx:vault:slug:{slug}` → VaultId). Name-based lookup removed (organization names are not unique).
 
 #### `system/keys.rs` (237 lines)
 
@@ -662,7 +665,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: openraft LogStore and StateMachine implementation, log storage, externalized state persistence, streaming snapshot building
 - **Structure**:
   - `log_storage/mod.rs` (6165 lines) — Metadata constants, `ShardChainState`, re-exports, test suite (test fixtures use `wrap_payload` helper to construct `EntryPayload::Normal(RaftPayload { ... })`, includes deterministic timestamp tests, eviction tests, pending writes tests, state persistence tests)
-  - `log_storage/types.rs` (884 lines) — `AppliedState`, `AppliedStateCore` (5-field persistence struct for new snapshot format), `PendingExternalWrites` (14-field accumulator for externalized table writes), `ClientSequenceEntry` (sequence + last_seen + idempotency_key + request_hash), `OrganizationMeta` (with `storage_bytes: u64`), `VaultMeta`, `SequenceCounters`, `VaultHealthStatus`. `AppliedState` maintains bidirectional slug ↔ internal ID maps for both organizations and vaults. Deleted: `CombinedSnapshot` (replaced by file-based streaming snapshots).
+  - `log_storage/types.rs` (884 lines) — `AppliedState`, `AppliedStateCore` (5-field persistence struct for new snapshot format), `PendingExternalWrites` (14-field accumulator for externalized table writes), `ClientSequenceEntry` (sequence + last_seen + idempotency_key + request_hash), `OrganizationMeta` (fields: `organization: OrganizationId`, `slug`, `name`, `status`, `storage_bytes`), `VaultMeta` (fields: `organization: OrganizationId`, `vault: VaultId`, `slug`, `name`, `health`), `SequenceCounters`, `VaultHealthStatus`. `AppliedState` maintains bidirectional slug ↔ internal ID maps for both organizations and vaults. Deleted: `CombinedSnapshot` (replaced by file-based streaming snapshots).
   - `log_storage/accessor.rs` (426 lines) — `AppliedStateAccessor` (19 pub query methods including org/vault slug resolution), `IdempotencyCheckResult` enum (`AlreadyCommitted`/`KeyReused`/`Miss`), `client_idempotency_check()` for cross-failover deduplication via replicated `ClientSequenceEntry`. 8 idempotency unit tests.
   - `log_storage/store.rs` (2065 lines) — `RaftLogStore` struct definition with `client_sequence_eviction: ClientSequenceEvictionConfig` field, creation/config/accessor methods, optional `event_writer: Option<EventWriter<B>>`. New externalized state methods: `flush_external_writes()` (writes 9 tables atomically), `save_state_core()` (version-sentinel + AppliedStateCore + flush in single WriteTransaction), `load_state_from_tables()` (three-way format detection: new/old/fresh). 15+ persistence tests + benchmark test.
   - `log_storage/operations.rs` (1202 lines) — `apply_request()` and `apply_request_with_events()` state machine dispatch logic. `apply_request_with_events` accepts `&mut PendingExternalWrites` parameter and mirrors all 12 `LedgerRequest` variants' state mutations to the accumulator for externalized persistence.
@@ -822,7 +825,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `batching.rs`: BatchWriter with request coalescing
 - `event_writer.rs` (~1317 lines): Event write infrastructure. `EventWriter<B>` (scope-filtered batch writes to events.db), `ApplyPhaseEmitter` (deterministic UUID v5 builder for apply-phase events), `HandlerPhaseEmitter` (UUID v4 builder for node-local events), `EventHandle<B>` (Arc-shared, cheaply cloneable, best-effort `record_handler_event()`), `IngestionRateLimiter` (per-source token bucket with `AtomicU64` for runtime-updatable rate). 25+ unit tests including 10k stress test.
 - `idempotency.rs`: TTL-based deduplication cache
-- `pagination.rs`: HMAC-signed page tokens. Includes `EventPageToken` (version, organization_id, last_key, query_hash) with encode/decode/validate methods on `PageTokenCodec`.
+- `pagination.rs`: HMAC-signed page tokens. Includes `EventPageToken` (version, organization, last_key, query_hash) with encode/decode/validate methods on `PageTokenCodec`.
 - `rate_limit.rs`: 3-tier token bucket rate limiter
 - `hot_key_detector.rs`: Count-Min Sketch with rotating windows
 - `metrics.rs` (1208 lines): Prometheus metrics with SLI histograms. Leader transfer metrics: `ledger_leader_transfers_total` (status label), `ledger_leader_transfer_latency_seconds` (histogram), `ledger_trigger_elections_total` (result label). Events metrics: `ledger_event_writes_total` (emission/scope/action labels), `ledger_events_gc_*` (entries_deleted, cycle_duration, cycles), `ledger_events_ingest_*` (total, batch_size, rate_limited, duration). Recording functions: `record_leader_transfer(success, latency_secs)`, `record_trigger_election(accepted)`.
@@ -863,7 +866,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `proof.rs`: Merkle proof generation (accepts `vault_slug: Option<VaultSlug>` parameter)
 - `shard_router.rs`: Dynamic shard routing
 - `saga_orchestrator.rs` (758 lines): Distributed transaction orchestration — CAS-based sequence ID allocation (prevents duplicates on leader failover), watchdog/metrics integration, configurable via `SagaConfig`, with optional `event_handle` for UserDeleted handler-phase events
-- `vip_cache.rs` (524 lines): VIP organization cache with static + dynamic discovery, `u64` organization slugs
+- `vip_cache.rs` (524 lines): VIP organization cache with static + dynamic discovery, `OrganizationSlug` typed keys
 - `cardinality.rs`: HyperLogLog for metrics
 - `file_lock.rs`: Data directory locking
 - `peer_tracker.rs`: Peer connection state
@@ -891,9 +894,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: LedgerClient with 40+ public methods, retry, cancellation, metrics, and comprehensive tests
 - **Key Types/Functions**:
   - `LedgerClient::new(config) -> Result<Self>`: Create client
-  - Data ops: `read()`, `write()`, `batch_read()`, `batch_write()` (with `_with_token` variants for cancellation) — all accept `vault_slug: u64`
+  - Data ops: `read()`, `write()`, `batch_read()`, `batch_write()` (with `_with_token` variants for cancellation) — all accept `organization: OrganizationSlug, vault: Option<VaultSlug>`
   - Relationship ops: `check_permission()`, `create_relationship()`, `delete_relationship()`
-  - Admin ops: `create_organization()`, `create_vault()` (returns `VaultInfo` with `vault_slug: u64`), `list_vaults()`
+  - Admin ops: `create_organization()`, `create_vault()` (returns `VaultInfo` with `vault: VaultSlug`), `list_vaults()`
   - Events ops: `list_events(org_slug, filter, limit)` → `EventPage`, `list_events_next(org_slug, page_token)`, `get_event(org_slug, event_id)`, `count_events(org_slug, filter)`, `ingest_events(org_slug, source_service, events)` → `IngestResult`
   - Events types: `EventScope`, `EventOutcome`, `EventEmissionPath` enums, `SdkEventEntry`, `EventPage` (with `has_next_page()`), `EventFilter` (builder with chainable filters: `start_time`, `end_time`, `actions`, `event_type_prefix`, `principal`, `outcome_*`, `*_phase_only`, `correlation_id`), `SdkIngestEventEntry` (builder with `detail`, `details`, `trace_id`, `correlation_id`, `vault_slug`, `timestamp`), `IngestResult`, `IngestRejection`
   - All methods use `with_retry_cancellable()` for retry + cancellation
@@ -1022,9 +1025,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: MockLedgerClient for testing
 - **Key Types/Functions**:
-  - `MockLedgerClient`: In-memory mock with HashMap storage, keyed by `(org_slug: u64, vault_slug: u64, ...)`
+  - `MockLedgerClient`: In-memory mock with HashMap storage, keyed by `(OrganizationSlug, VaultSlug, ...)`
   - All LedgerClient methods implemented (no network)
-- **Insights**: Enables unit testing without server. In-memory state for fast tests. Tuple keys use vault slugs (`u64`), not internal IDs. Large due to comprehensive mock implementations and inline tests.
+- **Insights**: Enables unit testing without server. In-memory state for fast tests. Tuple keys use `OrganizationSlug`/`VaultSlug` newtypes, not raw integers or internal IDs. Large due to comprehensive mock implementations and inline tests.
 
 ---
 

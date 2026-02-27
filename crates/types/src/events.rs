@@ -27,7 +27,7 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::types::OrganizationId;
+use crate::types::{OrganizationId, OrganizationSlug, VaultSlug};
 
 /// A structured audit event for persistent, queryable audit trails.
 ///
@@ -98,11 +98,11 @@ pub struct EventEntry {
 
     /// External organization slug (for API responses).
     #[serde(default)]
-    pub organization: Option<u64>,
+    pub organization: Option<OrganizationSlug>,
 
-    /// Vault context (when applicable).
+    /// External vault slug (for API responses).
     #[serde(default)]
-    pub vault: Option<u64>,
+    pub vault: Option<VaultSlug>,
 
     /// Success, failure, or denial.
     pub outcome: EventOutcome,
@@ -872,8 +872,8 @@ mod tests {
             emission: EventEmission::ApplyPhase,
             principal: "user:alice".to_string(),
             organization_id: OrganizationId::new(42),
-            organization: Some(12345),
-            vault: Some(67890),
+            organization: Some(OrganizationSlug::new(12345)),
+            vault: Some(VaultSlug::new(67890)),
             outcome: EventOutcome::Success,
             details: BTreeMap::from([("vault_name".to_string(), "my-vault".to_string())]),
             block_height: Some(100),
@@ -897,6 +897,48 @@ mod tests {
         let bytes = postcard::to_allocvec(&entry).expect("encode");
         let back: EventEntry = postcard::from_bytes(&bytes).expect("decode");
         assert_eq!(entry, back);
+    }
+
+    #[test]
+    fn event_entry_slug_newtypes_wire_compatible_with_raw_u64() {
+        // Verify that `#[serde(transparent)]` newtypes produce identical postcard
+        // bytes as raw u64 — no data migration needed when switching from
+        // Option<u64> to Option<OrganizationSlug>/Option<VaultSlug>.
+        let org_raw: Option<u64> = Some(12345);
+        let org_typed: Option<OrganizationSlug> = Some(OrganizationSlug::new(12345));
+        assert_eq!(
+            postcard::to_allocvec(&org_raw).expect("raw"),
+            postcard::to_allocvec(&org_typed).expect("typed"),
+            "OrganizationSlug must serialize identically to raw u64"
+        );
+
+        let vault_raw: Option<u64> = Some(67890);
+        let vault_typed: Option<VaultSlug> = Some(VaultSlug::new(67890));
+        assert_eq!(
+            postcard::to_allocvec(&vault_raw).expect("raw"),
+            postcard::to_allocvec(&vault_typed).expect("typed"),
+            "VaultSlug must serialize identically to raw u64"
+        );
+
+        // Also verify None case
+        let none_raw: Option<u64> = None;
+        let none_org: Option<OrganizationSlug> = None;
+        let none_vault: Option<VaultSlug> = None;
+        assert_eq!(
+            postcard::to_allocvec(&none_raw).expect("raw"),
+            postcard::to_allocvec(&none_org).expect("typed"),
+        );
+        assert_eq!(
+            postcard::to_allocvec(&none_raw).expect("raw"),
+            postcard::to_allocvec(&none_vault).expect("typed"),
+        );
+
+        // Full EventEntry roundtrip with populated slug fields
+        let entry = sample_event_entry();
+        let bytes = postcard::to_allocvec(&entry).expect("encode");
+        let back: EventEntry = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(entry.organization, back.organization);
+        assert_eq!(entry.vault, back.vault);
     }
 
     #[test]

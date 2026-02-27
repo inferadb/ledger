@@ -37,22 +37,19 @@ pub struct AppliedStateAccessor {
 
 impl AppliedStateAccessor {
     /// Returns the current height for a vault.
-    pub fn vault_height(&self, organization_id: OrganizationId, vault_id: VaultId) -> u64 {
-        self.state.read().vault_heights.get(&(organization_id, vault_id)).copied().unwrap_or(0)
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    pub fn vault_height(&self, organization: OrganizationId, vault: VaultId) -> u64 {
+        self.state.read().vault_heights.get(&(organization, vault)).copied().unwrap_or(0)
     }
 
     /// Returns the health status for a vault.
-    pub fn vault_health(
-        &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
-    ) -> VaultHealthStatus {
-        self.state
-            .read()
-            .vault_health
-            .get(&(organization_id, vault_id))
-            .cloned()
-            .unwrap_or_default()
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    pub fn vault_health(&self, organization: OrganizationId, vault: VaultId) -> VaultHealthStatus {
+        self.state.read().vault_health.get(&(organization, vault)).cloned().unwrap_or_default()
     }
 
     /// Returns all vault heights (for GetTip when no specific vault is requested).
@@ -60,13 +57,15 @@ impl AppliedStateAccessor {
         self.state.read().vault_heights.clone()
     }
 
-    /// Returns organization metadata by ID.
-    pub fn get_organization(&self, organization_id: OrganizationId) -> Option<OrganizationMeta> {
+    /// Returns organization metadata by internal ID.
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    pub fn get_organization(&self, organization: OrganizationId) -> Option<OrganizationMeta> {
         use inferadb_ledger_state::system::OrganizationStatus;
         self.state
             .read()
             .organizations
-            .get(&organization_id)
+            .get(&organization)
             .filter(|ns| ns.status != OrganizationStatus::Deleted)
             .cloned()
     }
@@ -83,22 +82,23 @@ impl AppliedStateAccessor {
             .collect()
     }
 
-    /// Returns vault metadata by ID.
-    pub fn get_vault(
-        &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
-    ) -> Option<VaultMeta> {
-        self.state.read().vaults.get(&(organization_id, vault_id)).filter(|v| !v.deleted).cloned()
+    /// Returns vault metadata by internal ID.
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    pub fn get_vault(&self, organization: OrganizationId, vault: VaultId) -> Option<VaultMeta> {
+        self.state.read().vaults.get(&(organization, vault)).filter(|v| !v.deleted).cloned()
     }
 
     /// Lists all active vaults in an organization.
-    pub fn list_vaults(&self, organization_id: OrganizationId) -> Vec<VaultMeta> {
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    pub fn list_vaults(&self, organization: OrganizationId) -> Vec<VaultMeta> {
         self.state
             .read()
             .vaults
             .values()
-            .filter(|v| v.organization_id == organization_id && !v.deleted)
+            .filter(|v| v.organization == organization && !v.deleted)
             .cloned()
             .collect()
     }
@@ -106,16 +106,19 @@ impl AppliedStateAccessor {
     /// Returns the last committed sequence for a client.
     ///
     /// Returns 0 if no sequence has been committed for this client.
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn client_sequence(
         &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         client_id: &str,
     ) -> u64 {
         self.state
             .read()
             .client_sequences
-            .get(&(organization_id, vault_id, client_id.to_string()))
+            .get(&(organization, vault, client_id.to_string()))
             .map_or(0, |entry| entry.sequence)
     }
 
@@ -136,13 +139,15 @@ impl AppliedStateAccessor {
     }
 
     /// Returns the number of active (non-deleted) vaults in an organization.
-    pub fn vault_count(&self, organization_id: OrganizationId) -> u32 {
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    pub fn vault_count(&self, organization: OrganizationId) -> u32 {
         let count = self
             .state
             .read()
             .vaults
             .values()
-            .filter(|v| v.organization_id == organization_id && !v.deleted)
+            .filter(|v| v.organization == organization && !v.deleted)
             .count();
         // Safe: vault count is bounded by u32::MAX in practice
         #[allow(clippy::cast_possible_truncation)]
@@ -154,33 +159,36 @@ impl AppliedStateAccessor {
     /// Returns cumulative estimated storage bytes for an organization.
     ///
     /// Returns 0 if no data has been written to the organization.
-    pub fn organization_storage_bytes(&self, organization_id: OrganizationId) -> u64 {
-        self.state.read().organization_storage_bytes.get(&organization_id).copied().unwrap_or(0)
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    pub fn organization_storage_bytes(&self, organization: OrganizationId) -> u64 {
+        self.state.read().organization_storage_bytes.get(&organization).copied().unwrap_or(0)
     }
 
     /// Returns a snapshot of resource usage for an organization.
     ///
     /// Combines `storage_bytes` and `vault_count` into a single struct
     /// for quota enforcement and capacity-planning APIs.
-    pub fn organization_usage(&self, organization_id: OrganizationId) -> OrganizationUsage {
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    pub fn organization_usage(&self, organization: OrganizationId) -> OrganizationUsage {
         let state = self.state.read();
         let storage_bytes =
-            state.organization_storage_bytes.get(&organization_id).copied().unwrap_or(0);
-        let vault_count = state
-            .vaults
-            .values()
-            .filter(|v| v.organization_id == organization_id && !v.deleted)
-            .count();
+            state.organization_storage_bytes.get(&organization).copied().unwrap_or(0);
+        let vault_count =
+            state.vaults.values().filter(|v| v.organization == organization && !v.deleted).count();
         #[allow(clippy::cast_possible_truncation)]
         OrganizationUsage { storage_bytes, vault_count: vault_count as u32 }
     }
 
     /// Returns the organization quota (per-organization override or None for server default).
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
     pub fn organization_quota(
         &self,
-        organization_id: OrganizationId,
+        organization: OrganizationId,
     ) -> Option<inferadb_ledger_types::config::OrganizationQuota> {
-        self.state.read().organizations.get(&organization_id).and_then(|ns| ns.quota.clone())
+        self.state.read().organizations.get(&organization).and_then(|ns| ns.quota.clone())
     }
 
     /// Resolves an external organization slug to its internal ID.
@@ -220,10 +228,13 @@ impl AppliedStateAccessor {
     /// Returns [`IdempotencyCheckResult::AlreadyCommitted`] if the key and hash
     /// match, [`IdempotencyCheckResult::KeyReused`] if the key matches but the
     /// hash differs, or [`IdempotencyCheckResult::Miss`] if no entry exists.
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn client_idempotency_check(
         &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         client_id: &str,
         idempotency_key: &[u8; 16],
         request_hash: u64,
@@ -233,7 +244,7 @@ impl AppliedStateAccessor {
             return IdempotencyCheckResult::Miss;
         }
 
-        let key = (organization_id, vault_id, client_id.to_string());
+        let key = (organization, vault, client_id.to_string());
         let state = self.state.read();
 
         match state.client_sequences.get(&key) {

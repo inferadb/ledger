@@ -662,8 +662,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
             // Derived: vault_id_to_slug reverse mapping
             state.vault_id_to_slug.insert(vault_id, meta.slug);
 
-            // Key uses (organization_id, vault_id) from the deserialized blob
-            state.vaults.insert((meta.organization_id, vault_id), meta);
+            // Key uses organization from the deserialized blob and vault_id from the table key
+            state.vaults.insert((meta.organization, vault_id), meta);
         }
 
         Ok(())
@@ -848,7 +848,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         // Populate vaults
         for ((_org_id, _vault_id), meta) in &old_state.vaults {
             let blob = encode(meta).map_err(|e| to_serde_error(&e))?;
-            pending.vaults.push((meta.vault_id, blob));
+            pending.vaults.push((meta.vault, blob));
         }
 
         // Populate vault heights
@@ -947,7 +947,7 @@ mod tests {
             state.organizations.insert(
                 org_id,
                 OrganizationMeta {
-                    organization_id: org_id,
+                    organization: org_id,
                     slug,
                     shard_id: ShardId::new(0),
                     name: format!("org-{i}"),
@@ -969,8 +969,8 @@ mod tests {
                 let vault_id = VaultId::new(org_i * 10 + vault_i);
                 let slug = VaultSlug::new(2000 + vault_id.value() as u64);
                 let meta = VaultMeta {
-                    organization_id: org_id,
-                    vault_id,
+                    organization: org_id,
+                    vault: vault_id,
                     slug,
                     name: Some(format!("vault-{org_i}-{vault_i}")),
                     deleted: false,
@@ -1023,7 +1023,7 @@ mod tests {
 
         for ((_org_id, _vault_id), meta) in &state.vaults {
             let blob = encode(meta).unwrap();
-            pending.vaults.push((meta.vault_id, blob));
+            pending.vaults.push((meta.vault, blob));
         }
 
         for ((org_id, vault_id), height) in &state.vault_heights {
@@ -1086,10 +1086,7 @@ mod tests {
                 .organizations
                 .get(id)
                 .unwrap_or_else(|| panic!("missing organization {id:?}"));
-            assert_eq!(
-                meta.organization_id, right_meta.organization_id,
-                "org {id:?} organization_id"
-            );
+            assert_eq!(meta.organization, right_meta.organization, "org {id:?} organization");
             assert_eq!(meta.name, right_meta.name, "org {id:?} name");
             assert_eq!(meta.slug, right_meta.slug, "org {id:?} slug");
             assert_eq!(meta.storage_bytes, right_meta.storage_bytes, "org {id:?} storage_bytes");
@@ -1098,11 +1095,8 @@ mod tests {
         for (key, meta) in &left.vaults {
             let right_meta =
                 right.vaults.get(key).unwrap_or_else(|| panic!("missing vault {key:?}"));
-            assert_eq!(
-                meta.organization_id, right_meta.organization_id,
-                "vault {key:?} organization_id"
-            );
-            assert_eq!(meta.vault_id, right_meta.vault_id, "vault {key:?} vault_id");
+            assert_eq!(meta.organization, right_meta.organization, "vault {key:?} organization");
+            assert_eq!(meta.vault, right_meta.vault, "vault {key:?} vault");
             assert_eq!(meta.slug, right_meta.slug, "vault {key:?} slug");
             assert_eq!(meta.name, right_meta.name, "vault {key:?} name");
         }
@@ -1193,7 +1187,7 @@ mod tests {
                 .insert::<tables::OrganizationMeta>(
                     &999i64,
                     &encode(&OrganizationMeta {
-                        organization_id: OrganizationId::new(999),
+                        organization: OrganizationId::new(999),
                         slug: OrganizationSlug::new(9999),
                         shard_id: ShardId::new(0),
                         name: "phantom".to_string(),
@@ -1380,11 +1374,11 @@ mod tests {
     }
 
     // ========================================================================
-    // Vault keys use organization_id from VaultMeta blob
+    // Vault keys use organization from VaultMeta blob
     // ========================================================================
 
     #[test]
-    fn test_vault_keys_use_organization_id_from_blob() {
+    fn test_vault_keys_use_organization_from_blob() {
         let dir = tempdir().unwrap();
         let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft.db")).unwrap();
 
@@ -1394,7 +1388,7 @@ mod tests {
 
         let loaded = store.load_state_from_tables().unwrap();
 
-        // Verify all 6 vaults use the correct organization_id from the deserialized blob
+        // Verify all 6 vaults use the correct organization from the deserialized blob
         for org_i in 1..=2i64 {
             let org_id = OrganizationId::new(org_i);
             for vault_i in 1..=3i64 {
@@ -1403,8 +1397,8 @@ mod tests {
                 let meta =
                     loaded.vaults.get(&key).unwrap_or_else(|| panic!("missing vault {key:?}"));
                 assert_eq!(
-                    meta.organization_id, org_id,
-                    "vault {key:?} organization_id should come from blob"
+                    meta.organization, org_id,
+                    "vault {key:?} organization should come from blob"
                 );
             }
         }
@@ -1459,7 +1453,7 @@ mod tests {
             pending2.organizations.push((
                 OrganizationId::new(99),
                 encode(&OrganizationMeta {
-                    organization_id: OrganizationId::new(99),
+                    organization: OrganizationId::new(99),
                     slug: OrganizationSlug::new(9900),
                     shard_id: ShardId::new(0),
                     name: "new-org".to_string(),
@@ -1508,7 +1502,7 @@ mod tests {
         mixed.organizations.push((
             new_org_id,
             encode(&OrganizationMeta {
-                organization_id: new_org_id,
+                organization: new_org_id,
                 slug: new_slug,
                 shard_id: ShardId::new(0),
                 name: "org-3".to_string(),
@@ -1547,7 +1541,7 @@ mod tests {
         updated.organizations.insert(
             new_org_id,
             OrganizationMeta {
-                organization_id: new_org_id,
+                organization: new_org_id,
                 slug: new_slug,
                 shard_id: ShardId::new(0),
                 name: "org-3".to_string(),
@@ -1679,7 +1673,7 @@ mod tests {
             state.organizations.insert(
                 org_id,
                 OrganizationMeta {
-                    organization_id: org_id,
+                    organization: org_id,
                     slug,
                     shard_id: ShardId::new((i % 10) as u32),
                     name: format!("org-{i}"),
@@ -1703,8 +1697,8 @@ mod tests {
                 state.vaults.insert(
                     (org_id, vault_id),
                     VaultMeta {
-                        organization_id: org_id,
-                        vault_id,
+                        organization: org_id,
+                        vault: vault_id,
                         slug,
                         name: Some(format!("vault-{org_i}-{v}")),
                         deleted: false,
@@ -1776,7 +1770,7 @@ mod tests {
         state2.organizations.insert(
             org_id,
             OrganizationMeta {
-                organization_id: org_id,
+                organization: org_id,
                 slug,
                 shard_id: ShardId::new(0),
                 name: "new-org".to_string(),

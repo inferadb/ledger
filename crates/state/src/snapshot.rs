@@ -76,8 +76,8 @@ pub type Result<T> = std::result::Result<T, SnapshotError>;
 /// Metadata for a single vault within a snapshot.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VaultSnapshotMeta {
-    /// Vault identifier.
-    pub vault_id: VaultId,
+    /// Internal vault identifier (`VaultId`).
+    pub vault: VaultId,
     /// Per-vault height at snapshot time.
     pub vault_height: u64,
     /// State root hash.
@@ -91,14 +91,16 @@ pub struct VaultSnapshotMeta {
 
 impl VaultSnapshotMeta {
     /// Creates a new vault snapshot metadata.
+    ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn new(
-        vault_id: VaultId,
+        vault: VaultId,
         vault_height: u64,
         state_root: Hash,
         bucket_roots: [Hash; NUM_BUCKETS],
         key_count: u64,
     ) -> Self {
-        Self { vault_id, vault_height, state_root, bucket_roots: bucket_roots.to_vec(), key_count }
+        Self { vault, vault_height, state_root, bucket_roots: bucket_roots.to_vec(), key_count }
     }
 
     /// Returns bucket roots as a fixed-size array.
@@ -244,14 +246,18 @@ impl Snapshot {
         self.header.shard_height
     }
 
-    /// Returns vault metadata by vault_id.
-    pub fn get_vault_meta(&self, vault_id: VaultId) -> Option<&VaultSnapshotMeta> {
-        self.header.vault_states.iter().find(|v| v.vault_id == vault_id)
+    /// Returns vault metadata by vault.
+    ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    pub fn get_vault_meta(&self, vault: VaultId) -> Option<&VaultSnapshotMeta> {
+        self.header.vault_states.iter().find(|v| v.vault == vault)
     }
 
     /// Returns entities for a vault.
-    pub fn get_vault_entities(&self, vault_id: VaultId) -> Option<&Vec<Entity>> {
-        self.state.vault_entities.get(&vault_id)
+    ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    pub fn get_vault_entities(&self, vault: VaultId) -> Option<&Vec<Entity>> {
+        self.state.vault_entities.get(&vault)
     }
 
     /// Writes snapshot to file with zstd compression.
@@ -506,7 +512,7 @@ mod tests {
 
     fn create_test_snapshot() -> Snapshot {
         let vault_states = vec![VaultSnapshotMeta {
-            vault_id: VaultId::new(1),
+            vault: VaultId::new(1),
             vault_height: 100,
             state_root: [42u8; 32],
             bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
@@ -563,7 +569,7 @@ mod tests {
         // Save multiple snapshots
         for height in [100, 200, 300, 400, 500] {
             let vault_states = vec![VaultSnapshotMeta {
-                vault_id: VaultId::new(1),
+                vault: VaultId::new(1),
                 vault_height: height / 2,
                 state_root: [height as u8; 32],
                 bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
@@ -635,7 +641,7 @@ mod tests {
         let path = temp.path().join("chain_verified.snap");
 
         let vault_states = vec![VaultSnapshotMeta {
-            vault_id: VaultId::new(1),
+            vault: VaultId::new(1),
             vault_height: 100,
             state_root: [42u8; 32],
             bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
@@ -691,7 +697,7 @@ mod tests {
         let manager = SnapshotManager::new(temp.path().to_path_buf(), 10);
 
         let vault_states = vec![VaultSnapshotMeta {
-            vault_id: VaultId::new(1),
+            vault: VaultId::new(1),
             vault_height: 50,
             state_root: [10u8; 32],
             bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
@@ -778,21 +784,21 @@ mod tests {
 
         let vault_states = vec![
             VaultSnapshotMeta {
-                vault_id: VaultId::new(1),
+                vault: VaultId::new(1),
                 vault_height: 100,
                 state_root: [0x11; 32],
                 bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
                 key_count: 10,
             },
             VaultSnapshotMeta {
-                vault_id: VaultId::new(2),
+                vault: VaultId::new(2),
                 vault_height: 200,
                 state_root: [0x22; 32],
                 bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
                 key_count: 20,
             },
             VaultSnapshotMeta {
-                vault_id: VaultId::new(3),
+                vault: VaultId::new(3),
                 vault_height: 300,
                 state_root: [0x33; 32],
                 bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),

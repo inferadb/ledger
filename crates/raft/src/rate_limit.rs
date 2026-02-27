@@ -11,7 +11,7 @@
 //! throughput). Tokens are consumed on each request and refilled over time.
 //!
 //! Mitigates noisy neighbor problems in multi-tenant shards by applying rate
-//! limits per organization_id at the shard leader.
+//! limits per organization at the shard leader.
 
 use std::{
     collections::HashMap,
@@ -72,7 +72,7 @@ pub struct RateLimitRejection {
     pub reason: RateLimitReason,
     /// Estimated milliseconds until the client should retry.
     pub retry_after_ms: u64,
-    /// The identifier that was rate limited (client_id or organization_id).
+    /// The identifier that was rate limited (client_id or organization).
     pub identifier: String,
 }
 
@@ -174,7 +174,7 @@ impl TokenBucket {
 pub struct RateLimiter {
     /// Per-client token buckets keyed by client_id.
     client_buckets: Mutex<HashMap<String, TokenBucket>>,
-    /// Per-organization token buckets keyed by organization_id.
+    /// Per-organization token buckets keyed by organization.
     organization_buckets: Mutex<HashMap<OrganizationId, TokenBucket>>,
 
     /// Capacity for per-client token buckets (max burst).
@@ -241,10 +241,12 @@ impl RateLimiter {
     /// - **Backpressure**: Raft pending proposals exceed the configured threshold.
     /// - **Client**: Per-client token bucket is exhausted.
     /// - **Organization**: Per-organization token bucket is exhausted.
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
     pub fn check(
         &self,
         client_id: &str,
-        organization_id: OrganizationId,
+        organization: OrganizationId,
     ) -> Result<(), RateLimitRejection> {
         // Tier 1: Global backpressure (cheapest — single atomic load, no token consumption)
         let pending = self.pending_proposals.load(Ordering::Relaxed);
@@ -286,7 +288,7 @@ impl RateLimiter {
         // Tier 3: Per-organization token bucket (shared across all clients in a organization)
         {
             let mut buckets = self.organization_buckets.lock();
-            let bucket = buckets.entry(organization_id).or_insert_with(|| {
+            let bucket = buckets.entry(organization).or_insert_with(|| {
                 TokenBucket::new(
                     self.organization_capacity.load(Ordering::Relaxed),
                     f64::from_bits(self.organization_refill_rate_bits.load(Ordering::Relaxed)),
@@ -300,7 +302,7 @@ impl RateLimiter {
                     level: RateLimitLevel::Organization,
                     reason: RateLimitReason::TokensExhausted,
                     retry_after_ms,
-                    identifier: organization_id.to_string(),
+                    identifier: organization.to_string(),
                 });
             }
         }
@@ -345,9 +347,9 @@ impl RateLimiter {
 
     /// Returns the current token count for a specific organization (for testing/metrics).
     #[cfg(test)]
-    fn organization_tokens(&self, organization_id: OrganizationId) -> Option<u64> {
+    fn organization_tokens(&self, organization: OrganizationId) -> Option<u64> {
         let buckets = self.organization_buckets.lock();
-        buckets.get(&organization_id).map(|b| b.tokens_millis / 1000)
+        buckets.get(&organization).map(|b| b.tokens_millis / 1000)
     }
 
     /// Returns the current token count for a specific client (for testing/metrics).
@@ -704,12 +706,12 @@ mod tests {
             let running = Arc::clone(&running);
             handles.push(thread::spawn(move || {
                 let client_id = format!("client-{}", thread_id);
-                let organization_id = OrganizationId::new((thread_id % 5 + 1) as i64);
+                let organization = OrganizationId::new((thread_id % 5 + 1) as i64);
                 let mut ok_count = 0u64;
                 let mut reject_count = 0u64;
 
                 while running.load(AOrdering::Relaxed) {
-                    match limiter.check(&client_id, organization_id) {
+                    match limiter.check(&client_id, organization) {
                         Ok(()) => ok_count += 1,
                         Err(_) => reject_count += 1,
                     }

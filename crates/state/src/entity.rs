@@ -45,16 +45,18 @@ pub struct EntityStore;
 impl EntityStore {
     /// Returns an entity by key, or `None` if not found.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `EntityError::Storage` if the read transaction fails.
     /// Returns `EntityError::Codec` if deserialization of the stored entity fails.
     pub fn get<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         key: &[u8],
     ) -> Result<Option<Entity>> {
-        let storage_key = encode_storage_key(vault_id, key);
+        let storage_key = encode_storage_key(vault, key);
 
         match txn.get::<tables::Entities>(&storage_key).context(StorageSnafu)? {
             Some(data) => {
@@ -70,16 +72,18 @@ impl EntityStore {
     /// If an entity with the same key already exists in the vault, it is replaced.
     /// The caller must commit the transaction after this call.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `EntityError::Codec` if serialization of the entity fails.
     /// Returns `EntityError::Storage` if the write transaction fails.
     pub fn set<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         entity: &Entity,
     ) -> Result<()> {
-        let storage_key = encode_storage_key(vault_id, &entity.key);
+        let storage_key = encode_storage_key(vault, &entity.key);
         let encoded = encode(entity).context(CodecSnafu)?;
 
         txn.insert::<tables::Entities>(&storage_key, &encoded).context(StorageSnafu)?;
@@ -91,30 +95,34 @@ impl EntityStore {
     /// Returns `true` if the entity existed and was deleted, `false` if it
     /// was not found. The caller must commit the transaction after this call.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `EntityError::Storage` if the delete operation fails.
     pub fn delete<B: StorageBackend>(
         txn: &mut WriteTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         key: &[u8],
     ) -> Result<bool> {
-        let storage_key = encode_storage_key(vault_id, key);
+        let storage_key = encode_storage_key(vault, key);
         let existed = txn.delete::<tables::Entities>(&storage_key).context(StorageSnafu)?;
         Ok(existed)
     }
 
     /// Checks if an entity exists in the vault.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `EntityError::Storage` if the read transaction fails.
     pub fn exists<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         key: &[u8],
     ) -> Result<bool> {
-        let storage_key = encode_storage_key(vault_id, key);
+        let storage_key = encode_storage_key(vault, key);
         Ok(txn.get::<tables::Entities>(&storage_key).context(StorageSnafu)?.is_some())
     }
 
@@ -123,17 +131,19 @@ impl EntityStore {
     /// Returns up to `limit` entities starting from `offset`, ordered by
     /// storage key (vault prefix + bucket + local key).
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `EntityError::Storage` if the iterator or read transaction fails.
     /// Returns `EntityError::Codec` if deserialization of any entity fails.
     pub fn list_in_vault<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<Entity>> {
-        let prefix = vault_prefix(vault_id);
+        let prefix = vault_prefix(vault);
         let mut entities = Vec::new();
 
         let iter = txn.iter::<tables::Entities>().context(StorageSnafu)?;
@@ -167,16 +177,18 @@ impl EntityStore {
     ///
     /// Used during state root recomputation to rehash a single dirty bucket.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `EntityError::Storage` if the iterator or read transaction fails.
     /// Returns `EntityError::Codec` if deserialization of any entity fails.
     pub fn list_in_bucket<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         bucket_id: u8,
     ) -> Result<Vec<Entity>> {
-        let _prefix = bucket_prefix(vault_id, bucket_id);
+        let _prefix = bucket_prefix(vault, bucket_id);
         let mut entities = Vec::new();
 
         let iter = txn.iter::<tables::Entities>().context(StorageSnafu)?;
@@ -187,10 +199,10 @@ impl EntityStore {
             }
 
             let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-            if key_vault_id < vault_id.value() {
+            if key_vault_id < vault.value() {
                 continue;
             }
-            if key_vault_id > vault_id.value() {
+            if key_vault_id > vault.value() {
                 break;
             }
 
@@ -210,14 +222,16 @@ impl EntityStore {
 
     /// Counts all entities in a vault.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `EntityError::Storage` if the iterator or read transaction fails.
     pub fn count_in_vault<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
     ) -> Result<usize> {
-        let prefix = vault_prefix(vault_id);
+        let prefix = vault_prefix(vault);
         let mut count = 0;
 
         let iter = txn.iter::<tables::Entities>().context(StorageSnafu)?;
@@ -241,17 +255,19 @@ impl EntityStore {
     /// Because keys are distributed across buckets by hash, a full vault scan
     /// is performed internally (prefix filtering cannot short-circuit by bucket).
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// # Errors
     ///
     /// Returns `EntityError::Storage` if the iterator or read transaction fails.
     /// Returns `EntityError::Codec` if deserialization of any matching entity fails.
     pub fn scan_prefix<B: StorageBackend>(
         txn: &ReadTransaction<'_, B>,
-        vault_id: VaultId,
+        vault: VaultId,
         key_prefix: &[u8],
         limit: usize,
     ) -> Result<Vec<Entity>> {
-        let prefix = vault_prefix(vault_id);
+        let prefix = vault_prefix(vault);
         let mut entities = Vec::new();
 
         let iter = txn.iter::<tables::Entities>().context(StorageSnafu)?;

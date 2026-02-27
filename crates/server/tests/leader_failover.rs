@@ -19,9 +19,8 @@
 
 use std::{collections::HashSet, time::Duration};
 
-use inferadb_ledger_proto::proto::{
-    ClientId, OrganizationSlug, ReadRequest, VaultSlug, WriteRequest,
-};
+use inferadb_ledger_proto::proto::{ClientId, ReadRequest, WriteRequest};
+use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
 use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
@@ -33,7 +32,7 @@ use crate::common::{TestCluster, create_admin_client, create_read_client, create
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
-) -> Result<u64, Box<dyn std::error::Error>> {
+) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
@@ -42,42 +41,51 @@ async fn create_organization(
             quota: None,
         })
         .await?;
-    let slug =
-        response.into_inner().slug.map(|n| n.slug).ok_or("No organization slug in response")?;
+    let slug = response
+        .into_inner()
+        .slug
+        .map(|n| OrganizationSlug::new(n.slug))
+        .ok_or("No organization slug in response")?;
     Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
     addr: std::net::SocketAddr,
-    organization: u64,
-) -> Result<u64, Box<dyn std::error::Error>> {
+    organization: OrganizationSlug,
+) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization,
+                slug: organization.value(),
             }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
         })
         .await?;
-    let slug = response.into_inner().vault.map(|v| v.slug).ok_or("No vault slug in response")?;
+    let slug = response
+        .into_inner()
+        .vault
+        .map(|v| VaultSlug::new(v.slug))
+        .ok_or("No vault slug in response")?;
     Ok(slug)
 }
 
 /// Helper to create a write request with a single SetEntity operation.
 fn make_write_request(
-    organization: u64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
     key: &str,
     value: &[u8],
     client_id: &str,
 ) -> WriteRequest {
     WriteRequest {
-        organization: Some(OrganizationSlug { slug: organization }),
-        vault: Some(VaultSlug { slug: vault }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization.value(),
+        }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         client_id: Some(ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -108,15 +116,17 @@ fn extract_block_height(response: inferadb_ledger_proto::proto::WriteResponse) -
 /// Helper to read an entity and return its value.
 async fn read_entity(
     addr: std::net::SocketAddr,
-    organization: u64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
     key: &str,
 ) -> Option<Vec<u8>> {
     let mut client = create_read_client(addr).await.ok()?;
     let response = client
         .read(ReadRequest {
-            organization: Some(OrganizationSlug { slug: organization }),
-            vault: Some(VaultSlug { slug: vault }),
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: organization.value(),
+            }),
+            vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
             key: key.to_string(),
             consistency: 0, // EVENTUAL (default)
         })

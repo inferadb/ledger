@@ -2199,9 +2199,9 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - The organization containing the data
-    /// * `vault` - Optional vault ID (omit for organization-level entities)
-    /// * `key` - The key to read
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (omit for organization-level entities).
+    /// * `key` - The key to read.
     ///
     /// # Returns
     ///
@@ -2243,9 +2243,9 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - The organization containing the data
-    /// * `vault` - Optional vault ID (omit for organization-level entities)
-    /// * `key` - The key to read
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (omit for organization-level entities).
+    /// * `key` - The key to read.
     ///
     /// # Returns
     ///
@@ -2388,9 +2388,9 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - The organization containing the data
-    /// * `vault` - Optional vault ID (omit for organization-level entities)
-    /// * `keys` - The keys to read (max 1000)
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (omit for organization-level entities).
+    /// * `keys` - The keys to read (max 1000).
     ///
     /// # Returns
     ///
@@ -2446,9 +2446,9 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - The organization containing the data
-    /// * `vault` - Optional vault ID (omit for organization-level entities)
-    /// * `keys` - The keys to read (max 1000)
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (omit for organization-level entities).
+    /// * `keys` - The keys to read (max 1000).
     ///
     /// # Returns
     ///
@@ -2602,9 +2602,9 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - The organization to write to
-    /// * `vault` - Optional vault ID (required for relationships)
-    /// * `operations` - The operations to apply atomically
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (required for relationships).
+    /// * `operations` - The operations to apply atomically.
     ///
     /// # Returns
     ///
@@ -2835,8 +2835,8 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - The organization to write to
-    /// * `vault` - Optional vault ID (required for relationships)
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (required for relationships).
     /// * `batches` - Groups of operations to apply atomically. Each inner `Vec<Operation>` is a
     ///   logical group processed in order.
     ///
@@ -3050,9 +3050,9 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - The organization containing the vault
-    /// * `vault` - The vault to watch for blocks
-    /// * `start_height` - First block height to receive (must be >= 1)
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Vault slug (external identifier).
+    /// * `start_height` - First block height to receive (must be >= 1).
     ///
     /// # Returns
     ///
@@ -3183,12 +3183,12 @@ impl LedgerClient {
 
     /// Creates a new organization.
     ///
-    /// Creates an organization with the given name. The organization ID is assigned
-    /// by the leader and returned in the response.
+    /// Creates an organization with the given name. The organization slug
+    /// (external identifier) is assigned by the leader and returned in the response.
     ///
     /// # Arguments
     ///
-    /// * `name` - Human-readable name for the organization (e.g., "acme_corp")
+    /// * `name` - Human-readable name for the organization (e.g., "acme_corp").
     ///
     /// # Returns
     ///
@@ -3265,7 +3265,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `slug` - The organization slug to look up
+    /// * `slug` - Organization slug (external identifier).
     ///
     /// # Returns
     ///
@@ -3334,7 +3334,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `slug` - The slug of the organization to delete
+    /// * `slug` - Organization slug (external identifier).
     ///
     /// # Errors
     ///
@@ -3462,12 +3462,12 @@ impl LedgerClient {
 
     /// Creates a new vault in an organization.
     ///
-    /// Creates a vault within the specified organization. The vault ID is assigned
-    /// by the leader and returned in the response.
+    /// Creates a vault within the specified organization. The vault slug
+    /// (external identifier) is assigned by the leader and returned in the response.
     ///
     /// # Arguments
     ///
-    /// * `organization` - The organization to create the vault in
+    /// * `organization` - Organization slug (external identifier).
     ///
     /// # Returns
     ///
@@ -3546,8 +3546,8 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - The organization containing the vault
-    /// * `vault` - The vault ID to look up
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Vault slug (external identifier).
     ///
     /// # Returns
     ///
@@ -3686,7 +3686,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - Organization slug (0 for system events).
+    /// * `organization` - Organization slug (external identifier; 0 for system events).
     /// * `filter` - Filter criteria (empty filter matches all events).
     /// * `limit` - Maximum results per page (0 = server default, max 1000).
     ///
@@ -3728,7 +3728,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - Organization slug (must match the original query).
+    /// * `organization` - Organization slug (external identifier; must match the original query).
     /// * `page_token` - Opaque cursor from the previous response's `next_page_token`.
     ///
     /// # Errors
@@ -3820,7 +3820,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - Organization that owns the event.
+    /// * `organization` - Organization slug (external identifier).
     /// * `event_id` - Event identifier (UUID string, e.g., from `event_id_string()`).
     ///
     /// # Errors
@@ -3895,7 +3895,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - Organization slug (0 for system events).
+    /// * `organization` - Organization slug (external identifier; 0 for system events).
     /// * `filter` - Filter criteria (empty filter counts all events).
     ///
     /// # Errors
@@ -3964,7 +3964,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - Organization receiving the events.
+    /// * `organization` - Organization slug (external identifier).
     /// * `source` - Originating component ([`EventSource::Engine`] or [`EventSource::Control`]).
     /// * `events` - Batch of events to ingest.
     ///
@@ -4166,8 +4166,8 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - The organization containing the vault
-    /// * `vault` - The vault to check
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Vault slug (external identifier).
     ///
     /// # Returns
     ///
@@ -4246,8 +4246,8 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - Organization containing the data.
-    /// * `vault` - Optional vault ID (None for organization-level entities).
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (omit for organization-level entities).
     /// * `key` - Entity key to read.
     /// * `opts` - Verification options (height, chain proof).
     ///
@@ -4342,7 +4342,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - Organization containing the entities.
+    /// * `organization` - Organization slug (external identifier).
     /// * `opts` - Query options including prefix filter, pagination, and consistency.
     ///
     /// # Errors
@@ -4437,8 +4437,8 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - Organization containing the vault.
-    /// * `vault` - Vault containing the relationships.
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Vault slug (external identifier).
     /// * `opts` - Query options including filters, pagination, and consistency.
     ///
     /// # Errors
@@ -4533,8 +4533,8 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `organization` - Organization containing the vault.
-    /// * `vault` - Vault containing the relationships.
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Vault slug (external identifier).
     /// * `opts` - Query options including type filter, pagination, and consistency.
     ///
     /// # Errors

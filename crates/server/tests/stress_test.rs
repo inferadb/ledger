@@ -54,6 +54,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 use parking_lot::Mutex;
 use tokio::sync::Semaphore;
 
@@ -72,10 +73,10 @@ struct StressConfig {
     batch_size: usize,
     /// Operations per batch for reads (uses BatchRead API when > 1).
     read_batch_size: usize,
-    /// Target organization ID.
-    organization_id: i64,
-    /// Target vault ID.
-    vault: u64,
+    /// Target organization slug.
+    organization: OrganizationSlug,
+    /// Target vault slug.
+    vault: VaultSlug,
     /// Maximum concurrent write requests (backpressure).
     max_concurrent_writes: usize,
     /// Maximum concurrent read requests (can be higher since reads are fast).
@@ -92,8 +93,8 @@ impl Default for StressConfig {
             duration: Duration::from_secs(30),
             batch_size: 10,
             read_batch_size: 50, // BatchRead for higher throughput
-            organization_id: 1,
-            vault: 1,
+            organization: OrganizationSlug::new(1),
+            vault: VaultSlug::new(1),
             max_concurrent_writes: 50,
             max_concurrent_reads: 500, // Reads are fast, allow high concurrency
             track_write_locations: false,
@@ -135,8 +136,8 @@ fn extract_leader_addr_from_error(error_msg: &str) -> Option<SocketAddr> {
 /// Written value with its location for multi-shard consistency verification.
 #[derive(Debug, Clone)]
 struct WrittenValue {
-    organization_id: i64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
     value: Vec<u8>,
 }
 
@@ -158,7 +159,7 @@ struct StressMetrics {
     /// Values written (key -> value) for consistency verification.
     written_values: Mutex<HashMap<String, Vec<u8>>>,
     /// Values written with location for multi-shard consistency verification.
-    /// Maps key -> (organization_id, vault, value).
+    /// Maps key -> (organization, vault, value).
     written_values_with_location: Mutex<HashMap<String, WrittenValue>>,
 }
 
@@ -180,7 +181,7 @@ async fn setup_organization_and_vault(
 
     // Create organization and capture the actual Snowflake slug
     let ns_request = inferadb_ledger_proto::proto::CreateOrganizationRequest {
-        name: format!("stress-ns-{}", config.organization_id),
+        name: format!("stress-ns-{}", config.organization.value()),
         shard_id: None,
         quota: None,
     };
@@ -188,13 +189,18 @@ async fn setup_organization_and_vault(
         .create_organization(ns_request)
         .await
         .map_err(|e| format!("Failed to create organization: {}", e))?;
-    let organization =
-        ns_response.into_inner().slug.map(|n| n.slug).ok_or("No organization slug in response")?;
-    config.organization_id = organization as i64;
+    let organization = ns_response
+        .into_inner()
+        .slug
+        .map(|n| OrganizationSlug::new(n.slug))
+        .ok_or("No organization slug in response")?;
+    config.organization = organization;
 
     // Create vault using the actual organization slug
     let vault_request = inferadb_ledger_proto::proto::CreateVaultRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: organization }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization.value(),
+        }),
         replication_factor: 1,
         initial_nodes: vec![],
         retention_policy: None,
@@ -203,8 +209,11 @@ async fn setup_organization_and_vault(
         .create_vault(vault_request)
         .await
         .map_err(|e| format!("Failed to create vault: {}", e))?;
-    let vault =
-        vault_response.into_inner().vault.map(|v| v.slug).ok_or("No vault slug in response")?;
+    let vault = vault_response
+        .into_inner()
+        .vault
+        .map(|v| VaultSlug::new(v.slug))
+        .ok_or("No vault slug in response")?;
     config.vault = vault;
 
     Ok(())
@@ -215,10 +224,10 @@ async fn setup_organization_and_vault(
 struct ShardAssignment {
     /// Shard ID (1-based for data shards).
     shard_id: u32,
-    /// Organization ID assigned to this shard.
-    organization_id: i64,
-    /// Vault ID within the organization.
-    vault: u64,
+    /// Organization slug assigned to this shard.
+    organization: OrganizationSlug,
+    /// Vault slug within the organization.
+    vault: VaultSlug,
 }
 
 /// Setup multiple organizations across different shards for true multi-shard stress testing.
@@ -254,16 +263,15 @@ async fn setup_multi_shard_organizations(
             .await
             .map_err(|e| format!("Failed to create organization for shard {}: {}", shard_id, e))?;
 
-        let organization_id = ns_response
-            .into_inner()
-            .slug
-            .map(|n| n.slug as i64)
-            .ok_or_else(|| format!("No organization_id in response for shard {}", shard_id))?;
+        let organization =
+            ns_response.into_inner().slug.map(|n| OrganizationSlug::new(n.slug)).ok_or_else(
+                || format!("No organization slug in response for shard {}", shard_id),
+            )?;
 
         // Create vault in this organization
         let vault_request = inferadb_ledger_proto::proto::CreateVaultRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization_id as u64,
+                slug: organization.value(),
             }),
             replication_factor: 1,
             initial_nodes: vec![],
@@ -271,15 +279,16 @@ async fn setup_multi_shard_organizations(
         };
 
         let vault_response = admin_client.create_vault(vault_request).await.map_err(|e| {
-            format!("Failed to create vault in organization {}: {}", organization_id, e)
+            format!("Failed to create vault in organization {}: {}", organization, e)
         })?;
 
-        let vault =
-            vault_response.into_inner().vault.map(|v| v.slug).ok_or_else(|| {
-                format!("No vault in response for organization {}", organization_id)
-            })?;
+        let vault = vault_response
+            .into_inner()
+            .vault
+            .map(|v| VaultSlug::new(v.slug))
+            .ok_or_else(|| format!("No vault in response for organization {}", organization))?;
 
-        assignments.push(ShardAssignment { shard_id: shard_id_u32, organization_id, vault });
+        assignments.push(ShardAssignment { shard_id: shard_id_u32, organization, vault });
     }
 
     Ok(assignments)
@@ -302,14 +311,14 @@ impl StressMetrics {
         latency: Duration,
         key: String,
         value: Vec<u8>,
-        organization_id: i64,
-        vault: u64,
+        organization: OrganizationSlug,
+        vault: VaultSlug,
     ) {
         self.write_count.fetch_add(1, Ordering::Relaxed);
         self.write_latencies.lock().push(latency.as_micros() as u64);
         self.written_values_with_location
             .lock()
-            .insert(key, WrittenValue { organization_id, vault, value });
+            .insert(key, WrittenValue { organization, vault, value });
     }
 
     fn record_write_error(&self) {
@@ -511,9 +520,9 @@ async fn write_worker(
 
             let request = inferadb_ledger_proto::proto::BatchWriteRequest {
                 organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                    slug: config.organization_id as u64,
+                    slug: config.organization.value(),
                 }),
-                vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault }),
+                vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault.value() }),
                 client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.clone() }),
                 idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
                 operations,
@@ -538,7 +547,7 @@ async fn write_worker(
                                         per_op_latency,
                                         key,
                                         value,
-                                        config.organization_id,
+                                        config.organization,
                                         config.vault,
                                     );
                                 } else {
@@ -610,9 +619,9 @@ async fn write_worker(
                 client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.clone() }),
                 idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
                 organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                    slug: config.organization_id as u64,
+                    slug: config.organization.value(),
                 }),
-                vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault }),
+                vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault.value() }),
                 operations: vec![inferadb_ledger_proto::proto::Operation {
                     op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                         inferadb_ledger_proto::proto::SetEntity {
@@ -637,7 +646,7 @@ async fn write_worker(
                                     latency,
                                     key,
                                     value,
-                                    config.organization_id,
+                                    config.organization,
                                     config.vault,
                                 );
                             } else {
@@ -753,9 +762,9 @@ async fn read_worker(
 
             let request = inferadb_ledger_proto::proto::BatchReadRequest {
                 organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                    slug: config.organization_id as u64,
+                    slug: config.organization.value(),
                 }),
-                vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault }),
+                vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault.value() }),
                 keys,
                 consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
             };
@@ -797,9 +806,9 @@ async fn read_worker(
 
             let request = inferadb_ledger_proto::proto::ReadRequest {
                 organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                    slug: config.organization_id as u64,
+                    slug: config.organization.value(),
                 }),
-                vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault }),
+                vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault.value() }),
                 key,
                 consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
             };
@@ -844,9 +853,9 @@ async fn verify_consistency(
     for (i, (key, expected_value)) in written.iter().take(sample_size).enumerate() {
         let request = inferadb_ledger_proto::proto::ReadRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: config.organization_id as u64,
+                slug: config.organization.value(),
             }),
-            vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault }),
+            vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault.value() }),
             key: key.clone(),
             // Use eventual consistency for verification - linearizable reads require
             // additional Raft configuration that isn't always enabled in test clusters.
@@ -955,9 +964,11 @@ async fn verify_multi_shard_consistency(
 
         let request = inferadb_ledger_proto::proto::ReadRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: written_value.organization_id as u64,
+                slug: written_value.organization.value(),
             }),
-            vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: written_value.vault }),
+            vault: Some(inferadb_ledger_proto::proto::VaultSlug {
+                slug: written_value.vault.value(),
+            }),
             key: key.clone(),
             consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
         };
@@ -976,7 +987,7 @@ async fn verify_multi_shard_consistency(
                             eprintln!(
                                 "  ❌ Mismatch for key '{}' (ns={}, vault={}): expected {} bytes, got {} bytes",
                                 key,
-                                written_value.organization_id,
+                                written_value.organization,
                                 written_value.vault,
                                 written_value.value.len(),
                                 value.len()
@@ -988,7 +999,7 @@ async fn verify_multi_shard_consistency(
                     if mismatches <= 5 {
                         eprintln!(
                             "  ❌ Key '{}' not found in ns={}, vault={} (was written)",
-                            key, written_value.organization_id, written_value.vault
+                            key, written_value.organization, written_value.vault
                         );
                     }
                 }
@@ -998,7 +1009,7 @@ async fn verify_multi_shard_consistency(
                 if mismatches <= 5 {
                     eprintln!(
                         "  ❌ Error reading key '{}' from ns={}, vault={}: {}",
-                        key, written_value.organization_id, written_value.vault, e
+                        key, written_value.organization, written_value.vault, e
                     );
                 }
             },
@@ -1073,7 +1084,7 @@ async fn run_stress_test_with_cluster_size(cluster_size: usize, mut config: Stre
         .expect("setup organization and vault");
     println!(
         "   ✅ Organization (slug={}) and vault (slug={}) created",
-        config.organization_id, config.vault
+        config.organization, config.vault
     );
 
     // Metrics and control
@@ -1320,7 +1331,7 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
             for assignment in &assignments {
                 println!(
                     "   ✅ Shard {} → Organization {} → Vault {}",
-                    assignment.shard_id, assignment.organization_id, assignment.vault
+                    assignment.shard_id, assignment.organization, assignment.vault
                 );
             }
             assignments
@@ -1344,7 +1355,7 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
         // Distribute workers round-robin across shards
         let assignment = shard_assignments[i % shard_assignments.len()].clone();
         let worker_config = StressConfig {
-            organization_id: assignment.organization_id,
+            organization: assignment.organization,
             vault: assignment.vault,
             track_write_locations: true, // Enable location tracking for multi-shard verification
             ..config.clone()
@@ -1359,7 +1370,7 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
 
     // For reads, use the first shard assignment (reads are fast anyway)
     let read_config = StressConfig {
-        organization_id: shard_assignments[0].organization_id,
+        organization: shard_assignments[0].organization,
         vault: shard_assignments[0].vault,
         ..config.clone()
     };
@@ -1459,8 +1470,8 @@ async fn test_stress_multi_shard_quick() {
             read_workers: 8,
             duration: Duration::from_secs(5),
             batch_size: 10,
-            organization_id: 0, // Overridden per-worker by shard assignments
-            vault: 1,
+            organization: OrganizationSlug::new(0), // Overridden per-worker by shard assignments
+            vault: VaultSlug::new(1),
             max_concurrent_writes: 50,
             max_concurrent_reads: 200,
             ..Default::default()
@@ -1489,8 +1500,8 @@ async fn test_stress_multi_shard_batched() {
             duration: Duration::from_secs(10),
             batch_size: 50, // Match batched test
             read_batch_size: 50,
-            organization_id: 0, // Overridden per-worker by shard assignments
-            vault: 1,
+            organization: OrganizationSlug::new(0), // Overridden per-worker by shard assignments
+            vault: VaultSlug::new(1),
             max_concurrent_writes: 100,
             max_concurrent_reads: 500,
             ..Default::default()
@@ -1514,8 +1525,8 @@ async fn test_stress_multi_shard() {
             duration: Duration::from_secs(15),
             batch_size: 50, // Match batched test for consistency
             read_batch_size: 100,
-            organization_id: 0, // Overridden per-worker by shard assignments
-            vault: 1,
+            organization: OrganizationSlug::new(0), // Overridden per-worker by shard assignments
+            vault: VaultSlug::new(1),
             max_concurrent_writes: 200,
             max_concurrent_reads: 1000,
             ..Default::default()
@@ -1548,8 +1559,8 @@ async fn test_stress_multi_shard_target() {
             duration: Duration::from_secs(15),
             batch_size: 100, // 16KB pages support larger batches
             read_batch_size: 100,
-            organization_id: 0, // Overridden per-worker by shard assignments
-            vault: 1,
+            organization: OrganizationSlug::new(0), // Overridden per-worker by shard assignments
+            vault: VaultSlug::new(1),
             max_concurrent_writes: 160,
             max_concurrent_reads: 500,
             ..Default::default()

@@ -44,7 +44,7 @@ pub struct AppliedState {
     #[serde(default)]
     pub previous_shard_hash: Hash,
     /// Per-client sequence tracking with cross-failover idempotency metadata.
-    /// Key: (organization_id, vault_id, client_id), Value: sequence + dedup fields.
+    /// Key: (organization, vault, client_id), Value: sequence + dedup fields.
     #[serde(default)]
     pub client_sequences: HashMap<(OrganizationId, VaultId, String), ClientSequenceEntry>,
     /// Cumulative estimated storage bytes per organization.
@@ -79,8 +79,8 @@ pub struct AppliedState {
 /// Metadata for an organization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrganizationMeta {
-    /// Organization ID.
-    pub organization_id: OrganizationId,
+    /// Internal organization identifier (`OrganizationId`).
+    pub organization: OrganizationId,
     /// External slug for API lookups.
     pub slug: OrganizationSlug,
     /// Human-readable name.
@@ -107,10 +107,10 @@ pub struct OrganizationMeta {
 /// Metadata for a vault.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultMeta {
-    /// Organization owning this vault.
-    pub organization_id: OrganizationId,
-    /// Vault ID.
-    pub vault_id: VaultId,
+    /// Internal organization identifier (`OrganizationId`) owning this vault.
+    pub organization: OrganizationId,
+    /// Internal vault identifier (`VaultId`).
+    pub vault: VaultId,
     /// External Snowflake slug for API lookups (generated before Raft proposal).
     pub slug: VaultSlug,
     /// Human-readable name (optional).
@@ -328,34 +328,40 @@ impl PendingExternalWrites {
     /// Encodes a composite key for vault-scoped tables (`VaultHeights`,
     /// `VaultHashes`, `VaultHealth`).
     ///
-    /// Format: `{organization_id:8BE}{vault_id:8BE}` (16 bytes total).
+    /// Format: `{organization:8BE}{vault:8BE}` (16 bytes total).
     ///
     /// Big-endian encoding ensures lexicographic byte ordering matches numeric
     /// ordering for non-negative IDs, enabling efficient B+ tree range scans
     /// scoped to a single organization.
-    pub fn vault_composite_key(organization_id: OrganizationId, vault_id: VaultId) -> Vec<u8> {
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    pub fn vault_composite_key(organization: OrganizationId, vault: VaultId) -> Vec<u8> {
         let mut key = Vec::with_capacity(16);
-        key.extend_from_slice(&organization_id.value().to_be_bytes());
-        key.extend_from_slice(&vault_id.value().to_be_bytes());
+        key.extend_from_slice(&organization.value().to_be_bytes());
+        key.extend_from_slice(&vault.value().to_be_bytes());
         key
     }
 
     /// Encodes a composite key for the `ClientSequences` table.
     ///
-    /// Format: `{organization_id:8BE}{vault_id:8BE}{client_id:raw}` (16 + len bytes).
+    /// Format: `{organization:8BE}{vault:8BE}{client_id:raw}` (16 + len bytes).
     ///
     /// The 16-byte fixed-length prefix ensures no collisions between different
     /// org/vault combinations regardless of `client_id` content (including
     /// `\0` bytes). The `client_id` is appended raw without a length prefix
     /// because it occupies the key suffix — no ambiguity is possible.
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn client_sequence_key(
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         client_id: &[u8],
     ) -> Vec<u8> {
         let mut key = Vec::with_capacity(16 + client_id.len());
-        key.extend_from_slice(&organization_id.value().to_be_bytes());
-        key.extend_from_slice(&vault_id.value().to_be_bytes());
+        key.extend_from_slice(&organization.value().to_be_bytes());
+        key.extend_from_slice(&vault.value().to_be_bytes());
         key.extend_from_slice(client_id);
         key
     }
@@ -582,7 +588,7 @@ mod tests {
         state.organizations.insert(
             OrganizationId::new(1),
             OrganizationMeta {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: OrganizationSlug::new(0),
                 shard_id: ShardId::new(0),
                 name: "test".to_string(),

@@ -12,6 +12,8 @@
 
 use std::time::Duration;
 
+use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+
 use crate::common::{TestCluster, create_admin_client, create_write_client};
 
 // ============================================================================
@@ -22,7 +24,7 @@ use crate::common::{TestCluster, create_admin_client, create_write_client};
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
-) -> Result<u64, Box<dyn std::error::Error>> {
+) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
@@ -32,8 +34,11 @@ async fn create_organization(
         })
         .await?;
 
-    let slug =
-        response.into_inner().slug.map(|n| n.slug).ok_or("No organization slug in response")?;
+    let slug = response
+        .into_inner()
+        .slug
+        .map(|n| OrganizationSlug::new(n.slug))
+        .ok_or("No organization slug in response")?;
 
     Ok(slug)
 }
@@ -41,20 +46,24 @@ async fn create_organization(
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
     addr: std::net::SocketAddr,
-    organization: u64,
-) -> Result<u64, Box<dyn std::error::Error>> {
+    organization: OrganizationSlug,
+) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization,
+                slug: organization.value(),
             }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
         })
         .await?;
-    let slug = response.into_inner().vault.map(|v| v.slug).ok_or("No vault slug in response")?;
+    let slug = response
+        .into_inner()
+        .vault
+        .map(|v| VaultSlug::new(v.slug))
+        .ok_or("No vault slug in response")?;
     Ok(slug)
 }
 
@@ -85,9 +94,9 @@ async fn test_ordered_replication() {
             }),
             idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization,
+                slug: organization.value(),
             }),
-            vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
+            vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
             operations: vec![inferadb_ledger_proto::proto::Operation {
                 op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                     inferadb_ledger_proto::proto::SetEntity {
@@ -146,8 +155,10 @@ async fn test_follower_state_consistency() {
     let batch_request = inferadb_ledger_proto::proto::BatchWriteRequest {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "batch-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: organization }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization.value(),
+        }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         operations: (0..10)
             .map(|i| inferadb_ledger_proto::proto::BatchWriteOperation {
                 operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -207,8 +218,10 @@ async fn test_replication_after_delay() {
     let request = inferadb_ledger_proto::proto::WriteRequest {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "delay-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: organization }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization.value(),
+        }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                 inferadb_ledger_proto::proto::SetEntity {
@@ -231,8 +244,10 @@ async fn test_replication_after_delay() {
     let request2 = inferadb_ledger_proto::proto::WriteRequest {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "delay-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: organization }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization.value(),
+        }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                 inferadb_ledger_proto::proto::SetEntity {

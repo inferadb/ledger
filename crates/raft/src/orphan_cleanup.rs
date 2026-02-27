@@ -161,7 +161,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
     /// deleted users. Returns `(key, user_id)` pairs for orphaned memberships.
     fn find_orphaned_memberships(
         &self,
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         deleted_users: &HashSet<i64>,
     ) -> Vec<(String, i64)> {
         if deleted_users.is_empty() {
@@ -170,14 +170,14 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
 
         // Find the organization's vaults. Membership entities are stored
         // in the organization's vaults, not in the _system vault.
-        let vaults = self.applied_state.list_vaults(organization_id);
+        let vaults = self.applied_state.list_vaults(organization);
 
         let mut orphaned = Vec::new();
 
         // Scan each vault in the organization for membership entities
         for vault in &vaults {
             let entities = match self.state.list_entities(
-                vault.vault_id,
+                vault.vault,
                 Some("member:"),
                 None,
                 MAX_BATCH_SIZE,
@@ -185,8 +185,8 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
                 Ok(e) => e,
                 Err(e) => {
                     warn!(
-                        organization_id = organization_id.value(),
-                        vault_id = vault.vault_id.value(),
+                        organization = organization.value(),
+                        vault = vault.vault.value(),
                         error = %e,
                         "Failed to list memberships"
                     );
@@ -219,7 +219,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
     /// Removes orphaned memberships from an organization.
     async fn remove_orphaned_memberships(
         &self,
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         orphaned: Vec<(String, i64)>,
     ) -> Result<usize, OrphanCleanupError> {
         if orphaned.is_empty() {
@@ -252,7 +252,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         };
 
         let request = LedgerRequest::Write {
-            organization: organization_id,
+            organization,
             vault: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
@@ -267,7 +267,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
                 backtrace: snafu::Backtrace::generate(),
             })?;
 
-        info!(organization_id = organization_id.value(), count, "Removed orphaned memberships");
+        info!(organization = organization.value(), count, "Removed orphaned memberships");
 
         Ok(count)
     }
@@ -315,12 +315,12 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         let mut total_removed: u64 = 0;
 
         for ns in organizations {
-            // Skip _system organization (organization_id = 0)
-            if ns.organization_id == SYSTEM_ORGANIZATION_ID {
+            // Skip _system organization (organization = 0)
+            if ns.organization == SYSTEM_ORGANIZATION_ID {
                 continue;
             }
 
-            let orphaned = self.find_orphaned_memberships(ns.organization_id, &deleted_users);
+            let orphaned = self.find_orphaned_memberships(ns.organization, &deleted_users);
             if orphaned.is_empty() {
                 // Yield between organizations to avoid I/O bursts
                 tokio::task::yield_now().await;
@@ -328,16 +328,16 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             }
 
             debug!(
-                organization_id = ns.organization_id.value(),
+                organization = ns.organization.value(),
                 count = orphaned.len(),
                 "Found orphaned memberships"
             );
 
-            match self.remove_orphaned_memberships(ns.organization_id, orphaned).await {
+            match self.remove_orphaned_memberships(ns.organization, orphaned).await {
                 Ok(count) => total_removed += count as u64,
                 Err(e) => {
                     warn!(
-                        organization_id = ns.organization_id.value(),
+                        organization = ns.organization.value(),
                         error = %e,
                         "Failed to remove orphaned memberships"
                     );
@@ -418,10 +418,10 @@ mod tests {
     ) -> AppliedStateAccessor {
         let mut state = AppliedState::default();
         for org in orgs {
-            state.organizations.insert(org.organization_id, org);
+            state.organizations.insert(org.organization, org);
         }
         for vault in vaults {
-            state.vaults.insert((vault.organization_id, vault.vault_id), vault);
+            state.vaults.insert((vault.organization, vault.vault), vault);
         }
         AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)))
     }
@@ -659,7 +659,7 @@ mod tests {
         let accessor = create_test_accessor(
             vec![
                 OrganizationMeta {
-                    organization_id: OrganizationId::new(1),
+                    organization: OrganizationId::new(1),
                     slug: OrganizationSlug::new(100),
                     name: "Org1".to_string(),
                     shard_id: ShardId::new(0),
@@ -669,7 +669,7 @@ mod tests {
                     storage_bytes: 0,
                 },
                 OrganizationMeta {
-                    organization_id: OrganizationId::new(2),
+                    organization: OrganizationId::new(2),
                     slug: OrganizationSlug::new(200),
                     name: "Org2".to_string(),
                     shard_id: ShardId::new(0),
@@ -681,8 +681,8 @@ mod tests {
             ],
             vec![
                 VaultMeta {
-                    organization_id: OrganizationId::new(1),
-                    vault_id: org1_vault,
+                    organization: OrganizationId::new(1),
+                    vault: org1_vault,
                     slug: VaultSlug::new(1000),
                     name: Some("vault1".to_string()),
                     deleted: false,
@@ -690,8 +690,8 @@ mod tests {
                     retention_policy: Default::default(),
                 },
                 VaultMeta {
-                    organization_id: OrganizationId::new(2),
-                    vault_id: org2_vault,
+                    organization: OrganizationId::new(2),
+                    vault: org2_vault,
                     slug: VaultSlug::new(2000),
                     name: Some("vault2".to_string()),
                     deleted: false,
@@ -708,7 +708,7 @@ mod tests {
         let mut org1_orphans = Vec::new();
         for vault in &org1_vaults {
             let entities = state
-                .list_entities(vault.vault_id, Some("member:"), None, MAX_BATCH_SIZE)
+                .list_entities(vault.vault, Some("member:"), None, MAX_BATCH_SIZE)
                 .expect("list memberships");
             for entity in entities {
                 let key = String::from_utf8_lossy(&entity.key).to_string();
@@ -736,7 +736,7 @@ mod tests {
         let mut org2_orphans = Vec::new();
         for vault in &org2_vaults {
             let entities = state
-                .list_entities(vault.vault_id, Some("member:"), None, MAX_BATCH_SIZE)
+                .list_entities(vault.vault, Some("member:"), None, MAX_BATCH_SIZE)
                 .expect("list memberships");
             for entity in entities {
                 let Some(member_data) =

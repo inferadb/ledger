@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use inferadb_ledger_state::{EventStore, EventsDatabase};
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
-    OrganizationId,
+    OrganizationId, OrganizationSlug, VaultSlug,
     events::{EventAction, EventConfig, EventEmission, EventEntry, EventOutcome, EventScope},
 };
 use snafu::{ResultExt, Snafu};
@@ -162,12 +162,12 @@ impl<B: StorageBackend> EventWriter<B> {
 /// ```no_run
 /// # use inferadb_ledger_raft::event_writer::ApplyPhaseEmitter;
 /// # use inferadb_ledger_types::events::{EventAction, EventOutcome};
-/// # use inferadb_ledger_types::OrganizationId;
+/// # use inferadb_ledger_types::{OrganizationId, OrganizationSlug};
 /// # use chrono::Utc;
 /// let entry = ApplyPhaseEmitter::for_organization(
 ///         EventAction::WriteCommitted,
 ///         OrganizationId::new(1),
-///         Some(12345),
+///         Some(OrganizationSlug::new(12345)),
 ///     )
 ///     .principal("user:alice")
 ///     .outcome(EventOutcome::Success)
@@ -177,8 +177,8 @@ impl<B: StorageBackend> EventWriter<B> {
 pub struct ApplyPhaseEmitter {
     action: EventAction,
     organization_id: OrganizationId,
-    organization: Option<u64>,
-    vault: Option<u64>,
+    organization: Option<OrganizationSlug>,
+    vault: Option<VaultSlug>,
     principal: String,
     outcome: EventOutcome,
     details: BTreeMap<String, String>,
@@ -208,7 +208,7 @@ impl ApplyPhaseEmitter {
     pub fn for_organization(
         action: EventAction,
         org_id: OrganizationId,
-        organization: Option<u64>,
+        organization: Option<OrganizationSlug>,
     ) -> Self {
         Self {
             action,
@@ -224,8 +224,8 @@ impl ApplyPhaseEmitter {
         }
     }
 
-    /// Sets the vault context.
-    pub fn vault(mut self, slug: u64) -> Self {
+    /// Sets the vault slug (external identifier).
+    pub fn vault(mut self, slug: VaultSlug) -> Self {
         self.vault = Some(slug);
         self
     }
@@ -329,11 +329,11 @@ impl ApplyPhaseEmitter {
 /// ```no_run
 /// # use inferadb_ledger_raft::event_writer::HandlerPhaseEmitter;
 /// # use inferadb_ledger_types::events::{EventAction, EventOutcome};
-/// # use inferadb_ledger_types::OrganizationId;
+/// # use inferadb_ledger_types::{OrganizationId, OrganizationSlug};
 /// let entry = HandlerPhaseEmitter::for_organization(
 ///         EventAction::RequestRateLimited,
 ///         OrganizationId::new(1),
-///         Some(12345),
+///         Some(OrganizationSlug::new(12345)),
 ///         42,
 ///     )
 ///     .principal("user:alice")
@@ -344,8 +344,8 @@ impl ApplyPhaseEmitter {
 pub struct HandlerPhaseEmitter {
     action: EventAction,
     organization_id: OrganizationId,
-    organization: Option<u64>,
-    vault: Option<u64>,
+    organization: Option<OrganizationSlug>,
+    vault: Option<VaultSlug>,
     node_id: u64,
     principal: String,
     outcome: EventOutcome,
@@ -377,7 +377,7 @@ impl HandlerPhaseEmitter {
     pub fn for_organization(
         action: EventAction,
         org_id: OrganizationId,
-        organization: Option<u64>,
+        organization: Option<OrganizationSlug>,
         node_id: u64,
     ) -> Self {
         Self {
@@ -395,8 +395,8 @@ impl HandlerPhaseEmitter {
         }
     }
 
-    /// Sets the vault context.
-    pub fn vault(mut self, slug: u64) -> Self {
+    /// Sets the vault slug (external identifier).
+    pub fn vault(mut self, slug: VaultSlug) -> Self {
         self.vault = Some(slug);
         self
     }
@@ -757,9 +757,9 @@ mod tests {
         let entry = ApplyPhaseEmitter::for_organization(
             EventAction::WriteCommitted,
             OrganizationId::new(42),
-            Some(12345),
+            Some(OrganizationSlug::new(12345)),
         )
-        .vault(67890)
+        .vault(VaultSlug::new(67890))
         .principal("user:alice")
         .outcome(EventOutcome::Success)
         .operations_count(5)
@@ -772,8 +772,8 @@ mod tests {
         assert_eq!(entry.scope, EventScope::Organization);
         assert_eq!(entry.emission, EventEmission::ApplyPhase);
         assert_eq!(entry.organization_id, OrganizationId::new(42));
-        assert_eq!(entry.organization, Some(12345));
-        assert_eq!(entry.vault, Some(67890));
+        assert_eq!(entry.organization, Some(OrganizationSlug::new(12345)));
+        assert_eq!(entry.vault, Some(VaultSlug::new(67890)));
         assert_eq!(entry.principal, "user:alice");
         assert_eq!(entry.operations_count, Some(5));
         assert_eq!(entry.details.get("vault_name").unwrap(), "my-vault");
@@ -999,7 +999,7 @@ mod tests {
         let entry1 = ApplyPhaseEmitter::for_organization(
             EventAction::WriteCommitted,
             OrganizationId::new(1),
-            Some(100),
+            Some(OrganizationSlug::new(100)),
         )
         .principal("user:alice")
         .operations_count(3)
@@ -1008,7 +1008,7 @@ mod tests {
         let entry2 = ApplyPhaseEmitter::for_organization(
             EventAction::WriteCommitted,
             OrganizationId::new(1),
-            Some(100),
+            Some(OrganizationSlug::new(100)),
         )
         .principal("user:alice")
         .operations_count(3)
@@ -1049,11 +1049,11 @@ mod tests {
         let entry = HandlerPhaseEmitter::for_organization(
             EventAction::RequestRateLimited,
             OrganizationId::new(7),
-            Some(99999),
+            Some(OrganizationSlug::new(99999)),
             10,
         )
         .principal("client:bot")
-        .vault(55555)
+        .vault(VaultSlug::new(55555))
         .outcome(EventOutcome::Denied { reason: "rate_limited".to_string() })
         .detail("level", "organization")
         .trace_id("trace-123")
@@ -1065,8 +1065,8 @@ mod tests {
         assert_eq!(entry.scope, EventScope::Organization);
         assert_eq!(entry.emission, EventEmission::HandlerPhase { node_id: 10 });
         assert_eq!(entry.organization_id, OrganizationId::new(7));
-        assert_eq!(entry.organization, Some(99999));
-        assert_eq!(entry.vault, Some(55555));
+        assert_eq!(entry.organization, Some(OrganizationSlug::new(99999)));
+        assert_eq!(entry.vault, Some(VaultSlug::new(55555)));
         assert_eq!(entry.principal, "client:bot");
         assert_eq!(entry.event_type, "ledger.request.rate_limited");
         assert!(

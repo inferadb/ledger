@@ -10,6 +10,7 @@
 //! message and preserve the semantic information in our error variants.
 
 use inferadb_ledger_state::{BlockArchiveError, StateError};
+use inferadb_ledger_types::{OrganizationId, VaultId};
 use snafu::{Backtrace, GenerateImplicitData, Snafu};
 
 // ============================================================================
@@ -26,9 +27,14 @@ pub enum RecoveryError {
 
     /// Failed to look up block index for vault height.
     #[snafu(display(
-        "Index lookup failed for organization {organization_id}, vault {vault_id}, height {height}: {source}"
+        "Index lookup failed for organization {organization}, vault {vault}, height {height}: {source}"
     ))]
-    IndexLookup { organization_id: i64, vault_id: i64, height: u64, source: BlockArchiveError },
+    IndexLookup {
+        organization: OrganizationId,
+        vault: VaultId,
+        height: u64,
+        source: BlockArchiveError,
+    },
 
     /// Failed to read block from archive.
     #[snafu(display("Block read failed at shard height {shard_height}: {source}"))]
@@ -39,8 +45,8 @@ pub enum RecoveryError {
     ApplyOperations { height: u64, source: StateError },
 
     /// Failed to compute state root.
-    #[snafu(display("State root computation failed for vault {vault_id}: {source}"))]
-    StateRootComputation { vault_id: i64, source: StateError },
+    #[snafu(display("State root computation failed for vault {vault}: {source}"))]
+    StateRootComputation { vault: VaultId, source: StateError },
 
     /// Raft consensus write failed.
     #[snafu(display("Raft consensus write failed: {message}"))]

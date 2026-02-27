@@ -254,15 +254,17 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
     /// Returns an organization by ID.
     ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    ///
     /// # Errors
     ///
     /// Returns [`SystemError::State`] if the read fails, or
     /// [`SystemError::Codec`] if deserialization fails.
     pub fn get_organization(
         &self,
-        organization_id: OrganizationId,
+        organization: OrganizationId,
     ) -> Result<Option<OrganizationRegistry>> {
-        let key = SystemKeys::organization_key(organization_id);
+        let key = SystemKeys::organization_key(organization);
 
         let entity_opt =
             self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
@@ -330,19 +332,21 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
     /// Updates organization status.
     ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    ///
     /// # Errors
     ///
     /// Returns [`SystemError::NotFound`] if the organization does not exist, or
     /// [`SystemError::Codec`] / [`SystemError::State`] if the update fails.
     pub fn update_organization_status(
         &self,
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         slug: OrganizationSlug,
         status: OrganizationStatus,
     ) -> Result<()> {
         // Get existing registry
-        let mut registry = self.get_organization(organization_id)?.ok_or_else(|| {
-            SystemError::NotFound { entity: format!("organization:{}", organization_id) }
+        let mut registry = self.get_organization(organization)?.ok_or_else(|| {
+            SystemError::NotFound { entity: format!("organization:{}", organization) }
         })?;
 
         // Update status
@@ -359,18 +363,22 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
     /// Returns the shard ID for an organization.
     ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    ///
     /// # Errors
     ///
     /// Returns [`SystemError::State`] or [`SystemError::Codec`] if the
     /// organization lookup fails.
     pub fn get_shard_for_organization(
         &self,
-        organization_id: OrganizationId,
+        organization: OrganizationId,
     ) -> Result<Option<ShardId>> {
-        self.get_organization(organization_id).map(|opt| opt.map(|r| r.shard_id))
+        self.get_organization(organization).map(|opt| opt.map(|r| r.shard_id))
     }
 
     /// Assigns an organization to a shard.
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
     ///
     /// # Errors
     ///
@@ -378,13 +386,13 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     /// [`SystemError::Codec`] / [`SystemError::State`] if the update fails.
     pub fn assign_organization_to_shard(
         &self,
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         slug: OrganizationSlug,
         shard_id: ShardId,
         member_nodes: Vec<NodeId>,
     ) -> Result<()> {
-        let mut registry = self.get_organization(organization_id)?.ok_or_else(|| {
-            SystemError::NotFound { entity: format!("organization:{}", organization_id) }
+        let mut registry = self.get_organization(organization)?.ok_or_else(|| {
+            SystemError::NotFound { entity: format!("organization:{}", organization) }
         })?;
 
         registry.shard_id = shard_id;
@@ -400,14 +408,16 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
     /// Registers a vault slug → internal ID mapping.
     ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    ///
     /// Stores the mapping in the system vault for persistent slug resolution.
     ///
     /// # Errors
     ///
     /// Returns [`SystemError::State`] if the write operation fails.
-    pub fn register_vault_slug(&self, slug: VaultSlug, vault_id: VaultId) -> Result<()> {
+    pub fn register_vault_slug(&self, slug: VaultSlug, vault: VaultId) -> Result<()> {
         let key = SystemKeys::vault_slug_key(slug);
-        let value = vault_id.value().to_string().into_bytes();
+        let value = vault.value().to_string().into_bytes();
 
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
 

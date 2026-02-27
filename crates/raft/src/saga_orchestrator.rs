@@ -95,7 +95,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     fn load_pending_sagas(&self) -> Vec<Saga> {
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
 
-        // List all entities with saga: prefix in _system (vault_id=0)
+        // List all entities with saga: prefix in _system (vault=0)
         let entities =
             match self.state.list_entities(SYSTEM_VAULT_ID, Some(SAGA_KEY_PREFIX), None, 1000) {
                 Ok(e) => e,
@@ -221,11 +221,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             CreateOrgSagaState::UserCreated { user_id } => {
                 // Step 2: Create organization
                 let raw_ns_id = self.allocate_sequence_id("organization").await?;
-                let organization_id = OrganizationId::new(raw_ns_id);
+                let organization = OrganizationId::new(raw_ns_id);
 
-                let ns_key = format!("organization:{}", organization_id.value());
+                let ns_key = format!("organization:{}", organization.value());
                 let ns_value = serde_json::json!({
-                    "id": organization_id.value(),
+                    "id": organization.value(),
                     "name": saga.input.org_name,
                     "owner_user_id": user_id.value(),
                     "created_at": chrono::Utc::now().to_rfc3339(),
@@ -236,9 +236,9 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
                 saga.transition(CreateOrgSagaState::OrganizationCreated {
                     user_id,
-                    organization_id,
+                    organization_id: organization,
                 });
-                info!(saga_id = %saga.id, organization_id = organization_id.value(), "CreateOrg: organization created");
+                info!(saga_id = %saga.id, organization = organization.value(), "CreateOrg: organization created");
                 Ok(())
             },
 
@@ -259,7 +259,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 info!(
                     saga_id = %saga.id,
                     user_id = user_id.value(),
-                    organization_id = organization_id.value(),
+                    organization = organization_id.value(),
                     "CreateOrg: saga completed"
                 );
                 Ok(())
@@ -324,15 +324,15 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
             DeleteUserSagaState::MarkingDeleted { user_id, remaining_organizations } => {
                 // Step 2: Remove memberships from each organization
-                if let Some(organization_id) = remaining_organizations.first() {
+                if let Some(organization) = remaining_organizations.first() {
                     let member_key = format!("member:{}", user_id.value());
 
                     // Delete membership in this organization
-                    self.delete_entity(*organization_id, SYSTEM_VAULT_ID, &member_key).await?;
+                    self.delete_entity(*organization, SYSTEM_VAULT_ID, &member_key).await?;
 
                     // Also delete the index
                     let idx_key = format!("_idx:member:user:{}", user_id.value());
-                    let _ = self.delete_entity(*organization_id, SYSTEM_VAULT_ID, &idx_key).await;
+                    let _ = self.delete_entity(*organization, SYSTEM_VAULT_ID, &idx_key).await;
 
                     // Update remaining organizations
                     let remaining: Vec<_> = remaining_organizations[1..].to_vec();
@@ -349,7 +349,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     info!(
                         saga_id = %saga.id,
                         user_id = user_id.value(),
-                        organization_id = organization_id.value(),
+                        organization = organization.value(),
                         "DeleteUser: removed membership"
                     );
                 } else {
@@ -466,8 +466,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     /// Writes an entity to storage through Raft.
     async fn write_entity(
         &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), SagaError> {
@@ -493,8 +493,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         };
 
         let request = LedgerRequest::Write {
-            organization: organization_id,
-            vault: vault_id,
+            organization,
+            vault,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
@@ -514,8 +514,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     /// Deletes an entity from storage through Raft.
     async fn delete_entity(
         &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         key: &str,
     ) -> Result<(), SagaError> {
         let operation = Operation::DeleteEntity { key: key.to_string() };
@@ -533,8 +533,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         };
 
         let request = LedgerRequest::Write {
-            organization: organization_id,
-            vault: vault_id,
+            organization,
+            vault,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,

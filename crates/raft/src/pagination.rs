@@ -2,13 +2,13 @@
 //!
 //! Page tokens are opaque to clients and include:
 //! - HMAC validation to prevent tampering
-//! - Context validation (organization_id, vault_id) to prevent cross-context reuse
+//! - Context validation (organization, vault) to prevent cross-context reuse
 //! - Query hash to detect filter changes mid-pagination
 //! - Height tracking for consistent pagination across pages
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
-use inferadb_ledger_types::{decode, encode};
+use inferadb_ledger_types::{OrganizationId, VaultId, decode, encode};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
@@ -29,10 +29,10 @@ const HMAC_LENGTH: usize = 16;
 pub struct PageToken {
     /// Token format version (for future changes).
     pub version: u8,
-    /// Request context: organization ID.
-    pub organization_id: i64,
-    /// Request context: vault ID.
-    pub vault_id: i64,
+    /// Request context: organization (internal ID).
+    pub organization: OrganizationId,
+    /// Request context: vault (internal ID).
+    pub vault: VaultId,
     /// Resume position: last key returned.
     pub last_key: Vec<u8>,
     /// Consistent reads: height when pagination started.
@@ -149,17 +149,17 @@ impl PageTokenCodec {
     /// Validates that a token matches the current request context.
     ///
     /// Returns an error if:
-    /// - organization_id doesn't match
-    /// - vault_id doesn't match
+    /// - organization doesn't match
+    /// - vault doesn't match
     /// - query_hash doesn't match (filters changed)
     pub fn validate_context(
         &self,
         token: &PageToken,
-        organization_id: i64,
-        vault_id: i64,
+        organization: OrganizationId,
+        vault: VaultId,
         query_hash: [u8; 8],
     ) -> Result<(), PageTokenError> {
-        if token.organization_id != organization_id || token.vault_id != vault_id {
+        if token.organization != organization || token.vault != vault {
             return Err(PageTokenError::ContextMismatch);
         }
 
@@ -218,7 +218,7 @@ impl std::error::Error for PageTokenError {}
 
 /// Page token for events pagination.
 ///
-/// Unlike [`PageToken`] which carries `vault_id` and `at_height` for
+/// Unlike [`PageToken`] which carries `vault` and `at_height` for
 /// entity pagination, event page tokens only need the organization context,
 /// a resume cursor (raw B+ tree key), and a query hash to prevent filter
 /// changes mid-pagination.
@@ -226,8 +226,8 @@ impl std::error::Error for PageTokenError {}
 pub struct EventPageToken {
     /// Token format version (for future changes).
     pub version: u8,
-    /// Request context: organization ID.
-    pub organization_id: i64,
+    /// Request context: organization (internal ID).
+    pub organization: OrganizationId,
     /// Resume position: last raw key from the Events B+ tree.
     pub last_key: Vec<u8>,
     /// SeaHash of query params (prevents filter changes).
@@ -306,14 +306,14 @@ impl PageTokenCodec {
 
     /// Validates that an event token matches the current request context.
     ///
-    /// Returns an error if organization_id or query_hash don't match.
+    /// Returns an error if organization or query_hash don't match.
     pub fn validate_event_context(
         &self,
         token: &EventPageToken,
-        organization_id: i64,
+        organization: OrganizationId,
         query_hash: [u8; 8],
     ) -> Result<(), PageTokenError> {
-        if token.organization_id != organization_id {
+        if token.organization != organization {
             return Err(PageTokenError::ContextMismatch);
         }
 
@@ -336,8 +336,8 @@ mod tests {
 
         let token = PageToken {
             version: TOKEN_VERSION,
-            organization_id: 42,
-            vault_id: 100,
+            organization: OrganizationId::new(42),
+            vault: VaultId::new(100),
             last_key: b"entity:user:123".to_vec(),
             at_height: 1000,
             query_hash: [1, 2, 3, 4, 5, 6, 7, 8],
@@ -347,8 +347,8 @@ mod tests {
         let decoded = codec.decode(&encoded).expect("decode should succeed");
 
         assert_eq!(decoded.version, token.version);
-        assert_eq!(decoded.organization_id, token.organization_id);
-        assert_eq!(decoded.vault_id, token.vault_id);
+        assert_eq!(decoded.organization, token.organization);
+        assert_eq!(decoded.vault, token.vault);
         assert_eq!(decoded.last_key, token.last_key);
         assert_eq!(decoded.at_height, token.at_height);
         assert_eq!(decoded.query_hash, token.query_hash);
@@ -360,8 +360,8 @@ mod tests {
 
         let token = PageToken {
             version: TOKEN_VERSION,
-            organization_id: 42,
-            vault_id: 100,
+            organization: OrganizationId::new(42),
+            vault: VaultId::new(100),
             last_key: b"entity:user:123".to_vec(),
             at_height: 1000,
             query_hash: [1, 2, 3, 4, 5, 6, 7, 8],
@@ -396,8 +396,8 @@ mod tests {
 
         let token = PageToken {
             version: TOKEN_VERSION,
-            organization_id: 42,
-            vault_id: 100,
+            organization: OrganizationId::new(42),
+            vault: VaultId::new(100),
             last_key: b"entity:user:123".to_vec(),
             at_height: 1000,
             query_hash: [1, 2, 3, 4, 5, 6, 7, 8],
@@ -417,32 +417,41 @@ mod tests {
 
         let token = PageToken {
             version: TOKEN_VERSION,
-            organization_id: 42,
-            vault_id: 100,
+            organization: OrganizationId::new(42),
+            vault: VaultId::new(100),
             last_key: b"entity:user:123".to_vec(),
             at_height: 1000,
             query_hash,
         };
 
         // Matching context should succeed
-        assert!(codec.validate_context(&token, 42, 100, query_hash).is_ok());
+        assert!(
+            codec
+                .validate_context(&token, OrganizationId::new(42), VaultId::new(100), query_hash)
+                .is_ok()
+        );
 
         // Wrong organization should fail
         assert_eq!(
-            codec.validate_context(&token, 999, 100, query_hash),
+            codec.validate_context(&token, OrganizationId::new(999), VaultId::new(100), query_hash),
             Err(PageTokenError::ContextMismatch)
         );
 
         // Wrong vault should fail
         assert_eq!(
-            codec.validate_context(&token, 42, 999, query_hash),
+            codec.validate_context(&token, OrganizationId::new(42), VaultId::new(999), query_hash),
             Err(PageTokenError::ContextMismatch)
         );
 
         // Changed query should fail
         let different_hash = PageTokenCodec::compute_query_hash(b"prefix:admin");
         assert_eq!(
-            codec.validate_context(&token, 42, 100, different_hash),
+            codec.validate_context(
+                &token,
+                OrganizationId::new(42),
+                VaultId::new(100),
+                different_hash
+            ),
             Err(PageTokenError::QueryChanged)
         );
     }
@@ -473,7 +482,7 @@ mod tests {
 
         let token = EventPageToken {
             version: TOKEN_VERSION,
-            organization_id: 42,
+            organization: OrganizationId::new(42),
             last_key: vec![
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
                 24,
@@ -485,7 +494,7 @@ mod tests {
         let decoded = codec.decode_event(&encoded).expect("decode should succeed");
 
         assert_eq!(decoded.version, token.version);
-        assert_eq!(decoded.organization_id, token.organization_id);
+        assert_eq!(decoded.organization, token.organization);
         assert_eq!(decoded.last_key, token.last_key);
         assert_eq!(decoded.query_hash, token.query_hash);
     }
@@ -496,7 +505,7 @@ mod tests {
 
         let token = EventPageToken {
             version: TOKEN_VERSION,
-            organization_id: 42,
+            organization: OrganizationId::new(42),
             last_key: vec![0u8; 24],
             query_hash: [1, 2, 3, 4, 5, 6, 7, 8],
         };
@@ -519,7 +528,7 @@ mod tests {
 
         let token = EventPageToken {
             version: TOKEN_VERSION,
-            organization_id: 1,
+            organization: OrganizationId::new(1),
             last_key: vec![0u8; 24],
             query_hash: [0; 8],
         };
@@ -535,24 +544,24 @@ mod tests {
 
         let token = EventPageToken {
             version: TOKEN_VERSION,
-            organization_id: 42,
+            organization: OrganizationId::new(42),
             last_key: vec![0u8; 24],
             query_hash,
         };
 
         // Matching context
-        assert!(codec.validate_event_context(&token, 42, query_hash).is_ok());
+        assert!(codec.validate_event_context(&token, OrganizationId::new(42), query_hash).is_ok());
 
         // Wrong org
         assert_eq!(
-            codec.validate_event_context(&token, 999, query_hash),
+            codec.validate_event_context(&token, OrganizationId::new(999), query_hash),
             Err(PageTokenError::ContextMismatch)
         );
 
         // Changed query
         let different_hash = PageTokenCodec::compute_query_hash(b"action:vault_deleted");
         assert_eq!(
-            codec.validate_event_context(&token, 42, different_hash),
+            codec.validate_event_context(&token, OrganizationId::new(42), different_hash),
             Err(PageTokenError::QueryChanged)
         );
     }
@@ -569,8 +578,8 @@ mod tests {
 
         let page_token = PageToken {
             version: TOKEN_VERSION,
-            organization_id: 42,
-            vault_id: 100,
+            organization: OrganizationId::new(42),
+            vault: VaultId::new(100),
             last_key: vec![0u8; 24],
             at_height: 1000,
             query_hash: [0; 8],
@@ -578,7 +587,7 @@ mod tests {
 
         let event_token = EventPageToken {
             version: TOKEN_VERSION,
-            organization_id: 42,
+            organization: OrganizationId::new(42),
             last_key: vec![0u8; 24],
             query_hash: [0; 8],
         };

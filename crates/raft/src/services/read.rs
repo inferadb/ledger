@@ -192,8 +192,8 @@ impl ReadServiceImpl {
     fn get_block_header(
         &self,
         archive: &BlockArchive<FileBackend>,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         vault_height: u64,
     ) -> Option<inferadb_ledger_proto::proto::BlockHeader> {
         // Height 0 means no blocks yet
@@ -203,16 +203,14 @@ impl ReadServiceImpl {
 
         // Find the shard height containing this vault block
         let shard_height =
-            archive.find_shard_height(organization_id, vault_id, vault_height).ok().flatten()?;
+            archive.find_shard_height(organization, vault, vault_height).ok().flatten()?;
 
         // Read the shard block
         let shard_block = archive.read_block(shard_height).ok()?;
 
         // Find the vault entry
         let entry = shard_block.vault_entries.iter().find(|e| {
-            e.organization == organization_id
-                && e.vault == vault_id
-                && e.vault_height == vault_height
+            e.organization == organization && e.vault == vault && e.vault_height == vault_height
         })?;
 
         // Build proto block header
@@ -257,15 +255,14 @@ impl ReadServiceImpl {
     fn get_tip_hashes(
         &self,
         archive: &BlockArchive<FileBackend>,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         vault_height: u64,
     ) -> (Option<inferadb_ledger_proto::proto::Hash>, Option<inferadb_ledger_proto::proto::Hash>)
     {
         // Find the shard height containing this vault block
         let shard_height =
-            match archive.find_shard_height(organization_id, vault_id, vault_height).ok().flatten()
-            {
+            match archive.find_shard_height(organization, vault, vault_height).ok().flatten() {
                 Some(h) => h,
                 None => return (None, None),
             };
@@ -278,9 +275,7 @@ impl ReadServiceImpl {
 
         // Find the vault entry
         let entry = match shard_block.vault_entries.iter().find(|e| {
-            e.organization == organization_id
-                && e.vault == vault_id
-                && e.vault_height == vault_height
+            e.organization == organization && e.vault == vault && e.vault_height == vault_height
         }) {
             Some(e) => e,
             None => return (None, None),
@@ -304,7 +299,7 @@ impl ReadServiceImpl {
     /// The snapshot state is loaded into temp_state for the specified vault.
     fn load_nearest_snapshot_for_historical_read(
         &self,
-        vault_id: VaultId,
+        vault: VaultId,
         target_height: u64,
         temp_state: &StateLayer<FileBackend>,
     ) -> (u64, bool) {
@@ -327,12 +322,11 @@ impl ReadServiceImpl {
             };
 
             // Find the vault's height in this snapshot
-            if let Some(vault_meta) =
-                snapshot.header.vault_states.iter().find(|v| v.vault_id == vault_id)
+            if let Some(vault_meta) = snapshot.header.vault_states.iter().find(|v| v.vault == vault)
                 && vault_meta.vault_height <= target_height
             {
                 // This snapshot is usable - load its entities into temp_state
-                if let Some(entities) = snapshot.state.vault_entities.get(&vault_id) {
+                if let Some(entities) = snapshot.state.vault_entities.get(&vault) {
                     // Convert entities to SetEntity operations for replay
                     let operations: Vec<inferadb_ledger_types::Operation> = entities
                         .iter()
@@ -354,11 +348,8 @@ impl ReadServiceImpl {
 
                     // Apply all entities at the snapshot height
                     if !operations.is_empty()
-                        && let Err(e) = temp_state.apply_operations(
-                            vault_id,
-                            &operations,
-                            vault_meta.vault_height,
-                        )
+                        && let Err(e) =
+                            temp_state.apply_operations(vault, &operations, vault_meta.vault_height)
                     {
                         debug!("Failed to restore entities from snapshot: {:?}", e);
                         return (1, false);
@@ -390,8 +381,8 @@ impl ReadServiceImpl {
     fn build_chain_proof(
         &self,
         archive: &BlockArchive<FileBackend>,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         trusted_height: u64,
         response_height: u64,
     ) -> Option<inferadb_ledger_proto::proto::ChainProof> {
@@ -404,7 +395,7 @@ impl ReadServiceImpl {
         let mut headers = Vec::with_capacity((response_height - trusted_height) as usize);
 
         for height in (trusted_height + 1)..=response_height {
-            let header = self.get_block_header(archive, organization_id, vault_id, height)?;
+            let header = self.get_block_header(archive, organization, vault, height)?;
             headers.push(header);
         }
 
@@ -416,8 +407,8 @@ impl ReadServiceImpl {
     /// Used by watch_blocks to replay committed blocks before streaming new ones.
     fn fetch_historical_announcements(
         &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         start_height: u64,
         end_height: u64,
     ) -> Vec<BlockAnnouncement> {
@@ -435,7 +426,7 @@ impl ReadServiceImpl {
 
         for height in start_height..=end_height {
             // Find the shard height containing this vault block
-            let shard_height = match archive.find_shard_height(organization_id, vault_id, height) {
+            let shard_height = match archive.find_shard_height(organization, vault, height) {
                 Ok(Some(h)) => h,
                 Ok(None) => {
                     debug!(height, "Vault block not found in archive");
@@ -458,7 +449,7 @@ impl ReadServiceImpl {
 
             // Find the vault entry in the shard block
             if let Some(entry) = shard_block.vault_entries.iter().find(|e| {
-                e.organization == organization_id && e.vault == vault_id && e.vault_height == height
+                e.organization == organization && e.vault == vault && e.vault_height == height
             }) {
                 // Compute vault block hash using the same function as get_tip_hashes
                 let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
@@ -497,6 +488,9 @@ impl ReadServiceImpl {
 
 #[tonic::async_trait]
 impl ReadService for ReadServiceImpl {
+    /// Reads a single entity or relationship by key.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn read(&self, request: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
         // Extract trace context and transport metadata from gRPC headers before consuming
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
@@ -602,8 +596,8 @@ impl ReadService for ReadServiceImpl {
 
         let elapsed = ctx.elapsed_secs();
         metrics::record_read(true, elapsed);
-        metrics::record_organization_operation(organization_id.value(), "read");
-        metrics::record_organization_latency(organization_id.value(), "read", elapsed);
+        metrics::record_organization_operation(organization_id, "read");
+        metrics::record_organization_latency(organization_id, "read", elapsed);
         ctx.set_success();
 
         // Get current block height for this vault
@@ -754,8 +748,8 @@ impl ReadService for ReadServiceImpl {
         for _ in 0..batch_size {
             metrics::record_read(true, latency / batch_size as f64);
         }
-        metrics::record_organization_operation(organization_id.value(), "read");
-        metrics::record_organization_latency(organization_id.value(), "read", latency);
+        metrics::record_organization_operation(organization_id, "read");
+        metrics::record_organization_latency(organization_id, "read", latency);
 
         ctx.set_success();
 
@@ -766,6 +760,9 @@ impl ReadService for ReadServiceImpl {
         Ok(Response::new(BatchReadResponse { results, block_height }))
     }
 
+    /// Reads a single entity or relationship with a cryptographic merkle proof and chain proof.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn verified_read(
         &self,
         request: Request<VerifiedReadRequest>,
@@ -907,6 +904,9 @@ impl ReadService for ReadServiceImpl {
         }))
     }
 
+    /// Reads entity state at a specific block height from the block archive.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn historical_read(
         &self,
         request: Request<HistoricalReadRequest>,
@@ -1251,6 +1251,9 @@ impl ReadService for ReadServiceImpl {
         Ok(Response::new(Box::pin(combined)))
     }
 
+    /// Retrieves a single block by height from the block archive.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn get_block(
         &self,
         request: Request<GetBlockRequest>,
@@ -1307,6 +1310,9 @@ impl ReadService for ReadServiceImpl {
         Ok(Response::new(GetBlockResponse { block }))
     }
 
+    /// Retrieves a contiguous range of blocks by start and end height.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn get_block_range(
         &self,
         request: Request<GetBlockRangeRequest>,
@@ -1379,6 +1385,9 @@ impl ReadService for ReadServiceImpl {
         Ok(Response::new(GetBlockRangeResponse { blocks, current_tip }))
     }
 
+    /// Returns the latest block height, hash, and state root for a vault.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn get_tip(
         &self,
         request: Request<GetTipRequest>,
@@ -1431,6 +1440,9 @@ impl ReadService for ReadServiceImpl {
         Ok(Response::new(GetTipResponse { height, block_hash, state_root }))
     }
 
+    /// Returns the last committed sequence number for a client within a vault.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn get_client_state(
         &self,
         request: Request<GetClientStateRequest>,
@@ -1464,6 +1476,10 @@ impl ReadService for ReadServiceImpl {
         Ok(Response::new(GetClientStateResponse { last_committed_sequence }))
     }
 
+    /// Lists relationships in a vault with optional resource/relation/subject filters and
+    /// pagination.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn list_relationships(
         &self,
         request: Request<ListRelationshipsRequest>,
@@ -1513,7 +1529,7 @@ impl ReadService for ReadServiceImpl {
 
             // Validate token context matches request
             self.page_token_codec
-                .validate_context(&token, organization_id.value(), vault_id.value(), query_hash)
+                .validate_context(&token, organization_id, vault_id, query_hash)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
             (Some(String::from_utf8_lossy(&token.last_key).to_string()), token.at_height)
@@ -1575,8 +1591,8 @@ impl ReadService for ReadServiceImpl {
                     let cursor = format!("{}#{}@{}", r.resource, r.relation, r.subject);
                     let token = PageToken {
                         version: 1,
-                        organization_id: organization_id.value(),
-                        vault_id: vault_id.value(),
+                        organization: organization_id,
+                        vault: vault_id,
                         last_key: cursor.into_bytes(),
                         at_height,
                         query_hash,
@@ -1595,6 +1611,9 @@ impl ReadService for ReadServiceImpl {
         }))
     }
 
+    /// Lists distinct resource identifiers in a vault, optionally filtered by resource type.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn list_resources(
         &self,
         request: Request<ListResourcesRequest>,
@@ -1639,7 +1658,7 @@ impl ReadService for ReadServiceImpl {
 
             // Validate token context matches request
             self.page_token_codec
-                .validate_context(&token, organization_id.value(), vault_id.value(), query_hash)
+                .validate_context(&token, organization_id, vault_id, query_hash)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
             (Some(String::from_utf8_lossy(&token.last_key).to_string()), token.at_height)
@@ -1670,8 +1689,8 @@ impl ReadService for ReadServiceImpl {
                 .map(|res| {
                     let token = PageToken {
                         version: 1,
-                        organization_id: organization_id.value(),
-                        vault_id: vault_id.value(),
+                        organization: organization_id,
+                        vault: vault_id,
                         last_key: res.as_bytes().to_vec(),
                         at_height,
                         query_hash,
@@ -1686,6 +1705,9 @@ impl ReadService for ReadServiceImpl {
         Ok(Response::new(ListResourcesResponse { resources, next_page_token, block_height }))
     }
 
+    /// Lists entities in a vault with optional key-prefix filter and pagination.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn list_entities(
         &self,
         request: Request<ListEntitiesRequest>,
@@ -1749,7 +1771,7 @@ impl ReadService for ReadServiceImpl {
 
             // Validate token context matches request
             self.page_token_codec
-                .validate_context(&token, organization_id.value(), vault_id.value(), query_hash)
+                .validate_context(&token, organization_id, vault_id, query_hash)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
             (Some(String::from_utf8_lossy(&token.last_key).to_string()), token.at_height)
@@ -1787,8 +1809,8 @@ impl ReadService for ReadServiceImpl {
                 .map(|e| {
                     let token = PageToken {
                         version: 1,
-                        organization_id: organization_id.value(),
-                        vault_id: vault_id.value(),
+                        organization: organization_id,
+                        vault: vault_id,
                         last_key: e.key.clone(),
                         at_height,
                         query_hash,

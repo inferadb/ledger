@@ -31,13 +31,13 @@ pub enum ProofError {
 
     /// Failed to find shard height for the vault block.
     #[snafu(display(
-        "block not found: organization={organization_id}, vault={vault_id}, height={vault_height}"
+        "block not found: organization={organization}, vault={vault}, height={vault_height}"
     ))]
     BlockNotFound {
         /// The organization ID that was not found.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// The vault ID that was not found.
-        vault_id: VaultId,
+        vault: VaultId,
         /// The vault height that was not found.
         vault_height: u64,
     },
@@ -59,12 +59,12 @@ pub enum ProofError {
     },
 
     /// Vault entry not found in the block.
-    #[snafu(display("vault entry not in block: organization={organization_id}, vault={vault_id}"))]
+    #[snafu(display("vault entry not in block: organization={organization}, vault={vault}"))]
     VaultEntryNotFound {
         /// The organization ID that was searched for.
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         /// The vault ID that was searched for.
-        vault_id: VaultId,
+        vault: VaultId,
     },
 
     /// Transaction index out of bounds.
@@ -100,21 +100,26 @@ pub struct WriteProof {
 ///
 /// This is the main entry point for proof generation after a write commits.
 /// It fetches the block, extracts the vault entry, and generates proofs.
+///
+/// * `organization` - Internal organization identifier (`OrganizationId`).
+/// * `org_slug` - External organization slug (`OrganizationSlug`), if available.
+/// * `vault` - Internal vault identifier (`VaultId`).
+/// * `vault_slug` - External vault slug (`VaultSlug`), if available.
 #[allow(clippy::result_large_err)] // ProofError contains BlockArchiveError (160+ bytes)
 pub fn generate_write_proof(
     archive: &Arc<BlockArchive<FileBackend>>,
-    organization_id: OrganizationId,
-    organization: Option<OrganizationSlug>,
-    vault_id: VaultId,
-    vault: Option<VaultSlug>,
+    organization: OrganizationId,
+    org_slug: Option<OrganizationSlug>,
+    vault: VaultId,
+    vault_slug: Option<VaultSlug>,
     vault_height: u64,
     tx_index: usize,
 ) -> Result<WriteProof> {
     // Find the shard height containing this vault block
     let shard_height = archive
-        .find_shard_height(organization_id, vault_id, vault_height)
+        .find_shard_height(organization, vault, vault_height)
         .context(FindShardHeightSnafu)?
-        .ok_or(ProofError::BlockNotFound { organization_id, vault_id, vault_height })?;
+        .ok_or(ProofError::BlockNotFound { organization, vault, vault_height })?;
 
     // Read the block
     let block = archive.read_block(shard_height).context(ReadBlockSnafu { shard_height })?;
@@ -123,8 +128,8 @@ pub fn generate_write_proof(
     let entry = block
         .vault_entries
         .iter()
-        .find(|e| e.organization == organization_id && e.vault == vault_id)
-        .ok_or(ProofError::VaultEntryNotFound { organization_id, vault_id })?;
+        .find(|e| e.organization == organization && e.vault == vault)
+        .ok_or(ProofError::VaultEntryNotFound { organization, vault })?;
 
     // Validate transaction index
     if entry.transactions.is_empty() {
@@ -141,9 +146,9 @@ pub fn generate_write_proof(
     let block_header = proto::BlockHeader {
         height: entry.vault_height,
         organization: Some(proto::OrganizationSlug {
-            slug: organization.map_or(entry.organization.value() as u64, |s| s.value()),
+            slug: org_slug.map_or(entry.organization.value() as u64, |s| s.value()),
         }),
-        vault: Some(proto::VaultSlug { slug: vault.map_or(0, |s| s.value()) }),
+        vault: Some(proto::VaultSlug { slug: vault_slug.map_or(0, |s| s.value()) }),
         previous_hash: Some(proto::Hash { value: entry.previous_vault_hash.to_vec() }),
         tx_merkle_root: Some(proto::Hash { value: entry.tx_merkle_root.to_vec() }),
         state_root: Some(proto::Hash { value: entry.state_root.to_vec() }),

@@ -50,12 +50,12 @@ use tracing::{debug, info, warn};
 #[derive(Debug, Snafu)]
 pub enum RoutingError {
     /// Organization not found in routing table.
-    #[snafu(display("Organization {organization_id} not found"))]
-    OrganizationNotFound { organization_id: OrganizationId },
+    #[snafu(display("Organization {organization} not found"))]
+    OrganizationNotFound { organization: OrganizationId },
 
     /// Organization is not active (migrating, suspended, deleted).
-    #[snafu(display("Organization {organization_id} is {status:?}"))]
-    OrganizationUnavailable { organization_id: OrganizationId, status: OrganizationStatus },
+    #[snafu(display("Organization {organization} is {status:?}"))]
+    OrganizationUnavailable { organization: OrganizationId, status: OrganizationStatus },
 
     /// Shard has no available nodes.
     #[snafu(display("Shard {shard_id} has no available nodes"))]
@@ -212,13 +212,15 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     /// Returns the shard connection for the organization. The connection
     /// may be cached or freshly established.
     ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    ///
     /// # Errors
     ///
     /// Returns a routing error if the organization is not found in the routing
     /// table or the gRPC connection to the target shard cannot be established.
-    pub async fn route(&self, organization_id: OrganizationId) -> Result<ShardConnection> {
+    pub async fn route(&self, organization: OrganizationId) -> Result<ShardConnection> {
         // 1. Check cache
-        let routing = self.get_routing_internal(organization_id)?;
+        let routing = self.get_routing_internal(organization)?;
 
         // 2. Get or create connection
         self.get_connection(routing.shard_id, &routing.member_nodes, routing.leader_hint.as_deref())
@@ -230,26 +232,28 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     /// Returns the shard assignment and member nodes for the organization.
     /// Uses cached data if fresh, otherwise queries `_system`.
     ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    ///
     /// # Errors
     ///
     /// Returns a routing error if the organization is not found in the `_system`
     /// organization store or is not assigned to any shard.
-    pub fn get_routing(&self, organization_id: OrganizationId) -> Result<RoutingInfo> {
-        self.get_routing_internal(organization_id).map(|entry| entry.to_routing_info())
+    pub fn get_routing(&self, organization: OrganizationId) -> Result<RoutingInfo> {
+        self.get_routing_internal(organization).map(|entry| entry.to_routing_info())
     }
 
     /// Returns routing information for an organization (internal).
     ///
     /// Uses cached data if fresh, otherwise queries `_system`.
-    fn get_routing_internal(&self, organization_id: OrganizationId) -> Result<CacheEntry> {
+    fn get_routing_internal(&self, organization: OrganizationId) -> Result<CacheEntry> {
         // Check cache first
         {
             let cache = self.cache.read();
-            if let Some(entry) = cache.get(&organization_id)
+            if let Some(entry) = cache.get(&organization)
                 && !entry.is_stale(self.config.cache_ttl)
             {
                 debug!(
-                    organization_id = organization_id.value(),
+                    organization = organization.value(),
                     shard_id = entry.shard_id.value(),
                     "Cache hit"
                 );
@@ -258,21 +262,21 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         }
 
         // Cache miss or stale - query _system
-        self.refresh_routing(organization_id)
+        self.refresh_routing(organization)
     }
 
     /// Refreshes routing information from `_system`.
-    fn refresh_routing(&self, organization_id: OrganizationId) -> Result<CacheEntry> {
+    fn refresh_routing(&self, organization: OrganizationId) -> Result<CacheEntry> {
         let registry = self
             .system
-            .get_organization(organization_id)
+            .get_organization(organization)
             .context(SystemLookupSnafu)?
-            .ok_or(RoutingError::OrganizationNotFound { organization_id })?;
+            .ok_or(RoutingError::OrganizationNotFound { organization })?;
 
         // Check organization status
         if registry.status != OrganizationStatus::Active {
             return Err(RoutingError::OrganizationUnavailable {
-                organization_id,
+                organization,
                 status: registry.status,
             });
         }
@@ -288,11 +292,11 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         // Update cache
         {
             let mut cache = self.cache.write();
-            cache.insert(organization_id, entry.clone());
+            cache.insert(organization, entry.clone());
         }
 
         info!(
-            organization_id = organization_id.value(),
+            organization = organization.value(),
             shard_id = registry.shard_id.value(),
             config_version = registry.config_version,
             "Refreshed routing cache"
@@ -425,10 +429,12 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     /// Invalidate cached routing for an organization.
     ///
     /// Invalidates cached routing when a redirect indicates stale data.
-    pub fn invalidate(&self, organization_id: OrganizationId) {
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    pub fn invalidate(&self, organization: OrganizationId) {
         let mut cache = self.cache.write();
-        if cache.remove(&organization_id).is_some() {
-            debug!(organization_id = organization_id.value(), "Invalidated routing cache");
+        if cache.remove(&organization).is_some() {
+            debug!(organization = organization.value(), "Invalidated routing cache");
         }
     }
 
@@ -445,13 +451,15 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     /// Updates leader hint after successful request.
     ///
     /// Updates the leader hint when a response indicates the actual leader.
-    pub fn update_leader_hint(&self, organization_id: OrganizationId, leader_node: &str) {
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    pub fn update_leader_hint(&self, organization: OrganizationId, leader_node: &str) {
         let mut cache = self.cache.write();
-        if let Some(entry) = cache.get_mut(&organization_id)
+        if let Some(entry) = cache.get_mut(&organization)
             && entry.leader_hint.as_deref() != Some(leader_node)
         {
             entry.leader_hint = Some(leader_node.to_string());
-            debug!(organization_id = organization_id.value(), leader_node, "Updated leader hint");
+            debug!(organization = organization.value(), leader_node, "Updated leader hint");
         }
     }
 
@@ -603,7 +611,7 @@ mod tests {
 
         let result = router.get_routing(OrganizationId::new(999));
         assert!(
-            matches!(result, Err(RoutingError::OrganizationNotFound { organization_id }) if organization_id == OrganizationId::new(999))
+            matches!(result, Err(RoutingError::OrganizationNotFound { organization }) if organization == OrganizationId::new(999))
         );
     }
 
@@ -805,9 +813,9 @@ mod tests {
             matches!(
                 result,
                 Err(RoutingError::OrganizationUnavailable {
-                    organization_id,
+                    organization,
                     status: inferadb_ledger_state::system::OrganizationStatus::Suspended
-                }) if organization_id == OrganizationId::new(77)
+                }) if organization == OrganizationId::new(77)
             ),
             "expected OrganizationUnavailable, got: {:?}",
             result

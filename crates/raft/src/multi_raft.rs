@@ -397,11 +397,13 @@ impl MultiRaftManager {
     /// - Router not initialized (system shard not started)
     /// - Organization not found in routing table
     /// - Shard is on a different node (requires forwarding)
-    pub fn route_organization(&self, organization_id: OrganizationId) -> Option<Arc<ShardGroup>> {
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    pub fn route_organization(&self, organization: OrganizationId) -> Option<Arc<ShardGroup>> {
         let router = self.router.read().clone()?;
 
         // Look up shard assignment
-        let routing = router.get_routing(organization_id).ok()?;
+        let routing = router.get_routing(organization).ok()?;
 
         // Get local shard group (if we host this shard)
         self.shards.read().get(&routing.shard_id).cloned()
@@ -411,9 +413,11 @@ impl MultiRaftManager {
     ///
     /// Looks up the organization's shard assignment without checking
     /// if the shard is locally available.
-    pub fn get_organization_shard(&self, organization_id: OrganizationId) -> Option<ShardId> {
+    ///
+    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    pub fn get_organization_shard(&self, organization: OrganizationId) -> Option<ShardId> {
         let router = self.router.read().clone()?;
-        router.get_routing(organization_id).ok().map(|r| r.shard_id)
+        router.get_routing(organization).ok().map(|r| r.shard_id)
     }
 
     /// Starts the system shard (`_system`).

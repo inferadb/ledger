@@ -35,7 +35,7 @@ use inferadb_ledger_types::{VaultId, config::HotKeyConfig};
 #[derive(Debug, Clone, PartialEq)]
 pub struct HotKeyInfo {
     /// The vault containing the hot key.
-    pub vault_id: VaultId,
+    pub vault: VaultId,
     /// The key that is hot (entity key or relationship resource).
     pub key: String,
     /// Estimated operations per second within the current window.
@@ -114,7 +114,7 @@ impl CountMinSketch {
 /// Entry in the top-k min-heap (ordered by ops_per_sec ascending for eviction).
 #[derive(Debug, Clone)]
 struct TopKEntry {
-    vault_id: VaultId,
+    vault: VaultId,
     key: String,
     ops_per_sec: f64,
 }
@@ -193,7 +193,9 @@ impl HotKeyDetector {
     /// This is the hot-path method called on every write operation.
     /// Lock contention is minimized by keeping the critical section to
     /// counter increments and a single heap operation.
-    pub fn record_access(&self, vault_id: VaultId, key: &str) -> AccessResult {
+    ///
+    /// * `vault` - Internal vault identifier (`VaultId`).
+    pub fn record_access(&self, vault: VaultId, key: &str) -> AccessResult {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         // Check if window has expired and rotate if needed.
@@ -223,24 +225,24 @@ impl HotKeyDetector {
 
         let threshold = self.threshold.load(Ordering::Relaxed);
         if ops_per_sec >= threshold as f64 {
-            let info = HotKeyInfo { vault_id, key: key.to_string(), ops_per_sec };
+            let info = HotKeyInfo { vault, key: key.to_string(), ops_per_sec };
 
             // Update top-k tracking.
-            let composite = (vault_id, key.to_string());
+            let composite = (vault, key.to_string());
             if let Some(existing) = state.top_k_map.get_mut(&composite) {
                 // Update rate for existing entry (heap will be rebuilt on get_top_hot_keys).
                 *existing = ops_per_sec;
             } else if state.top_k_map.len() < self.top_k {
                 // Room in top-k: add directly.
                 state.top_k_map.insert(composite.clone(), ops_per_sec);
-                state.top_k_heap.push(TopKEntry { vault_id, key: key.to_string(), ops_per_sec });
+                state.top_k_heap.push(TopKEntry { vault, key: key.to_string(), ops_per_sec });
             } else if state.top_k_heap.peek().is_some_and(|min| ops_per_sec > min.ops_per_sec) {
                 // Evict the coldest entry since this key is hotter.
                 if let Some(evicted) = state.top_k_heap.pop() {
-                    state.top_k_map.remove(&(evicted.vault_id, evicted.key));
+                    state.top_k_map.remove(&(evicted.vault, evicted.key));
                 }
                 state.top_k_map.insert(composite.clone(), ops_per_sec);
-                state.top_k_heap.push(TopKEntry { vault_id, key: key.to_string(), ops_per_sec });
+                state.top_k_heap.push(TopKEntry { vault, key: key.to_string(), ops_per_sec });
             }
 
             // Rate-limited logging: warn at most once per 10 seconds per key.
@@ -250,7 +252,7 @@ impl HotKeyDetector {
             };
             if should_warn {
                 tracing::warn!(
-                    vault_id = vault_id.value(),
+                    vault = vault.value(),
                     key = key,
                     ops_per_sec = format!("{:.1}", ops_per_sec),
                     threshold = threshold,
@@ -260,7 +262,7 @@ impl HotKeyDetector {
             }
 
             // Record Prometheus metric.
-            crate::metrics::record_hot_key_detected(vault_id, key, ops_per_sec);
+            crate::metrics::record_hot_key_detected(vault, key, ops_per_sec);
 
             AccessResult::Hot(info)
         } else {
@@ -275,8 +277,8 @@ impl HotKeyDetector {
         let mut entries: Vec<_> = state
             .top_k_map
             .iter()
-            .map(|((vault_id, key), &ops_per_sec)| HotKeyInfo {
-                vault_id: *vault_id,
+            .map(|((vault, key), &ops_per_sec)| HotKeyInfo {
+                vault: *vault,
                 key: key.clone(),
                 ops_per_sec,
             })
@@ -468,7 +470,7 @@ mod tests {
         }
 
         let top = detector.get_top_hot_keys(10);
-        let vault_ids: Vec<i64> = top.iter().map(|e| e.vault_id.value()).collect();
+        let vault_ids: Vec<i64> = top.iter().map(|e| e.vault.value()).collect();
         // Both vaults should appear.
         if top.len() >= 2 {
             assert!(vault_ids.contains(&1));
@@ -537,11 +539,11 @@ mod tests {
     #[test]
     fn test_hot_key_info_fields() {
         let info = HotKeyInfo {
-            vault_id: VaultId::new(42),
+            vault: VaultId::new(42),
             key: "entity:user:123".to_string(),
             ops_per_sec: 150.5,
         };
-        assert_eq!(info.vault_id, VaultId::new(42));
+        assert_eq!(info.vault, VaultId::new(42));
         assert_eq!(info.key, "entity:user:123");
         assert!((info.ops_per_sec - 150.5).abs() < f64::EPSILON);
     }
@@ -552,7 +554,7 @@ mod tests {
         assert_eq!(normal, AccessResult::Normal);
 
         let hot = AccessResult::Hot(HotKeyInfo {
-            vault_id: VaultId::new(1),
+            vault: VaultId::new(1),
             key: "k".to_string(),
             ops_per_sec: 200.0,
         });
@@ -589,8 +591,8 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for i in 0..ops_per_thread {
                     let key = format!("key-{}-{}", thread_id % 10, i % 20);
-                    let vault_id = VaultId::new((thread_id % 5) as i64 + 1);
-                    let _ = detector.record_access(vault_id, &key);
+                    let vault = VaultId::new((thread_id % 5) as i64 + 1);
+                    let _ = detector.record_access(vault, &key);
 
                     // Occasionally sleep to allow window expiry to trigger rotation
                     if i == ops_per_thread / 2 {
@@ -669,7 +671,7 @@ mod tests {
 
         let reported = &top_keys[0];
         assert_eq!(reported.key, target_key);
-        assert_eq!(reported.vault_id, target_vault);
+        assert_eq!(reported.vault, target_vault);
 
         // CMS may over-count but ops_per_sec is count/elapsed_secs.
         // Since we're in a single 3600s window that just started,

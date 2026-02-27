@@ -18,8 +18,9 @@ use chrono::Utc;
 use inferadb_ledger_proto::{proto, proto::events_service_server::EventsService};
 use inferadb_ledger_state::{EventStore, EventsDatabase};
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::events::{
-    EventAction, EventConfig, EventEmission, EventEntry, EventOutcome, EventScope,
+use inferadb_ledger_types::{
+    OrganizationSlug, VaultSlug,
+    events::{EventAction, EventConfig, EventEmission, EventEntry, EventOutcome, EventScope},
 };
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -190,6 +191,9 @@ fn matches_filter(
 
 #[tonic::async_trait]
 impl<B: StorageBackend + 'static> EventsService for EventsServiceImpl<B> {
+    /// Lists events with pagination and optional filtering by action, type, or time range.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn list_events(
         &self,
         request: Request<proto::ListEventsRequest>,
@@ -221,7 +225,7 @@ impl<B: StorageBackend + 'static> EventsService for EventsServiceImpl<B> {
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
             self.page_token_codec
-                .validate_event_context(&token, org_id.value(), query_hash)
+                .validate_event_context(&token, org_id, query_hash)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
             Some(token.last_key)
@@ -281,12 +285,8 @@ impl<B: StorageBackend + 'static> EventsService for EventsServiceImpl<B> {
                     ts_ns,
                     &entry.event_id,
                 );
-                let token = EventPageToken {
-                    version: 1,
-                    organization_id: org_id.value(),
-                    last_key: key,
-                    query_hash,
-                };
+                let token =
+                    EventPageToken { version: 1, organization: org_id, last_key: key, query_hash };
                 self.page_token_codec.encode_event(&token)
             })
         } else {
@@ -313,6 +313,9 @@ impl<B: StorageBackend + 'static> EventsService for EventsServiceImpl<B> {
         }))
     }
 
+    /// Retrieves a single event by its 16-byte event ID.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn get_event(
         &self,
         request: Request<proto::GetEventRequest>,
@@ -360,6 +363,9 @@ impl<B: StorageBackend + 'static> EventsService for EventsServiceImpl<B> {
         }
     }
 
+    /// Counts events matching optional filter criteria (action, type, time range).
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn count_events(
         &self,
         request: Request<proto::CountEventsRequest>,
@@ -435,6 +441,9 @@ impl<B: StorageBackend + 'static> EventsService for EventsServiceImpl<B> {
         Ok(Response::new(proto::CountEventsResponse { count }))
     }
 
+    /// Ingests a batch of external events from an authorized source service.
+    ///
+    /// Validates the source against the configured allow-list and enforces batch size limits.
     async fn ingest_events(
         &self,
         request: Request<proto::IngestEventsRequest>,
@@ -531,7 +540,7 @@ impl<B: StorageBackend + 'static> EventsService for EventsServiceImpl<B> {
         // 6. Resolve organization
         let resolver = SlugResolver::new(self.applied_state.clone());
         let org_id = resolver.extract_and_resolve_for_events(&req.organization)?;
-        let organization = req.organization.as_ref().map(|o| o.slug);
+        let organization = req.organization.as_ref().map(|o| OrganizationSlug::new(o.slug));
 
         // 7. Process each entry — validate and convert to EventEntry
         let now = Utc::now();
@@ -653,7 +662,7 @@ impl<B: StorageBackend + 'static> EventsService for EventsServiceImpl<B> {
                 principal: proto_entry.principal.clone(),
                 organization_id: org_id,
                 organization,
-                vault: proto_entry.vault.as_ref().map(|v| v.slug),
+                vault: proto_entry.vault.as_ref().map(|v| VaultSlug::new(v.slug)),
                 outcome,
                 details,
                 block_height: None,

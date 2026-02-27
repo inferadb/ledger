@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use inferadb_ledger_types::{OrganizationId, UserId};
+use inferadb_ledger_types::{OrganizationId, OrganizationSlug, UserId, VaultSlug};
 
 use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
@@ -23,7 +23,7 @@ use crate::common::{TestCluster, create_admin_client, create_read_client, create
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
-) -> Result<u64, Box<dyn std::error::Error>> {
+) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
@@ -33,8 +33,11 @@ async fn create_organization(
         })
         .await?;
 
-    let slug =
-        response.into_inner().slug.map(|n| n.slug).ok_or("No organization slug in response")?;
+    let slug = response
+        .into_inner()
+        .slug
+        .map(|n| OrganizationSlug::new(n.slug))
+        .ok_or("No organization slug in response")?;
 
     Ok(slug)
 }
@@ -42,13 +45,13 @@ async fn create_organization(
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
     addr: std::net::SocketAddr,
-    organization: u64,
-) -> Result<u64, Box<dyn std::error::Error>> {
+    organization: OrganizationSlug,
+) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization,
+                slug: organization.value(),
             }),
             replication_factor: 0,
             initial_nodes: vec![],
@@ -56,7 +59,11 @@ async fn create_vault(
         })
         .await?;
 
-    let vault = response.into_inner().vault.map(|v| v.slug).ok_or("No vault in response")?;
+    let vault = response
+        .into_inner()
+        .vault
+        .map(|v| VaultSlug::new(v.slug))
+        .ok_or("No vault in response")?;
 
     Ok(vault)
 }
@@ -64,8 +71,8 @@ async fn create_vault(
 /// Writes an entity to an organization.
 async fn write_entity(
     addr: std::net::SocketAddr,
-    organization: u64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
     key: &str,
     value: &serde_json::Value,
     client_id: &str,
@@ -73,8 +80,10 @@ async fn write_entity(
     let mut client = create_write_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: organization }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization.value(),
+        }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -104,15 +113,17 @@ async fn write_entity(
 /// Reads an entity from an organization.
 async fn read_entity(
     addr: std::net::SocketAddr,
-    organization: u64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
 
     let request = inferadb_ledger_proto::proto::ReadRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: organization }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization.value(),
+        }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
     };
@@ -255,7 +266,7 @@ async fn test_delete_user_saga_state_transitions() {
     let saga_id = "test-delete-user-1".to_string();
     let input = DeleteUserInput {
         user_id: UserId::new(user_id),
-        organization_ids: vec![OrganizationId::new(organization as i64)],
+        organization_ids: vec![OrganizationId::new(organization.value() as i64)],
     };
     let saga = DeleteUserSaga::new(saga_id.clone(), input);
     let wrapped = Saga::DeleteUser(saga);

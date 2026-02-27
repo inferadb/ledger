@@ -31,7 +31,8 @@
 
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
-    BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId, OrganizationId, VaultSlug,
+    BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId, OrganizationId, OrganizationSlug,
+    VaultSlug,
     events::{EventAction, EventEmission, EventEntry, EventOutcome, EventScope},
     merkle::MerkleProof as InternalMerkleProof,
 };
@@ -602,9 +603,12 @@ impl From<&EventEntry> for proto::EventEntry {
             emission_path: proto::EventEmissionPath::from(&entry.emission).into(),
             principal: entry.principal.clone(),
             organization: Some(proto::OrganizationSlug {
-                slug: entry.organization.unwrap_or(entry.organization_id.value() as u64),
+                slug: entry
+                    .organization
+                    .map(|s| s.value())
+                    .unwrap_or(entry.organization_id.value() as u64),
             }),
-            vault: entry.vault.map(|s| proto::VaultSlug { slug: s }),
+            vault: entry.vault.map(|s| proto::VaultSlug { slug: s.value() }),
             outcome: proto::EventOutcome::from(&entry.outcome).into(),
             error_code,
             error_detail,
@@ -686,8 +690,9 @@ impl TryFrom<&proto::EventEntry> for EventEntry {
             },
         };
 
-        let organization = proto_entry.organization.as_ref().map(|o| o.slug);
-        let organization_id = OrganizationId::new(organization.unwrap_or(0) as i64);
+        let organization = proto_entry.organization.as_ref().map(|o| OrganizationSlug::new(o.slug));
+        let organization_id =
+            OrganizationId::new(organization.map(|s| s.value()).unwrap_or(0) as i64);
 
         Ok(EventEntry {
             expires_at: proto_entry.expires_at,
@@ -701,7 +706,7 @@ impl TryFrom<&proto::EventEntry> for EventEntry {
             principal: proto_entry.principal.clone(),
             organization_id,
             organization,
-            vault: proto_entry.vault.as_ref().map(|v| v.slug),
+            vault: proto_entry.vault.as_ref().map(|v| VaultSlug::new(v.slug)),
             outcome,
             details: proto_entry.details.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             block_height: proto_entry.block_height,
@@ -1517,8 +1522,8 @@ mod tests {
             emission: EventEmission::ApplyPhase,
             principal: "system".to_string(),
             organization_id: OrganizationId::new(42),
-            organization: Some(12345),
-            vault: Some(67890),
+            organization: Some(OrganizationSlug::new(12345)),
+            vault: Some(VaultSlug::new(67890)),
             outcome: EventOutcome::Success,
             details: BTreeMap::from([("key".to_string(), "val".to_string())]),
             block_height: Some(100),
@@ -1563,7 +1568,7 @@ mod tests {
             emission: EventEmission::ApplyPhase,
             principal: "user:1".to_string(),
             organization_id: OrganizationId::new(1),
-            organization: Some(100),
+            organization: Some(OrganizationSlug::new(100)),
             vault: None,
             outcome: EventOutcome::Failed {
                 code: "E2001".to_string(),
@@ -1600,7 +1605,7 @@ mod tests {
             emission: EventEmission::HandlerPhase { node_id: 7 },
             principal: "client:abc".to_string(),
             organization_id: OrganizationId::new(5),
-            organization: Some(555),
+            organization: Some(OrganizationSlug::new(555)),
             vault: None,
             outcome: EventOutcome::Denied { reason: "rate limit exceeded".to_string() },
             details: BTreeMap::new(),
@@ -1672,7 +1677,7 @@ mod tests {
             emission: EventEmission::ApplyPhase,
             principal: "system".to_string(),
             organization_id: OrganizationId::new(0),
-            organization: Some(0),
+            organization: Some(OrganizationSlug::new(0)),
             vault: None,
             outcome: EventOutcome::Success,
             details: BTreeMap::new(),

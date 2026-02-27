@@ -1224,7 +1224,7 @@ impl RaftLogStore {
                 if let Ok(meta) = decode::<super::types::VaultMeta>(&value_bytes) {
                     state.vault_id_to_slug.insert(vault_id, meta.slug);
                     state.vault_slug_index.insert(meta.slug, vault_id);
-                    state.vaults.insert((meta.organization_id, vault_id), meta);
+                    state.vaults.insert((meta.organization, vault_id), meta);
                 }
             }
         }

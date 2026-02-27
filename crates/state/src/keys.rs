@@ -21,28 +21,34 @@ pub struct StorageKey {
 
 /// Encodes a storage key with vault and bucket prefixes.
 ///
+/// * `vault` - Internal vault identifier (`VaultId`).
+///
 /// Format: {vault_id:8BE}{bucket_id:1}{local_key:var}
 ///
 /// The bucket_id is computed from local_key using seahash % 256.
 /// Using big-endian for vault_id ensures lexicographic ordering by vault.
-pub fn encode_storage_key(vault_id: VaultId, local_key: &[u8]) -> Vec<u8> {
+pub fn encode_storage_key(vault: VaultId, local_key: &[u8]) -> Vec<u8> {
     let bucket = bucket_id(local_key);
     let mut key = Vec::with_capacity(9 + local_key.len());
-    key.extend_from_slice(&vault_id.value().to_be_bytes());
+    key.extend_from_slice(&vault.value().to_be_bytes());
     key.push(bucket);
     key.extend_from_slice(local_key);
     key
 }
 
 /// Creates a prefix for scanning all keys in a vault.
-pub fn vault_prefix(vault_id: VaultId) -> [u8; 8] {
-    vault_id.value().to_be_bytes()
+///
+/// * `vault` - Internal vault identifier (`VaultId`).
+pub fn vault_prefix(vault: VaultId) -> [u8; 8] {
+    vault.value().to_be_bytes()
 }
 
 /// Creates a prefix for scanning all keys in a specific bucket within a vault.
-pub fn bucket_prefix(vault_id: VaultId, bucket_id: u8) -> [u8; 9] {
+///
+/// * `vault` - Internal vault identifier (`VaultId`).
+pub fn bucket_prefix(vault: VaultId, bucket_id: u8) -> [u8; 9] {
     let mut prefix = [0u8; 9];
-    prefix[..8].copy_from_slice(&vault_id.value().to_be_bytes());
+    prefix[..8].copy_from_slice(&vault.value().to_be_bytes());
     prefix[8] = bucket_id;
     prefix
 }

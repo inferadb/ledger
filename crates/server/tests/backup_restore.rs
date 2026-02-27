@@ -9,17 +9,19 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
+use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+
 use crate::common::{TestCluster, create_admin_client, create_write_client};
 
 // ============================================================================
 // Test Helpers
 // ============================================================================
 
-/// Creates a organization and return its ID.
+/// Creates an organization and returns its slug.
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
-) -> Result<i64, Box<dyn std::error::Error>> {
+) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
@@ -29,25 +31,25 @@ async fn create_organization(
         })
         .await?;
 
-    let organization_id = response
+    let organization = response
         .into_inner()
         .slug
-        .map(|n| n.slug as i64)
-        .ok_or("No organization_id in response")?;
+        .map(|n| OrganizationSlug::new(n.slug))
+        .ok_or("No organization slug in response")?;
 
-    Ok(organization_id)
+    Ok(organization)
 }
 
-/// Creates a vault in a organization and return its ID.
+/// Creates a vault in an organization and returns its slug.
 async fn create_vault(
     addr: std::net::SocketAddr,
-    organization_id: i64,
-) -> Result<u64, Box<dyn std::error::Error>> {
+    organization: OrganizationSlug,
+) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization_id as u64,
+                slug: organization.value(),
             }),
             replication_factor: 0,
             initial_nodes: vec![],
@@ -55,15 +57,19 @@ async fn create_vault(
         })
         .await?;
 
-    let vault = response.into_inner().vault.map(|v| v.slug).ok_or("No vault in response")?;
+    let vault = response
+        .into_inner()
+        .vault
+        .map(|v| VaultSlug::new(v.slug))
+        .ok_or("No vault in response")?;
     Ok(vault)
 }
 
 /// Writes an entity and return the block height.
 async fn write_entity(
     addr: std::net::SocketAddr,
-    organization_id: i64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
     key: &str,
     value: &[u8],
 ) -> Result<u64, Box<dyn std::error::Error>> {
@@ -71,9 +77,9 @@ async fn write_entity(
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization_id as u64,
+            slug: organization.value(),
         }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId {
             id: "backup-test-client".to_string(),
         }),

@@ -13,7 +13,7 @@ use inferadb_ledger_proto::proto::{
     BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, Operation, TxId, WriteError,
     WriteErrorCode, WriteRequest, WriteResponse, WriteSuccess, write_service_server::WriteService,
 };
-use inferadb_ledger_types::config::ValidationConfig;
+use inferadb_ledger_types::{OrganizationSlug, config::ValidationConfig};
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
@@ -83,9 +83,9 @@ impl MultiShardWriteService {
     fn check_rate_limit(
         &self,
         client_id: &str,
-        organization_id: inferadb_ledger_types::OrganizationId,
+        organization: inferadb_ledger_types::OrganizationId,
     ) -> Result<(), Status> {
-        super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, organization_id)
+        super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, organization)
     }
 
     /// Records a handler-phase event (best-effort).
@@ -133,8 +133,8 @@ impl MultiShardWriteService {
     }
 
     /// Records key accesses from operations for hot key detection.
-    fn record_hot_keys(&self, vault_id: inferadb_ledger_types::VaultId, operations: &[Operation]) {
-        super::helpers::record_hot_keys(self.hot_key_detector.as_ref(), vault_id, operations);
+    fn record_hot_keys(&self, vault: inferadb_ledger_types::VaultId, operations: &[Operation]) {
+        super::helpers::record_hot_keys(self.hot_key_detector.as_ref(), vault, operations);
     }
 
     /// Computes a hash of operations for idempotency payload comparison.
@@ -145,29 +145,29 @@ impl MultiShardWriteService {
     /// Generates block header and transaction proof for a committed write.
     fn generate_write_proof(
         &self,
-        organization_id: inferadb_ledger_types::OrganizationId,
-        vault_id: inferadb_ledger_types::VaultId,
+        organization: inferadb_ledger_types::OrganizationId,
+        vault: inferadb_ledger_types::VaultId,
         vault_height: u64,
     ) -> (
         Option<inferadb_ledger_proto::proto::BlockHeader>,
         Option<inferadb_ledger_proto::proto::MerkleProof>,
     ) {
-        let ctx = match self.resolver.resolve(organization_id) {
+        let ctx = match self.resolver.resolve(organization) {
             Ok(ctx) => ctx,
             Err(_) => return (None, None),
         };
 
         // Resolve internal IDs to slugs for response construction
-        let slug = ctx.applied_state.resolve_id_to_slug(organization_id);
-        let vault = ctx.applied_state.resolve_vault_id_to_slug(vault_id);
+        let org_slug = ctx.applied_state.resolve_id_to_slug(organization);
+        let vault_slug = ctx.applied_state.resolve_vault_id_to_slug(vault);
 
         // Use the proof module's implementation
         match proof::generate_write_proof(
             &ctx.block_archive,
-            organization_id,
-            slug,
-            vault_id,
+            organization,
+            org_slug,
             vault,
+            vault_slug,
             vault_height,
             0,
         ) {
@@ -193,8 +193,8 @@ impl MultiShardWriteService {
     fn build_request(
         &self,
         operations: &[Operation],
-        organization_id: inferadb_ledger_types::OrganizationId,
-        vault_id: inferadb_ledger_types::VaultId,
+        organization: inferadb_ledger_types::OrganizationId,
+        vault: inferadb_ledger_types::VaultId,
         client_id: &str,
         actor: &str,
     ) -> Result<LedgerRequest, Status> {
@@ -219,8 +219,8 @@ impl MultiShardWriteService {
         };
 
         Ok(LedgerRequest::Write {
-            organization: organization_id,
-            vault: vault_id,
+            organization,
+            vault,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
@@ -264,7 +264,7 @@ impl WriteService for MultiShardWriteService {
                     crate::event_writer::HandlerPhaseEmitter::for_organization(
                         inferadb_ledger_types::events::EventAction::RequestValidationFailed,
                         organization_id,
-                        req.organization.as_ref().map(|n| n.slug),
+                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                         self.node_id.unwrap_or(0),
                     )
                     .principal(&client_id)
@@ -283,7 +283,7 @@ impl WriteService for MultiShardWriteService {
                     crate::event_writer::HandlerPhaseEmitter::for_organization(
                         inferadb_ledger_types::events::EventAction::RequestRateLimited,
                         organization_id,
-                        req.organization.as_ref().map(|n| n.slug),
+                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                         self.node_id.unwrap_or(0),
                     )
                     .principal(&client_id)
@@ -308,7 +308,7 @@ impl WriteService for MultiShardWriteService {
                     crate::event_writer::HandlerPhaseEmitter::for_organization(
                         inferadb_ledger_types::events::EventAction::QuotaExceeded,
                         organization_id,
-                        req.organization.as_ref().map(|n| n.slug),
+                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                         self.node_id.unwrap_or(0),
                     )
                     .principal(&client_id)
@@ -352,7 +352,7 @@ impl WriteService for MultiShardWriteService {
                 crate::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::RequestValidationFailed,
                     organization_id,
-                    req.organization.as_ref().map(|n| n.slug),
+                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
@@ -376,8 +376,8 @@ impl WriteService for MultiShardWriteService {
         // Check idempotency cache
         use crate::idempotency::IdempotencyCheckResult;
         match self.idempotency.check(
-            organization_id.value(),
-            vault_id.value(),
+            organization_id,
+            vault_id,
             &client_id,
             idempotency_key,
             request_hash,
@@ -428,7 +428,7 @@ impl WriteService for MultiShardWriteService {
                 crate::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::RequestRateLimited,
                     organization_id,
-                    req.organization.as_ref().map(|n| n.slug),
+                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
@@ -453,7 +453,7 @@ impl WriteService for MultiShardWriteService {
                 crate::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::QuotaExceeded,
                     organization_id,
-                    req.organization.as_ref().map(|n| n.slug),
+                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
@@ -537,8 +537,8 @@ impl WriteService for MultiShardWriteService {
 
                 // Cache the successful result
                 self.idempotency.insert(
-                    organization_id.value(),
-                    vault_id.value(),
+                    organization_id,
+                    vault_id,
                     client_id.clone(),
                     idempotency_key,
                     request_hash,
@@ -546,8 +546,8 @@ impl WriteService for MultiShardWriteService {
                 );
 
                 metrics::record_write(true, latency);
-                metrics::record_organization_operation(organization_id.value(), "write");
-                metrics::record_organization_latency(organization_id.value(), "write", latency);
+                metrics::record_organization_operation(organization_id, "write");
+                metrics::record_organization_latency(organization_id, "write", latency);
                 info!(
                     trace_id = %trace_ctx.trace_id,
                     block_height,
@@ -619,7 +619,7 @@ impl WriteService for MultiShardWriteService {
                     crate::event_writer::HandlerPhaseEmitter::for_organization(
                         inferadb_ledger_types::events::EventAction::RequestValidationFailed,
                         organization_id,
-                        req.organization.as_ref().map(|n| n.slug),
+                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                         self.node_id.unwrap_or(0),
                     )
                     .principal(&client_id)
@@ -638,7 +638,7 @@ impl WriteService for MultiShardWriteService {
                     crate::event_writer::HandlerPhaseEmitter::for_organization(
                         inferadb_ledger_types::events::EventAction::RequestRateLimited,
                         organization_id,
-                        req.organization.as_ref().map(|n| n.slug),
+                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                         self.node_id.unwrap_or(0),
                     )
                     .principal(&client_id)
@@ -664,7 +664,7 @@ impl WriteService for MultiShardWriteService {
                     crate::event_writer::HandlerPhaseEmitter::for_organization(
                         inferadb_ledger_types::events::EventAction::QuotaExceeded,
                         organization_id,
-                        req.organization.as_ref().map(|n| n.slug),
+                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                         self.node_id.unwrap_or(0),
                     )
                     .principal(&client_id)
@@ -710,7 +710,7 @@ impl WriteService for MultiShardWriteService {
                 crate::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::RequestValidationFailed,
                     organization_id,
-                    req.organization.as_ref().map(|n| n.slug),
+                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
@@ -737,8 +737,8 @@ impl WriteService for MultiShardWriteService {
         // Check idempotency cache
         use crate::idempotency::IdempotencyCheckResult;
         match self.idempotency.check(
-            organization_id.value(),
-            vault_id.value(),
+            organization_id,
+            vault_id,
             &client_id,
             idempotency_key,
             request_hash,
@@ -793,7 +793,7 @@ impl WriteService for MultiShardWriteService {
                 crate::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::RequestRateLimited,
                     organization_id,
-                    req.organization.as_ref().map(|n| n.slug),
+                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
@@ -819,7 +819,7 @@ impl WriteService for MultiShardWriteService {
                 crate::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::QuotaExceeded,
                     organization_id,
-                    req.organization.as_ref().map(|n| n.slug),
+                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
@@ -902,8 +902,8 @@ impl WriteService for MultiShardWriteService {
 
                 // Cache the successful result
                 self.idempotency.insert(
-                    organization_id.value(),
-                    vault_id.value(),
+                    organization_id,
+                    vault_id,
                     client_id.clone(),
                     idempotency_key,
                     request_hash,
@@ -919,8 +919,8 @@ impl WriteService for MultiShardWriteService {
                 };
 
                 metrics::record_batch_write(true, batch_size, latency);
-                metrics::record_organization_operation(organization_id.value(), "write");
-                metrics::record_organization_latency(organization_id.value(), "write", latency);
+                metrics::record_organization_operation(organization_id, "write");
+                metrics::record_organization_latency(organization_id, "write", latency);
                 info!(
                     trace_id = %trace_ctx.trace_id,
                     block_height,

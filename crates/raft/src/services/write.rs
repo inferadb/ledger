@@ -14,7 +14,9 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::{OrganizationId, SetCondition, VaultId, config::ValidationConfig};
+use inferadb_ledger_types::{
+    OrganizationId, OrganizationSlug, SetCondition, VaultId, VaultSlug, config::ValidationConfig,
+};
 use openraft::Raft;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
@@ -308,9 +310,9 @@ impl WriteServiceImpl {
     fn check_rate_limit(
         &self,
         client_id: &str,
-        organization_id: OrganizationId,
+        organization: OrganizationId,
     ) -> Result<(), Status> {
-        super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, organization_id)
+        super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, organization)
     }
 
     /// Records a handler-phase event (best-effort).
@@ -323,10 +325,10 @@ impl WriteServiceImpl {
     /// Records key accesses from operations for hot key detection.
     fn record_hot_keys(
         &self,
-        vault_id: VaultId,
+        vault: VaultId,
         operations: &[inferadb_ledger_proto::proto::Operation],
     ) {
-        super::helpers::record_hot_keys(self.hot_key_detector.as_ref(), vault_id, operations);
+        super::helpers::record_hot_keys(self.hot_key_detector.as_ref(), vault, operations);
     }
 
     /// Maps a failed SetCondition to the appropriate WriteErrorCode.
@@ -434,8 +436,8 @@ impl WriteServiceImpl {
     /// Errors are logged with context for debugging.
     fn generate_write_proof(
         &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         vault_height: u64,
     ) -> (
         Option<inferadb_ledger_proto::proto::BlockHeader>,
@@ -447,17 +449,17 @@ impl WriteServiceImpl {
         };
 
         // Resolve internal IDs to slugs for response construction
-        let organization =
-            self.applied_state.as_ref().and_then(|s| s.resolve_id_to_slug(organization_id));
-        let vault = self.applied_state.as_ref().and_then(|s| s.resolve_vault_id_to_slug(vault_id));
+        let org_slug = self.applied_state.as_ref().and_then(|s| s.resolve_id_to_slug(organization));
+        let vault_slug =
+            self.applied_state.as_ref().and_then(|s| s.resolve_vault_id_to_slug(vault));
 
         // Use the proof module's SNAFU-based implementation
         match proof::generate_write_proof(
             archive,
-            organization_id,
             organization,
-            vault_id,
+            org_slug,
             vault,
+            vault_slug,
             vault_height,
             0,
         ) {
@@ -484,8 +486,8 @@ impl WriteServiceImpl {
     /// the actual sequence will be assigned by the Raft state machine at apply time.
     fn operations_to_request(
         &self,
-        organization_id: OrganizationId,
-        vault_id: Option<VaultId>,
+        organization: OrganizationId,
+        vault: Option<VaultId>,
         operations: &[inferadb_ledger_proto::proto::Operation],
         client_id: &str,
         idempotency_key: [u8; 16],
@@ -518,8 +520,8 @@ impl WriteServiceImpl {
         };
 
         Ok(LedgerRequest::Write {
-            organization: organization_id,
-            vault: vault_id.unwrap_or(VaultId::new(0)),
+            organization,
+            vault: vault.unwrap_or(VaultId::new(0)),
             transactions: vec![transaction],
             idempotency_key,
             request_hash,
@@ -529,6 +531,9 @@ impl WriteServiceImpl {
 
 #[tonic::async_trait]
 impl WriteService for WriteServiceImpl {
+    /// Processes a single write transaction containing entity and relationship operations.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn write(
         &self,
         request: Request<WriteRequest>,
@@ -606,7 +611,7 @@ impl WriteService for WriteServiceImpl {
                 crate::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::RequestValidationFailed,
                     organization_id,
-                    req.organization.as_ref().map(|n| n.slug),
+                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
@@ -636,8 +641,8 @@ impl WriteService for WriteServiceImpl {
         // Check idempotency cache for duplicate
         use crate::idempotency::IdempotencyCheckResult;
         match self.idempotency.check(
-            organization_id.value(),
-            vault_id.value(),
+            organization_id,
+            vault_id,
             &client_id,
             idempotency_key,
             request_hash,
@@ -765,11 +770,11 @@ impl WriteService for WriteServiceImpl {
                 crate::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::RequestRateLimited,
                     organization_id,
-                    req.organization.as_ref().map(|n| n.slug),
+                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
-                .vault(vault)
+                .vault(VaultSlug::new(vault))
                 .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
                     reason: "rate_limited".to_string(),
                 })
@@ -791,11 +796,11 @@ impl WriteService for WriteServiceImpl {
                 crate::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::QuotaExceeded,
                     organization_id,
-                    req.organization.as_ref().map(|n| n.slug),
+                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
-                .vault(vault)
+                .vault(VaultSlug::new(vault))
                 .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
                     reason: "storage_quota_exceeded".to_string(),
                 })
@@ -935,8 +940,8 @@ impl WriteService for WriteServiceImpl {
 
                 // Cache the result for idempotency
                 self.idempotency.insert(
-                    organization_id.value(),
-                    vault_id.value(),
+                    organization_id,
+                    vault_id,
                     client_id.clone(),
                     idempotency_key,
                     request_hash,
@@ -956,7 +961,7 @@ impl WriteService for WriteServiceImpl {
 
                 let elapsed = ctx.elapsed_secs();
                 metrics::record_write(true, elapsed);
-                metrics::record_organization_latency(organization_id.value(), "write", elapsed);
+                metrics::record_organization_latency(organization_id, "write", elapsed);
 
                 Ok(response_with_correlation(
                     WriteResponse {
@@ -1038,6 +1043,9 @@ impl WriteService for WriteServiceImpl {
         }
     }
 
+    /// Processes multiple write transactions atomically as a single batch.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn batch_write(
         &self,
         request: Request<BatchWriteRequest>,
@@ -1125,11 +1133,11 @@ impl WriteService for WriteServiceImpl {
                 crate::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::RequestValidationFailed,
                     organization_id,
-                    req.organization.as_ref().map(|n| n.slug),
+                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
-                .vault(vault)
+                .vault(VaultSlug::new(vault))
                 .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
                     reason: status.message().to_string(),
                 })
@@ -1153,8 +1161,8 @@ impl WriteService for WriteServiceImpl {
         // Check idempotency cache for duplicate
         use crate::idempotency::IdempotencyCheckResult;
         match self.idempotency.check(
-            organization_id.value(),
-            vault_id.value(),
+            organization_id,
+            vault_id,
             &client_id,
             idempotency_key,
             request_hash,
@@ -1286,11 +1294,11 @@ impl WriteService for WriteServiceImpl {
                 crate::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::RequestRateLimited,
                     organization_id,
-                    req.organization.as_ref().map(|n| n.slug),
+                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
-                .vault(vault)
+                .vault(VaultSlug::new(vault))
                 .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
                     reason: "rate_limited".to_string(),
                 })
@@ -1313,11 +1321,11 @@ impl WriteService for WriteServiceImpl {
                 crate::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::QuotaExceeded,
                     organization_id,
-                    req.organization.as_ref().map(|n| n.slug),
+                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
                     self.node_id.unwrap_or(0),
                 )
                 .principal(&client_id)
-                .vault(vault)
+                .vault(VaultSlug::new(vault))
                 .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
                     reason: "storage_quota_exceeded".to_string(),
                 })
@@ -1412,8 +1420,8 @@ impl WriteService for WriteServiceImpl {
 
                 // Cache the result for idempotency
                 self.idempotency.insert(
-                    organization_id.value(),
-                    vault_id.value(),
+                    organization_id,
+                    vault_id,
                     client_id.clone(),
                     idempotency_key,
                     request_hash,
@@ -1433,7 +1441,7 @@ impl WriteService for WriteServiceImpl {
 
                 let elapsed = ctx.elapsed_secs();
                 metrics::record_batch_write(true, batch_size, elapsed);
-                metrics::record_organization_latency(organization_id.value(), "write", elapsed);
+                metrics::record_organization_latency(organization_id, "write", elapsed);
 
                 Ok(response_with_correlation(
                     BatchWriteResponse {

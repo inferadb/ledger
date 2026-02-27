@@ -70,7 +70,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
     /// Scans for expired entities in a vault.
     ///
     /// Returns a list of (key, expires_at) for entities that have expired.
-    fn find_expired_entities(&self, vault_id: VaultId) -> Vec<(String, u64)> {
+    fn find_expired_entities(&self, vault: VaultId) -> Vec<(String, u64)> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -78,7 +78,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
 
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
         // List all entities including expired ones
-        match self.state.list_entities(vault_id, None, None, self.max_batch_size * 2) {
+        match self.state.list_entities(vault, None, None, self.max_batch_size * 2) {
             Ok(entities) => entities
                 .into_iter()
                 .filter(|e| e.expires_at > 0 && e.expires_at < now)
@@ -89,7 +89,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
                 })
                 .collect(),
             Err(e) => {
-                warn!(vault_id = vault_id.value(), error = %e, "Failed to list entities for GC");
+                warn!(vault = vault.value(), error = %e, "Failed to list entities for GC");
                 Vec::new()
             },
         }
@@ -98,8 +98,8 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
     /// Submit ExpireEntity operations through Raft.
     async fn expire_entities(
         &self,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         expired: Vec<(String, u64)>,
     ) -> Result<(), String> {
         if expired.is_empty() {
@@ -127,8 +127,8 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
         };
 
         let request = LedgerRequest::Write {
-            organization: organization_id,
-            vault: vault_id,
+            organization,
+            vault,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
@@ -140,8 +140,8 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
             .map_err(|e| format!("Raft write failed: {}", e))?;
 
         info!(
-            organization_id = organization_id.value(),
-            vault_id = vault_id.value(),
+            organization = organization.value(),
+            vault = vault.value(),
             count = expired.len(),
             "GC expired entities"
         );
@@ -163,25 +163,25 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
         // Get all active vaults from the applied state registry
         let vault_heights = self.applied_state.all_vault_heights();
 
-        for ((organization_id, vault_id), _height) in vault_heights {
-            let expired = self.find_expired_entities(vault_id);
+        for ((organization, vault), _height) in vault_heights {
+            let expired = self.find_expired_entities(vault);
             if expired.is_empty() {
                 continue;
             }
 
             debug!(
                 trace_id = %trace_ctx.trace_id,
-                organization_id = organization_id.value(),
-                vault_id = vault_id.value(),
+                organization = organization.value(),
+                vault = vault.value(),
                 count = expired.len(),
                 "Found expired entities"
             );
 
-            if let Err(e) = self.expire_entities(organization_id, vault_id, expired).await {
+            if let Err(e) = self.expire_entities(organization, vault, expired).await {
                 warn!(
                     trace_id = %trace_ctx.trace_id,
-                    organization_id = organization_id.value(),
-                    vault_id = vault_id.value(),
+                    organization = organization.value(),
+                    vault = vault.value(),
                     error = %e,
                     "GC cycle failed"
                 );

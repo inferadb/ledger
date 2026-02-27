@@ -25,6 +25,7 @@
 use std::time::Duration;
 
 use inferadb_ledger_proto::proto;
+use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
 use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
 
@@ -36,7 +37,7 @@ use crate::common::{TestCluster, create_admin_client, create_read_client, create
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
-) -> Result<u64, Box<dyn std::error::Error>> {
+) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_organization(proto::CreateOrganizationRequest {
@@ -45,33 +46,38 @@ async fn create_organization(
             quota: None,
         })
         .await?;
-    let slug = response.into_inner().slug.map(|n| n.slug).ok_or("No organization slug")?;
+    let slug = response
+        .into_inner()
+        .slug
+        .map(|n| OrganizationSlug::new(n.slug))
+        .ok_or("No organization slug")?;
     Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
     addr: std::net::SocketAddr,
-    organization: u64,
-) -> Result<u64, Box<dyn std::error::Error>> {
+    organization: OrganizationSlug,
+) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     let response = client
         .create_vault(proto::CreateVaultRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization }),
+            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
         })
         .await?;
-    let slug = response.into_inner().vault.map(|v| v.slug).ok_or("No vault slug")?;
+    let slug =
+        response.into_inner().vault.map(|v| VaultSlug::new(v.slug)).ok_or("No vault slug")?;
     Ok(slug)
 }
 
 /// Writes an entity and returns the assigned sequence number.
 async fn write_entity(
     addr: std::net::SocketAddr,
-    organization: u64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
     key: &str,
     value: &[u8],
     client_id: &str,
@@ -81,8 +87,8 @@ async fn write_entity(
         .write(proto::WriteRequest {
             client_id: Some(proto::ClientId { id: client_id.to_string() }),
             idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-            organization: Some(proto::OrganizationSlug { slug: organization }),
-            vault: Some(proto::VaultSlug { slug: vault }),
+            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+            vault: Some(proto::VaultSlug { slug: vault.value() }),
             operations: vec![proto::Operation {
                 op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
                     key: key.to_string(),
@@ -106,15 +112,15 @@ async fn write_entity(
 /// Reads an entity and returns its value (if it exists).
 async fn read_entity(
     addr: std::net::SocketAddr,
-    organization: u64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
     key: &str,
 ) -> Option<Vec<u8>> {
     let mut client = create_read_client(addr).await.ok()?;
     let response = client
         .read(proto::ReadRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization }),
-            vault: Some(proto::VaultSlug { slug: vault }),
+            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+            vault: Some(proto::VaultSlug { slug: vault.value() }),
             key: key.to_string(),
             consistency: 0,
         })
@@ -126,14 +132,14 @@ async fn read_entity(
 /// Deletes a vault.
 async fn delete_vault(
     addr: std::net::SocketAddr,
-    organization: u64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
     client
         .delete_vault(proto::DeleteVaultRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization }),
-            vault: Some(proto::VaultSlug { slug: vault }),
+            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+            vault: Some(proto::VaultSlug { slug: vault.value() }),
         })
         .await?;
     Ok(())
@@ -142,15 +148,15 @@ async fn delete_vault(
 /// Gets the client state (last committed sequence).
 async fn get_client_state(
     addr: std::net::SocketAddr,
-    organization: u64,
-    vault: u64,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
     client_id: &str,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let mut client = create_read_client(addr).await?;
     let response = client
         .get_client_state(proto::GetClientStateRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization }),
-            vault: Some(proto::VaultSlug { slug: vault }),
+            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+            vault: Some(proto::VaultSlug { slug: vault.value() }),
             client_id: Some(proto::ClientId { id: client_id.to_string() }),
         })
         .await?;
@@ -265,8 +271,8 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
     let batch_request = proto::BatchWriteRequest {
         client_id: Some(proto::ClientId { id: "failover-batch".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(proto::OrganizationSlug { slug: organization }),
-        vault: Some(proto::VaultSlug { slug: vault }),
+        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+        vault: Some(proto::VaultSlug { slug: vault.value() }),
         operations: (0..50)
             .map(|i| proto::BatchWriteOperation {
                 operations: vec![proto::Operation {
@@ -331,8 +337,8 @@ async fn test_idempotency_dedup_same_key_returns_cached() {
     let request = proto::WriteRequest {
         client_id: Some(proto::ClientId { id: "dedup-client".to_string() }),
         idempotency_key: shared_key.clone(),
-        organization: Some(proto::OrganizationSlug { slug: organization }),
-        vault: Some(proto::VaultSlug { slug: vault }),
+        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+        vault: Some(proto::VaultSlug { slug: vault.value() }),
         operations: vec![proto::Operation {
             op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
                 key: "dedup-key".to_string(),
@@ -356,8 +362,8 @@ async fn test_idempotency_dedup_same_key_returns_cached() {
     let retry = proto::WriteRequest {
         client_id: Some(proto::ClientId { id: "dedup-client".to_string() }),
         idempotency_key: shared_key,
-        organization: Some(proto::OrganizationSlug { slug: organization }),
-        vault: Some(proto::VaultSlug { slug: vault }),
+        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+        vault: Some(proto::VaultSlug { slug: vault.value() }),
         operations: vec![proto::Operation {
             op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
                 key: "dedup-key".to_string(),
@@ -569,8 +575,8 @@ async fn test_post_eviction_retry_accepted() {
     let request = proto::WriteRequest {
         client_id: Some(proto::ClientId { id: "post-evict-client".to_string() }),
         idempotency_key: key.clone(),
-        organization: Some(proto::OrganizationSlug { slug: organization }),
-        vault: Some(proto::VaultSlug { slug: vault }),
+        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+        vault: Some(proto::VaultSlug { slug: vault.value() }),
         operations: vec![proto::Operation {
             op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
                 key: "post-evict-entity".to_string(),
@@ -591,8 +597,8 @@ async fn test_post_eviction_retry_accepted() {
     let retry = proto::WriteRequest {
         client_id: Some(proto::ClientId { id: "post-evict-client".to_string() }),
         idempotency_key: key,
-        organization: Some(proto::OrganizationSlug { slug: organization }),
-        vault: Some(proto::VaultSlug { slug: vault }),
+        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+        vault: Some(proto::VaultSlug { slug: vault.value() }),
         operations: vec![proto::Operation {
             op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
                 key: "post-evict-entity".to_string(),

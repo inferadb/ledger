@@ -92,7 +92,7 @@ impl MultiShardReadService {
     /// Checks consistency requirements for a read request.
     fn check_consistency(
         &self,
-        organization_id: OrganizationId,
+        organization: OrganizationId,
         consistency: i32,
     ) -> Result<(), Status> {
         let consistency =
@@ -101,7 +101,7 @@ impl MultiShardReadService {
         match consistency {
             ReadConsistency::Linearizable => {
                 // Linearizable reads require this node to be the leader
-                let ctx = self.resolver.resolve(organization_id)?;
+                let ctx = self.resolver.resolve(organization)?;
                 let metrics = ctx.raft.metrics().borrow().clone();
                 if metrics.current_leader.is_none() {
                     return Err(Status::unavailable(
@@ -127,12 +127,12 @@ impl MultiShardReadService {
         &self,
         req: &HistoricalReadRequest,
         ctx: &crate::services::shard_resolver::ShardContext,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         start: Instant,
     ) -> Result<Response<HistoricalReadResponse>, Status> {
         // Check that requested height doesn't exceed current tip
-        let tip_height = ctx.applied_state.vault_height(organization_id, vault_id);
+        let tip_height = ctx.applied_state.vault_height(organization, vault);
         if req.at_height > tip_height {
             return Err(Status::invalid_argument(format!(
                 "Requested height {} exceeds current tip {}",
@@ -159,7 +159,7 @@ impl MultiShardReadService {
         for height in 1..=req.at_height {
             // Find shard height for this vault block
             let shard_height =
-                match ctx.block_archive.find_shard_height(organization_id, vault_id, height) {
+                match ctx.block_archive.find_shard_height(organization, vault, height) {
                     Ok(Some(h)) => h,
                     Ok(None) => continue, // Block might not exist at this height (sparse)
                     Err(e) => {
@@ -175,14 +175,14 @@ impl MultiShardReadService {
 
             // Find the vault entry
             let vault_entry = shard_block.vault_entries.iter().find(|e| {
-                e.organization == organization_id && e.vault == vault_id && e.vault_height == height
+                e.organization == organization && e.vault == vault && e.vault_height == height
             });
 
             if let Some(entry) = vault_entry {
                 // Apply all transactions in this block
                 for tx in &entry.transactions {
                     temp_state
-                        .apply_operations(vault_id, &tx.operations, height)
+                        .apply_operations(vault, &tx.operations, height)
                         .map_err(|e| Status::internal(format!("Apply failed: {:?}", e)))?;
                 }
 
@@ -195,7 +195,7 @@ impl MultiShardReadService {
 
         // Read entity from reconstructed state
         let entity = temp_state
-            .get_entity(vault_id, req.key.as_bytes())
+            .get_entity(vault, req.key.as_bytes())
             .map_err(|e| Status::internal(format!("Read failed: {:?}", e)))?;
 
         // Check expiration using block timestamp (not current time)
@@ -230,8 +230,8 @@ impl MultiShardReadService {
         &self,
         req: &WatchBlocksRequest,
         ctx: &crate::services::shard_resolver::ShardContext,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
     ) -> Result<
         Response<Pin<Box<dyn futures::Stream<Item = Result<BlockAnnouncement, Status>> + Send>>>,
         Status,
@@ -251,27 +251,21 @@ impl MultiShardReadService {
         })?;
 
         // Get current tip for this vault
-        let current_tip = ctx.applied_state.vault_height(organization_id, vault_id);
+        let current_tip = ctx.applied_state.vault_height(organization, vault);
 
         // Subscribe BEFORE reading historical blocks to avoid missing any
         let receiver = announcements.subscribe();
 
         // Fetch historical announcements if start_height <= current_tip
         let historical_blocks: Vec<BlockAnnouncement> = if start_height <= current_tip {
-            self.fetch_historical_announcements(
-                ctx,
-                organization_id,
-                vault_id,
-                start_height,
-                current_tip,
-            )
+            self.fetch_historical_announcements(ctx, organization, vault, start_height, current_tip)
         } else {
             vec![]
         };
 
         info!(
-            organization_id = organization_id.value(),
-            vault_id = vault_id.value(),
+            organization = organization.value(),
+            vault = vault.value(),
             start_height,
             current_tip,
             historical_count = historical_blocks.len(),
@@ -323,8 +317,8 @@ impl MultiShardReadService {
     fn fetch_historical_announcements(
         &self,
         ctx: &crate::services::shard_resolver::ShardContext,
-        organization_id: OrganizationId,
-        vault_id: VaultId,
+        organization: OrganizationId,
+        vault: VaultId,
         start_height: u64,
         end_height: u64,
     ) -> Vec<BlockAnnouncement> {
@@ -333,8 +327,8 @@ impl MultiShardReadService {
         for height in start_height..=end_height {
             // Find shard height for this vault block
             let shard_height = match ctx.block_archive.find_shard_height(
-                organization_id,
-                vault_id,
+                organization,
+                vault,
                 height,
             ) {
                 Ok(Some(h)) => h,
@@ -356,7 +350,7 @@ impl MultiShardReadService {
 
             // Find the vault entry
             if let Some(entry) = shard_block.vault_entries.iter().find(|e| {
-                e.organization == organization_id && e.vault == vault_id && e.vault_height == height
+                e.organization == organization && e.vault == vault && e.vault_height == height
             }) {
                 // Compute block hash from vault entry (hash of previous_hash || state_root ||
                 // tx_merkle_root) For announcements, we use the tx_merkle_root as a
@@ -372,13 +366,13 @@ impl MultiShardReadService {
                     organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                         slug: ctx
                             .applied_state
-                            .resolve_id_to_slug(organization_id)
-                            .map_or(organization_id.value() as u64, |s| s.value()),
+                            .resolve_id_to_slug(organization)
+                            .map_or(organization.value() as u64, |s| s.value()),
                     }),
                     vault: Some(inferadb_ledger_proto::proto::VaultSlug {
                         slug: ctx
                             .applied_state
-                            .resolve_vault_id_to_slug(vault_id)
+                            .resolve_vault_id_to_slug(vault)
                             .map_or(0, |s| s.value()),
                     }),
                     height,

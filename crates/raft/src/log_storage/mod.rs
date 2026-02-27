@@ -176,7 +176,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(1),
             OrganizationMeta {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns1".to_string(),
                 shard_id: ShardId::new(0),
@@ -189,7 +189,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(2),
             OrganizationMeta {
-                organization_id: OrganizationId::new(2),
+                organization: OrganizationId::new(2),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns2".to_string(),
                 shard_id: ShardId::new(0),
@@ -210,7 +210,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(1),
             OrganizationMeta {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns1".to_string(),
                 shard_id: ShardId::new(0),
@@ -223,7 +223,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(2),
             OrganizationMeta {
-                organization_id: OrganizationId::new(2),
+                organization: OrganizationId::new(2),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns2".to_string(),
                 shard_id: ShardId::new(0),
@@ -237,7 +237,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(3),
             OrganizationMeta {
-                organization_id: OrganizationId::new(3),
+                organization: OrganizationId::new(3),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns3".to_string(),
                 shard_id: ShardId::new(1),
@@ -250,7 +250,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(4),
             OrganizationMeta {
-                organization_id: OrganizationId::new(4),
+                organization: OrganizationId::new(4),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns4".to_string(),
                 shard_id: ShardId::new(1),
@@ -271,7 +271,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(1),
             OrganizationMeta {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns1".to_string(),
                 shard_id: ShardId::new(0),
@@ -284,7 +284,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(2),
             OrganizationMeta {
-                organization_id: OrganizationId::new(2),
+                organization: OrganizationId::new(2),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns2".to_string(),
                 shard_id: ShardId::new(0),
@@ -297,7 +297,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(3),
             OrganizationMeta {
-                organization_id: OrganizationId::new(3),
+                organization: OrganizationId::new(3),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns3".to_string(),
                 shard_id: ShardId::new(0),
@@ -311,7 +311,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(4),
             OrganizationMeta {
-                organization_id: OrganizationId::new(4),
+                organization: OrganizationId::new(4),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns4".to_string(),
                 shard_id: ShardId::new(1),
@@ -332,7 +332,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(1),
             OrganizationMeta {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns1".to_string(),
                 shard_id: ShardId::new(0),
@@ -345,7 +345,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(2),
             OrganizationMeta {
-                organization_id: OrganizationId::new(2),
+                organization: OrganizationId::new(2),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns2".to_string(),
                 shard_id: ShardId::new(0),
@@ -358,7 +358,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(3),
             OrganizationMeta {
-                organization_id: OrganizationId::new(3),
+                organization: OrganizationId::new(3),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns3".to_string(),
                 shard_id: ShardId::new(0),
@@ -372,7 +372,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(4),
             OrganizationMeta {
-                organization_id: OrganizationId::new(4),
+                organization: OrganizationId::new(4),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns4".to_string(),
                 shard_id: ShardId::new(1),
@@ -385,7 +385,7 @@ mod tests {
         organizations.insert(
             OrganizationId::new(5),
             OrganizationMeta {
-                organization_id: OrganizationId::new(5),
+                organization: OrganizationId::new(5),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "ns5".to_string(),
                 shard_id: ShardId::new(1),
@@ -407,7 +407,7 @@ mod tests {
             organizations.insert(
                 OrganizationId::new(i),
                 OrganizationMeta {
-                    organization_id: OrganizationId::new(i),
+                    organization: OrganizationId::new(i),
                     slug: inferadb_ledger_types::OrganizationSlug::new(0),
                     name: format!("ns{}", i),
                     shard_id: ShardId::new(0),
@@ -423,7 +423,7 @@ mod tests {
             organizations.insert(
                 OrganizationId::new(i),
                 OrganizationMeta {
-                    organization_id: OrganizationId::new(i),
+                    organization: OrganizationId::new(i),
                     slug: inferadb_ledger_types::OrganizationSlug::new(0),
                     name: format!("ns{}", i),
                     shard_id: ShardId::new(1),
@@ -439,7 +439,7 @@ mod tests {
             organizations.insert(
                 OrganizationId::new(i),
                 OrganizationMeta {
-                    organization_id: OrganizationId::new(i),
+                    organization: OrganizationId::new(i),
                     slug: inferadb_ledger_types::OrganizationSlug::new(0),
                     name: format!("ns{}", i),
                     shard_id: ShardId::new(2),
@@ -468,7 +468,7 @@ mod tests {
             state.organizations.insert(
                 OrganizationId::new(i),
                 OrganizationMeta {
-                    organization_id: OrganizationId::new(i),
+                    organization: OrganizationId::new(i),
                     slug: inferadb_ledger_types::OrganizationSlug::new(0),
                     name: format!("existing-ns-{}", i),
                     shard_id: ShardId::new(0),
@@ -483,7 +483,7 @@ mod tests {
         state.organizations.insert(
             OrganizationId::new(4),
             OrganizationMeta {
-                organization_id: OrganizationId::new(4),
+                organization: OrganizationId::new(4),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "existing-ns-4".to_string(),
                 shard_id: ShardId::new(1),
@@ -529,7 +529,7 @@ mod tests {
         state.organizations.insert(
             OrganizationId::new(1),
             OrganizationMeta {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "existing".to_string(),
                 shard_id: ShardId::new(0),
@@ -2895,7 +2895,7 @@ mod tests {
         original.organizations.insert(
             OrganizationId::new(1),
             OrganizationMeta {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 shard_id: ShardId::new(0),
                 name: "test-ns".to_string(),
@@ -2908,8 +2908,8 @@ mod tests {
         original.vaults.insert(
             (OrganizationId::new(1), VaultId::new(1)),
             VaultMeta {
-                organization_id: OrganizationId::new(1),
-                vault_id: VaultId::new(1),
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 deleted: false,
@@ -2958,7 +2958,7 @@ mod tests {
             state.organizations.insert(
                 OrganizationId::new(1),
                 OrganizationMeta {
-                    organization_id: OrganizationId::new(1),
+                    organization: OrganizationId::new(1),
                     slug: inferadb_ledger_types::OrganizationSlug::new(0),
                     shard_id: ShardId::new(0),
                     name: "test".to_string(),
@@ -4426,10 +4426,10 @@ mod tests {
     }
 
     /// Helper: creates a simple Write request with one set operation.
-    fn simple_write_request(org_id: OrganizationId, vault_id: VaultId) -> LedgerRequest {
+    fn simple_write_request(organization: OrganizationId, vault: VaultId) -> LedgerRequest {
         LedgerRequest::Write {
-            organization: org_id,
-            vault: vault_id,
+            organization,
+            vault,
             transactions: vec![Transaction {
                 id: [1u8; 16],
                 client_id: "test-client".to_string(),
@@ -4458,7 +4458,7 @@ mod tests {
         state.organizations.insert(
             org_id,
             OrganizationMeta {
-                organization_id: org_id,
+                organization: org_id,
                 slug: org_slug,
                 name: "test-org".to_string(),
                 shard_id: ShardId::new(0),
@@ -4476,8 +4476,8 @@ mod tests {
         state.vaults.insert(
             key,
             VaultMeta {
-                organization_id: org_id,
-                vault_id,
+                organization: org_id,
+                vault: vault_id,
                 slug: vault_slug,
                 name: Some("test-vault".to_string()),
                 deleted: false,
@@ -5160,7 +5160,7 @@ mod tests {
 
         assert_eq!(vault_event.scope, EventScope::Organization);
         assert_eq!(vault_event.organization_id, org_id);
-        assert_eq!(vault_event.vault, Some(6000));
+        assert_eq!(vault_event.vault, Some(VaultSlug::new(6000)));
         assert_eq!(vault_event.details.get("vault_name").map(|s| s.as_str()), Some("audit-vault"));
     }
 
@@ -5326,7 +5326,7 @@ mod tests {
         state.organizations.insert(
             org_b,
             OrganizationMeta {
-                organization_id: org_b,
+                organization: org_b,
                 slug: org_b_slug,
                 name: "org-b".to_string(),
                 shard_id: ShardId::new(0),
@@ -5343,8 +5343,8 @@ mod tests {
         state.vaults.insert(
             key_b,
             VaultMeta {
-                organization_id: org_b,
-                vault_id: vault_b,
+                organization: org_b,
+                vault: vault_b,
                 slug: vault_b_slug,
                 name: Some("vault-b".to_string()),
                 deleted: false,
@@ -5570,7 +5570,7 @@ mod tests {
         // Insert OrganizationMeta so event collection can find org IDs
         {
             let org_meta = super::types::OrganizationMeta {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(100),
                 name: "test-org".to_string(),
                 shard_id: ShardId::new(0),
@@ -5682,7 +5682,7 @@ mod tests {
         // Insert OrganizationMeta so event collection can find org IDs
         {
             let org_meta = super::types::OrganizationMeta {
-                organization_id: OrganizationId::new(1),
+                organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(100),
                 name: "test-org".to_string(),
                 shard_id: ShardId::new(0),
