@@ -141,6 +141,7 @@ proto:
     cargo +{{rust}} clean -p inferadb-ledger-proto
     cargo +{{rust}} build -p inferadb-ledger-proto
     cp target/debug/build/inferadb-ledger-proto-*/out/ledger.v1.rs crates/proto/src/generated/
+    cp target/debug/build/inferadb-ledger-proto-*/out/ledger_v1_descriptor.bin crates/proto/src/generated/
 
 # Lint protobuf definitions
 proto-lint:
