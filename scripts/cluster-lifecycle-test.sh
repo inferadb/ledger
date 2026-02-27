@@ -433,7 +433,7 @@ leave_cluster() {
     if echo "$result" | grep -q "already undergoing a configuration change"; then
       attempts=$((attempts + 1))
       log_info "    Membership change in progress, retrying ($attempts/$max_attempts)..."
-      sleep 2
+      sleep 1
       continue
     fi
 
@@ -451,13 +451,13 @@ leave_cluster() {
 wait_for_member_removed() {
   local removed_num=$1
   local query_num=$2
-  local elapsed=0
+  local start_time=$SECONDS
   local timeout=15
 
   local removed_id
   removed_id=$(get_node_id "$removed_num")
 
-  while [[ $elapsed -lt $timeout ]]; do
+  while (( SECONDS - start_time < timeout )); do
     local query_addr
     query_addr=$(node_addr "$query_num")
     local result
@@ -470,8 +470,7 @@ wait_for_member_removed() {
       return 0
     fi
 
-    sleep 1
-    elapsed=$((elapsed + 1))
+    sleep 0.5
   done
 
   log_warn "Node $removed_num still in membership after ${timeout}s (proceeding anyway)"
@@ -508,6 +507,53 @@ kill_node() {
     wait "$pid" 2>/dev/null || true
     log_info "  Killed node $node_num (PID $pid, found by port)"
   fi
+}
+
+# Kill multiple node processes in parallel.
+# Sends SIGTERM to all nodes first, then waits for all to exit.
+# This parallelizes graceful shutdowns instead of running them sequentially.
+# Args: node_numbers...
+kill_nodes_parallel() {
+  local nodes=("$@")
+  local pids_to_wait=()
+
+  # Phase 1: send SIGTERM to all nodes
+  for node_num in "${nodes[@]}"; do
+    local port
+    port=$(node_port "$node_num")
+    local found=false
+
+    for i in "${!ACTIVE_PIDS[@]}"; do
+      local pid="${ACTIVE_PIDS[$i]}"
+      if kill -0 "$pid" 2>/dev/null; then
+        if grep -q "127.0.0.1:$port" "$DATA_ROOT/node$node_num.log" 2>/dev/null; then
+          kill "$pid" 2>/dev/null || true
+          pids_to_wait+=("$pid")
+          unset 'ACTIVE_PIDS[i]'
+          log_info "  Sent SIGTERM to node $node_num (PID $pid)"
+          found=true
+          break
+        fi
+      fi
+    done
+
+    # Fallback: find by port if not found via ACTIVE_PIDS
+    if [[ "$found" == "false" ]]; then
+      local pid
+      pid=$(lsof -ti "tcp:$port" 2>/dev/null || true)
+      if [[ -n "$pid" ]]; then
+        kill "$pid" 2>/dev/null || true
+        pids_to_wait+=("$pid")
+        log_info "  Sent SIGTERM to node $node_num (PID $pid, found by port)"
+      fi
+    fi
+  done
+  ACTIVE_PIDS=("${ACTIVE_PIDS[@]}")
+
+  # Phase 2: wait for all to exit
+  for pid in "${pids_to_wait[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -1059,10 +1105,8 @@ for node_num in "${NODES_TO_REMOVE[@]}"; do
   wait_for_member_removed "$node_num" "${ACTIVE_QUERY_NODES[0]}"
 done
 
-log_info "Killing original nodes..."
-for i in 1 2 3; do
-  kill_node "$i"
-done
+log_info "Killing original nodes (parallel shutdown)..."
+kill_nodes_parallel 1 2 3
 
 # Wait for node 4 to elect itself leader (it's the sole remaining voter).
 # This replaces a blind sleep — the election timeout is non-deterministic.

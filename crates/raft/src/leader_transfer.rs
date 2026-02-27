@@ -202,13 +202,17 @@ pub async fn transfer_leadership(
         return Err(LeaderTransferError::TargetRejected { message: inner.message });
     }
 
-    // Step 5: Poll until leadership changes
+    // Step 5: Poll until a different leader is confirmed.
+    // During the election transition there is a brief window where
+    // `current_leader` is `None`. We must wait through that window until
+    // a concrete new leader ID appears, otherwise we return 0.
     loop {
         let fresh = raft.metrics().borrow().clone();
-        if fresh.current_leader != Some(my_id) {
-            let new_leader = fresh.current_leader.unwrap_or(0);
-            info!(new_leader, target_id, "Leadership transferred");
-            return Ok(new_leader);
+        if let Some(leader) = fresh.current_leader
+            && leader != my_id
+        {
+            info!(new_leader = leader, target_id, "Leadership transferred");
+            return Ok(leader);
         }
 
         if tokio::time::Instant::now() >= overall_deadline {
