@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
@@ -121,13 +121,13 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 async-stream = "0.3"
 
 # Internal crates (version + path for crates.io publishing)
-inferadb-ledger-types = { version = "0.1.0", path = "crates/types" }
-inferadb-ledger-store = { version = "0.1.0", path = "crates/store" }
-inferadb-ledger-state = { version = "0.1.0", path = "crates/state" }
-inferadb-ledger-proto = { version = "0.1.0", path = "crates/proto" }
-inferadb-ledger-raft = { version = "0.1.0", path = "crates/raft" }
+inferadb-ledger-types = { version = "0.1.1", path = "crates/types" }
+inferadb-ledger-store = { version = "0.1.1", path = "crates/store" }
+inferadb-ledger-state = { version = "0.1.1", path = "crates/state" }
+inferadb-ledger-proto = { version = "0.1.1", path = "crates/proto" }
+inferadb-ledger-raft = { version = "0.1.1", path = "crates/raft" }
 inferadb-ledger-server = { path = "crates/server" }
-inferadb-ledger-sdk = { version = "0.1.0", path = "crates/sdk" }
+inferadb-ledger-sdk = { version = "0.1.1", path = "crates/sdk" }
 inferadb-ledger-test-utils = { path = "crates/test-utils" }
 
 # Hashing (for inferadb-ledger-store)
