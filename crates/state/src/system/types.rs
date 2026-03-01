@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
-use inferadb_ledger_types::{NodeId, OrganizationId, ShardId, UserId};
+use inferadb_ledger_types::{NodeId, OrganizationId, ShardId, UserEmailId, UserId, UserSlug};
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -18,10 +18,12 @@ use serde::{Deserialize, Serialize};
 pub struct User {
     /// Unique user identifier (globally unique).
     pub id: UserId,
+    /// External Snowflake identifier for API consumers.
+    pub slug: UserSlug,
     /// User's display name.
     pub name: String,
     /// ID of the user's primary email address.
-    pub primary_email_id: i64,
+    pub email: UserEmailId,
     /// Current user status.
     pub status: UserStatus,
     /// Authorization role (regular user or service admin).
@@ -74,7 +76,7 @@ pub enum UserRole {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserEmail {
     /// Unique email record identifier.
-    pub id: i64,
+    pub id: UserEmailId,
     /// User who owns this email.
     pub user_id: UserId,
     /// Email address (lowercase normalized).
@@ -97,7 +99,7 @@ pub struct EmailVerificationToken {
     /// Unique token identifier.
     pub id: i64,
     /// Email record this token is for.
-    pub email_id: i64,
+    pub email_id: UserEmailId,
     /// SHA-256 hash of the token (not the plaintext token).
     pub token_hash: [u8; 32],
     /// When this token expires.
@@ -120,7 +122,7 @@ pub struct OrganizationRegistry {
     /// Human-readable organization name.
     pub name: String,
     /// Shard group hosting this organization.
-    pub shard_id: ShardId,
+    pub shard: ShardId,
     /// Nodes in the shard group.
     pub member_nodes: Vec<NodeId>,
     /// Current organization status.
@@ -146,6 +148,22 @@ pub enum OrganizationStatus {
     Deleting,
     /// Organization has been deleted (tombstone).
     Deleted,
+}
+
+/// Organization billing tier.
+///
+/// Determines runtime behavior such as quota presets and feature gating.
+/// Billing details (Stripe, payment info) are managed externally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationTier {
+    /// Free tier (default for new organizations).
+    #[default]
+    Free,
+    /// Professional tier with higher limits.
+    Pro,
+    /// Enterprise tier with custom limits and SLA.
+    Enterprise,
 }
 
 // ============================================================================
@@ -196,6 +214,11 @@ mod tests {
     }
 
     #[test]
+    fn test_organization_tier_default() {
+        assert_eq!(OrganizationTier::default(), OrganizationTier::Free);
+    }
+
+    #[test]
     fn test_node_role_default() {
         assert_eq!(NodeRole::default(), NodeRole::Learner);
     }
@@ -209,8 +232,9 @@ mod tests {
     fn test_user_serialization() {
         let user = User {
             id: UserId::new(1),
+            slug: UserSlug::new(100),
             name: "Alice".to_string(),
-            primary_email_id: 1,
+            email: UserEmailId::new(1),
             status: UserStatus::Active,
             role: UserRole::User,
             created_at: Utc::now(),
@@ -228,8 +252,9 @@ mod tests {
     fn test_user_admin_serialization() {
         let user = User {
             id: UserId::new(2),
+            slug: UserSlug::new(200),
             name: "Bob".to_string(),
-            primary_email_id: 2,
+            email: UserEmailId::new(2),
             status: UserStatus::Active,
             role: UserRole::Admin,
             created_at: Utc::now(),
@@ -246,7 +271,7 @@ mod tests {
         let registry = OrganizationRegistry {
             organization_id: OrganizationId::new(1),
             name: "acme-corp".to_string(),
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
             status: OrganizationStatus::Active,
             config_version: 1,

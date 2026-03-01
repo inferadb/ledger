@@ -27,8 +27,8 @@ async fn create_organization(
     let response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: name.to_string(),
-            shard_id: None,
-            quota: None,
+            shard: None,
+            tier: None,
         })
         .await?;
 
@@ -375,8 +375,8 @@ async fn test_orphan_cleanup_with_concurrent_jobs() {
     let ns_response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: "concurrent-jobs-test".to_string(),
-            shard_id: None,
-            quota: None,
+            shard: None,
+            tier: None,
         })
         .await
         .unwrap();

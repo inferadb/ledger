@@ -85,20 +85,20 @@ use crate::{
 #[derive(Debug, Snafu)]
 pub enum MultiRaftError {
     /// Shard already exists.
-    #[snafu(display("Shard {shard_id} already exists"))]
-    ShardExists { shard_id: ShardId },
+    #[snafu(display("Shard {shard} already exists"))]
+    ShardExists { shard: ShardId },
 
     /// Shard not found.
-    #[snafu(display("Shard {shard_id} not found"))]
-    ShardNotFound { shard_id: ShardId },
+    #[snafu(display("Shard {shard} not found"))]
+    ShardNotFound { shard: ShardId },
 
     /// Failed to open storage.
-    #[snafu(display("Storage error for shard {shard_id}: {message}"))]
-    Storage { shard_id: ShardId, message: String },
+    #[snafu(display("Storage error for shard {shard}: {message}"))]
+    Storage { shard: ShardId, message: String },
 
     /// Failed to create Raft instance.
-    #[snafu(display("Raft error for shard {shard_id}: {message}"))]
-    Raft { shard_id: ShardId, message: String },
+    #[snafu(display("Raft error for shard {shard}: {message}"))]
+    Raft { shard: ShardId, message: String },
 
     /// System shard not initialized.
     #[snafu(display("System shard (_system) must be started first"))]
@@ -156,11 +156,11 @@ impl MultiRaftConfig {
     }
 
     /// Returns the data directory for a specific shard.
-    pub fn shard_dir(&self, shard_id: ShardId) -> PathBuf {
-        if shard_id == ShardId::new(0) {
+    pub fn shard_dir(&self, shard: ShardId) -> PathBuf {
+        if shard == ShardId::new(0) {
             self.data_dir.join("shards").join("_system")
         } else {
-            self.data_dir.join("shards").join(format!("shard_{:04}", shard_id.value()))
+            self.data_dir.join("shards").join(format!("shard_{:04}", shard.value()))
         }
     }
 }
@@ -169,7 +169,7 @@ impl MultiRaftConfig {
 #[derive(Debug, Clone, bon::Builder)]
 pub struct ShardConfig {
     /// Shard identifier.
-    pub shard_id: ShardId,
+    pub shard: ShardId,
     /// Initial cluster members (node_id -> address).
     #[builder(default)]
     pub initial_members: Vec<(LedgerNodeId, String)>,
@@ -185,7 +185,7 @@ impl ShardConfig {
     /// Creates configuration for the system shard.
     pub fn system(node_id: LedgerNodeId, address: String) -> Self {
         Self {
-            shard_id: ShardId::new(0),
+            shard: ShardId::new(0),
             initial_members: vec![(node_id, address)],
             bootstrap: true,
             enable_background_jobs: true,
@@ -193,8 +193,8 @@ impl ShardConfig {
     }
 
     /// Creates configuration for a data shard.
-    pub fn data(shard_id: ShardId, initial_members: Vec<(LedgerNodeId, String)>) -> Self {
-        Self { shard_id, initial_members, bootstrap: true, enable_background_jobs: true }
+    pub fn data(shard: ShardId, initial_members: Vec<(LedgerNodeId, String)>) -> Self {
+        Self { shard, initial_members, bootstrap: true, enable_background_jobs: true }
     }
 
     /// Disables background jobs (useful for testing).
@@ -261,7 +261,7 @@ impl ShardBackgroundJobs {
 /// durable storage for safety.
 pub struct ShardGroup {
     /// Shard identifier.
-    shard_id: ShardId,
+    shard: ShardId,
     /// The Raft consensus instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// Shared state layer for this shard.
@@ -278,8 +278,8 @@ pub struct ShardGroup {
 
 impl ShardGroup {
     /// Returns the shard ID.
-    pub fn shard_id(&self) -> ShardId {
-        self.shard_id
+    pub fn shard(&self) -> ShardId {
+        self.shard
     }
 
     /// Returns the Raft instance.
@@ -359,8 +359,8 @@ impl MultiRaftManager {
     ///
     /// Returns [`MultiRaftError::ShardNotFound`] if no shard with the given ID
     /// is currently active.
-    pub fn get_shard(&self, shard_id: ShardId) -> Result<Arc<ShardGroup>> {
-        self.shards.read().get(&shard_id).cloned().ok_or(MultiRaftError::ShardNotFound { shard_id })
+    pub fn get_shard(&self, shard: ShardId) -> Result<Arc<ShardGroup>> {
+        self.shards.read().get(&shard).cloned().ok_or(MultiRaftError::ShardNotFound { shard })
     }
 
     /// Returns the system shard (`_system`).
@@ -379,8 +379,8 @@ impl MultiRaftManager {
     }
 
     /// Checks if a shard is active.
-    pub fn has_shard(&self, shard_id: ShardId) -> bool {
-        self.shards.read().contains_key(&shard_id)
+    pub fn has_shard(&self, shard: ShardId) -> bool {
+        self.shards.read().contains_key(&shard)
     }
 
     /// Returns the shard router (if initialized).
@@ -406,7 +406,7 @@ impl MultiRaftManager {
         let routing = router.get_routing(organization).ok()?;
 
         // Get local shard group (if we host this shard)
-        self.shards.read().get(&routing.shard_id).cloned()
+        self.shards.read().get(&routing.shard).cloned()
     }
 
     /// Returns the shard ID for an organization.
@@ -417,7 +417,7 @@ impl MultiRaftManager {
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     pub fn get_organization_shard(&self, organization: OrganizationId) -> Option<ShardId> {
         let router = self.router.read().clone()?;
-        router.get_routing(organization).ok().map(|r| r.shard_id)
+        router.get_routing(organization).ok().map(|r| r.shard)
     }
 
     /// Starts the system shard (`_system`).
@@ -428,14 +428,14 @@ impl MultiRaftManager {
     ///
     /// # Errors
     ///
-    /// Returns [`MultiRaftError::Raft`] if `shard_id` is not 0,
+    /// Returns [`MultiRaftError::Raft`] if `shard` is not 0,
     /// [`MultiRaftError::ShardExists`] if the shard is already running,
     /// or a storage/Raft error if initialization fails.
     pub async fn start_system_shard(&self, shard_config: ShardConfig) -> Result<Arc<ShardGroup>> {
-        if shard_config.shard_id != ShardId::new(0) {
+        if shard_config.shard != ShardId::new(0) {
             return Err(MultiRaftError::Raft {
-                shard_id: shard_config.shard_id,
-                message: "System shard must have shard_id=0".to_string(),
+                shard: shard_config.shard,
+                message: "System shard must have shard=0".to_string(),
             });
         }
 
@@ -458,7 +458,7 @@ impl MultiRaftManager {
     /// # Errors
     ///
     /// Returns [`MultiRaftError::SystemShardRequired`] if the system shard has
-    /// not been started, [`MultiRaftError::Raft`] if `shard_id` is 0,
+    /// not been started, [`MultiRaftError::Raft`] if `shard` is 0,
     /// [`MultiRaftError::ShardExists`] if the shard is already running,
     /// or a storage/Raft error if initialization fails.
     pub async fn start_data_shard(&self, shard_config: ShardConfig) -> Result<Arc<ShardGroup>> {
@@ -467,10 +467,10 @@ impl MultiRaftManager {
             return Err(MultiRaftError::SystemShardRequired);
         }
 
-        if shard_config.shard_id == ShardId::new(0) {
+        if shard_config.shard == ShardId::new(0) {
             return Err(MultiRaftError::Raft {
-                shard_id: ShardId::new(0),
-                message: "Use start_system_shard for shard_id=0".to_string(),
+                shard: ShardId::new(0),
+                message: "Use start_system_shard for shard=0".to_string(),
             });
         }
 
@@ -479,25 +479,25 @@ impl MultiRaftManager {
 
     /// Starts a shard group.
     async fn start_shard(&self, shard_config: ShardConfig) -> Result<Arc<ShardGroup>> {
-        let shard_id = shard_config.shard_id;
+        let shard = shard_config.shard;
 
         // Check if shard already exists
-        if self.has_shard(shard_id) {
-            return Err(MultiRaftError::ShardExists { shard_id });
+        if self.has_shard(shard) {
+            return Err(MultiRaftError::ShardExists { shard });
         }
 
-        info!(shard_id = shard_id.value(), "Starting shard group");
+        info!(shard = shard.value(), "Starting shard group");
 
         // Create shard directory
-        let shard_dir = self.config.shard_dir(shard_id);
+        let shard_dir = self.config.shard_dir(shard);
         std::fs::create_dir_all(&shard_dir).map_err(|e| MultiRaftError::Storage {
-            shard_id,
+            shard,
             message: format!("Failed to create shard directory: {}", e),
         })?;
 
         // Open storage (includes block announcements channel wired to RaftLogStore)
         let (state, block_archive, log_store, block_announcements) =
-            self.open_shard_storage(shard_id, &shard_dir)?;
+            self.open_shard_storage(shard, &shard_dir)?;
 
         // Get accessor before log_store is consumed
         let applied_state = log_store.accessor();
@@ -506,7 +506,7 @@ impl MultiRaftManager {
 
         // Build Raft config
         let raft_config = openraft::Config {
-            cluster_name: format!("ledger-shard-{}", shard_id.value()),
+            cluster_name: format!("ledger-shard-{}", shard.value()),
             heartbeat_interval: self.config.heartbeat_interval_ms,
             election_timeout_min: self.config.election_timeout_min_ms,
             election_timeout_max: self.config.election_timeout_max_ms,
@@ -526,7 +526,7 @@ impl MultiRaftManager {
         )
         .await
         .map_err(|e| MultiRaftError::Raft {
-            shard_id,
+            shard,
             message: format!("Failed to create Raft instance: {}", e),
         })?;
 
@@ -540,7 +540,7 @@ impl MultiRaftManager {
         // Start background jobs if enabled
         let background_jobs = if shard_config.enable_background_jobs {
             self.start_background_jobs(
-                shard_id,
+                shard,
                 raft.clone(),
                 state.clone(),
                 block_archive.clone(),
@@ -552,7 +552,7 @@ impl MultiRaftManager {
 
         // Create shard group
         let shard_group = Arc::new(ShardGroup {
-            shard_id,
+            shard,
             raft,
             state,
             block_archive,
@@ -564,10 +564,10 @@ impl MultiRaftManager {
         // Register shard
         {
             let mut shards = self.shards.write();
-            shards.insert(shard_id, shard_group.clone());
+            shards.insert(shard, shard_group.clone());
         }
 
-        info!(shard_id = shard_id.value(), "Shard group started successfully");
+        info!(shard = shard.value(), "Shard group started successfully");
 
         Ok(shard_group)
     }
@@ -575,13 +575,13 @@ impl MultiRaftManager {
     /// Starts background jobs for a shard.
     fn start_background_jobs(
         &self,
-        shard_id: ShardId,
+        shard: ShardId,
         raft: Arc<Raft<LedgerTypeConfig>>,
         state: Arc<StateLayer<FileBackend>>,
         block_archive: Arc<BlockArchive<FileBackend>>,
         applied_state: AppliedStateAccessor,
     ) -> ShardBackgroundJobs {
-        info!(shard_id = shard_id.value(), "Starting background jobs for shard");
+        info!(shard = shard.value(), "Starting background jobs for shard");
 
         // TTL Garbage Collector
         let gc = TtlGarbageCollector::builder()
@@ -591,7 +591,7 @@ impl MultiRaftManager {
             .applied_state(applied_state.clone())
             .build();
         let gc_handle = gc.start();
-        info!(shard_id = shard_id.value(), "Started TTL garbage collector");
+        info!(shard = shard.value(), "Started TTL garbage collector");
 
         // Block Compactor
         let compactor = BlockCompactor::builder()
@@ -601,7 +601,7 @@ impl MultiRaftManager {
             .applied_state(applied_state.clone())
             .build();
         let compactor_handle = compactor.start();
-        info!(shard_id = shard_id.value(), "Started block compactor");
+        info!(shard = shard.value(), "Started block compactor");
 
         // Auto Recovery Job
         let recovery = AutoRecoveryJob::builder()
@@ -612,7 +612,7 @@ impl MultiRaftManager {
             .block_archive(Some(block_archive))
             .build();
         let recovery_handle = recovery.start();
-        info!(shard_id = shard_id.value(), "Started auto recovery job");
+        info!(shard = shard.value(), "Started auto recovery job");
 
         // B+ Tree Compactor
         let btree_compactor = BTreeCompactor::builder()
@@ -621,12 +621,12 @@ impl MultiRaftManager {
             .state(state.clone())
             .build();
         let btree_compactor_handle = btree_compactor.start();
-        info!(shard_id = shard_id.value(), "Started B+ tree compactor");
+        info!(shard = shard.value(), "Started B+ tree compactor");
 
         // Integrity Scrubber
         let integrity_scrubber = IntegrityScrubberJob::builder().state(state).build();
         let integrity_scrubber_handle = integrity_scrubber.start();
-        info!(shard_id = shard_id.value(), "Started integrity scrubber");
+        info!(shard = shard.value(), "Started integrity scrubber");
 
         ShardBackgroundJobs {
             gc_handle: Some(gc_handle),
@@ -638,7 +638,7 @@ impl MultiRaftManager {
     }
 
     /// Opens storage for a shard.
-    fn open_shard_storage(&self, shard_id: ShardId, shard_dir: &Path) -> Result<ShardStorage> {
+    fn open_shard_storage(&self, shard: ShardId, shard_dir: &Path) -> Result<ShardStorage> {
         // Use larger pages for all databases to support larger batch sizes
         // This matches RAFT_PAGE_SIZE in RaftLogStore
         const SHARD_PAGE_SIZE: usize = 16 * 1024; // 16KB
@@ -652,7 +652,7 @@ impl MultiRaftManager {
             Database::<FileBackend>::create_with_config(&state_db_path, config)
         }
         .map_err(|e| MultiRaftError::Storage {
-            shard_id,
+            shard,
             message: format!("Failed to open state db: {}", e),
         })?;
         let state = Arc::new(StateLayer::new(Arc::new(state_db)));
@@ -666,7 +666,7 @@ impl MultiRaftManager {
             Database::<FileBackend>::create_with_config(&blocks_db_path, config)
         }
         .map_err(|e| MultiRaftError::Storage {
-            shard_id,
+            shard,
             message: format!("Failed to open blocks db: {}", e),
         })?;
         let block_archive = Arc::new(BlockArchive::new(Arc::new(blocks_db)));
@@ -679,12 +679,12 @@ impl MultiRaftManager {
         let log_path = shard_dir.join("raft.db");
         let log_store = RaftLogStore::<FileBackend>::open(&log_path)
             .map_err(|e| MultiRaftError::Storage {
-                shard_id,
+                shard,
                 message: format!("Failed to open log store: {}", e),
             })?
             .with_state_layer(state.clone())
             .with_block_archive(block_archive.clone())
-            .with_shard_config(shard_id, self.config.node_id.to_string())
+            .with_shard_config(shard, self.config.node_id.to_string())
             .with_block_announcements(block_announcements.clone());
 
         Ok((state, block_archive, log_store, block_announcements))
@@ -704,12 +704,12 @@ impl MultiRaftManager {
         }
 
         raft.initialize(members).await.map_err(|e| MultiRaftError::Raft {
-            shard_id: config.shard_id,
+            shard: config.shard,
             message: format!("Failed to initialize: {}", e),
         })?;
 
         info!(
-            shard_id = config.shard_id.value(),
+            shard = config.shard.value(),
             members = config.initial_members.len(),
             "Bootstrapped shard cluster"
         );
@@ -726,35 +726,35 @@ impl MultiRaftManager {
     ///
     /// Returns [`MultiRaftError::ShardNotFound`] if no shard with the given ID
     /// is currently active.
-    pub async fn stop_shard(&self, shard_id: ShardId) -> Result<()> {
-        let shard = {
+    pub async fn stop_shard(&self, shard: ShardId) -> Result<()> {
+        let shard_group = {
             let mut shards = self.shards.write();
-            shards.remove(&shard_id).ok_or(MultiRaftError::ShardNotFound { shard_id })?
+            shards.remove(&shard).ok_or(MultiRaftError::ShardNotFound { shard })?
         };
 
         // Abort background jobs first
         {
-            let mut jobs = shard.background_jobs.lock();
+            let mut jobs = shard_group.background_jobs.lock();
             jobs.abort();
-            debug!(shard_id = shard_id.value(), "Aborted background jobs");
+            debug!(shard = shard.value(), "Aborted background jobs");
         }
 
         // Trigger Raft shutdown
-        if let Err(e) = shard.raft.shutdown().await {
-            warn!(shard_id = shard_id.value(), error = ?e, "Error during Raft shutdown");
+        if let Err(e) = shard_group.raft.shutdown().await {
+            warn!(shard = shard.value(), error = ?e, "Error during Raft shutdown");
         }
 
-        info!(shard_id = shard_id.value(), "Shard group stopped");
+        info!(shard = shard.value(), "Shard group stopped");
         Ok(())
     }
 
     /// Stops all shard groups.
     pub async fn shutdown(&self) {
-        let shard_ids: Vec<ShardId> = self.list_shards();
+        let shards: Vec<ShardId> = self.list_shards();
 
-        for shard_id in shard_ids {
-            if let Err(e) = self.stop_shard(shard_id).await {
-                warn!(shard_id = shard_id.value(), error = %e, "Error stopping shard during shutdown");
+        for shard in shards {
+            if let Err(e) = self.stop_shard(shard).await {
+                warn!(shard = shard.value(), error = %e, "Error stopping shard during shutdown");
             }
         }
 
@@ -771,26 +771,23 @@ impl MultiRaftManager {
     /// shutting down the leader triggers re-election among remaining nodes.
     pub async fn graceful_shutdown(&self) {
         let node_id = self.config.node_id;
-        let shard_ids = self.list_shards();
+        let shards = self.list_shards();
 
         // Trigger final snapshots for leader shards
-        for shard_id in &shard_ids {
+        for shard in &shards {
             // Clone the shard Arc so we can drop the lock before awaiting
-            let shard = {
+            let shard_group = {
                 let shards = self.shards.read();
-                shards.get(shard_id).cloned()
+                shards.get(shard).cloned()
             };
 
-            if let Some(shard) = shard
-                && shard.is_leader(node_id)
+            if let Some(shard_group) = shard_group
+                && shard_group.is_leader(node_id)
             {
-                info!(
-                    shard_id = shard_id.value(),
-                    "Triggering final snapshot before leadership handoff"
-                );
-                if let Err(e) = shard.raft.trigger().snapshot().await {
+                info!(shard = shard.value(), "Triggering final snapshot before leadership handoff");
+                if let Err(e) = shard_group.raft.trigger().snapshot().await {
                     warn!(
-                        shard_id = shard_id.value(),
+                        shard = shard.value(),
                         error = %e,
                         "Failed to trigger final snapshot"
                     );
@@ -867,7 +864,7 @@ mod tests {
     #[test]
     fn test_shard_config_system() {
         let config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        assert_eq!(config.shard_id, ShardId::new(0));
+        assert_eq!(config.shard, ShardId::new(0));
         assert!(config.bootstrap);
         assert_eq!(config.initial_members.len(), 1);
     }
@@ -876,7 +873,7 @@ mod tests {
     fn test_shard_config_data() {
         let members = vec![(1, "127.0.0.1:50051".to_string()), (2, "127.0.0.1:50052".to_string())];
         let config = ShardConfig::data(ShardId::new(1), members);
-        assert_eq!(config.shard_id, ShardId::new(1));
+        assert_eq!(config.shard, ShardId::new(1));
         assert!(config.bootstrap);
         assert_eq!(config.initial_members.len(), 2);
     }
@@ -921,8 +918,8 @@ mod tests {
 
     #[test]
     fn test_shard_config_builder() {
-        let config = ShardConfig::builder().shard_id(ShardId::new(5)).build();
-        assert_eq!(config.shard_id, ShardId::new(5));
+        let config = ShardConfig::builder().shard(ShardId::new(5)).build();
+        assert_eq!(config.shard, ShardId::new(5));
         assert!(config.initial_members.is_empty());
         assert!(config.bootstrap);
         assert!(config.enable_background_jobs);
@@ -932,12 +929,12 @@ mod tests {
     fn test_shard_config_builder_with_all_fields() {
         let members = vec![(1, "127.0.0.1:50051".to_string())];
         let config = ShardConfig::builder()
-            .shard_id(ShardId::new(3))
+            .shard(ShardId::new(3))
             .initial_members(members.clone())
             .bootstrap(false)
             .enable_background_jobs(false)
             .build();
-        assert_eq!(config.shard_id, ShardId::new(3));
+        assert_eq!(config.shard, ShardId::new(3));
         assert_eq!(config.initial_members, members);
         assert!(!config.bootstrap);
         assert!(!config.enable_background_jobs);
@@ -998,7 +995,7 @@ mod tests {
         assert!(result.is_ok(), "start_system_shard failed: {:?}", result.err());
 
         let shard = result.unwrap();
-        assert_eq!(shard.shard_id(), ShardId::new(0));
+        assert_eq!(shard.shard(), ShardId::new(0));
         assert!(manager.has_shard(ShardId::new(0)));
         assert_eq!(manager.list_shards(), vec![ShardId::new(0)]);
     }
@@ -1036,7 +1033,7 @@ mod tests {
         // Try to start again
         let result = manager.start_system_shard(shard_config).await;
         assert!(
-            matches!(result, Err(MultiRaftError::ShardExists { shard_id }) if shard_id == ShardId::new(0))
+            matches!(result, Err(MultiRaftError::ShardExists { shard }) if shard == ShardId::new(0))
         );
     }
 
@@ -1067,7 +1064,7 @@ mod tests {
         // Try to get non-existent shard
         let result = manager.get_shard(ShardId::new(0));
         assert!(
-            matches!(result, Err(MultiRaftError::ShardNotFound { shard_id }) if shard_id == ShardId::new(0))
+            matches!(result, Err(MultiRaftError::ShardNotFound { shard }) if shard == ShardId::new(0))
         );
 
         // Start and get
@@ -1075,11 +1072,11 @@ mod tests {
         manager.start_system_shard(shard_config).await.expect("start system");
 
         let shard = manager.get_shard(ShardId::new(0)).expect("get shard");
-        assert_eq!(shard.shard_id(), ShardId::new(0));
+        assert_eq!(shard.shard(), ShardId::new(0));
 
         // system_shard() should work too
         let system = manager.system_shard().expect("system shard");
-        assert_eq!(system.shard_id(), ShardId::new(0));
+        assert_eq!(system.shard(), ShardId::new(0));
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use inferadb_ledger_types::{
-    OrganizationId, OrganizationSlug, OrganizationUsage, VaultId, VaultSlug,
+    OrganizationId, OrganizationSlug, OrganizationUsage, UserId, UserSlug, VaultId, VaultSlug,
 };
 use parking_lot::RwLock;
 
@@ -181,16 +181,6 @@ impl AppliedStateAccessor {
         OrganizationUsage { storage_bytes, vault_count: vault_count as u32 }
     }
 
-    /// Returns the organization quota (per-organization override or None for server default).
-    ///
-    /// * `organization` - Internal organization identifier (`OrganizationId`).
-    pub fn organization_quota(
-        &self,
-        organization: OrganizationId,
-    ) -> Option<inferadb_ledger_types::config::OrganizationQuota> {
-        self.state.read().organizations.get(&organization).and_then(|ns| ns.quota.clone())
-    }
-
     /// Resolves an external organization slug to its internal ID.
     ///
     /// Returns `None` if the slug is not registered in the slug index.
@@ -217,6 +207,20 @@ impl AppliedStateAccessor {
     /// Returns `None` if the ID is not registered in the vault reverse index.
     pub fn resolve_vault_id_to_slug(&self, id: VaultId) -> Option<VaultSlug> {
         self.state.read().vault_id_to_slug.get(&id).copied()
+    }
+
+    /// Resolves an external user slug to the internal user ID.
+    ///
+    /// Returns `None` if the slug is not registered in the user slug index.
+    pub fn resolve_user_slug_to_id(&self, slug: UserSlug) -> Option<UserId> {
+        self.state.read().user_slug_index.get(&slug).copied()
+    }
+
+    /// Resolves an internal user ID to its external slug.
+    ///
+    /// Returns `None` if the ID is not registered in the user reverse index.
+    pub fn resolve_user_id_to_slug(&self, id: UserId) -> Option<UserSlug> {
+        self.state.read().user_id_to_slug.get(&id).copied()
     }
 
     /// Checks the replicated client sequence table for idempotency.

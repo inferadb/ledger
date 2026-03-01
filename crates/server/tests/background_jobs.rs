@@ -95,8 +95,8 @@ async fn test_vault_health_tracking() {
     let ns_response = admin_client
         .create_organization(proto::CreateOrganizationRequest {
             name: ns_name,
-            shard_id: None,
-            quota: None,
+            shard: None,
+            tier: None,
         })
         .await
         .expect("create organization");
@@ -206,8 +206,8 @@ async fn test_learner_cache_initialization() {
     let ns_response = admin_client
         .create_organization(proto::CreateOrganizationRequest {
             name: ns_name.clone(),
-            shard_id: None,
-            quota: None,
+            shard: None,
+            tier: None,
         })
         .await
         .expect("create organization");
@@ -255,8 +255,8 @@ async fn test_concurrent_background_jobs() {
     let ns_response = admin_client
         .create_organization(proto::CreateOrganizationRequest {
             name: ns_name,
-            shard_id: None,
-            quota: None,
+            shard: None,
+            tier: None,
         })
         .await
         .expect("create organization");

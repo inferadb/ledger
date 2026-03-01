@@ -1379,7 +1379,6 @@ mod tests {
         assert!(props.contains_key("hot_key"), "Missing hot_key");
         assert!(props.contains_key("compaction"), "Missing compaction");
         assert!(props.contains_key("validation"), "Missing validation");
-        assert!(props.contains_key("default_quota"), "Missing default_quota");
         assert!(props.contains_key("integrity"), "Missing integrity");
         assert!(props.contains_key("metrics_cardinality"), "Missing metrics_cardinality");
     }

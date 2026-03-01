@@ -1,7 +1,7 @@
 //! Slug resolution for gRPC service boundaries.
 //!
-//! Translates external [`OrganizationSlug`] and [`VaultSlug`] values to their
-//! internal counterparts ([`OrganizationId`] and [`VaultId`]) at the service
+//! Translates external [`OrganizationSlug`], [`VaultSlug`], and [`UserSlug`] values
+//! to their internal counterparts ([`OrganizationId`], [`VaultId`], and [`UserId`]) at the service
 //! boundary. Every inbound request carrying a slug must resolve it before any
 //! internal operation.
 //!
@@ -23,7 +23,9 @@
 //! ```
 
 use inferadb_ledger_proto::proto;
-use inferadb_ledger_types::{OrganizationId, OrganizationSlug, VaultId, VaultSlug};
+use inferadb_ledger_types::{
+    OrganizationId, OrganizationSlug, UserId, UserSlug, VaultId, VaultSlug,
+};
 use tonic::Status;
 
 use crate::log_storage::AppliedStateAccessor;
@@ -193,6 +195,70 @@ impl SlugResolver {
             Some(slug) => {
                 let domain_slug = VaultSlug::new(slug.slug);
                 self.resolve_vault(domain_slug).map(Some)
+            },
+        }
+    }
+
+    // =========================================================================
+    // User slug resolution
+    // =========================================================================
+
+    /// Extracts and validates a user slug from a proto message.
+    ///
+    /// Returns `INVALID_ARGUMENT` if the slug field is missing or zero.
+    pub fn extract_user_slug(proto_slug: &Option<proto::UserSlug>) -> Result<UserSlug, Status> {
+        let slug = proto_slug.as_ref().ok_or_else(|| Status::invalid_argument("Missing user"))?;
+        if slug.slug == 0 {
+            return Err(Status::invalid_argument("user must be non-zero"));
+        }
+        Ok(UserSlug::new(slug.slug))
+    }
+
+    /// Resolves a user slug to its internal ID.
+    ///
+    /// Returns `NOT_FOUND` if the slug is not registered.
+    pub fn resolve_user(&self, slug: UserSlug) -> Result<UserId, Status> {
+        self.state
+            .resolve_user_slug_to_id(slug)
+            .ok_or_else(|| Status::not_found(format!("User with slug {} not found", slug.value())))
+    }
+
+    /// Reverse lookup: internal user ID to external slug.
+    ///
+    /// Returns `NOT_FOUND` if the ID has no associated slug.
+    pub fn resolve_user_slug(&self, id: UserId) -> Result<UserSlug, Status> {
+        self.state
+            .resolve_user_id_to_slug(id)
+            .ok_or_else(|| Status::not_found(format!("User {} not found", id)))
+    }
+
+    /// Extracts a user slug from a proto message and resolves it to an internal ID.
+    ///
+    /// Combines [`extract_user_slug`](Self::extract_user_slug) and
+    /// [`resolve_user`](Self::resolve_user) for the common case where a
+    /// request carries a required user slug.
+    pub fn extract_and_resolve_user(
+        &self,
+        proto_slug: &Option<proto::UserSlug>,
+    ) -> Result<UserId, Status> {
+        let slug = Self::extract_user_slug(proto_slug)?;
+        self.resolve_user(slug)
+    }
+
+    /// Extracts an optional user slug and resolves it if present.
+    ///
+    /// Returns `Ok(None)` when the proto field is absent. Returns an error
+    /// only if the slug is present but zero or not found in the index.
+    pub fn extract_and_resolve_user_optional(
+        &self,
+        proto_slug: &Option<proto::UserSlug>,
+    ) -> Result<Option<UserId>, Status> {
+        match proto_slug {
+            None => Ok(None),
+            Some(slug) if slug.slug == 0 => Err(Status::invalid_argument("user must be non-zero")),
+            Some(slug) => {
+                let domain_slug = UserSlug::new(slug.slug);
+                self.resolve_user(domain_slug).map(Some)
             },
         }
     }
@@ -566,5 +632,164 @@ mod tests {
         // Cross-type lookups don't interfere — vault slug doesn't resolve as org
         assert!(resolver.resolve(OrganizationSlug::new(200)).is_err());
         assert!(resolver.resolve_vault(VaultSlug::new(100)).is_err());
+    }
+
+    // =========================================================================
+    // User slug tests
+    // =========================================================================
+
+    fn make_resolver_with_users(user_entries: &[(u64, i64)]) -> SlugResolver {
+        let mut state = AppliedState::default();
+        for &(slug_val, user_id_val) in user_entries {
+            let slug = UserSlug::new(slug_val);
+            let user_id = UserId::new(user_id_val);
+            state.user_slug_index.insert(slug, user_id);
+            state.user_id_to_slug.insert(user_id, slug);
+        }
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        SlugResolver::new(accessor)
+    }
+
+    #[test]
+    fn extract_user_slug_valid() {
+        let proto = Some(proto::UserSlug { slug: 42 });
+        let result = SlugResolver::extract_user_slug(&proto).unwrap();
+        assert_eq!(result.value(), 42);
+    }
+
+    #[test]
+    fn extract_user_slug_missing_returns_invalid_argument() {
+        let result = SlugResolver::extract_user_slug(&None);
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("Missing"));
+    }
+
+    #[test]
+    fn extract_user_slug_zero_returns_invalid_argument() {
+        let proto = Some(proto::UserSlug { slug: 0 });
+        let result = SlugResolver::extract_user_slug(&proto);
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("non-zero"));
+    }
+
+    #[test]
+    fn resolve_user_valid_slug() {
+        let resolver = make_resolver_with_users(&[(100, 1)]);
+        let slug = UserSlug::new(100);
+        let user_id = resolver.resolve_user(slug).unwrap();
+        assert_eq!(user_id, UserId::new(1));
+    }
+
+    #[test]
+    fn resolve_user_unknown_slug_returns_not_found() {
+        let resolver = make_resolver_with_users(&[(100, 1)]);
+        let slug = UserSlug::new(999);
+        let result = resolver.resolve_user(slug);
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert!(status.message().contains("999"));
+    }
+
+    #[test]
+    fn resolve_user_slug_reverse_lookup() {
+        let resolver = make_resolver_with_users(&[(100, 1)]);
+        let slug = resolver.resolve_user_slug(UserId::new(1)).unwrap();
+        assert_eq!(slug.value(), 100);
+    }
+
+    #[test]
+    fn resolve_user_slug_reverse_unknown_returns_not_found() {
+        let resolver = make_resolver_with_users(&[(100, 1)]);
+        let result = resolver.resolve_user_slug(UserId::new(42));
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::NotFound);
+    }
+
+    #[test]
+    fn extract_and_resolve_user_valid() {
+        let resolver = make_resolver_with_users(&[(42, 7)]);
+        let proto = Some(proto::UserSlug { slug: 42 });
+        let user_id = resolver.extract_and_resolve_user(&proto).unwrap();
+        assert_eq!(user_id, UserId::new(7));
+    }
+
+    #[test]
+    fn extract_and_resolve_user_missing_slug() {
+        let resolver = make_resolver_with_users(&[]);
+        let result = resolver.extract_and_resolve_user(&None);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn extract_and_resolve_user_zero_slug() {
+        let resolver = make_resolver_with_users(&[]);
+        let proto = Some(proto::UserSlug { slug: 0 });
+        let result = resolver.extract_and_resolve_user(&proto);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn extract_and_resolve_user_unknown_slug() {
+        let resolver = make_resolver_with_users(&[(100, 1)]);
+        let proto = Some(proto::UserSlug { slug: 999 });
+        let result = resolver.extract_and_resolve_user(&proto);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[test]
+    fn extract_and_resolve_user_optional_none() {
+        let resolver = make_resolver_with_users(&[]);
+        let result = resolver.extract_and_resolve_user_optional(&None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_and_resolve_user_optional_valid() {
+        let resolver = make_resolver_with_users(&[(42, 7)]);
+        let proto = Some(proto::UserSlug { slug: 42 });
+        let result = resolver.extract_and_resolve_user_optional(&proto).unwrap();
+        assert_eq!(result, Some(UserId::new(7)));
+    }
+
+    #[test]
+    fn extract_and_resolve_user_optional_zero() {
+        let resolver = make_resolver_with_users(&[]);
+        let proto = Some(proto::UserSlug { slug: 0 });
+        let result = resolver.extract_and_resolve_user_optional(&proto);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn extract_and_resolve_user_optional_unknown() {
+        let resolver = make_resolver_with_users(&[(100, 1)]);
+        let proto = Some(proto::UserSlug { slug: 999 });
+        let result = resolver.extract_and_resolve_user_optional(&proto);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[test]
+    fn org_vault_and_user_slugs_independent() {
+        let mut state = AppliedState::default();
+        state.slug_index.insert(OrganizationSlug::new(100), OrganizationId::new(1));
+        state.id_to_slug.insert(OrganizationId::new(1), OrganizationSlug::new(100));
+        state.vault_slug_index.insert(VaultSlug::new(200), VaultId::new(2));
+        state.vault_id_to_slug.insert(VaultId::new(2), VaultSlug::new(200));
+        state.user_slug_index.insert(UserSlug::new(300), UserId::new(3));
+        state.user_id_to_slug.insert(UserId::new(3), UserSlug::new(300));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let resolver = SlugResolver::new(accessor);
+
+        assert_eq!(resolver.resolve(OrganizationSlug::new(100)).unwrap(), OrganizationId::new(1));
+        assert_eq!(resolver.resolve_vault(VaultSlug::new(200)).unwrap(), VaultId::new(2));
+        assert_eq!(resolver.resolve_user(UserSlug::new(300)).unwrap(), UserId::new(3));
+        // Cross-type lookups don't interfere
+        assert!(resolver.resolve_user(UserSlug::new(100)).is_err());
+        assert!(resolver.resolve_user(UserSlug::new(200)).is_err());
     }
 }

@@ -34,8 +34,8 @@ async fn create_organization(
     let response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: name.to_string(),
-            shard_id: None,
-            quota: None,
+            shard: None,
+            tier: None,
         })
         .await?;
     let slug = response
@@ -976,8 +976,8 @@ async fn test_idempotency_survives_leader_failover() {
     let ns_response = admin_client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: "failover-test-ns".to_string(),
-            shard_id: None,
-            quota: None,
+            shard: None,
+            tier: None,
         })
         .await
         .expect("create organization");

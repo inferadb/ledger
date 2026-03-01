@@ -349,19 +349,19 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 )
             },
 
-            LedgerRequest::CreateOrganization { name, slug, shard_id, quota } => {
+            LedgerRequest::CreateOrganization { name, slug, shard, tier } => {
                 let organization_id = state.sequences.next_organization();
-                // Use provided shard_id or select least-loaded shard
+                // Use provided shard or select least-loaded shard
                 let assigned_shard =
-                    shard_id.unwrap_or_else(|| select_least_loaded_shard(&state.organizations));
+                    shard.unwrap_or_else(|| select_least_loaded_shard(&state.organizations));
                 let org_meta = OrganizationMeta {
                     organization: organization_id,
                     slug: *slug,
                     name: name.clone(),
-                    shard_id: assigned_shard,
+                    shard: assigned_shard,
                     status: OrganizationStatus::Active,
-                    pending_shard_id: None,
-                    quota: quota.clone(),
+                    tier: *tier,
+                    pending_shard: None,
                     storage_bytes: 0,
                 };
                 // Mirror to pending external writes
@@ -381,7 +381,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     let registry = OrganizationRegistry {
                         organization_id,
                         name: name.clone(),
-                        shard_id: assigned_shard,
+                        shard: assigned_shard,
                         member_nodes: state
                             .membership
                             .membership()
@@ -423,7 +423,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         .detail("organization_name", name)
                         .detail("organization_id", &organization_id.to_string())
                         .detail("organization_slug", &slug.value().to_string())
-                        .detail("shard_id", &assigned_shard.to_string())
+                        .detail("shard", &assigned_shard.to_string())
                         .outcome(EventOutcome::Success)
                         .build(block_height, *op_index, block_timestamp, ttl_days),
                 );
@@ -432,7 +432,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (
                     LedgerResponse::OrganizationCreated {
                         organization: organization_id,
-                        shard_id: assigned_shard,
+                        shard: assigned_shard,
                     },
                     None,
                 )
@@ -793,27 +793,27 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (response, None)
             },
 
-            LedgerRequest::StartMigration { organization, target_shard_id } => {
+            LedgerRequest::StartMigration { organization, target_shard } => {
                 let response = if let Some(org) = state.organizations.get_mut(organization) {
                     match org.status {
                         OrganizationStatus::Active => {
                             // Validate target shard is different
-                            if *target_shard_id == org.shard_id {
+                            if *target_shard == org.shard {
                                 LedgerResponse::Error {
                                     message: format!(
                                         "Organization {} is already on shard {}",
-                                        organization, target_shard_id
+                                        organization, target_shard
                                     ),
                                 }
                             } else {
                                 org.status = OrganizationStatus::Migrating;
-                                org.pending_shard_id = Some(*target_shard_id);
+                                org.pending_shard = Some(*target_shard);
                                 if let Ok(blob) = encode(org) {
                                     pending.organizations.push((*organization, blob));
                                 }
                                 LedgerResponse::MigrationStarted {
                                     organization: *organization,
-                                    target_shard_id: *target_shard_id,
+                                    target_shard: *target_shard,
                                 }
                             }
                         },
@@ -846,7 +846,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     events.push(
                         ApplyPhaseEmitter::for_system(EventAction::MigrationStarted)
                             .detail("organization_id", &organization.to_string())
-                            .detail("target_shard_id", &target_shard_id.to_string())
+                            .detail("target_shard", &target_shard.to_string())
                             .outcome(EventOutcome::Success)
                             .build(block_height, *op_index, block_timestamp, ttl_days),
                     );
@@ -860,18 +860,18 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let response = if let Some(org) = state.organizations.get_mut(organization) {
                     match org.status {
                         OrganizationStatus::Migrating => {
-                            if let Some(target_shard) = org.pending_shard_id {
-                                let old_shard = org.shard_id;
-                                org.shard_id = target_shard;
+                            if let Some(target_shard) = org.pending_shard {
+                                let old_shard = org.shard;
+                                org.shard = target_shard;
                                 org.status = OrganizationStatus::Active;
-                                org.pending_shard_id = None;
+                                org.pending_shard = None;
                                 if let Ok(blob) = encode(org) {
                                     pending.organizations.push((*organization, blob));
                                 }
                                 LedgerResponse::MigrationCompleted {
                                     organization: *organization,
-                                    old_shard_id: old_shard,
-                                    new_shard_id: target_shard,
+                                    old_shard,
+                                    new_shard: target_shard,
                                 }
                             } else {
                                 // Should not happen, but handle gracefully
@@ -900,11 +900,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 };
 
                 // Emit MigrationCompleted event on success
-                if let LedgerResponse::MigrationCompleted { new_shard_id, .. } = &response {
+                if let LedgerResponse::MigrationCompleted { new_shard, .. } = &response {
                     events.push(
                         ApplyPhaseEmitter::for_system(EventAction::MigrationCompleted)
                             .detail("organization_id", &organization.to_string())
-                            .detail("shard_id", &new_shard_id.to_string())
+                            .detail("shard", &new_shard.to_string())
                             .outcome(EventOutcome::Success)
                             .build(block_height, *op_index, block_timestamp, ttl_days),
                     );
@@ -997,23 +997,19 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             LedgerRequest::System(system_request) => {
                 let response = match system_request {
-                    SystemRequest::CreateUser { .. } => {
+                    SystemRequest::CreateUser { slug, .. } => {
                         let user_id = state.sequences.next_user();
-                        LedgerResponse::UserCreated { user_id }
+                        let slug = *slug;
+                        state.user_slug_index.insert(slug, user_id);
+                        state.user_id_to_slug.insert(user_id, slug);
+                        pending.user_slug_index.push((slug, user_id));
+                        LedgerResponse::UserCreated { user_id, slug }
                     },
                     SystemRequest::AddNode { .. } | SystemRequest::RemoveNode { .. } => {
                         LedgerResponse::Empty
                     },
-                    SystemRequest::UpdateOrganizationRouting { organization, shard_id } => {
-                        // Validate shard_id is non-negative
-                        if *shard_id < 0 {
-                            LedgerResponse::Error {
-                                message: format!(
-                                    "Invalid shard_id: {} (must be non-negative)",
-                                    shard_id
-                                ),
-                            }
-                        } else if let Some(org) = state.organizations.get_mut(organization) {
+                    SystemRequest::UpdateOrganizationRouting { organization, shard } => {
+                        if let Some(org) = state.organizations.get_mut(organization) {
                             if org.status == OrganizationStatus::Deleted {
                                 LedgerResponse::Error {
                                     message: format!(
@@ -1022,19 +1018,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     ),
                                 }
                             } else {
-                                let old_shard_id = org.shard_id;
-                                // Safe cast: we already validated shard_id >= 0 above
-                                #[allow(clippy::cast_sign_loss)]
-                                let new_shard_id =
-                                    inferadb_ledger_types::ShardId::new(*shard_id as u32);
-                                org.shard_id = new_shard_id;
+                                let old_shard = org.shard;
+                                org.shard = *shard;
                                 if let Ok(blob) = encode(org) {
                                     pending.organizations.push((*organization, blob));
                                 }
                                 LedgerResponse::OrganizationMigrated {
                                     organization: *organization,
-                                    old_shard_id,
-                                    new_shard_id,
+                                    old_shard,
+                                    new_shard: *shard,
                                 }
                             }
                         } else {
@@ -1048,13 +1040,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // Emit events for system request variants
                 match (&response, system_request) {
                     (
-                        LedgerResponse::UserCreated { user_id },
-                        SystemRequest::CreateUser { name, email, admin },
+                        LedgerResponse::UserCreated { user_id, slug },
+                        SystemRequest::CreateUser { name, email, admin, .. },
                     ) => {
                         events.push(
                             ApplyPhaseEmitter::for_system(EventAction::UserCreated)
                                 .principal("system")
                                 .detail("user_id", &user_id.to_string())
+                                .detail("slug", &slug.to_string())
                                 .detail("name", name)
                                 .detail("email", email)
                                 .detail("admin", &admin.to_string())
@@ -1085,13 +1078,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         *op_index += 1;
                     },
                     (
-                        LedgerResponse::OrganizationMigrated { new_shard_id, .. },
+                        LedgerResponse::OrganizationMigrated { new_shard, .. },
                         SystemRequest::UpdateOrganizationRouting { organization, .. },
                     ) => {
                         events.push(
                             ApplyPhaseEmitter::for_system(EventAction::RoutingUpdated)
                                 .detail("organization_id", &organization.to_string())
-                                .detail("shard_id", &new_shard_id.to_string())
+                                .detail("shard", &new_shard.to_string())
                                 .outcome(EventOutcome::Success)
                                 .build(block_height, *op_index, block_timestamp, ttl_days),
                         );

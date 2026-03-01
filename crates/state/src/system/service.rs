@@ -373,7 +373,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         &self,
         organization: OrganizationId,
     ) -> Result<Option<ShardId>> {
-        self.get_organization(organization).map(|opt| opt.map(|r| r.shard_id))
+        self.get_organization(organization).map(|opt| opt.map(|r| r.shard))
     }
 
     /// Assigns an organization to a shard.
@@ -388,14 +388,14 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         &self,
         organization: OrganizationId,
         slug: OrganizationSlug,
-        shard_id: ShardId,
+        shard: ShardId,
         member_nodes: Vec<NodeId>,
     ) -> Result<()> {
         let mut registry = self.get_organization(organization)?.ok_or_else(|| {
             SystemError::NotFound { entity: format!("organization:{}", organization) }
         })?;
 
-        registry.shard_id = shard_id;
+        registry.shard = shard;
         registry.member_nodes = member_nodes;
         registry.config_version += 1;
 
@@ -535,7 +535,7 @@ mod tests {
         let registry = OrganizationRegistry {
             organization_id: OrganizationId::new(1),
             name: "acme-corp".to_string(),
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
             status: OrganizationStatus::Active,
             config_version: 1,
@@ -564,7 +564,7 @@ mod tests {
             let registry = OrganizationRegistry {
                 organization_id: OrganizationId::new(i),
                 name: format!("org-{}", i),
-                shard_id: ShardId::new(1),
+                shard: ShardId::new(1),
                 member_nodes: vec![],
                 status: OrganizationStatus::Active,
                 config_version: 1,
@@ -585,7 +585,7 @@ mod tests {
         let registry = OrganizationRegistry {
             organization_id: OrganizationId::new(1),
             name: "test-org".to_string(),
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             member_nodes: vec![],
             status: OrganizationStatus::Active,
             config_version: 1,
@@ -664,7 +664,7 @@ mod tests {
         let registry = OrganizationRegistry {
             organization_id: OrganizationId::new(1),
             name: "test-org".to_string(),
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             member_nodes: vec![],
             status: OrganizationStatus::Active,
             config_version: 1,

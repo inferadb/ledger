@@ -93,9 +93,6 @@ pub struct AdminServiceImpl {
     /// Snapshot manager for reading Raft snapshots during backup.
     #[builder(default)]
     snapshot_manager: Option<Arc<inferadb_ledger_state::SnapshotManager>>,
-    /// Per-organization resource quota checker.
-    #[builder(default)]
-    quota_checker: Option<crate::quota::QuotaChecker>,
     /// Handler-phase event handle for recording denial events.
     #[builder(default)]
     event_handle: Option<crate::event_writer::EventHandle<inferadb_ledger_store::FileBackend>>,
@@ -145,13 +142,6 @@ impl AdminServiceImpl {
     ) -> Self {
         self.backup_manager = Some(backup_manager);
         self.snapshot_manager = Some(snapshot_manager);
-        self
-    }
-
-    /// Sets the per-organization resource quota checker.
-    #[must_use]
-    pub fn with_quota_checker(mut self, checker: crate::quota::QuotaChecker) -> Self {
-        self.quota_checker = Some(checker);
         self
     }
 
@@ -233,20 +223,13 @@ impl AdminService for AdminServiceImpl {
         })?;
 
         // Submit create organization through Raft
-        // Map proto ShardId to domain ShardId newtype
-        // Convert proto quota to domain type
-        let quota = req.quota.map(|q| inferadb_ledger_types::config::OrganizationQuota {
-            max_storage_bytes: q.max_storage_bytes,
-            max_vaults: q.max_vaults,
-            max_write_ops_per_sec: q.max_write_ops_per_sec,
-            max_read_ops_per_sec: q.max_read_ops_per_sec,
-        });
+        let tier = crate::proto_compat::organization_tier_from_proto(req.tier());
 
         let ledger_request = LedgerRequest::CreateOrganization {
             name: req.name,
             slug,
-            shard_id: req.shard_id.map(|s| DomainShardId::new(s.id)),
-            quota,
+            shard: req.shard.map(|s| DomainShardId::new(s.id)),
+            tier,
         };
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
@@ -285,7 +268,7 @@ impl AdminService for AdminServiceImpl {
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
         match result.data {
-            LedgerResponse::OrganizationCreated { organization: organization_id, shard_id } => {
+            LedgerResponse::OrganizationCreated { organization: organization_id, shard } => {
                 ctx.set_organization(slug.value());
                 ctx.set_success();
                 metrics::record_organization_operation(organization_id, "admin");
@@ -293,7 +276,7 @@ impl AdminService for AdminServiceImpl {
                 let organization = slug_resolver.resolve_slug(organization_id)?;
                 Ok(Response::new(CreateOrganizationResponse {
                     slug: Some(OrganizationSlug { slug: organization.value() }),
-                    shard_id: Some(ShardId { id: shard_id.value() }),
+                    shard: Some(ShardId { id: shard.value() }),
                 }))
             },
             LedgerResponse::Error { message } => {
@@ -475,15 +458,17 @@ impl AdminService for AdminServiceImpl {
                 ctx.set_organization(organization_slug_val);
                 ctx.set_success();
                 let status = crate::proto_compat::organization_status_to_proto(org.status);
+                let tier = crate::proto_compat::organization_tier_to_proto(org.tier);
                 let organization = slug_resolver.resolve_slug(org.organization)?;
                 Ok(Response::new(GetOrganizationResponse {
                     slug: Some(OrganizationSlug { slug: organization.value() }),
                     name: org.name,
-                    shard_id: Some(ShardId { id: org.shard_id.value() }),
+                    shard: Some(ShardId { id: org.shard.value() }),
                     member_nodes: vec![],
                     status: status.into(),
                     config_version: 0,
                     created_at: None,
+                    tier: tier.into(),
                 }))
             },
             None => {
@@ -518,15 +503,17 @@ impl AdminService for AdminServiceImpl {
             .into_iter()
             .map(|org| {
                 let status = crate::proto_compat::organization_status_to_proto(org.status);
+                let tier = crate::proto_compat::organization_tier_to_proto(org.tier);
                 let organization = slug_resolver.resolve_slug(org.organization)?;
                 Ok(inferadb_ledger_proto::proto::GetOrganizationResponse {
                     slug: Some(OrganizationSlug { slug: organization.value() }),
                     name: org.name,
-                    shard_id: Some(ShardId { id: org.shard_id.value() }),
+                    shard: Some(ShardId { id: org.shard.value() }),
                     member_nodes: vec![],
                     status: status.into(),
                     config_version: 0,
                     created_at: None,
+                    tier: tier.into(),
                 })
             })
             .collect::<Result<Vec<_>, Status>>()?;
@@ -585,30 +572,6 @@ impl AdminService for AdminServiceImpl {
             })?;
 
         ctx.set_organization(organization_slug_val);
-
-        // Check vault count quota before submitting to Raft
-        super::helpers::check_vault_quota(self.quota_checker.as_ref(), organization_id).map_err(
-            |status| {
-                self.record_handler_event(
-                    crate::event_writer::HandlerPhaseEmitter::for_organization(
-                        inferadb_ledger_types::events::EventAction::QuotaExceeded,
-                        organization_id,
-                        req.organization.as_ref().map(|n| DomainOrganizationSlug::new(n.slug)),
-                        self.node_id.unwrap_or(0),
-                    )
-                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
-                        reason: "vault_quota_exceeded".to_string(),
-                    })
-                    .trace_id(&trace_ctx.trace_id)
-                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
-                );
-                super::metadata::status_with_correlation(
-                    status,
-                    &ctx.request_id(),
-                    &trace_ctx.trace_id,
-                )
-            },
-        )?;
 
         // Convert proto retention policy to internal type
         let retention_policy = req.retention_policy.map(|proto_policy| {
@@ -2534,7 +2497,7 @@ impl AdminService for AdminServiceImpl {
                 .create_incremental_backup(
                     db.as_ref(),
                     &base_backup_id,
-                    base_meta.shard_id,
+                    base_meta.shard,
                     shard_height,
                     &tag,
                 )

@@ -58,12 +58,12 @@ pub enum RoutingError {
     OrganizationUnavailable { organization: OrganizationId, status: OrganizationStatus },
 
     /// Shard has no available nodes.
-    #[snafu(display("Shard {shard_id} has no available nodes"))]
-    NoAvailableNodes { shard_id: ShardId },
+    #[snafu(display("Shard {shard} has no available nodes"))]
+    NoAvailableNodes { shard: ShardId },
 
     /// Failed to connect to shard leader.
-    #[snafu(display("Failed to connect to shard {shard_id}: {message}"))]
-    ConnectionFailed { shard_id: ShardId, message: String },
+    #[snafu(display("Failed to connect to shard {shard}: {message}"))]
+    ConnectionFailed { shard: ShardId, message: String },
 
     /// System service error during lookup.
     #[snafu(display("System lookup failed: {source}"))]
@@ -84,7 +84,7 @@ pub type Result<T> = std::result::Result<T, RoutingError>;
 #[derive(Debug, Clone)]
 pub struct RoutingInfo {
     /// Shard hosting this organization.
-    pub shard_id: ShardId,
+    pub shard: ShardId,
     /// Member nodes in the shard.
     pub member_nodes: Vec<String>,
     /// Hint for current leader (may be stale).
@@ -99,7 +99,7 @@ pub struct RoutingInfo {
 #[derive(Debug, Clone)]
 struct CacheEntry {
     /// Shard hosting this organization.
-    shard_id: ShardId,
+    shard: ShardId,
     /// Member nodes in the shard.
     member_nodes: Vec<String>,
     /// Hint for current leader (may be stale).
@@ -120,7 +120,7 @@ impl CacheEntry {
     /// Converts to public RoutingInfo.
     fn to_routing_info(&self) -> RoutingInfo {
         RoutingInfo {
-            shard_id: self.shard_id,
+            shard: self.shard,
             member_nodes: self.member_nodes.clone(),
             leader_hint: self.leader_hint.clone(),
         }
@@ -135,7 +135,7 @@ impl CacheEntry {
 #[derive(Debug, Clone)]
 pub struct ShardConnection {
     /// Shard identifier.
-    pub shard_id: ShardId,
+    pub shard: ShardId,
     /// gRPC channel to the shard leader.
     pub channel: Channel,
     /// Address of the connected node.
@@ -223,7 +223,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         let routing = self.get_routing_internal(organization)?;
 
         // 2. Get or create connection
-        self.get_connection(routing.shard_id, &routing.member_nodes, routing.leader_hint.as_deref())
+        self.get_connection(routing.shard, &routing.member_nodes, routing.leader_hint.as_deref())
             .await
     }
 
@@ -254,7 +254,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
             {
                 debug!(
                     organization = organization.value(),
-                    shard_id = entry.shard_id.value(),
+                    shard = entry.shard.value(),
                     "Cache hit"
                 );
                 return Ok(entry.clone());
@@ -282,7 +282,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         }
 
         let entry = CacheEntry {
-            shard_id: registry.shard_id,
+            shard: registry.shard,
             member_nodes: registry.member_nodes.clone(),
             leader_hint: registry.member_nodes.first().cloned(), // First node as hint
             config_version: registry.config_version,
@@ -297,7 +297,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
 
         info!(
             organization = organization.value(),
-            shard_id = registry.shard_id.value(),
+            shard = registry.shard.value(),
             config_version = registry.config_version,
             "Refreshed routing cache"
         );
@@ -311,14 +311,14 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     /// The connection will be cached for future use.
     pub async fn get_connection(
         &self,
-        shard_id: ShardId,
+        shard: ShardId,
         member_nodes: &[String],
         leader_hint: Option<&str>,
     ) -> Result<ShardConnection> {
         // Check for existing connection
         {
             let connections = self.connections.read();
-            if let Some(conn) = connections.get(&shard_id) {
+            if let Some(conn) = connections.get(&shard) {
                 // Verify connection is still valid
                 // In a real implementation, we'd ping the connection
                 return Ok(conn.clone());
@@ -326,18 +326,18 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         }
 
         // No existing connection - create new one
-        self.create_connection(shard_id, member_nodes, leader_hint).await
+        self.create_connection(shard, member_nodes, leader_hint).await
     }
 
     /// Creates a new connection to a shard.
     async fn create_connection(
         &self,
-        shard_id: ShardId,
+        shard: ShardId,
         member_nodes: &[String],
         leader_hint: Option<&str>,
     ) -> Result<ShardConnection> {
         if member_nodes.is_empty() {
-            return Err(RoutingError::NoAvailableNodes { shard_id });
+            return Err(RoutingError::NoAvailableNodes { shard });
         }
 
         // Try leader hint first, then other nodes
@@ -354,27 +354,27 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         let mut last_error = None;
 
         for node_id in nodes_to_try {
-            match self.connect_to_node(shard_id, node_id).await {
+            match self.connect_to_node(shard, node_id).await {
                 Ok(conn) => {
                     // Cache the connection
                     {
                         let mut connections = self.connections.write();
-                        connections.insert(shard_id, conn.clone());
+                        connections.insert(shard, conn.clone());
                     }
                     return Ok(conn);
                 },
                 Err(e) => {
-                    warn!(shard_id = shard_id.value(), node_id, error = %e, "Failed to connect to node");
+                    warn!(shard = shard.value(), node_id, error = %e, "Failed to connect to node");
                     last_error = Some(e);
                 },
             }
         }
 
-        Err(last_error.unwrap_or(RoutingError::NoAvailableNodes { shard_id }))
+        Err(last_error.unwrap_or(RoutingError::NoAvailableNodes { shard }))
     }
 
     /// Connects to a specific node.
-    async fn connect_to_node(&self, shard_id: ShardId, node_id: &str) -> Result<ShardConnection> {
+    async fn connect_to_node(&self, shard: ShardId, node_id: &str) -> Result<ShardConnection> {
         // Parse node address (format: "host:port" or just "host")
         let address = self.resolve_node_address(node_id)?;
 
@@ -382,21 +382,21 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
 
         let channel = Channel::from_shared(endpoint.clone())
             .map_err(|e| RoutingError::ConnectionFailed {
-                shard_id,
+                shard,
                 message: format!("Invalid endpoint {}: {}", endpoint, e),
             })?
             .connect_timeout(self.config.connect_timeout)
             .connect()
             .await
             .map_err(|e| RoutingError::ConnectionFailed {
-                shard_id,
+                shard,
                 message: format!("Connection to {} failed: {}", endpoint, e),
             })?;
 
-        debug!(shard_id = shard_id.value(), node_id, address = %address, "Connected to shard node");
+        debug!(shard = shard.value(), node_id, address = %address, "Connected to shard node");
 
         Ok(ShardConnection {
-            shard_id,
+            shard,
             channel,
             address,
             is_leader: false, // Will be confirmed on first request
@@ -413,7 +413,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         // Try parsing as host:port
         if node_id.contains(':') {
             return node_id.parse().map_err(|_| RoutingError::ConnectionFailed {
-                shard_id: ShardId::new(0),
+                shard: ShardId::new(0),
                 message: format!("Invalid address: {}", node_id),
             });
         }
@@ -421,7 +421,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         // Assume it's just a hostname, append default port
         let addr_str = format!("{}:{}", node_id, self.config.grpc_port);
         addr_str.parse().map_err(|_| RoutingError::ConnectionFailed {
-            shard_id: ShardId::new(0),
+            shard: ShardId::new(0),
             message: format!("Invalid hostname: {}", node_id),
         })
     }
@@ -441,10 +441,10 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     /// Invalidate all cached connections to a shard.
     ///
     /// Invalidates all cached connections when a shard leader changes or becomes unavailable.
-    pub fn invalidate_shard(&self, shard_id: ShardId) {
+    pub fn invalidate_shard(&self, shard: ShardId) {
         let mut connections = self.connections.write();
-        if connections.remove(&shard_id).is_some() {
-            debug!(shard_id = shard_id.value(), "Invalidated shard connection");
+        if connections.remove(&shard).is_some() {
+            debug!(shard = shard.value(), "Invalidated shard connection");
         }
     }
 
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn test_cache_entry_staleness() {
         let entry = CacheEntry {
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             member_nodes: vec!["node-1".to_string()],
             leader_hint: Some("node-1".to_string()),
             config_version: 1,
@@ -625,7 +625,7 @@ mod tests {
             cache.insert(
                 OrganizationId::new(1),
                 CacheEntry {
-                    shard_id: ShardId::new(1),
+                    shard: ShardId::new(1),
                     member_nodes: vec!["node-1".to_string()],
                     leader_hint: None,
                     config_version: 1,
@@ -661,7 +661,7 @@ mod tests {
             cache.insert(
                 OrganizationId::new(1),
                 CacheEntry {
-                    shard_id: ShardId::new(1),
+                    shard: ShardId::new(1),
                     member_nodes: vec![],
                     leader_hint: None,
                     config_version: 1,
@@ -683,7 +683,7 @@ mod tests {
         let registry = inferadb_ledger_state::system::OrganizationRegistry {
             organization_id: OrganizationId::new(42),
             name: "test-ns".to_string(),
-            shard_id: ShardId::new(3),
+            shard: ShardId::new(3),
             member_nodes: vec!["node-a:50051".to_string(), "node-b:50051".to_string()],
             status: inferadb_ledger_state::system::OrganizationStatus::Active,
             config_version: 1,
@@ -701,7 +701,7 @@ mod tests {
 
         // Router should resolve the organization to shard 3
         let info = router.get_routing(OrganizationId::new(42)).expect("get routing");
-        assert_eq!(info.shard_id, ShardId::new(3));
+        assert_eq!(info.shard, ShardId::new(3));
         assert_eq!(info.member_nodes.len(), 2);
         assert!(info.leader_hint.is_some(), "should have a leader hint");
 
@@ -716,12 +716,12 @@ mod tests {
         // Register two organizations on different shards
         let system = SystemOrganizationService::new(Arc::clone(&state));
 
-        for (ns_id, shard_id) in [(10, 1), (20, 2)] {
+        for (ns_id, shard) in [(10, 1), (20, 2)] {
             let registry = inferadb_ledger_state::system::OrganizationRegistry {
                 organization_id: OrganizationId::new(ns_id),
                 name: format!("ns-{}", ns_id),
-                shard_id: ShardId::new(shard_id),
-                member_nodes: vec![format!("node-{}:50051", shard_id)],
+                shard: ShardId::new(shard),
+                member_nodes: vec![format!("node-{}:50051", shard)],
                 status: inferadb_ledger_state::system::OrganizationStatus::Active,
                 config_version: 1,
                 created_at: chrono::Utc::now(),
@@ -740,8 +740,8 @@ mod tests {
         let info1 = router.get_routing(OrganizationId::new(10)).expect("ns 10");
         let info2 = router.get_routing(OrganizationId::new(20)).expect("ns 20");
 
-        assert_eq!(info1.shard_id, ShardId::new(1));
-        assert_eq!(info2.shard_id, ShardId::new(2));
+        assert_eq!(info1.shard, ShardId::new(1));
+        assert_eq!(info2.shard, ShardId::new(2));
 
         // Both should be cached
         assert_eq!(router.stats().cached_organizations, 2);
@@ -756,7 +756,7 @@ mod tests {
         let registry = inferadb_ledger_state::system::OrganizationRegistry {
             organization_id: OrganizationId::new(5),
             name: "hint-test".to_string(),
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             member_nodes: vec!["node-a:50051".to_string(), "node-b:50051".to_string()],
             status: inferadb_ledger_state::system::OrganizationStatus::Active,
             config_version: 1,
@@ -792,7 +792,7 @@ mod tests {
         let registry = inferadb_ledger_state::system::OrganizationRegistry {
             organization_id: OrganizationId::new(77),
             name: "suspended-ns".to_string(),
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             member_nodes: vec!["node-1:50051".to_string()],
             status: inferadb_ledger_state::system::OrganizationStatus::Suspended,
             config_version: 1,

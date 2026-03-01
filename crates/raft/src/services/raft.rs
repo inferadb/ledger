@@ -220,7 +220,7 @@ use crate::multi_raft::MultiRaftManager;
 
 /// Multi-shard Raft service that routes RPCs to the correct shard.
 ///
-/// Extracts `shard_id` from incoming requests and forwards to the corresponding
+/// Extracts `shard` from incoming requests and forwards to the corresponding
 /// shard's Raft instance. Defaults to shard 0 (system shard) for backward
 /// compatibility with clients that don't specify a shard.
 pub struct MultiShardRaftService {
@@ -234,13 +234,13 @@ impl MultiShardRaftService {
         Self { manager }
     }
 
-    /// Resolves shard ID to a Raft instance.
-    fn resolve_shard(&self, shard_id: Option<u64>) -> Result<Arc<Raft<LedgerTypeConfig>>, Status> {
-        let shard_id = inferadb_ledger_types::ShardId::new(shard_id.unwrap_or(0) as u32);
+    /// Resolves shard to a Raft instance.
+    fn resolve_shard(&self, shard: Option<u64>) -> Result<Arc<Raft<LedgerTypeConfig>>, Status> {
+        let shard = inferadb_ledger_types::ShardId::new(shard.unwrap_or(0) as u32);
         self.manager
-            .get_shard(shard_id)
-            .map(|shard| shard.raft().clone())
-            .map_err(|_| Status::not_found(format!("shard {} not found", shard_id)))
+            .get_shard(shard)
+            .map(|s| s.raft().clone())
+            .map_err(|_| Status::not_found(format!("shard {} not found", shard)))
     }
 }
 
@@ -252,7 +252,7 @@ impl RaftService for MultiShardRaftService {
     ) -> Result<Response<RaftVoteResponse>, Status> {
         let req = request.into_inner();
 
-        let raft = self.resolve_shard(req.shard_id)?;
+        let raft = self.resolve_shard(req.shard)?;
 
         let vote =
             req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
@@ -284,7 +284,7 @@ impl RaftService for MultiShardRaftService {
     ) -> Result<Response<RaftAppendEntriesResponse>, Status> {
         let req = request.into_inner();
 
-        let raft = self.resolve_shard(req.shard_id)?;
+        let raft = self.resolve_shard(req.shard)?;
 
         let vote =
             req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
@@ -331,7 +331,7 @@ impl RaftService for MultiShardRaftService {
     ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
         let req = request.into_inner();
 
-        let raft = self.resolve_shard(req.shard_id)?;
+        let raft = self.resolve_shard(req.shard)?;
 
         let vote =
             req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
@@ -543,20 +543,14 @@ mod tests {
     }
 
     /// Returns the current term from the Raft instance via the manager.
-    fn get_term(manager: &MultiRaftManager, shard_id: u32) -> u64 {
-        manager
-            .get_shard(ShardId::new(shard_id))
-            .expect("shard exists")
-            .raft()
-            .metrics()
-            .borrow()
-            .current_term
+    fn get_term(manager: &MultiRaftManager, shard: ShardId) -> u64 {
+        manager.get_shard(shard).expect("shard exists").raft().metrics().borrow().current_term
     }
 
     /// Returns the last applied index from the Raft instance.
-    fn get_applied(manager: &MultiRaftManager, shard_id: u32) -> u64 {
+    fn get_applied(manager: &MultiRaftManager, shard: ShardId) -> u64 {
         manager
-            .get_shard(ShardId::new(shard_id))
+            .get_shard(shard)
             .expect("shard exists")
             .raft()
             .metrics()
@@ -574,8 +568,7 @@ mod tests {
     async fn test_byzantine_vote_missing_vote_field() {
         let (service, _mgr, _id, _dir) = create_test_service().await;
 
-        let request =
-            Request::new(RaftVoteRequest { vote: None, last_log_id: None, shard_id: None });
+        let request = Request::new(RaftVoteRequest { vote: None, last_log_id: None, shard: None });
         let result = service.vote(request).await;
 
         assert!(result.is_err());
@@ -592,7 +585,7 @@ mod tests {
             prev_log_id: None,
             entries: vec![],
             leader_commit: None,
-            shard_id: None,
+            shard: None,
         });
         let result = service.append_entries(request).await;
 
@@ -611,7 +604,7 @@ mod tests {
             offset: 0,
             data: vec![],
             done: true,
-            shard_id: None,
+            shard: None,
         });
         let result = service.install_snapshot(request).await;
 
@@ -634,7 +627,7 @@ mod tests {
             offset: 0,
             data: vec![],
             done: true,
-            shard_id: None,
+            shard: None,
         });
         let result = service.install_snapshot(request).await;
 
@@ -656,7 +649,7 @@ mod tests {
             prev_log_id: None,
             entries: vec![],
             leader_commit: None,
-            shard_id: None,
+            shard: None,
         });
         let result = service.append_entries(request).await;
 
@@ -673,8 +666,8 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_garbage_log_entries() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, 0);
-        let applied_before = get_applied(&mgr, 0);
+        let current_term = get_term(&mgr, ShardId::new(0));
+        let applied_before = get_applied(&mgr, ShardId::new(0));
 
         let garbage_entries = vec![
             vec![0xFF, 0xFE, 0xFD],
@@ -688,11 +681,11 @@ mod tests {
             prev_log_id: None,
             entries: garbage_entries,
             leader_commit: None,
-            shard_id: None,
+            shard: None,
         });
         let _result = service.append_entries(request).await;
 
-        let applied_after = get_applied(&mgr, 0);
+        let applied_after = get_applied(&mgr, ShardId::new(0));
         assert!(
             applied_after >= applied_before,
             "Applied index must not regress: before={}, after={}",
@@ -705,14 +698,14 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_conflicting_prev_log_id() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, 0);
+        let current_term = get_term(&mgr, ShardId::new(0));
 
         let request = Request::new(RaftAppendEntriesRequest {
             vote: Some(make_vote(current_term, node_id)),
             prev_log_id: Some(make_log_id(current_term, 999_999)),
             entries: vec![],
             leader_commit: None,
-            shard_id: None,
+            shard: None,
         });
         let result = service.append_entries(request).await;
 
@@ -737,7 +730,7 @@ mod tests {
         let request = Request::new(RaftVoteRequest {
             vote: Some(make_vote(999, 12345)),
             last_log_id: Some(make_log_id(999, 100)),
-            shard_id: None,
+            shard: None,
         });
         let result = service.vote(request).await;
 
@@ -769,12 +762,12 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_competing_vote_same_term() {
         let (service, mgr, _id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, 0);
+        let current_term = get_term(&mgr, ShardId::new(0));
 
         let request = Request::new(RaftVoteRequest {
             vote: Some(make_vote(current_term, 99999)),
             last_log_id: None,
-            shard_id: None,
+            shard: None,
         });
         let result = service.vote(request).await;
 
@@ -791,8 +784,8 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_corrupted_snapshot_data() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, 0);
-        let applied_before = get_applied(&mgr, 0);
+        let current_term = get_term(&mgr, ShardId::new(0));
+        let applied_before = get_applied(&mgr, ShardId::new(0));
 
         let meta = make_snapshot_meta(
             current_term,
@@ -807,13 +800,13 @@ mod tests {
             offset: 0,
             data: vec![0xFF; 4096],
             done: true,
-            shard_id: None,
+            shard: None,
         });
         let _result = service.install_snapshot(request).await;
 
         // Wait for potential recovery
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let applied_after = get_applied(&mgr, 0);
+        let applied_after = get_applied(&mgr, ShardId::new(0));
         assert!(
             applied_after >= applied_before,
             "State must not regress: before={}, after={}",
@@ -826,7 +819,7 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_forged_membership_in_snapshot() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, 0);
+        let current_term = get_term(&mgr, ShardId::new(0));
 
         let meta = make_snapshot_meta(
             current_term,
@@ -845,7 +838,7 @@ mod tests {
             offset: 0,
             data: vec![0x00; 64],
             done: true,
-            shard_id: None,
+            shard: None,
         });
         let _result = service.install_snapshot(request).await;
 
@@ -860,7 +853,7 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_snapshot_future_log_index() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, 0);
+        let current_term = get_term(&mgr, ShardId::new(0));
 
         let meta = make_snapshot_meta(
             current_term,
@@ -875,7 +868,7 @@ mod tests {
             offset: 0,
             data: vec![0x00; 64],
             done: true,
-            shard_id: None,
+            shard: None,
         });
         let _result = service.install_snapshot(request).await;
 
@@ -894,8 +887,8 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_replay_old_term_entries() {
         let (service, mgr, _id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, 0);
-        let applied_before = get_applied(&mgr, 0);
+        let current_term = get_term(&mgr, ShardId::new(0));
+        let applied_before = get_applied(&mgr, ShardId::new(0));
         let old_term = current_term.saturating_sub(1);
 
         let request = Request::new(RaftAppendEntriesRequest {
@@ -903,7 +896,7 @@ mod tests {
             prev_log_id: Some(make_log_id(old_term, 1)),
             entries: vec![vec![0xDE, 0xAD, 0xBE, 0xEF]],
             leader_commit: Some(make_log_id(old_term, 1)),
-            shard_id: None,
+            shard: None,
         });
         let result = service.append_entries(request).await;
 
@@ -916,7 +909,7 @@ mod tests {
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let applied_after = get_applied(&mgr, 0);
+        let applied_after = get_applied(&mgr, ShardId::new(0));
         assert!(
             applied_after >= applied_before,
             "Applied must not regress: before={}, after={}",
@@ -929,14 +922,14 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_replay_committed_index() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, 0);
+        let current_term = get_term(&mgr, ShardId::new(0));
 
         let request = Request::new(RaftAppendEntriesRequest {
             vote: Some(make_vote(current_term, node_id)),
             prev_log_id: None,
             entries: vec![vec![0xBA, 0xD0, 0x00]],
             leader_commit: Some(make_log_id(current_term, 1)),
-            shard_id: None,
+            shard: None,
         });
         let _result = service.append_entries(request).await;
 
@@ -958,7 +951,7 @@ mod tests {
         let request = Request::new(RaftVoteRequest {
             vote: Some(make_vote(u64::MAX, 77777)),
             last_log_id: Some(make_log_id(u64::MAX, u64::MAX)),
-            shard_id: None,
+            shard: None,
         });
         let _result = service.vote(request).await;
 
@@ -973,8 +966,8 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_empty_snapshot_marked_done() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, 0);
-        let applied_before = get_applied(&mgr, 0);
+        let current_term = get_term(&mgr, ShardId::new(0));
+        let applied_before = get_applied(&mgr, ShardId::new(0));
 
         let meta = make_snapshot_meta(
             current_term,
@@ -989,12 +982,12 @@ mod tests {
             offset: 0,
             data: vec![],
             done: true,
-            shard_id: None,
+            shard: None,
         });
         let _result = service.install_snapshot(request).await;
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let applied_after = get_applied(&mgr, 0);
+        let applied_after = get_applied(&mgr, ShardId::new(0));
         assert!(
             applied_after >= applied_before,
             "State must not regress: before={}, after={}",
@@ -1007,7 +1000,7 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_out_of_order_snapshot_chunks() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, 0);
+        let current_term = get_term(&mgr, ShardId::new(0));
 
         let meta = make_snapshot_meta(
             current_term,
@@ -1023,7 +1016,7 @@ mod tests {
             offset: 1000,
             data: vec![0xCC; 128],
             done: false,
-            shard_id: None,
+            shard: None,
         });
         let _result = service.install_snapshot(request).await;
 
@@ -1036,7 +1029,7 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_oversized_snapshot_chunk() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, 0);
+        let current_term = get_term(&mgr, ShardId::new(0));
 
         let meta = make_snapshot_meta(
             current_term,
@@ -1051,7 +1044,7 @@ mod tests {
             offset: 0,
             data: vec![0xAB; 1024 * 1024], // 1MB
             done: true,
-            shard_id: None,
+            shard: None,
         });
         let _result = service.install_snapshot(request).await;
 
@@ -1065,7 +1058,7 @@ mod tests {
     // Test: MultiShardRaftService routing
     // ====================================================================
 
-    /// Non-existent shard_id → NOT_FOUND error.
+    /// Non-existent shard → NOT_FOUND error.
     #[tokio::test]
     async fn test_byzantine_multi_shard_invalid_shard() {
         let (service, _mgr, _id, _dir) = create_multi_shard_service().await;
@@ -1075,7 +1068,7 @@ mod tests {
             prev_log_id: None,
             entries: vec![],
             leader_commit: None,
-            shard_id: Some(99999), // Non-existent shard
+            shard: Some(99999), // Non-existent shard
         });
         let result = service.append_entries(request).await;
 
@@ -1083,15 +1076,14 @@ mod tests {
         assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
     }
 
-    /// Missing shard_id defaults to shard 0 (system shard).
+    /// Missing shard defaults to shard 0 (system shard).
     #[tokio::test]
     async fn test_byzantine_multi_shard_default_routing() {
         let (service, _mgr, _id, _dir) = create_multi_shard_service().await;
 
-        // Request without shard_id and missing vote → should route to shard 0
+        // Request without shard and missing vote → should route to shard 0
         // and return InvalidArgument (not NotFound)
-        let request =
-            Request::new(RaftVoteRequest { vote: None, last_log_id: None, shard_id: None });
+        let request = Request::new(RaftVoteRequest { vote: None, last_log_id: None, shard: None });
         let result = service.vote(request).await;
 
         assert!(result.is_err());
@@ -1110,7 +1102,7 @@ mod tests {
         let request = Request::new(RaftVoteRequest {
             vote: None,
             last_log_id: None,
-            shard_id: Some(1), // Route to data shard
+            shard: Some(1), // Route to data shard
         });
         let result = service.vote(request).await;
 
@@ -1126,8 +1118,8 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_cluster_integrity_after_attacks() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, 0);
-        let initial_applied = get_applied(&mgr, 0);
+        let current_term = get_term(&mgr, ShardId::new(0));
+        let initial_applied = get_applied(&mgr, ShardId::new(0));
 
         // Attack 1: Stale term
         let _ = service
@@ -1136,7 +1128,7 @@ mod tests {
                 prev_log_id: None,
                 entries: vec![vec![0xFF; 32]],
                 leader_commit: None,
-                shard_id: None,
+                shard: None,
             }))
             .await;
 
@@ -1147,13 +1139,13 @@ mod tests {
                 prev_log_id: None,
                 entries: vec![vec![0xDE; 1024], vec![0xAD; 512]],
                 leader_commit: None,
-                shard_id: None,
+                shard: None,
             }))
             .await;
 
         // Attack 3: Missing-field vote
         let _ = service
-            .vote(Request::new(RaftVoteRequest { vote: None, last_log_id: None, shard_id: None }))
+            .vote(Request::new(RaftVoteRequest { vote: None, last_log_id: None, shard: None }))
             .await;
 
         // Attack 4: Corrupt snapshot
@@ -1170,7 +1162,7 @@ mod tests {
                 offset: 0,
                 data: vec![0xDE, 0xAD],
                 done: true,
-                shard_id: None,
+                shard: None,
             }))
             .await;
 
@@ -1181,7 +1173,7 @@ mod tests {
                 prev_log_id: Some(make_log_id(current_term, 999_999)),
                 entries: vec![],
                 leader_commit: None,
-                shard_id: None,
+                shard: None,
             }))
             .await;
 
@@ -1193,7 +1185,7 @@ mod tests {
             mgr.get_shard(ShardId::new(0)).expect("shard").raft().metrics().borrow().clone();
         assert!(metrics.id > 0, "Node should be responsive after attacks");
 
-        let final_applied = get_applied(&mgr, 0);
+        let final_applied = get_applied(&mgr, ShardId::new(0));
         assert!(
             final_applied >= initial_applied,
             "Applied index regressed: {} -> {}",

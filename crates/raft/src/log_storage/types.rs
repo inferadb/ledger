@@ -5,9 +5,10 @@
 
 use std::collections::HashMap;
 
-use inferadb_ledger_state::system::OrganizationStatus;
+use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
 use inferadb_ledger_types::{
-    Hash, Operation, OrganizationId, OrganizationSlug, ShardId, Transaction, VaultId, VaultSlug,
+    Hash, Operation, OrganizationId, OrganizationSlug, ShardId, Transaction, UserEmailId, UserId,
+    UserSlug, VaultId, VaultSlug,
 };
 use openraft::{LogId, StoredMembership};
 use serde::{Deserialize, Serialize};
@@ -68,6 +69,12 @@ pub struct AppliedState {
     /// Internal vault ID → slug reverse mapping for response construction.
     #[serde(default)]
     pub vault_id_to_slug: HashMap<VaultId, VaultSlug>,
+    /// User slug → internal user ID mapping for fast resolution.
+    #[serde(default)]
+    pub user_slug_index: HashMap<UserSlug, UserId>,
+    /// Internal user ID → slug reverse mapping for response construction.
+    #[serde(default)]
+    pub user_id_to_slug: HashMap<UserId, UserSlug>,
     /// Deterministic timestamp (nanoseconds since epoch) from the last applied
     /// Raft entry's `proposed_at`. Used as the reference "now" for snapshot event
     /// collection — ensures two snapshots of the same state produce identical
@@ -86,16 +93,16 @@ pub struct OrganizationMeta {
     /// Human-readable name.
     pub name: String,
     /// Shard hosting this organization (0 for default).
-    pub shard_id: ShardId,
+    pub shard: ShardId,
     /// Organization lifecycle status.
     #[serde(default)]
     pub status: OrganizationStatus,
+    /// Billing tier (Free, Pro, Enterprise).
+    #[serde(default)]
+    pub tier: OrganizationTier,
     /// Target shard for pending migration (only set when status is Migrating).
     #[serde(default)]
-    pub pending_shard_id: Option<ShardId>,
-    /// Per-organization resource quota (None means use server default).
-    #[serde(default)]
-    pub quota: Option<inferadb_ledger_types::config::OrganizationQuota>,
+    pub pending_shard: Option<ShardId>,
     /// Accumulated storage bytes for this organization.
     ///
     /// Persisted within the `OrganizationMeta` table entry so it survives restarts
@@ -160,7 +167,7 @@ pub struct SequenceCounters {
     /// Next user ID.
     pub user: i64,
     /// Next user email ID.
-    pub user_email: i64,
+    pub user_email: UserEmailId,
     /// Next email verification token ID.
     pub email_verify: i64,
 }
@@ -171,7 +178,7 @@ impl Default for SequenceCounters {
             organization: OrganizationId::new(0),
             vault: VaultId::new(0),
             user: 0,
-            user_email: 0,
+            user_email: UserEmailId::new(0),
             email_verify: 0,
         }
     }
@@ -184,7 +191,7 @@ impl SequenceCounters {
             organization: OrganizationId::new(1),
             vault: VaultId::new(1),
             user: 1,
-            user_email: 1,
+            user_email: UserEmailId::new(1),
             email_verify: 1,
         }
     }
@@ -204,16 +211,16 @@ impl SequenceCounters {
     }
 
     /// Returns and increments the next user ID.
-    pub fn next_user(&mut self) -> i64 {
+    pub fn next_user(&mut self) -> UserId {
         let id = self.user;
         self.user += 1;
-        id
+        UserId::new(id)
     }
 
     /// Returns and increments the next user email ID.
-    pub fn next_user_email(&mut self) -> i64 {
+    pub fn next_user_email(&mut self) -> UserEmailId {
         let id = self.user_email;
-        self.user_email += 1;
+        self.user_email = UserEmailId::new(id.value() + 1);
         id
     }
 
@@ -299,6 +306,10 @@ pub struct PendingExternalWrites {
     pub vault_slug_index: Vec<(VaultSlug, VaultId)>,
     /// `VaultSlugIndex` table deletes (on vault deletion).
     pub vault_slug_index_deleted: Vec<VaultSlug>,
+    /// `UserSlugIndex` table inserts/updates.
+    pub user_slug_index: Vec<(UserSlug, UserId)>,
+    /// `UserSlugIndex` table deletes (on user deletion).
+    pub user_slug_index_deleted: Vec<UserSlug>,
 }
 
 impl PendingExternalWrites {
@@ -382,7 +393,7 @@ impl From<&AppliedState> for AppliedStateCore {
 /// Selects the least-loaded shard for a new organization.
 ///
 /// Returns the shard with the fewest active (non-deleted) organizations.
-/// Tie-breaker: lowest shard_id wins.
+/// Tie-breaker: lowest shard wins.
 /// Fallback: shard 0 if no organizations exist.
 pub fn select_least_loaded_shard(
     organizations: &HashMap<OrganizationId, OrganizationMeta>,
@@ -392,7 +403,7 @@ pub fn select_least_loaded_shard(
 
     for meta in organizations.values() {
         if meta.status != OrganizationStatus::Deleted {
-            *shard_counts.entry(meta.shard_id).or_insert(0) += 1;
+            *shard_counts.entry(meta.shard).or_insert(0) += 1;
         }
     }
 
@@ -401,13 +412,13 @@ pub fn select_least_loaded_shard(
         return ShardId::new(0);
     }
 
-    // Find shard with minimum count, preferring lower shard_id on ties
+    // Find shard with minimum count, preferring lower shard on ties
     shard_counts
         .into_iter()
         .min_by(|(shard_a, count_a), (shard_b, count_b)| {
             count_a.cmp(count_b).then_with(|| shard_a.cmp(shard_b))
         })
-        .map(|(shard_id, _)| shard_id)
+        .map(|(shard, _)| shard)
         .unwrap_or(ShardId::new(0))
 }
 
@@ -590,11 +601,11 @@ mod tests {
             OrganizationMeta {
                 organization: OrganizationId::new(1),
                 slug: OrganizationSlug::new(0),
-                shard_id: ShardId::new(0),
+                shard: ShardId::new(0),
                 name: "test".to_string(),
                 status: OrganizationStatus::Active,
-                pending_shard_id: None,
-                quota: None,
+                tier: OrganizationTier::Free,
+                pending_shard: None,
                 storage_bytes: 0,
             },
         );

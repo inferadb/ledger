@@ -555,8 +555,8 @@ impl MultiShardTestNode {
     }
 
     /// Returns a data shard by ID.
-    pub fn shard(&self, shard_id: inferadb_ledger_types::ShardId) -> Option<Arc<ShardGroup>> {
-        self.manager.get_shard(shard_id).ok()
+    pub fn shard(&self, shard: inferadb_ledger_types::ShardId) -> Option<Arc<ShardGroup>> {
+        self.manager.get_shard(shard).ok()
     }
 
     /// Returns all shard IDs.
@@ -646,7 +646,7 @@ impl MultiShardTestCluster {
 
             // Start system shard (shard 0) - required first
             let system_config = ShardConfig {
-                shard_id: inferadb_ledger_types::ShardId::new(0),
+                shard: inferadb_ledger_types::ShardId::new(0),
                 initial_members: members.clone(),
                 bootstrap: i == 0, // Only first node bootstraps
                 enable_background_jobs: true,
@@ -654,9 +654,9 @@ impl MultiShardTestCluster {
             manager.start_system_shard(system_config).await.expect("start system shard");
 
             // Start data shards (shard 1, 2, ...)
-            for shard_id in 1..=num_data_shards {
+            for shard in 1..=num_data_shards {
                 let shard_config = ShardConfig {
-                    shard_id: inferadb_ledger_types::ShardId::new(shard_id as u32),
+                    shard: inferadb_ledger_types::ShardId::new(shard as u32),
                     initial_members: members.clone(),
                     bootstrap: i == 0,
                     enable_background_jobs: true,
@@ -664,7 +664,7 @@ impl MultiShardTestCluster {
                 manager
                     .start_data_shard(shard_config)
                     .await
-                    .unwrap_or_else(|_| panic!("start data shard {}", shard_id));
+                    .unwrap_or_else(|_| panic!("start data shard {}", shard));
             }
 
             // Create health state (starts in Starting phase, marked Ready after leader election)
@@ -713,11 +713,11 @@ impl MultiShardTestCluster {
 
             // Check each shard on the first node
             if let Some(node) = nodes.first() {
-                for shard_id in 0..=num_data_shards as u32 {
-                    if let Ok(shard) =
-                        node.manager.get_shard(inferadb_ledger_types::ShardId::new(shard_id))
+                for shard in 0..=num_data_shards as u32 {
+                    if let Ok(shard_group) =
+                        node.manager.get_shard(inferadb_ledger_types::ShardId::new(shard))
                     {
-                        let metrics = shard.raft().metrics().borrow().clone();
+                        let metrics = shard_group.raft().metrics().borrow().clone();
                         if metrics.current_leader.is_none() {
                             all_ready = false;
                             break;
@@ -782,9 +782,9 @@ impl MultiShardTestCluster {
             let mut all_have_leaders = true;
 
             for node in &self.nodes {
-                for shard_id in node.shard_ids() {
-                    if let Some(shard) = node.shard(shard_id) {
-                        let metrics = shard.raft().metrics().borrow().clone();
+                for shard in node.shard_ids() {
+                    if let Some(shard_group) = node.shard(shard) {
+                        let metrics = shard_group.raft().metrics().borrow().clone();
                         if metrics.current_leader.is_none() {
                             all_have_leaders = false;
                             break;

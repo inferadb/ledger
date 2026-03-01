@@ -202,6 +202,61 @@ impl std::str::FromStr for VaultSlug {
     }
 }
 
+/// Snowflake-generated external identifier for a user.
+///
+/// Wraps a `u64` Snowflake ID that is the sole external identifier for
+/// users in gRPC APIs and the SDK. The display format is the raw
+/// number without prefix for API clarity.
+///
+/// # Display
+///
+/// Displays as the raw number: `1234567890`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UserSlug(u64);
+
+impl UserSlug {
+    /// Creates a new slug from a raw Snowflake ID value.
+    #[inline]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the raw Snowflake ID value.
+    #[inline]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for UserSlug {
+    #[inline]
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<UserSlug> for u64 {
+    #[inline]
+    fn from(slug: UserSlug) -> Self {
+        slug.0
+    }
+}
+
+impl fmt::Display for UserSlug {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::str::FromStr for UserSlug {
+    type Err = <u64 as std::str::FromStr>::Err;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        s.parse::<u64>().map(Self)
+    }
+}
+
 define_id!(
     /// Unique identifier for a vault within an organization.
     ///
@@ -236,6 +291,18 @@ define_id!(
     ///
     /// Formats with `shard:` prefix: `shard:3`.
     ShardId, u32, "shard"
+);
+
+define_id!(
+    /// Unique identifier for a user email record.
+    ///
+    /// Wraps an `i64` with compile-time type safety to prevent mixing
+    /// with [`UserId`], [`OrganizationId`], or [`VaultId`].
+    ///
+    /// # Display
+    ///
+    /// Formats with `email:` prefix: `email:42`.
+    UserEmailId, i64, "email"
 );
 
 /// Transaction identifier (16 bytes, typically UUIDv4).
@@ -319,7 +386,7 @@ impl VaultBlock {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShardBlock {
     /// Shard group identifier.
-    pub shard_id: ShardId,
+    pub shard: ShardId,
     /// Monotonic shard-level height.
     pub shard_height: u64,
     /// Hash linking to previous shard block.
@@ -398,7 +465,7 @@ impl ShardBlock {
         BlockHeader {
             height: self.shard_height,
             organization: OrganizationId::new(0), // Shard-level aggregate, not vault-specific
-            vault: VaultId::new(self.shard_id.value() as i64),
+            vault: VaultId::new(self.shard.value() as i64),
             previous_hash: self.previous_shard_hash,
             tx_merkle_root,
             state_root,
@@ -1280,7 +1347,7 @@ mod tests {
         };
 
         let block = ShardBlock {
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             shard_height: 100,
             previous_shard_hash: ZERO_HASH,
             vault_entries: vec![entry_h5, entry_h6],

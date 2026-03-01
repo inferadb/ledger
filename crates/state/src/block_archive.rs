@@ -532,7 +532,7 @@ mod tests {
 
     fn create_test_block(shard_height: u64) -> ShardBlock {
         ShardBlock {
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             shard_height,
             previous_shard_hash: [0u8; 32],
             vault_entries: vec![VaultEntry {
@@ -689,7 +689,7 @@ mod tests {
             .collect();
 
         ShardBlock {
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             shard_height,
             previous_shard_hash: [shard_height as u8; 32],
             vault_entries: vec![VaultEntry {

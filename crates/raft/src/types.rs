@@ -12,7 +12,8 @@ use chrono::{DateTime, Utc};
 // Re-export domain types that originated here but now live in types crate.
 pub use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId};
 use inferadb_ledger_types::{
-    Hash, OrganizationId, OrganizationSlug, SetCondition, ShardId, Transaction, VaultId, VaultSlug,
+    Hash, OrganizationId, OrganizationSlug, SetCondition, ShardId, Transaction, UserId, UserSlug,
+    VaultId, VaultSlug,
 };
 use openraft::{BasicNode, impls::OneshotResponder};
 use serde::{Deserialize, Serialize};
@@ -94,11 +95,11 @@ pub enum LedgerRequest {
         name: String,
         /// External slug for API lookups (generated before Raft proposal).
         slug: OrganizationSlug,
-        /// Target shard ID (None = auto-assign to shard 0).
-        shard_id: Option<ShardId>,
-        /// Optional resource quota for this organization.
-        /// When `None`, server-wide default quota applies.
-        quota: Option<inferadb_ledger_types::config::OrganizationQuota>,
+        /// Target shard (None = auto-assign to shard 0).
+        shard: Option<ShardId>,
+        /// Billing tier (defaults to Free).
+        #[serde(default)]
+        tier: inferadb_ledger_state::system::OrganizationTier,
     },
 
     /// Creates a new vault within an organization.
@@ -148,12 +149,12 @@ pub enum LedgerRequest {
     StartMigration {
         /// Organization to migrate.
         organization: OrganizationId,
-        /// Target shard ID for migration.
-        target_shard_id: ShardId,
+        /// Target shard for migration.
+        target_shard: ShardId,
     },
 
     /// Completes a pending organization migration.
-    /// Updates shard_id and returns status to Active.
+    /// Updates shard and returns status to Active.
     CompleteMigration {
         /// Organization being migrated.
         organization: OrganizationId,
@@ -207,6 +208,8 @@ pub enum SystemRequest {
         email: String,
         /// Whether this user is a global service administrator.
         admin: bool,
+        /// External Snowflake identifier.
+        slug: UserSlug,
     },
 
     /// Adds a node to the cluster.
@@ -228,7 +231,7 @@ pub enum SystemRequest {
         /// Organization to update.
         organization: OrganizationId,
         /// New shard assignment.
-        shard_id: i32,
+        shard: ShardId,
     },
 }
 
@@ -255,8 +258,8 @@ pub enum LedgerResponse {
     OrganizationCreated {
         /// Assigned organization ID.
         organization: OrganizationId,
-        /// Assigned shard ID.
-        shard_id: ShardId,
+        /// Assigned shard.
+        shard: ShardId,
     },
 
     /// Vault created.
@@ -282,9 +285,9 @@ pub enum LedgerResponse {
         /// Organization that was migrated.
         organization: OrganizationId,
         /// Previous shard assignment.
-        old_shard_id: ShardId,
+        old_shard: ShardId,
         /// New shard assignment.
-        new_shard_id: ShardId,
+        new_shard: ShardId,
     },
 
     /// Organization suspended.
@@ -304,7 +307,7 @@ pub enum LedgerResponse {
         /// Organization entering migration.
         organization: OrganizationId,
         /// Target shard for migration.
-        target_shard_id: ShardId,
+        target_shard: ShardId,
     },
 
     /// Organization migration completed.
@@ -312,9 +315,9 @@ pub enum LedgerResponse {
         /// Organization that was migrated.
         organization: OrganizationId,
         /// Previous shard assignment.
-        old_shard_id: ShardId,
+        old_shard: ShardId,
         /// New shard assignment.
-        new_shard_id: ShardId,
+        new_shard: ShardId,
     },
 
     /// Organization marked for deletion (has active vaults).
@@ -341,7 +344,9 @@ pub enum LedgerResponse {
     /// User created.
     UserCreated {
         /// Assigned user ID.
-        user_id: i64,
+        user_id: UserId,
+        /// External Snowflake identifier.
+        slug: UserSlug,
     },
 
     /// Error response.
@@ -380,14 +385,14 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::Write { block_height, .. } => {
                 write!(f, "Write(height={})", block_height)
             },
-            LedgerResponse::OrganizationCreated { organization, shard_id } => {
-                write!(f, "OrganizationCreated(id={}, shard={})", organization, shard_id)
+            LedgerResponse::OrganizationCreated { organization, shard } => {
+                write!(f, "OrganizationCreated(id={}, shard={})", organization, shard)
             },
             LedgerResponse::VaultCreated { vault, slug } => {
                 write!(f, "VaultCreated(id={}, slug={})", vault, slug)
             },
-            LedgerResponse::UserCreated { user_id } => {
-                write!(f, "UserCreated(id={})", user_id)
+            LedgerResponse::UserCreated { user_id, slug } => {
+                write!(f, "UserCreated(id={}, slug={})", user_id, slug)
             },
             LedgerResponse::OrganizationDeleted { success, blocking_vault_ids } => {
                 if *success {
@@ -400,12 +405,8 @@ impl fmt::Display for LedgerResponse {
                     )
                 }
             },
-            LedgerResponse::OrganizationMigrated { organization, old_shard_id, new_shard_id } => {
-                write!(
-                    f,
-                    "OrganizationMigrated(id={}, {}->{})",
-                    organization, old_shard_id, new_shard_id
-                )
+            LedgerResponse::OrganizationMigrated { organization, old_shard, new_shard } => {
+                write!(f, "OrganizationMigrated(id={}, {}->{})", organization, old_shard, new_shard)
             },
             LedgerResponse::OrganizationSuspended { organization } => {
                 write!(f, "OrganizationSuspended(id={})", organization)
@@ -413,15 +414,11 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::OrganizationResumed { organization } => {
                 write!(f, "OrganizationResumed(id={})", organization)
             },
-            LedgerResponse::MigrationStarted { organization, target_shard_id } => {
-                write!(f, "MigrationStarted(id={}, target={})", organization, target_shard_id)
+            LedgerResponse::MigrationStarted { organization, target_shard } => {
+                write!(f, "MigrationStarted(id={}, target={})", organization, target_shard)
             },
-            LedgerResponse::MigrationCompleted { organization, old_shard_id, new_shard_id } => {
-                write!(
-                    f,
-                    "MigrationCompleted(id={}, {}->{})",
-                    organization, old_shard_id, new_shard_id
-                )
+            LedgerResponse::MigrationCompleted { organization, old_shard, new_shard } => {
+                write!(f, "MigrationCompleted(id={}, {}->{})", organization, old_shard, new_shard)
             },
             LedgerResponse::OrganizationDeleting { organization, blocking_vault_ids } => {
                 write!(
@@ -459,18 +456,18 @@ mod tests {
         let request = LedgerRequest::CreateOrganization {
             name: "test-org".to_string(),
             slug: OrganizationSlug::new(12345),
-            shard_id: Some(ShardId::new(1)),
-            quota: None,
+            shard: Some(ShardId::new(1)),
+            tier: Default::default(),
         };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::CreateOrganization { name, slug, shard_id, quota: _ } => {
+            LedgerRequest::CreateOrganization { name, slug, shard, .. } => {
                 assert_eq!(name, "test-org");
                 assert_eq!(slug, OrganizationSlug::new(12345));
-                assert_eq!(shard_id, Some(ShardId::new(1)));
+                assert_eq!(shard, Some(ShardId::new(1)));
             },
             _ => panic!("unexpected variant"),
         }
@@ -489,16 +486,18 @@ mod tests {
             name: "Alice".to_string(),
             email: "alice@example.com".to_string(),
             admin: false,
+            slug: UserSlug::new(12345),
         };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            SystemRequest::CreateUser { name, email, admin } => {
+            SystemRequest::CreateUser { name, email, admin, slug } => {
                 assert_eq!(name, "Alice");
                 assert_eq!(email, "alice@example.com");
                 assert!(!admin);
+                assert_eq!(slug, UserSlug::new(12345));
             },
             _ => panic!("unexpected variant"),
         }
@@ -512,8 +511,8 @@ mod tests {
             request: LedgerRequest::CreateOrganization {
                 name: "test-org".to_string(),
                 slug: OrganizationSlug::new(999),
-                shard_id: Some(ShardId::new(1)),
-                quota: None,
+                shard: Some(ShardId::new(1)),
+                tier: Default::default(),
             },
             proposed_at: Utc.with_ymd_and_hms(2099, 6, 15, 12, 30, 0).unwrap(),
         };
@@ -701,14 +700,14 @@ mod tests {
                 name in "[a-z]{1,16}",
                 organization in (1i64..10_000).prop_map(OrganizationId::new),
                 vault in (1i64..10_000).prop_map(VaultId::new),
-                shard_id in (1u32..1_000).prop_map(ShardId::new),
+                shard in (1u32..1_000).prop_map(ShardId::new),
             ) {
                 let request = match variant_idx {
                     0 => LedgerRequest::CreateOrganization {
                         name: name.clone(),
                         slug: inferadb_ledger_types::OrganizationSlug::new(42),
-                        shard_id: Some(shard_id),
-                        quota: None,
+                        shard: Some(shard),
+                        tier: Default::default(),
                     },
                     1 => LedgerRequest::CreateVault {
                         organization,

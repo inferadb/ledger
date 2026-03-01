@@ -32,7 +32,7 @@
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
     BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId, OrganizationId, OrganizationSlug,
-    VaultSlug,
+    UserEmailId, UserSlug, VaultSlug,
     events::{EventAction, EventEmission, EventEntry, EventOutcome, EventScope},
     merkle::MerkleProof as InternalMerkleProof,
 };
@@ -432,6 +432,55 @@ impl From<proto::VaultSlug> for VaultSlug {
 impl From<&proto::VaultSlug> for VaultSlug {
     fn from(proto: &proto::VaultSlug) -> Self {
         VaultSlug::new(proto.slug)
+    }
+}
+
+// =============================================================================
+// UserSlug conversions
+// =============================================================================
+
+/// Converts a domain [`UserSlug`] to its protobuf representation.
+impl From<UserSlug> for proto::UserSlug {
+    fn from(slug: UserSlug) -> Self {
+        proto::UserSlug { slug: slug.value() }
+    }
+}
+
+/// Converts a protobuf [`UserSlug`](proto::UserSlug) to the domain type.
+impl From<proto::UserSlug> for UserSlug {
+    fn from(proto: proto::UserSlug) -> Self {
+        UserSlug::new(proto.slug)
+    }
+}
+
+/// Converts a protobuf [`UserSlug`](proto::UserSlug) reference to the domain type.
+impl From<&proto::UserSlug> for UserSlug {
+    fn from(proto: &proto::UserSlug) -> Self {
+        UserSlug::new(proto.slug)
+    }
+}
+
+// UserEmailId conversions
+// =============================================================================
+
+/// Converts a domain [`UserEmailId`] to its protobuf representation.
+impl From<UserEmailId> for proto::UserEmailId {
+    fn from(id: UserEmailId) -> Self {
+        proto::UserEmailId { id: id.value() }
+    }
+}
+
+/// Converts a protobuf [`UserEmailId`](proto::UserEmailId) to the domain type.
+impl From<proto::UserEmailId> for UserEmailId {
+    fn from(proto: proto::UserEmailId) -> Self {
+        UserEmailId::new(proto.id)
+    }
+}
+
+/// Converts a protobuf [`UserEmailId`](proto::UserEmailId) reference to the domain type.
+impl From<&proto::UserEmailId> for UserEmailId {
+    fn from(proto: &proto::UserEmailId) -> Self {
+        UserEmailId::new(proto.id)
     }
 }
 
@@ -1074,7 +1123,7 @@ mod tests {
         };
 
         let shard_block = inferadb_ledger_types::ShardBlock {
-            shard_id: inferadb_ledger_types::ShardId::new(1),
+            shard: inferadb_ledger_types::ShardId::new(1),
             shard_height: 100,
             previous_shard_hash: Hash::default(),
             vault_entries: vec![],
@@ -1126,7 +1175,7 @@ mod tests {
         };
 
         let shard_block = inferadb_ledger_types::ShardBlock {
-            shard_id: inferadb_ledger_types::ShardId::new(1),
+            shard: inferadb_ledger_types::ShardId::new(1),
             shard_height: 50,
             previous_shard_hash: Hash::default(),
             vault_entries: vec![],
@@ -1165,7 +1214,7 @@ mod tests {
         };
 
         let shard_block = inferadb_ledger_types::ShardBlock {
-            shard_id: inferadb_ledger_types::ShardId::new(1),
+            shard: inferadb_ledger_types::ShardId::new(1),
             shard_height: 1,
             previous_shard_hash: Hash::default(),
             vault_entries: vec![],

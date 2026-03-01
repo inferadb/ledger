@@ -97,7 +97,7 @@ pub use connection::ConnectionPool;
 pub use discovery::{DiscoveryResult, DiscoveryService, PeerInfo};
 pub use error::{Result, SdkError};
 // Re-export commonly used types from inferadb-ledger-types
-pub use inferadb_ledger_types::{OrganizationId, OrganizationSlug, VaultId, VaultSlug};
+pub use inferadb_ledger_types::{OrganizationId, OrganizationSlug, UserSlug, VaultId, VaultSlug};
 pub use metrics::{ConnectionEvent, MetricsSdkMetrics, NoopSdkMetrics, SdkMetrics};
 pub use retry::{with_retry, with_retry_cancellable};
 pub use server::{

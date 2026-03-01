@@ -129,7 +129,7 @@ pub struct SnapshotHeader {
     /// Format version.
     pub version: u32,
     /// Shard identifier.
-    pub shard_id: ShardId,
+    pub shard: ShardId,
     /// Shard height at snapshot time.
     pub shard_height: u64,
     /// Per-vault metadata.
@@ -202,7 +202,7 @@ impl Snapshot {
     ///
     /// Returns [`SnapshotError::Codec`] if serialization of the state data fails.
     pub fn new(
-        shard_id: ShardId,
+        shard: ShardId,
         shard_height: u64,
         vault_states: Vec<VaultSnapshotMeta>,
         state: SnapshotStateData,
@@ -215,7 +215,7 @@ impl Snapshot {
         let header = SnapshotHeader {
             magic: SNAPSHOT_MAGIC,
             version: SNAPSHOT_VERSION,
-            shard_id,
+            shard,
             shard_height,
             vault_states,
             checksum,
@@ -233,12 +233,12 @@ impl Snapshot {
     /// In production, prefer `new()` with proper chain parameters.
     #[cfg(test)]
     pub fn new_simple(
-        shard_id: ShardId,
+        shard: ShardId,
         shard_height: u64,
         vault_states: Vec<VaultSnapshotMeta>,
         state: SnapshotStateData,
     ) -> Result<Self> {
-        Self::new(shard_id, shard_height, vault_states, state, SnapshotChainParams::default())
+        Self::new(shard, shard_height, vault_states, state, SnapshotChainParams::default())
     }
 
     /// Returns the shard height of this snapshot.
@@ -553,7 +553,7 @@ mod tests {
 
         let loaded = Snapshot::read_from_file(&path).expect("read snapshot");
 
-        assert_eq!(loaded.header.shard_id, snapshot.header.shard_id);
+        assert_eq!(loaded.header.shard, snapshot.header.shard);
         assert_eq!(loaded.header.shard_height, snapshot.header.shard_height);
         assert_eq!(loaded.header.vault_states.len(), snapshot.header.vault_states.len());
 

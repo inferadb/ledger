@@ -1,6 +1,8 @@
 //! Key patterns for the `_system` organization.
 
-use inferadb_ledger_types::{NodeId, OrganizationId, OrganizationSlug, UserId, VaultSlug};
+use inferadb_ledger_types::{
+    NodeId, OrganizationId, OrganizationSlug, UserEmailId, UserId, VaultSlug,
+};
 
 /// Key pattern generators for `_system` organization entities.
 ///
@@ -41,8 +43,8 @@ impl SystemKeys {
     /// Primary key for a user email record.
     ///
     /// Pattern: `user_email:{id}`
-    pub fn user_email_key(email_id: i64) -> String {
-        format!("user_email:{email_id}")
+    pub fn user_email_key(email_id: UserEmailId) -> String {
+        format!("user_email:{}", email_id.value())
     }
 
     /// Index key for email uniqueness lookup.

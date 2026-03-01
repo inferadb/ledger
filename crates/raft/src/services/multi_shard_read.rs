@@ -77,7 +77,7 @@ impl MultiShardReadService {
 
         let connection = router
             .get_connection(
-                remote.shard_id,
+                remote.shard,
                 &remote.routing.member_nodes,
                 remote.routing.leader_hint.as_deref(),
             )
@@ -916,7 +916,7 @@ impl ReadService for MultiShardReadService {
                     // Forward to the remote shard
                     debug!(
                         organization_id = organization_id.value(),
-                        shard_id = remote.shard_id.value(),
+                        shard = remote.shard.value(),
                         "Forwarding historical_read to remote shard"
                     );
                     let mut client = self.get_forward_client(&remote).await?;
@@ -963,7 +963,7 @@ impl ReadService for MultiShardReadService {
                     // Forward to the remote shard
                     debug!(
                         organization_id = organization_id.value(),
-                        shard_id = remote.shard_id.value(),
+                        shard = remote.shard.value(),
                         "Forwarding watch_blocks to remote shard"
                     );
                     let mut client = self.get_forward_client(&remote).await?;

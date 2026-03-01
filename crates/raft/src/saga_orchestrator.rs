@@ -32,6 +32,7 @@ use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
     Operation, OrganizationId, SetCondition, Transaction, UserId, VaultId,
     events::{EventAction, EventOutcome},
+    snowflake,
 };
 use openraft::Raft;
 use snafu::{GenerateImplicitData, ResultExt};
@@ -179,15 +180,21 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     saga.transition(CreateOrgSagaState::UserCreated { user_id });
                     info!(saga_id = %saga.id, user_id = user_id.value(), "CreateOrg: using existing user");
                 } else {
-                    // Create new user - allocate ID and write user entity
+                    // Create new user - allocate ID, generate slug, and write user entity
                     // Note: In production, this would call through the proper user creation flow
                     // For now, we simulate by writing to _system
                     let raw_id = self.allocate_sequence_id("user").await?;
                     let user_id = UserId::new(raw_id);
+                    let user_slug = snowflake::generate_user_slug().map_err(|e| {
+                        SagaError::UnexpectedSagaResponse {
+                            description: format!("failed to generate user slug: {e}"),
+                        }
+                    })?;
 
                     let user_key = format!("user:{}", user_id.value());
                     let user_value = serde_json::json!({
                         "id": user_id.value(),
+                        "slug": user_slug.value(),
                         "name": saga.input.user_name,
                         "email": saga.input.user_email,
                         "created_at": chrono::Utc::now().to_rfc3339(),

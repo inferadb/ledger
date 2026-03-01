@@ -42,8 +42,8 @@ async fn create_organization(
     let response = client
         .create_organization(proto::CreateOrganizationRequest {
             name: name.to_string(),
-            shard_id: None,
-            quota: None,
+            shard: None,
+            tier: None,
         })
         .await?;
     let slug = response

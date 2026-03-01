@@ -113,7 +113,7 @@ pub struct BackupMetadata {
     /// Unique backup identifier (timestamp-based).
     pub backup_id: String,
     /// Shard ID.
-    pub shard_id: ShardId,
+    pub shard: ShardId,
     /// Shard height at backup time.
     pub shard_height: u64,
     /// Backup file path.
@@ -193,7 +193,7 @@ impl BackupManager {
 
         let metadata = BackupMetadata {
             backup_id: backup_id.clone(),
-            shard_id: snapshot.header.shard_id,
+            shard: snapshot.header.shard,
             shard_height: snapshot.header.shard_height,
             backup_path: backup_path.display().to_string(),
             size_bytes,
@@ -371,7 +371,7 @@ impl BackupManager {
         &self,
         db: &Database<B>,
         base_backup_id: &str,
-        shard_id: ShardId,
+        shard: ShardId,
         shard_height: u64,
         tag: &str,
     ) -> Result<BackupMetadata> {
@@ -418,7 +418,7 @@ impl BackupManager {
 
         let metadata = BackupMetadata {
             backup_id: backup_id.clone(),
-            shard_id,
+            shard,
             shard_height,
             backup_path: backup_path.display().to_string(),
             size_bytes,
@@ -754,7 +754,7 @@ impl BackupManager {
     pub fn create_full_page_backup<B: StorageBackend>(
         &self,
         db: &Database<B>,
-        shard_id: ShardId,
+        shard: ShardId,
         shard_height: u64,
         chain_commitment_hash: Hash,
         tag: &str,
@@ -782,7 +782,7 @@ impl BackupManager {
 
         let metadata = BackupMetadata {
             backup_id: backup_id.clone(),
-            shard_id,
+            shard,
             shard_height,
             backup_path: backup_path.display().to_string(),
             size_bytes,
@@ -1030,7 +1030,7 @@ mod tests {
 
         let loaded = manager.load_backup(&meta.backup_id).expect("load backup");
         assert_eq!(loaded.header.shard_height, 2000);
-        assert_eq!(loaded.header.shard_id, ShardId::new(1));
+        assert_eq!(loaded.header.shard, ShardId::new(1));
     }
 
     #[test]

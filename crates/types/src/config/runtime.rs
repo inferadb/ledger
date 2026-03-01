@@ -1,4 +1,4 @@
-//! Runtime-reconfigurable configuration and organization quota management.
+//! Runtime-reconfigurable configuration.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -9,127 +9,6 @@ use super::{
     resilience::{RateLimitConfig, ValidationConfig},
     storage::{BTreeCompactionConfig, IntegrityConfig},
 };
-
-/// Default maximum storage bytes per organization (10 GiB).
-const fn default_max_storage_bytes() -> u64 {
-    10 * 1024 * 1024 * 1024
-}
-
-/// Default maximum vault count per organization.
-const fn default_max_vaults() -> u32 {
-    1000
-}
-
-/// Default maximum write operations per second per organization.
-const fn default_max_write_ops_per_sec() -> u32 {
-    10_000
-}
-
-/// Default maximum read operations per second per organization.
-const fn default_max_read_ops_per_sec() -> u32 {
-    50_000
-}
-
-/// Per-organization resource quota configuration.
-///
-/// Enforces hard resource limits per organization to prevent any single tenant
-/// from exhausting shared infrastructure. Quotas are checked at the service
-/// layer before operations reach the storage engine.
-///
-/// # Fields
-///
-/// - `max_storage_bytes`: Maximum cumulative storage bytes (estimated from payload sizes).
-/// - `max_vaults`: Maximum number of vaults within the organization.
-/// - `max_write_ops_per_sec`: Maximum write operations per second (separate from global rate
-///   limits).
-/// - `max_read_ops_per_sec`: Maximum read operations per second (separate from global rate limits).
-///
-/// # Example
-///
-/// ```no_run
-/// # use inferadb_ledger_types::config::OrganizationQuota;
-/// let quota = OrganizationQuota::builder()
-///     .max_storage_bytes(1024 * 1024 * 1024) // 1 GiB
-///     .max_vaults(100)
-///     .build()
-///     .expect("valid quota");
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct OrganizationQuota {
-    /// Maximum cumulative storage bytes for the organization.
-    #[serde(default = "default_max_storage_bytes")]
-    pub max_storage_bytes: u64,
-    /// Maximum number of vaults within the organization.
-    #[serde(default = "default_max_vaults")]
-    pub max_vaults: u32,
-    /// Maximum write operations per second (organization-level rate).
-    #[serde(default = "default_max_write_ops_per_sec")]
-    pub max_write_ops_per_sec: u32,
-    /// Maximum read operations per second (organization-level rate).
-    #[serde(default = "default_max_read_ops_per_sec")]
-    pub max_read_ops_per_sec: u32,
-}
-
-impl Default for OrganizationQuota {
-    fn default() -> Self {
-        Self {
-            max_storage_bytes: default_max_storage_bytes(),
-            max_vaults: default_max_vaults(),
-            max_write_ops_per_sec: default_max_write_ops_per_sec(),
-            max_read_ops_per_sec: default_max_read_ops_per_sec(),
-        }
-    }
-}
-
-#[bon::bon]
-impl OrganizationQuota {
-    /// Creates a new organization quota with validation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError::Validation`] if any value is zero.
-    #[builder]
-    pub fn new(
-        #[builder(default = default_max_storage_bytes())] max_storage_bytes: u64,
-        #[builder(default = default_max_vaults())] max_vaults: u32,
-        #[builder(default = default_max_write_ops_per_sec())] max_write_ops_per_sec: u32,
-        #[builder(default = default_max_read_ops_per_sec())] max_read_ops_per_sec: u32,
-    ) -> Result<Self, ConfigError> {
-        let config =
-            Self { max_storage_bytes, max_vaults, max_write_ops_per_sec, max_read_ops_per_sec };
-        config.validate()?;
-        Ok(config)
-    }
-}
-
-impl OrganizationQuota {
-    /// Validates an existing quota configuration (e.g., after deserialization).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError::Validation`] if any quota value is zero.
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.max_storage_bytes == 0 {
-            return Err(ConfigError::Validation {
-                message: "max_storage_bytes must be > 0".to_string(),
-            });
-        }
-        if self.max_vaults == 0 {
-            return Err(ConfigError::Validation { message: "max_vaults must be > 0".to_string() });
-        }
-        if self.max_write_ops_per_sec == 0 {
-            return Err(ConfigError::Validation {
-                message: "max_write_ops_per_sec must be > 0".to_string(),
-            });
-        }
-        if self.max_read_ops_per_sec == 0 {
-            return Err(ConfigError::Validation {
-                message: "max_read_ops_per_sec must be > 0".to_string(),
-            });
-        }
-        Ok(())
-    }
-}
 
 /// Runtime-reconfigurable configuration subset.
 ///
@@ -165,9 +44,6 @@ pub struct RuntimeConfig {
     /// Input validation limits.
     #[serde(default)]
     pub validation: Option<ValidationConfig>,
-    /// Default organization quota applied to new organizations without explicit quotas.
-    #[serde(default)]
-    pub default_quota: Option<OrganizationQuota>,
     /// Integrity scrubber parameters.
     #[serde(default)]
     pub integrity: Option<IntegrityConfig>,
@@ -323,9 +199,6 @@ impl RuntimeConfig {
         if let Some(ref v) = self.validation {
             v.validate()?;
         }
-        if let Some(ref q) = self.default_quota {
-            q.validate()?;
-        }
         if let Some(ref i) = self.integrity {
             i.validate()?;
         }
@@ -384,9 +257,6 @@ impl RuntimeConfig {
         }
         if self.validation != other.validation {
             changes.push("validation".to_string());
-        }
-        if self.default_quota != other.default_quota {
-            changes.push("default_quota".to_string());
         }
         if self.integrity != other.integrity {
             changes.push("integrity".to_string());

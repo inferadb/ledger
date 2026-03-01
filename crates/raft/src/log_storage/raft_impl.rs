@@ -7,7 +7,7 @@ use std::{fmt::Debug, ops::RangeBounds, sync::Arc};
 
 use inferadb_ledger_state::EventsDatabase;
 use inferadb_ledger_store::{FileBackend, TableId, tables};
-use inferadb_ledger_types::{decode, encode, events::EventConfig};
+use inferadb_ledger_types::{UserEmailId, decode, encode, events::EventConfig};
 use openraft::{
     Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
     StoredMembership, Vote,
@@ -399,6 +399,7 @@ fn iter_table_raw(
         TableId::CompactionMeta => collect_table!(tables::CompactionMeta),
         TableId::OrganizationSlugIndex => collect_table!(tables::OrganizationSlugIndex),
         TableId::VaultSlugIndex => collect_table!(tables::VaultSlugIndex),
+        TableId::UserSlugIndex => collect_table!(tables::UserSlugIndex),
         TableId::VaultHeights => collect_table!(tables::VaultHeights),
         TableId::VaultHashes => collect_table!(tables::VaultHashes),
         TableId::VaultHealth => collect_table!(tables::VaultHealth),
@@ -523,7 +524,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             applied_state: Arc::clone(&self.applied_state),
             state_layer: self.state_layer.clone(),
             block_archive: self.block_archive.clone(),
-            shard_id: self.shard_id,
+            shard: self.shard,
             node_id: self.node_id.clone(),
             shard_chain: RwLock::new(*self.shard_chain.read()),
             block_announcements: self.block_announcements.clone(),
@@ -682,7 +683,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         let _span = tracing::info_span!(
             "apply_to_state_machine",
             entry_count = entries.len(),
-            shard_id = self.shard_id.value(),
+            shard = self.shard.value(),
         )
         .entered();
 
@@ -748,7 +749,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             let new_shard_height = chain_state.height + 1;
 
             let shard_block = inferadb_ledger_types::ShardBlock {
-                shard_id: self.shard_id,
+                shard: self.shard,
                 shard_height: new_shard_height,
                 previous_shard_hash: chain_state.previous_hash,
                 vault_entries: vault_entries.clone(),
@@ -883,7 +884,9 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             .push(("organization".to_string(), state.sequences.organization.value() as u64));
         pending.sequences.push(("vault".to_string(), state.sequences.vault.value() as u64));
         pending.sequences.push(("user".to_string(), state.sequences.user as u64));
-        pending.sequences.push(("user_email".to_string(), state.sequences.user_email as u64));
+        pending
+            .sequences
+            .push(("user_email".to_string(), state.sequences.user_email.value() as u64));
         pending.sequences.push(("email_verify".to_string(), state.sequences.email_verify as u64));
 
         // Persist core state blob + external table writes atomically
@@ -1245,7 +1248,7 @@ impl RaftLogStore {
                         state.sequences.vault = inferadb_ledger_types::VaultId::new(val as i64);
                     },
                     "user" => state.sequences.user = val as i64,
-                    "user_email" => state.sequences.user_email = val as i64,
+                    "user_email" => state.sequences.user_email = UserEmailId::new(val as i64),
                     "email_verify" => state.sequences.email_verify = val as i64,
                     _ => {},
                 }
@@ -1346,6 +1349,20 @@ impl RaftLogStore {
                 let vault_id = inferadb_ledger_types::VaultId::new(vault_id_val);
                 state.vault_slug_index.insert(slug, vault_id);
                 state.vault_id_to_slug.insert(vault_id, slug);
+            }
+        }
+
+        let user_slug_iter =
+            read_txn.iter::<tables::UserSlugIndex>().map_err(|e| to_storage_error(&e))?;
+        for (key_bytes, value_bytes) in user_slug_iter {
+            if let (Some(slug_val), Some(user_id_val)) = (
+                <u64 as inferadb_ledger_store::Key>::decode(&key_bytes),
+                decode::<i64>(&value_bytes).ok(),
+            ) {
+                let slug = inferadb_ledger_types::UserSlug::new(slug_val);
+                let user_id = inferadb_ledger_types::UserId::new(user_id_val);
+                state.user_slug_index.insert(slug, user_id);
+                state.user_id_to_slug.insert(user_id, slug);
             }
         }
 

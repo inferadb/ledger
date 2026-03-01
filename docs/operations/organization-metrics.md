@@ -1,6 +1,6 @@
 # Organization Resource Metrics
 
-Per-organization resource accounting for capacity planning, quota enforcement, and tenant billing.
+Per-organization resource accounting for capacity planning and tenant billing.
 
 ## Metrics
 
@@ -27,16 +27,9 @@ Storage bytes are tracked in Raft-replicated state, updated on every committed w
 
 The counter floors at zero via saturating subtraction. Because only committed writes update the counter, all replicas converge to the same value after snapshot restore.
 
-## Quota Enforcement
+## Tier-Based Limits
 
-`QuotaChecker::check_storage_estimate()` uses the cumulative storage counter:
-
-```text
-projected = current_usage + estimated_write_bytes
-if projected > organization_quota.max_storage_bytes → reject
-```
-
-Configure per-organization quotas via `CreateOrganization` or `UpdateConfig`.
+Resource limits are derived from the organization's `OrganizationTier` (`Free`, `Pro`, `Enterprise`) by the downstream Engine and Control layers. The Ledger tracks cumulative storage bytes but does not enforce limits itself — enforcement is handled externally based on tier.
 
 ## Dashboard Queries
 
@@ -70,12 +63,6 @@ histogram_quantile(0.99,
 )
 ```
 
-### Organizations approaching quota (>80% utilization)
-
-```promql
-ledger_organization_storage_bytes / on(organization_slug) ledger_organization_quota_bytes > 0.8
-```
-
 ### Operations per organization over 24h
 
 ```promql
@@ -90,14 +77,6 @@ Example Prometheus alert rules:
 groups:
   - name: organization-capacity
     rules:
-      - alert: OrganizationNearQuota
-        expr: ledger_organization_storage_bytes / on(organization_slug) ledger_organization_quota_bytes > 0.9
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Organization {{ $labels.organization_slug }} at {{ $value | humanizePercentage }} of quota"
-
       - alert: OrganizationHighWriteRate
         expr: sum by (organization_slug) (rate(ledger_organization_operations_total{operation="write"}[5m])) > 1000
         for: 10m

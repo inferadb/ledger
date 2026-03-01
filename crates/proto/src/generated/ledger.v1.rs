@@ -23,6 +23,14 @@ pub struct VaultSlug {
     #[prost(uint64, tag = "1")]
     pub slug: u64,
 }
+/// External Snowflake identifier for a user.
+/// This is the only user identifier exposed to API consumers.
+/// Internal sequential UserId(i64) is used for storage but never appears in the API.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UserSlug {
+    #[prost(uint64, tag = "1")]
+    pub slug: u64,
+}
 /// Unique shard identifier (Raft group hosting multiple organizations)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ShardId {
@@ -42,6 +50,13 @@ pub struct UserId {
     #[prost(int64, tag = "1")]
     pub id: i64,
 }
+/// Unique identifier for a user email record.
+/// Sequential int64 assigned by Ledger leader from sequence counter "\_meta:seq:user_email"
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UserEmailId {
+    #[prost(int64, tag = "1")]
+    pub id: i64,
+}
 /// User record (stored in \_system organization as Entity with key "user:{id}")
 /// Users can have multiple email addresses via separate UserEmail entities.
 /// Organization access is derived from membership records (member:{id} in each org).
@@ -54,8 +69,8 @@ pub struct User {
     #[prost(string, tag = "2")]
     pub name: ::prost::alloc::string::String,
     /// References UserEmail.id
-    #[prost(int64, tag = "3")]
-    pub primary_email_id: i64,
+    #[prost(message, optional, tag = "3")]
+    pub email: ::core::option::Option<UserEmailId>,
     /// Lifecycle state
     #[prost(enumeration = "UserStatus", tag = "4")]
     pub status: i32,
@@ -66,6 +81,9 @@ pub struct User {
     /// Authorization role (default: USER)
     #[prost(enumeration = "UserRole", tag = "7")]
     pub role: i32,
+    /// External Snowflake identifier
+    #[prost(message, optional, tag = "8")]
+    pub slug: ::core::option::Option<UserSlug>,
 }
 /// User email address (stored in \_system organization as Entity with key "user_email:{id}")
 /// Each user can have multiple emails; primary is tracked by UserEmail.primary field.
@@ -75,8 +93,8 @@ pub struct User {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct UserEmail {
     /// Sequential ID (Ledger-assigned)
-    #[prost(int64, tag = "1")]
-    pub id: i64,
+    #[prost(message, optional, tag = "1")]
+    pub id: ::core::option::Option<UserEmailId>,
     /// Owning user
     #[prost(message, optional, tag = "2")]
     pub user_id: ::core::option::Option<UserId>,
@@ -105,8 +123,8 @@ pub struct EmailVerificationToken {
     #[prost(int64, tag = "1")]
     pub id: i64,
     /// Email being verified
-    #[prost(int64, tag = "2")]
-    pub user_email_id: i64,
+    #[prost(message, optional, tag = "2")]
+    pub user_email_id: ::core::option::Option<UserEmailId>,
     /// 64-char hex string (32 random bytes)
     #[prost(string, tag = "3")]
     pub token: ::prost::alloc::string::String,
@@ -957,23 +975,6 @@ pub struct BatchWriteSuccess {
     #[prost(uint64, tag = "5")]
     pub assigned_sequence: u64,
 }
-/// Per-organization resource quota limits.
-/// Applied to new organizations; defaults from server config if not specified.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct OrganizationQuota {
-    /// Maximum cumulative storage bytes
-    #[prost(uint64, tag = "1")]
-    pub max_storage_bytes: u64,
-    /// Maximum number of vaults
-    #[prost(uint32, tag = "2")]
-    pub max_vaults: u32,
-    /// Maximum write ops/sec
-    #[prost(uint32, tag = "3")]
-    pub max_write_ops_per_sec: u32,
-    /// Maximum read ops/sec
-    #[prost(uint32, tag = "4")]
-    pub max_read_ops_per_sec: u32,
-}
 /// Create a new organization. An OrganizationSlug (Snowflake ID) is generated
 /// by the leader and returned. The organization is assigned to the shard with
 /// lowest load, or to the specified shard.
@@ -984,10 +985,10 @@ pub struct CreateOrganizationRequest {
     pub name: ::prost::alloc::string::String,
     /// Target shard (auto-assigned if not specified)
     #[prost(message, optional, tag = "2")]
-    pub shard_id: ::core::option::Option<ShardId>,
-    /// Resource quota (server default if not specified)
-    #[prost(message, optional, tag = "3")]
-    pub quota: ::core::option::Option<OrganizationQuota>,
+    pub shard: ::core::option::Option<ShardId>,
+    /// Billing tier (Free if not specified)
+    #[prost(enumeration = "OrganizationTier", optional, tag = "3")]
+    pub tier: ::core::option::Option<i32>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateOrganizationResponse {
@@ -995,7 +996,7 @@ pub struct CreateOrganizationResponse {
     pub slug: ::core::option::Option<OrganizationSlug>,
     /// Assigned shard
     #[prost(message, optional, tag = "2")]
-    pub shard_id: ::core::option::Option<ShardId>,
+    pub shard: ::core::option::Option<ShardId>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteOrganizationRequest {
@@ -1024,7 +1025,7 @@ pub struct GetOrganizationResponse {
     pub name: ::prost::alloc::string::String,
     /// Which shard hosts this organization
     #[prost(message, optional, tag = "3")]
-    pub shard_id: ::core::option::Option<ShardId>,
+    pub shard: ::core::option::Option<ShardId>,
     /// Nodes in the shard
     #[prost(message, repeated, tag = "4")]
     pub member_nodes: ::prost::alloc::vec::Vec<NodeId>,
@@ -1036,6 +1037,9 @@ pub struct GetOrganizationResponse {
     pub config_version: u64,
     #[prost(message, optional, tag = "7")]
     pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Billing tier
+    #[prost(enumeration = "OrganizationTier", tag = "8")]
+    pub tier: i32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListOrganizationsRequest {
@@ -1822,7 +1826,7 @@ pub struct OrganizationRegistry {
     pub name: ::prost::alloc::string::String,
     /// Which Raft group hosts this organization
     #[prost(message, optional, tag = "3")]
-    pub shard_id: ::core::option::Option<ShardId>,
+    pub shard: ::core::option::Option<ShardId>,
     /// Nodes in the shard
     #[prost(message, repeated, tag = "4")]
     pub members: ::prost::alloc::vec::Vec<NodeId>,
@@ -1860,9 +1864,9 @@ pub struct RaftVoteRequest {
     pub vote: ::core::option::Option<RaftVote>,
     #[prost(message, optional, tag = "2")]
     pub last_log_id: ::core::option::Option<RaftLogId>,
-    /// Shard ID for multi-shard routing (defaults to system shard 0).
+    /// Shard for multi-shard routing (defaults to system shard 0).
     #[prost(uint64, optional, tag = "3")]
-    pub shard_id: ::core::option::Option<u64>,
+    pub shard: ::core::option::Option<u64>,
 }
 /// Vote response.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1886,9 +1890,9 @@ pub struct RaftAppendEntriesRequest {
     pub entries: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
     #[prost(message, optional, tag = "4")]
     pub leader_commit: ::core::option::Option<RaftLogId>,
-    /// Shard ID for multi-shard routing (defaults to system shard 0).
+    /// Shard for multi-shard routing (defaults to system shard 0).
     #[prost(uint64, optional, tag = "5")]
-    pub shard_id: ::core::option::Option<u64>,
+    pub shard: ::core::option::Option<u64>,
 }
 /// Log replication response.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1913,9 +1917,9 @@ pub struct RaftInstallSnapshotRequest {
     pub data: ::prost::alloc::vec::Vec<u8>,
     #[prost(bool, tag = "5")]
     pub done: bool,
-    /// Shard ID for multi-shard routing (defaults to system shard 0).
+    /// Shard for multi-shard routing (defaults to system shard 0).
     #[prost(uint64, optional, tag = "6")]
-    pub shard_id: ::core::option::Option<u64>,
+    pub shard: ::core::option::Option<u64>,
 }
 /// Snapshot installation response.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2245,6 +2249,41 @@ impl OrganizationStatus {
             "ORGANIZATION_STATUS_SUSPENDED" => Some(Self::Suspended),
             "ORGANIZATION_STATUS_DELETING" => Some(Self::Deleting),
             "ORGANIZATION_STATUS_DELETED" => Some(Self::Deleted),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum OrganizationTier {
+    Unspecified = 0,
+    /// Free tier (default)
+    Free = 1,
+    /// Professional tier
+    Pro = 2,
+    /// Enterprise tier
+    Enterprise = 3,
+}
+impl OrganizationTier {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ORGANIZATION_TIER_UNSPECIFIED",
+            Self::Free => "ORGANIZATION_TIER_FREE",
+            Self::Pro => "ORGANIZATION_TIER_PRO",
+            Self::Enterprise => "ORGANIZATION_TIER_ENTERPRISE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ORGANIZATION_TIER_UNSPECIFIED" => Some(Self::Unspecified),
+            "ORGANIZATION_TIER_FREE" => Some(Self::Free),
+            "ORGANIZATION_TIER_PRO" => Some(Self::Pro),
+            "ORGANIZATION_TIER_ENTERPRISE" => Some(Self::Enterprise),
             _ => None,
         }
     }

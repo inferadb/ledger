@@ -484,7 +484,7 @@ mod tests {
             /// Any `ShardBlock` must survive postcard roundtrip.
             #[test]
             fn prop_shard_block_roundtrip(
-                shard_id in (1u32..1_000).prop_map(crate::types::ShardId::new),
+                shard in (1u32..1_000).prop_map(crate::types::ShardId::new),
                 shard_height in any::<u64>(),
                 previous_shard_hash in arb_hash(),
                 timestamp in arb_timestamp(),
@@ -493,7 +493,7 @@ mod tests {
                 committed_index in any::<u64>(),
             ) {
                 let block = ShardBlock {
-                    shard_id,
+                    shard,
                     shard_height,
                     previous_shard_hash,
                     vault_entries: vec![],

@@ -23,6 +23,6 @@ pub use service::{
     SYSTEM_ORGANIZATION_ID, SYSTEM_VAULT_ID, SystemError, SystemOrganizationService,
 };
 pub use types::{
-    EmailVerificationToken, NodeInfo, NodeRole, OrganizationRegistry, OrganizationStatus, User,
-    UserEmail, UserRole, UserStatus,
+    EmailVerificationToken, NodeInfo, NodeRole, OrganizationRegistry, OrganizationStatus,
+    OrganizationTier, User, UserEmail, UserRole, UserStatus,
 };

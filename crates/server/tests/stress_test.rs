@@ -182,8 +182,8 @@ async fn setup_organization_and_vault(
     // Create organization and capture the actual Snowflake slug
     let ns_request = inferadb_ledger_proto::proto::CreateOrganizationRequest {
         name: format!("stress-ns-{}", config.organization.value()),
-        shard_id: None,
-        quota: None,
+        shard: None,
+        tier: None,
     };
     let ns_response = admin_client
         .create_organization(ns_request)
@@ -223,7 +223,7 @@ async fn setup_organization_and_vault(
 #[derive(Debug, Clone)]
 struct ShardAssignment {
     /// Shard ID (1-based for data shards).
-    shard_id: u32,
+    shard: u32,
     /// Organization slug assigned to this shard.
     organization: OrganizationSlug,
     /// Vault slug within the organization.
@@ -248,25 +248,26 @@ async fn setup_multi_shard_organizations(
 
     let mut assignments = Vec::with_capacity(num_shards);
 
-    for shard_id in 1..=num_shards {
-        let shard_id_u32 = shard_id as u32;
+    for shard in 1..=num_shards {
+        let shard_u32 = shard as u32;
 
         // Create organization (automatic shard assignment)
         let ns_request = inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: format!("stress-shard-{}-ns", shard_id),
-            shard_id: None,
-            quota: None,
+            name: format!("stress-shard-{}-ns", shard),
+            shard: None,
+            tier: None,
         };
 
         let ns_response = admin_client
             .create_organization(ns_request)
             .await
-            .map_err(|e| format!("Failed to create organization for shard {}: {}", shard_id, e))?;
+            .map_err(|e| format!("Failed to create organization for shard {}: {}", shard, e))?;
 
-        let organization =
-            ns_response.into_inner().slug.map(|n| OrganizationSlug::new(n.slug)).ok_or_else(
-                || format!("No organization slug in response for shard {}", shard_id),
-            )?;
+        let organization = ns_response
+            .into_inner()
+            .slug
+            .map(|n| OrganizationSlug::new(n.slug))
+            .ok_or_else(|| format!("No organization slug in response for shard {}", shard))?;
 
         // Create vault in this organization
         let vault_request = inferadb_ledger_proto::proto::CreateVaultRequest {
@@ -288,7 +289,7 @@ async fn setup_multi_shard_organizations(
             .map(|v| VaultSlug::new(v.slug))
             .ok_or_else(|| format!("No vault in response for organization {}", organization))?;
 
-        assignments.push(ShardAssignment { shard_id: shard_id_u32, organization, vault });
+        assignments.push(ShardAssignment { shard: shard_u32, organization, vault });
     }
 
     Ok(assignments)
@@ -1331,7 +1332,7 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
             for assignment in &assignments {
                 println!(
                     "   ✅ Shard {} → Organization {} → Vault {}",
-                    assignment.shard_id, assignment.organization, assignment.vault
+                    assignment.shard, assignment.organization, assignment.vault
                 );
             }
             assignments

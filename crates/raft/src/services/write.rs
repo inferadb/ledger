@@ -98,9 +98,6 @@ pub struct WriteServiceImpl {
     /// If a gRPC deadline is shorter, the deadline takes precedence.
     #[builder(default = Duration::from_secs(30))]
     proposal_timeout: Duration,
-    /// Per-organization resource quota checker.
-    #[builder(default)]
-    quota_checker: Option<crate::quota::QuotaChecker>,
     /// Handler-phase event handle for recording denial events.
     #[builder(default)]
     event_handle: Option<crate::event_writer::EventHandle<FileBackend>>,
@@ -186,7 +183,6 @@ impl WriteServiceImpl {
             hot_key_detector: None,
             validation_config: Arc::new(ValidationConfig::default()),
             proposal_timeout: Duration::from_secs(30),
-            quota_checker: None,
             event_handle: None,
             leader_channel_cache: LeaderChannelCache::new(),
             health_state: None,
@@ -242,13 +238,6 @@ impl WriteServiceImpl {
     #[must_use]
     pub fn with_proposal_timeout(mut self, timeout: Duration) -> Self {
         self.proposal_timeout = timeout;
-        self
-    }
-
-    /// Sets the per-organization resource quota checker.
-    #[must_use]
-    pub fn with_quota_checker(mut self, checker: crate::quota::QuotaChecker) -> Self {
-        self.quota_checker = Some(checker);
         self
     }
 
@@ -784,33 +773,6 @@ impl WriteService for WriteServiceImpl {
             return Err(status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id));
         }
 
-        // Check storage quota (estimated from operation payload size)
-        let estimated_bytes = super::helpers::estimate_operations_bytes(&req.operations);
-        super::helpers::check_storage_quota(
-            self.quota_checker.as_ref(),
-            organization_id,
-            estimated_bytes,
-        )
-        .map_err(|status| {
-            self.record_handler_event(
-                crate::event_writer::HandlerPhaseEmitter::for_organization(
-                    inferadb_ledger_types::events::EventAction::QuotaExceeded,
-                    organization_id,
-                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
-                    self.node_id.unwrap_or(0),
-                )
-                .principal(&client_id)
-                .vault(VaultSlug::new(vault))
-                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
-                    reason: "storage_quota_exceeded".to_string(),
-                })
-                .detail("estimated_bytes", &estimated_bytes.to_string())
-                .trace_id(&trace_ctx.trace_id)
-                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
-            );
-            status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id)
-        })?;
-
         // Track key access frequency for hot key detection.
         self.record_hot_keys(vault_id, &req.operations);
 
@@ -1308,33 +1270,6 @@ impl WriteService for WriteServiceImpl {
             );
             return Err(status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id));
         }
-
-        // Check storage quota (estimated from operation payload size)
-        let estimated_bytes = super::helpers::estimate_operations_bytes(&all_operations);
-        super::helpers::check_storage_quota(
-            self.quota_checker.as_ref(),
-            organization_id,
-            estimated_bytes,
-        )
-        .map_err(|status| {
-            self.record_handler_event(
-                crate::event_writer::HandlerPhaseEmitter::for_organization(
-                    inferadb_ledger_types::events::EventAction::QuotaExceeded,
-                    organization_id,
-                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
-                    self.node_id.unwrap_or(0),
-                )
-                .principal(&client_id)
-                .vault(VaultSlug::new(vault))
-                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
-                    reason: "storage_quota_exceeded".to_string(),
-                })
-                .detail("estimated_bytes", &estimated_bytes.to_string())
-                .trace_id(&trace_ctx.trace_id)
-                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
-            );
-            status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id)
-        })?;
 
         // Track key access frequency for hot key detection.
         self.record_hot_keys(vault_id, &all_operations);

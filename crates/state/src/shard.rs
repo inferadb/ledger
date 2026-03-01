@@ -93,7 +93,7 @@ pub struct VaultMeta {
 /// - Vault health tracking
 pub struct ShardManager<B: StorageBackend> {
     /// Shard identifier.
-    shard_id: ShardId,
+    shard: ShardId,
     /// Shared database.
     db: Arc<Database<B>>,
     /// State layer for K/V operations.
@@ -114,13 +114,13 @@ pub struct ShardManager<B: StorageBackend> {
 impl<B: StorageBackend> ShardManager<B> {
     /// Creates a new shard manager.
     pub fn new(
-        shard_id: ShardId,
+        shard: ShardId,
         db: Arc<Database<B>>,
         snapshot_dir: PathBuf,
         max_snapshots: usize,
     ) -> Self {
         Self {
-            shard_id,
+            shard,
             db: Arc::clone(&db),
             state: StateLayer::new(Arc::clone(&db)),
             blocks: BlockArchive::new(Arc::clone(&db)),
@@ -131,9 +131,9 @@ impl<B: StorageBackend> ShardManager<B> {
         }
     }
 
-    /// Returns the shard ID.
-    pub fn shard_id(&self) -> ShardId {
-        self.shard_id
+    /// Returns the shard identifier.
+    pub fn shard(&self) -> ShardId {
+        self.shard
     }
 
     /// Returns the current shard height.
@@ -333,7 +333,7 @@ impl<B: StorageBackend> ShardManager<B> {
         let chain_params = self.compute_chain_params(shard_height)?;
 
         let snapshot =
-            Snapshot::new(self.shard_id, shard_height, vault_states, state_data, chain_params)
+            Snapshot::new(self.shard, shard_height, vault_states, state_data, chain_params)
                 .context(SnapshotSnafu)?;
 
         self.snapshots.save(&snapshot).context(SnapshotSnafu)
@@ -541,7 +541,7 @@ mod tests {
         manager.register_vault(OrganizationId::new(1), VaultId::new(1));
 
         let block = ShardBlock {
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             shard_height: 1,
             previous_shard_hash: inferadb_ledger_types::ZERO_HASH,
             vault_entries: vec![VaultEntry {
@@ -588,7 +588,7 @@ mod tests {
 
         // Block with wrong state root
         let block = ShardBlock {
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             shard_height: 1,
             previous_shard_hash: inferadb_ledger_types::ZERO_HASH,
             vault_entries: vec![VaultEntry {

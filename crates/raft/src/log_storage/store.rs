@@ -8,7 +8,8 @@ use inferadb_ledger_store::{
     Database, DatabaseConfig, FileBackend, Key, StorageBackend, Value, WriteTransaction, tables,
 };
 use inferadb_ledger_types::{
-    OrganizationId, OrganizationSlug, ShardId, VaultId, VaultSlug, decode, encode,
+    OrganizationId, OrganizationSlug, ShardId, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
+    decode, encode,
 };
 use openraft::{Entry, LogId, StorageError, Vote};
 use parking_lot::RwLock;
@@ -61,8 +62,8 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     pub(super) state_layer: Option<Arc<StateLayer<B>>>,
     /// Block archive for permanent block storage.
     pub(super) block_archive: Option<Arc<BlockArchive<B>>>,
-    /// Shard ID for this Raft group.
-    pub(super) shard_id: ShardId,
+    /// Shard for this Raft group.
+    pub(super) shard: ShardId,
     /// Node ID for block metadata.
     pub(super) node_id: String,
     /// Shard chain state (height and previous hash).
@@ -127,7 +128,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             })),
             state_layer: None,
             block_archive: None,
-            shard_id: ShardId::new(0),
+            shard: ShardId::new(0),
             node_id: String::new(),
             shard_chain: RwLock::new(ShardChainState {
                 height: 0,
@@ -158,8 +159,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
     }
 
     /// Configures shard metadata.
-    pub fn with_shard_config(mut self, shard_id: ShardId, node_id: String) -> Self {
-        self.shard_id = shard_id;
+    pub fn with_shard_config(mut self, shard: ShardId, node_id: String) -> Self {
+        self.shard = shard;
         self.node_id = node_id;
         self
     }
@@ -426,6 +427,21 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 .map_err(|e| to_storage_error(&e))?;
         }
 
+        // UserSlugIndex inserts/updates
+        for (slug, user_id) in &pending.user_slug_index {
+            let value = encode(user_id).map_err(|e| to_serde_error(&e))?;
+            write_txn
+                .insert::<tables::UserSlugIndex>(&slug.value(), &value)
+                .map_err(|e| to_storage_error(&e))?;
+        }
+
+        // UserSlugIndex deletes
+        for slug in &pending.user_slug_index_deleted {
+            write_txn
+                .delete::<tables::UserSlugIndex>(&slug.value())
+                .map_err(|e| to_storage_error(&e))?;
+        }
+
         Ok(())
     }
 
@@ -574,6 +590,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
         // VaultSlugIndex table scan
         Self::load_vault_slug_index(&read_txn, &mut state)?;
 
+        // UserSlugIndex table scan
+        Self::load_user_slug_index(&read_txn, &mut state)?;
+
         Ok(state)
     }
 
@@ -600,7 +619,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 },
                 "vault" => state.sequences.vault = VaultId::new(value as i64),
                 "user" => state.sequences.user = value as i64,
-                "user_email" => state.sequences.user_email = value as i64,
+                "user_email" => state.sequences.user_email = UserEmailId::new(value as i64),
                 "email_verify" => state.sequences.email_verify = value as i64,
                 unknown => {
                     warn!(key = unknown, "Unknown sequence key in Sequences table, skipping");
@@ -806,6 +825,28 @@ impl<B: StorageBackend> RaftLogStore<B> {
         Ok(())
     }
 
+    /// Load user slug index from the UserSlugIndex table.
+    fn load_user_slug_index(
+        read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
+        state: &mut AppliedState,
+    ) -> Result<(), StorageError<LedgerNodeId>> {
+        let mut iter =
+            read_txn.iter::<tables::UserSlugIndex>().map_err(|e| to_storage_error(&e))?;
+
+        while let Some((key_bytes, value_bytes)) =
+            iter.next_entry().map_err(|e| to_storage_error(&e))?
+        {
+            let slug_raw = <u64 as Key>::decode(&key_bytes)
+                .ok_or_else(|| corrupted_error("invalid u64 key in UserSlugIndex table"))?;
+            let slug = UserSlug::new(slug_raw);
+            let user_id: UserId = decode(&value_bytes).map_err(|e| to_serde_error(&e))?;
+            state.user_slug_index.insert(slug, user_id);
+            state.user_id_to_slug.insert(user_id, slug);
+        }
+
+        Ok(())
+    }
+
     /// Decode a 16-byte composite key into (OrganizationId, VaultId).
     fn decode_vault_composite_key(
         key_bytes: &[u8],
@@ -872,7 +913,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
             .push(("organization".to_string(), old_state.sequences.organization.value() as u64));
         pending.sequences.push(("vault".to_string(), old_state.sequences.vault.value() as u64));
         pending.sequences.push(("user".to_string(), old_state.sequences.user as u64));
-        pending.sequences.push(("user_email".to_string(), old_state.sequences.user_email as u64));
+        pending
+            .sequences
+            .push(("user_email".to_string(), old_state.sequences.user_email.value() as u64));
         pending
             .sequences
             .push(("email_verify".to_string(), old_state.sequences.email_verify as u64));
@@ -898,6 +941,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
             pending.vault_slug_index.push((*slug, *vault_id));
         }
 
+        // Populate user slug index
+        for (slug, user_id) in &old_state.user_slug_index {
+            pending.user_slug_index.push((*slug, *user_id));
+        }
+
         // Write core + external tables atomically
         self.save_state_core(old_state, &pending)
     }
@@ -906,10 +954,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
-    use inferadb_ledger_state::system::OrganizationStatus;
+    use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
     use inferadb_ledger_store::{FileBackend, tables};
     use inferadb_ledger_types::{
-        OrganizationId, OrganizationSlug, ShardId, VaultId, VaultSlug, decode, encode,
+        OrganizationId, OrganizationSlug, ShardId, UserEmailId, VaultId, VaultSlug, decode, encode,
     };
     use openraft::{CommittedLeaderId, LogId};
     use tempfile::tempdir;
@@ -934,7 +982,7 @@ mod tests {
                 organization: OrganizationId::new(10),
                 vault: VaultId::new(20),
                 user: 30,
-                user_email: 40,
+                user_email: UserEmailId::new(40),
                 email_verify: 50,
             },
             ..Default::default()
@@ -949,11 +997,11 @@ mod tests {
                 OrganizationMeta {
                     organization: org_id,
                     slug,
-                    shard_id: ShardId::new(0),
+                    shard: ShardId::new(0),
                     name: format!("org-{i}"),
                     status: OrganizationStatus::Active,
-                    pending_shard_id: None,
-                    quota: None,
+                    tier: OrganizationTier::Free,
+                    pending_shard: None,
                     storage_bytes: i as u64 * 1024,
                 },
             );
@@ -1043,7 +1091,9 @@ mod tests {
             .push(("organization".to_string(), state.sequences.organization.value() as u64));
         pending.sequences.push(("vault".to_string(), state.sequences.vault.value() as u64));
         pending.sequences.push(("user".to_string(), state.sequences.user as u64));
-        pending.sequences.push(("user_email".to_string(), state.sequences.user_email as u64));
+        pending
+            .sequences
+            .push(("user_email".to_string(), state.sequences.user_email.value() as u64));
         pending.sequences.push(("email_verify".to_string(), state.sequences.email_verify as u64));
 
         for ((org_id, vault_id, client_id), sequence) in &state.client_sequences {
@@ -1189,11 +1239,11 @@ mod tests {
                     &encode(&OrganizationMeta {
                         organization: OrganizationId::new(999),
                         slug: OrganizationSlug::new(9999),
-                        shard_id: ShardId::new(0),
+                        shard: ShardId::new(0),
                         name: "phantom".to_string(),
                         status: OrganizationStatus::Active,
-                        pending_shard_id: None,
-                        quota: None,
+                        tier: OrganizationTier::Free,
+                        pending_shard: None,
                         storage_bytes: 0,
                     })
                     .unwrap(),
@@ -1364,7 +1414,8 @@ mod tests {
         // But since we initialized from Core which sets SequenceCounters::new() then only overwrote
         // from the Sequences table, the missing ones keep the SequenceCounters::new() defaults.
         assert_eq!(
-            loaded.sequences.user_email, 1,
+            loaded.sequences.user_email,
+            UserEmailId::new(1),
             "missing key defaults to SequenceCounters::new() initial value"
         );
         assert_eq!(
@@ -1455,11 +1506,11 @@ mod tests {
                 encode(&OrganizationMeta {
                     organization: OrganizationId::new(99),
                     slug: OrganizationSlug::new(9900),
-                    shard_id: ShardId::new(0),
+                    shard: ShardId::new(0),
                     name: "new-org".to_string(),
                     status: OrganizationStatus::Active,
-                    pending_shard_id: None,
-                    quota: None,
+                    tier: OrganizationTier::Free,
+                    pending_shard: None,
                     storage_bytes: 0,
                 })
                 .unwrap(),
@@ -1504,11 +1555,11 @@ mod tests {
             encode(&OrganizationMeta {
                 organization: new_org_id,
                 slug: new_slug,
-                shard_id: ShardId::new(0),
+                shard: ShardId::new(0),
                 name: "org-3".to_string(),
                 status: OrganizationStatus::Active,
-                pending_shard_id: None,
-                quota: None,
+                tier: OrganizationTier::Free,
+                pending_shard: None,
                 storage_bytes: 0,
             })
             .unwrap(),
@@ -1543,11 +1594,11 @@ mod tests {
             OrganizationMeta {
                 organization: new_org_id,
                 slug: new_slug,
-                shard_id: ShardId::new(0),
+                shard: ShardId::new(0),
                 name: "org-3".to_string(),
                 status: OrganizationStatus::Active,
-                pending_shard_id: None,
-                quota: None,
+                tier: OrganizationTier::Free,
+                pending_shard: None,
                 storage_bytes: 0,
             },
         );
@@ -1660,7 +1711,7 @@ mod tests {
                 organization: OrganizationId::new(1001),
                 vault: VaultId::new(5001),
                 user: 10000,
-                user_email: 10000,
+                user_email: UserEmailId::new(10000),
                 email_verify: 10000,
             },
             ..Default::default()
@@ -1675,11 +1726,11 @@ mod tests {
                 OrganizationMeta {
                     organization: org_id,
                     slug,
-                    shard_id: ShardId::new((i % 10) as u32),
+                    shard: ShardId::new((i % 10) as u32),
                     name: format!("org-{i}"),
                     status: OrganizationStatus::Active,
-                    pending_shard_id: None,
-                    quota: None,
+                    tier: OrganizationTier::Free,
+                    pending_shard: None,
                     storage_bytes: i as u64 * 100,
                 },
             );
@@ -1760,7 +1811,7 @@ mod tests {
                 organization: OrganizationId::new(50),
                 vault: VaultId::new(60),
                 user: 70,
-                user_email: 80,
+                user_email: UserEmailId::new(80),
                 email_verify: 90,
             },
             ..Default::default()
@@ -1772,11 +1823,11 @@ mod tests {
             OrganizationMeta {
                 organization: org_id,
                 slug,
-                shard_id: ShardId::new(0),
+                shard: ShardId::new(0),
                 name: "new-org".to_string(),
                 status: OrganizationStatus::Active,
-                pending_shard_id: None,
-                quota: None,
+                tier: OrganizationTier::Free,
+                pending_shard: None,
                 storage_bytes: 5000,
             },
         );

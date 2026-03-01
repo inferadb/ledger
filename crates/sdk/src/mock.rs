@@ -132,7 +132,7 @@ struct MockState {
 #[derive(Debug, Clone)]
 struct OrganizationData {
     name: String,
-    shard_id: u32,
+    shard: u32,
     status: i32,
 }
 
@@ -434,14 +434,14 @@ impl MockLedgerServer {
     ///
     /// * `organization` - Organization slug (external identifier).
     /// * `name` - Human-readable organization name.
-    /// * `shard_id` - Shard assignment for the organization.
-    pub fn add_organization(&self, organization: OrganizationSlug, name: &str, shard_id: u32) {
+    /// * `shard` - Shard assignment for the organization.
+    pub fn add_organization(&self, organization: OrganizationSlug, name: &str, shard: u32) {
         let mut organizations = self.state.organizations.write();
         organizations.insert(
             organization,
             OrganizationData {
                 name: name.to_string(),
-                shard_id,
+                shard,
                 status: proto::OrganizationStatus::Active as i32,
             },
         );
@@ -1131,7 +1131,7 @@ impl AdminService for MockAdminService {
                 organization,
                 OrganizationData {
                     name: req.name,
-                    shard_id: req.shard_id.map_or(1, |s| s.id),
+                    shard: req.shard.map_or(1, |s| s.id),
                     status: proto::OrganizationStatus::Active as i32,
                 },
             );
@@ -1139,7 +1139,7 @@ impl AdminService for MockAdminService {
 
         Ok(Response::new(proto::CreateOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: organization.value() }),
-            shard_id: Some(proto::ShardId { id: 1 }),
+            shard: Some(proto::ShardId { id: 1 }),
         }))
     }
 
@@ -1173,11 +1173,12 @@ impl AdminService for MockAdminService {
         Ok(Response::new(proto::GetOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: organization.value() }),
             name: data.name.clone(),
-            shard_id: Some(proto::ShardId { id: data.shard_id }),
+            shard: Some(proto::ShardId { id: data.shard }),
             member_nodes: vec![],
             status: data.status,
             config_version: 1,
             created_at: None,
+            tier: 0, // Free (default)
         }))
     }
 
@@ -1193,11 +1194,12 @@ impl AdminService for MockAdminService {
             .map(|(slug, data)| proto::GetOrganizationResponse {
                 slug: Some(proto::OrganizationSlug { slug: slug.value() }),
                 name: data.name.clone(),
-                shard_id: Some(proto::ShardId { id: data.shard_id }),
+                shard: Some(proto::ShardId { id: data.shard }),
                 member_nodes: vec![],
                 status: data.status,
                 config_version: 1,
                 created_at: None,
+                tier: 0, // Free (default)
             })
             .collect();
 

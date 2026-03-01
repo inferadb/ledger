@@ -63,9 +63,6 @@ pub struct MultiShardWriteService {
     /// If a gRPC deadline is shorter, the deadline takes precedence.
     #[builder(default = Duration::from_secs(30))]
     proposal_timeout: Duration,
-    /// Per-organization resource quota checker.
-    #[builder(default)]
-    quota_checker: Option<crate::quota::QuotaChecker>,
     /// Handler-phase event handle for recording denial events.
     #[builder(default)]
     event_handle: Option<crate::event_writer::EventHandle<inferadb_ledger_store::FileBackend>>,
@@ -108,7 +105,7 @@ impl MultiShardWriteService {
 
         let connection = router
             .get_connection(
-                remote.shard_id,
+                remote.shard,
                 &remote.routing.member_nodes,
                 remote.routing.leader_hint.as_deref(),
             )
@@ -296,36 +293,10 @@ impl WriteService for MultiShardWriteService {
                 return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
             }
 
-            // Pre-flight: quota on originating node
-            let estimated_bytes = super::helpers::estimate_operations_bytes(&req.operations);
-            super::helpers::check_storage_quota(
-                self.quota_checker.as_ref(),
-                organization_id,
-                estimated_bytes,
-            )
-            .map_err(|status| {
-                self.record_handler_event(
-                    crate::event_writer::HandlerPhaseEmitter::for_organization(
-                        inferadb_ledger_types::events::EventAction::QuotaExceeded,
-                        organization_id,
-                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
-                        self.node_id.unwrap_or(0),
-                    )
-                    .principal(&client_id)
-                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
-                        reason: "storage_quota_exceeded".to_string(),
-                    })
-                    .detail("estimated_bytes", &estimated_bytes.to_string())
-                    .trace_id(&trace_ctx.trace_id)
-                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
-                );
-                status_with_correlation(status, &request_id, &trace_ctx.trace_id)
-            })?;
-
             // Forward to remote shard — destination resolves vault slug
             debug!(
                 organization_id = organization_id.value(),
-                shard_id = remote.shard_id.value(),
+                shard = remote.shard.value(),
                 "Forwarding write to remote shard"
             );
             let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
@@ -440,32 +411,6 @@ impl WriteService for MultiShardWriteService {
             );
             return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
         }
-
-        // Check storage quota (estimated from operation payload size)
-        let estimated_bytes = super::helpers::estimate_operations_bytes(&req.operations);
-        super::helpers::check_storage_quota(
-            self.quota_checker.as_ref(),
-            organization_id,
-            estimated_bytes,
-        )
-        .map_err(|status| {
-            self.record_handler_event(
-                crate::event_writer::HandlerPhaseEmitter::for_organization(
-                    inferadb_ledger_types::events::EventAction::QuotaExceeded,
-                    organization_id,
-                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
-                    self.node_id.unwrap_or(0),
-                )
-                .principal(&client_id)
-                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
-                    reason: "storage_quota_exceeded".to_string(),
-                })
-                .detail("estimated_bytes", &estimated_bytes.to_string())
-                .trace_id(&trace_ctx.trace_id)
-                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
-            );
-            status_with_correlation(status, &request_id, &trace_ctx.trace_id)
-        })?;
 
         // Track key access frequency for hot key detection.
         self.record_hot_keys(vault_id, &req.operations);
@@ -652,36 +597,10 @@ impl WriteService for MultiShardWriteService {
                 return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
             }
 
-            // Pre-flight: quota on originating node
-            let estimated_bytes = super::helpers::estimate_operations_bytes(&all_operations);
-            super::helpers::check_storage_quota(
-                self.quota_checker.as_ref(),
-                organization_id,
-                estimated_bytes,
-            )
-            .map_err(|status| {
-                self.record_handler_event(
-                    crate::event_writer::HandlerPhaseEmitter::for_organization(
-                        inferadb_ledger_types::events::EventAction::QuotaExceeded,
-                        organization_id,
-                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
-                        self.node_id.unwrap_or(0),
-                    )
-                    .principal(&client_id)
-                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
-                        reason: "storage_quota_exceeded".to_string(),
-                    })
-                    .detail("estimated_bytes", &estimated_bytes.to_string())
-                    .trace_id(&trace_ctx.trace_id)
-                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
-                );
-                status_with_correlation(status, &request_id, &trace_ctx.trace_id)
-            })?;
-
             // Forward to remote shard — destination resolves vault slug
             debug!(
                 organization_id = organization_id.value(),
-                shard_id = remote.shard_id.value(),
+                shard = remote.shard.value(),
                 "Forwarding batch_write to remote shard"
             );
             let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
@@ -806,32 +725,6 @@ impl WriteService for MultiShardWriteService {
             );
             return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
         }
-
-        // Check storage quota (estimated from operation payload size)
-        let estimated_bytes = super::helpers::estimate_operations_bytes(&all_operations);
-        super::helpers::check_storage_quota(
-            self.quota_checker.as_ref(),
-            organization_id,
-            estimated_bytes,
-        )
-        .map_err(|status| {
-            self.record_handler_event(
-                crate::event_writer::HandlerPhaseEmitter::for_organization(
-                    inferadb_ledger_types::events::EventAction::QuotaExceeded,
-                    organization_id,
-                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
-                    self.node_id.unwrap_or(0),
-                )
-                .principal(&client_id)
-                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
-                    reason: "storage_quota_exceeded".to_string(),
-                })
-                .detail("estimated_bytes", &estimated_bytes.to_string())
-                .trace_id(&trace_ctx.trace_id)
-                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
-            );
-            status_with_correlation(status, &request_id, &trace_ctx.trace_id)
-        })?;
 
         // Track key access frequency for hot key detection.
         self.record_hot_keys(vault_id, &all_operations);

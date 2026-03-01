@@ -1,7 +1,8 @@
 //! Core types, errors, and cryptographic primitives for InferaDB Ledger.
 //!
 //! Provides the foundational types used throughout the ledger:
-//! - Newtype identifiers (`OrganizationId`, `OrganizationSlug`, `VaultId`, `UserId`, `ShardId`)
+//! - Newtype identifiers (`OrganizationId`, `OrganizationSlug`, `VaultId`, `UserId`, `UserEmailId`,
+//!   `ShardId`)
 //! - Data structures for blocks, transactions, and operations
 //! - Configuration types with validated builders
 //! - Cryptographic hashing functions (SHA-256, seahash)
@@ -62,7 +63,10 @@ pub use types::{
     Transaction,
     TransactionValidationError,
     TxId,
+    UserEmailId,
     UserId,
+    // External user identifier
+    UserSlug,
     VaultBlock,
     VaultEntry,
     VaultHealth,

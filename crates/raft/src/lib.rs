@@ -93,8 +93,6 @@ pub mod proof;
 #[doc(hidden)]
 pub mod proto_compat;
 #[doc(hidden)]
-pub mod quota;
-#[doc(hidden)]
 pub mod resource_metrics;
 #[doc(hidden)]
 pub mod runtime_config;

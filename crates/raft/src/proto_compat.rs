@@ -8,7 +8,7 @@
 //! prevents implementing foreign traits between two external types.
 
 use inferadb_ledger_proto::proto;
-use inferadb_ledger_state::system::OrganizationStatus;
+use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
 
 /// Converts a domain `OrganizationStatus` to its proto representation.
 pub(crate) fn organization_status_to_proto(
@@ -20,5 +20,27 @@ pub(crate) fn organization_status_to_proto(
         OrganizationStatus::Suspended => proto::OrganizationStatus::Suspended,
         OrganizationStatus::Deleting => proto::OrganizationStatus::Deleting,
         OrganizationStatus::Deleted => proto::OrganizationStatus::Deleted,
+    }
+}
+
+/// Converts a domain `OrganizationTier` to its proto representation.
+pub(crate) fn organization_tier_to_proto(tier: OrganizationTier) -> proto::OrganizationTier {
+    match tier {
+        OrganizationTier::Free => proto::OrganizationTier::Free,
+        OrganizationTier::Pro => proto::OrganizationTier::Pro,
+        OrganizationTier::Enterprise => proto::OrganizationTier::Enterprise,
+    }
+}
+
+/// Converts a proto `OrganizationTier` to its domain representation.
+///
+/// `Unspecified` maps to `Free` (the default tier for new organizations).
+pub(crate) fn organization_tier_from_proto(tier: proto::OrganizationTier) -> OrganizationTier {
+    match tier {
+        proto::OrganizationTier::Unspecified | proto::OrganizationTier::Free => {
+            OrganizationTier::Free
+        },
+        proto::OrganizationTier::Pro => OrganizationTier::Pro,
+        proto::OrganizationTier::Enterprise => OrganizationTier::Enterprise,
     }
 }

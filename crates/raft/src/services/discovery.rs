@@ -391,7 +391,7 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
                             .map_or(ns.organization.value() as u64, |s| s.value()),
                     }),
                     name: ns.name,
-                    shard_id: Some(ShardId { id: ns.shard_id.value() }),
+                    shard: Some(ShardId { id: ns.shard.value() }),
                     members: member_nodes.clone(),
                     status: status.into(),
                     config_version: current_version,

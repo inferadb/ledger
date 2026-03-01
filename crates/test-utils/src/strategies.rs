@@ -179,7 +179,7 @@ pub fn arb_vault_id() -> impl Strategy<Value = VaultId> {
 }
 
 /// Generates an arbitrary [`ShardId`] in the range 1-999.
-pub fn arb_shard_id() -> impl Strategy<Value = ShardId> {
+pub fn arb_shard() -> impl Strategy<Value = ShardId> {
     (1u32..1_000).prop_map(ShardId::new)
 }
 
@@ -286,7 +286,7 @@ pub fn arb_vault_entry() -> impl Strategy<Value = VaultEntry> {
 /// Generates an arbitrary [`ShardBlock`] with height 0-999,999 and 0-2 vault entries.
 pub fn arb_shard_block() -> impl Strategy<Value = ShardBlock> {
     (
-        arb_shard_id(),
+        arb_shard(),
         0u64..1_000_000,
         arb_hash(),
         proptest::collection::vec(arb_vault_entry(), 0..3),
@@ -297,7 +297,7 @@ pub fn arb_shard_block() -> impl Strategy<Value = ShardBlock> {
     )
         .prop_map(
             |(
-                shard_id,
+                shard,
                 shard_height,
                 previous_shard_hash,
                 vault_entries,
@@ -307,7 +307,7 @@ pub fn arb_shard_block() -> impl Strategy<Value = ShardBlock> {
                 committed_index,
             )| {
                 ShardBlock {
-                    shard_id,
+                    shard,
                     shard_height,
                     previous_shard_hash,
                     vault_entries,

@@ -74,6 +74,12 @@ pub enum TableId {
     VaultSlugIndex = 14,
 
     // ========================================================================
+    // User Index Tables
+    // ========================================================================
+    /// User slug → internal ID mapping for external identifier resolution.
+    UserSlugIndex = 18,
+
+    // ========================================================================
     // Vault-Scoped State Tables (composite key: {organization_id:8BE}{vault_id:8BE})
     // ========================================================================
     /// Vault block heights: composite key → `u64` vault block height.
@@ -88,7 +94,7 @@ pub enum TableId {
 
 impl TableId {
     /// Total number of tables.
-    pub const COUNT: usize = 18;
+    pub const COUNT: usize = 19;
 
     /// Returns the key type for this table.
     #[inline]
@@ -115,7 +121,9 @@ impl TableId {
             | Self::VaultHealth => KeyType::Bytes,
 
             // u64 keys (slug → internal ID)
-            Self::OrganizationSlugIndex | Self::VaultSlugIndex => KeyType::U64,
+            Self::OrganizationSlugIndex | Self::VaultSlugIndex | Self::UserSlugIndex => {
+                KeyType::U64
+            },
         }
     }
 
@@ -141,6 +149,7 @@ impl TableId {
             Self::VaultHeights => "vault_heights",
             Self::VaultHashes => "vault_hashes",
             Self::VaultHealth => "vault_health",
+            Self::UserSlugIndex => "user_slug_index",
         }
     }
 
@@ -165,6 +174,7 @@ impl TableId {
             Self::VaultHeights,
             Self::VaultHashes,
             Self::VaultHealth,
+            Self::UserSlugIndex,
         ]
     }
 
@@ -190,6 +200,7 @@ impl TableId {
             15 => Some(Self::VaultHeights),
             16 => Some(Self::VaultHashes),
             17 => Some(Self::VaultHealth),
+            18 => Some(Self::UserSlugIndex),
             _ => None,
         }
     }
@@ -342,6 +353,14 @@ impl Table for VaultSlugIndex {
     type ValueType = Vec<u8>;
 }
 
+/// User slug index: maps external user slugs to internal user IDs.
+pub struct UserSlugIndex;
+impl Table for UserSlugIndex {
+    const ID: TableId = TableId::UserSlugIndex;
+    type KeyType = u64;
+    type ValueType = Vec<u8>;
+}
+
 /// Vault block heights: tracks per-vault block height.
 ///
 /// Key: `{organization_id:8BE}{vault_id:8BE}`, Value: `u64` vault block height.
@@ -471,23 +490,23 @@ mod tests {
     }
 
     #[test]
-    fn test_table_count_is_18() {
-        assert_eq!(TableId::COUNT, 18);
-        assert_eq!(TableId::all().len(), 18);
+    fn test_table_count_is_19() {
+        assert_eq!(TableId::COUNT, 19);
+        assert_eq!(TableId::all().len(), 19);
     }
 
     #[test]
     fn test_from_u8_rejects_out_of_range() {
-        assert!(TableId::from_u8(18).is_none());
+        assert!(TableId::from_u8(19).is_none());
         assert!(TableId::from_u8(255).is_none());
     }
 
     #[test]
     fn test_directory_page_fits_minimum_page_size() {
-        // With COUNT=18 tables, the directory occupies 18 * 17 = 306 bytes.
+        // With COUNT=19 tables, the directory occupies 19 * 17 = 323 bytes.
         // This must fit within the minimum 512-byte page size.
         let directory_size = TableId::COUNT * TableEntry::SIZE;
-        assert_eq!(directory_size, 306);
+        assert_eq!(directory_size, 323);
         assert!(
             directory_size <= 512,
             "directory size {directory_size} exceeds minimum 512-byte page"

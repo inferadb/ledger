@@ -67,7 +67,7 @@ pub struct ShardContext {
 #[derive(Debug, Clone)]
 pub struct RemoteShardInfo {
     /// The shard hosting the organization.
-    pub shard_id: ShardId,
+    pub shard: ShardId,
     /// The organization being accessed (internal identifier).
     pub organization: OrganizationId,
     /// Routing information including node addresses and leader hint.
@@ -288,11 +288,7 @@ impl ShardResolver for MultiShardResolver {
         })?;
 
         // Return forwarding info
-        Ok(ResolveResult::Remote(RemoteShardInfo {
-            shard_id: routing.shard_id,
-            organization,
-            routing,
-        }))
+        Ok(ResolveResult::Remote(RemoteShardInfo { shard: routing.shard, organization, routing }))
     }
 
     fn system_shard(&self) -> Result<ShardContext, Status> {
@@ -335,20 +331,20 @@ mod tests {
     #[test]
     fn test_remote_shard_info_fields() {
         let routing = RoutingInfo {
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
             leader_hint: Some("node-1".to_string()),
         };
 
         let remote_info = RemoteShardInfo {
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             organization: OrganizationId::new(42),
             routing: routing.clone(),
         };
 
-        assert_eq!(remote_info.shard_id, ShardId::new(1));
+        assert_eq!(remote_info.shard, ShardId::new(1));
         assert_eq!(remote_info.organization, OrganizationId::new(42));
-        assert_eq!(remote_info.routing.shard_id, ShardId::new(1));
+        assert_eq!(remote_info.routing.shard, ShardId::new(1));
         assert_eq!(remote_info.routing.member_nodes.len(), 2);
         assert_eq!(remote_info.routing.leader_hint, Some("node-1".to_string()));
     }
@@ -363,13 +359,13 @@ mod tests {
     #[test]
     fn test_resolve_result_remote_variant() {
         let routing = RoutingInfo {
-            shard_id: ShardId::new(2),
+            shard: ShardId::new(2),
             member_nodes: vec!["192.168.1.1:50051".to_string()],
             leader_hint: None,
         };
 
         let remote = RemoteShardInfo {
-            shard_id: ShardId::new(2),
+            shard: ShardId::new(2),
             organization: OrganizationId::new(100),
             routing,
         };
@@ -379,7 +375,7 @@ mod tests {
         match result {
             ResolveResult::Local(_) => unreachable!("Expected Remote variant"),
             ResolveResult::Remote(info) => {
-                assert_eq!(info.shard_id, ShardId::new(2));
+                assert_eq!(info.shard, ShardId::new(2));
                 assert_eq!(info.organization, OrganizationId::new(100));
                 assert_eq!(info.routing.member_nodes.len(), 1);
             },
@@ -399,10 +395,10 @@ mod tests {
         let debug_output = format!(
             "{:?}",
             RemoteShardInfo {
-                shard_id: ShardId::new(1),
+                shard: ShardId::new(1),
                 organization: OrganizationId::new(1),
                 routing: RoutingInfo {
-                    shard_id: ShardId::new(1),
+                    shard: ShardId::new(1),
                     member_nodes: vec![],
                     leader_hint: None,
                 },
@@ -415,13 +411,13 @@ mod tests {
     fn test_resolve_result_debug() {
         // Verify Debug impl for RemoteShardInfo (ResolveResult::Remote)
         let routing = RoutingInfo {
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             member_nodes: vec!["node-1".to_string()],
             leader_hint: Some("node-1".to_string()),
         };
 
         let remote_info = RemoteShardInfo {
-            shard_id: ShardId::new(1),
+            shard: ShardId::new(1),
             organization: OrganizationId::new(42),
             routing,
         };
@@ -429,7 +425,7 @@ mod tests {
         let result = ResolveResult::Remote(remote_info);
         let debug_output = format!("{:?}", result);
         assert!(debug_output.contains("Remote"));
-        assert!(debug_output.contains("shard_id"));
+        assert!(debug_output.contains("shard"));
         assert!(debug_output.contains("organization"));
     }
 }

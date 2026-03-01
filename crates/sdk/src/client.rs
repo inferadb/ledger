@@ -194,7 +194,7 @@ pub struct OrganizationInfo {
     /// Human-readable organization name.
     pub name: String,
     /// Shard ID hosting this organization.
-    pub shard_id: u32,
+    pub shard: u32,
     /// Node IDs of shard members (node IDs are strings).
     pub member_nodes: Vec<String>,
     /// Configuration version number.
@@ -209,7 +209,7 @@ impl OrganizationInfo {
         Self {
             slug: OrganizationSlug::new(proto.slug.map_or(0, |n| n.slug)),
             name: proto.name,
-            shard_id: proto.shard_id.map_or(0, |s| s.id),
+            shard: proto.shard.map_or(0, |s| s.id),
             member_nodes: proto.member_nodes.into_iter().map(|n| n.id).collect(),
             config_version: proto.config_version,
             status: OrganizationStatus::from_proto(proto.status),
@@ -3238,8 +3238,8 @@ impl LedgerClient {
 
                     let request = proto::CreateOrganizationRequest {
                         name: name.clone(),
-                        shard_id: None, // Auto-assigned
-                        quota: None,
+                        shard: None, // Auto-assigned
+                        tier: None,
                     };
 
                     let response = client
@@ -3250,7 +3250,7 @@ impl LedgerClient {
                     Ok(OrganizationInfo {
                         slug: OrganizationSlug::new(response.slug.map_or(0, |n| n.slug)),
                         name: name.clone(),
-                        shard_id: response.shard_id.map_or(0, |s| s.id),
+                        shard: response.shard.map_or(0, |s| s.id),
                         member_nodes: Vec::new(),
                         config_version: 0,
                         status: OrganizationStatus::Active,
@@ -5480,7 +5480,7 @@ mod tests {
         let proto = proto::GetOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: 42 }),
             name: "test-organization".to_string(),
-            shard_id: Some(proto::ShardId { id: 1 }),
+            shard: Some(proto::ShardId { id: 1 }),
             member_nodes: vec![
                 proto::NodeId { id: "node-100".to_string() },
                 proto::NodeId { id: "node-101".to_string() },
@@ -5488,13 +5488,14 @@ mod tests {
             status: proto::OrganizationStatus::Active as i32,
             config_version: 5,
             created_at: None,
+            tier: 0,
         };
 
         let info = OrganizationInfo::from_proto(proto);
 
         assert_eq!(info.slug, OrganizationSlug::new(42));
         assert_eq!(info.name, "test-organization");
-        assert_eq!(info.shard_id, 1);
+        assert_eq!(info.shard, 1);
         assert_eq!(info.member_nodes, vec!["node-100", "node-101"]);
         assert_eq!(info.config_version, 5);
         assert_eq!(info.status, OrganizationStatus::Active);
@@ -5505,18 +5506,19 @@ mod tests {
         let proto = proto::GetOrganizationResponse {
             slug: None,
             name: "minimal".to_string(),
-            shard_id: None,
+            shard: None,
             member_nodes: vec![],
             status: proto::OrganizationStatus::Unspecified as i32,
             config_version: 0,
             created_at: None,
+            tier: 0,
         };
 
         let info = OrganizationInfo::from_proto(proto);
 
         assert_eq!(info.slug, OrganizationSlug::new(0));
         assert_eq!(info.name, "minimal");
-        assert_eq!(info.shard_id, 0);
+        assert_eq!(info.shard, 0);
         assert!(info.member_nodes.is_empty());
         assert_eq!(info.config_version, 0);
         assert_eq!(info.status, OrganizationStatus::Unspecified);
@@ -5578,7 +5580,7 @@ mod tests {
         let info1 = OrganizationInfo {
             slug: ORG,
             name: "test".to_string(),
-            shard_id: 1,
+            shard: 1,
             member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
             config_version: 1,
             status: OrganizationStatus::Active,
