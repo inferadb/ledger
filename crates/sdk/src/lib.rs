@@ -82,12 +82,13 @@ mod tracing;
 pub use builders::{BatchReadBuilder, RelationshipQueryBuilder, WriteBuilder};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use client::{
-    BlockAnnouncement, BlockHeader, ChainProof, Direction, Entity, EventEmissionPath, EventFilter,
-    EventOutcome, EventPage, EventScope, EventSource, HealthCheckResult, HealthStatus,
-    IngestRejection, IngestResult, LedgerClient, ListEntitiesOpts, ListRelationshipsOpts,
-    ListResourcesOpts, MerkleProof, MerkleSibling, Operation, OrganizationInfo, OrganizationStatus,
-    PagedResult, ReadConsistency, Relationship, SdkEventEntry, SdkIngestEventEntry, SetCondition,
-    VaultInfo, VaultStatus, VerifiedValue, VerifyOpts, WriteSuccess,
+    BlindingKeyRehashStatus, BlindingKeyRotationStatus, BlockAnnouncement, BlockHeader, ChainProof,
+    Direction, Entity, EventEmissionPath, EventFilter, EventOutcome, EventPage, EventScope,
+    EventSource, HealthCheckResult, HealthStatus, IngestRejection, IngestResult, LedgerClient,
+    ListEntitiesOpts, ListRelationshipsOpts, ListResourcesOpts, MerkleProof, MerkleSibling,
+    MigrationInfo, Operation, OrganizationInfo, OrganizationStatus, PagedResult, ReadConsistency,
+    Relationship, SdkEventEntry, SdkIngestEventEntry, SetCondition, UserMigrationInfo, VaultInfo,
+    VaultStatus, VerifiedValue, VerifyOpts, WriteSuccess,
 };
 pub use config::{
     CertificateData, ClientConfig, ClientConfigBuilder, DiscoveryConfig, RetryPolicy, TlsConfig,
@@ -97,7 +98,9 @@ pub use connection::ConnectionPool;
 pub use discovery::{DiscoveryResult, DiscoveryService, PeerInfo};
 pub use error::{Result, SdkError};
 // Re-export commonly used types from inferadb-ledger-types
-pub use inferadb_ledger_types::{OrganizationId, OrganizationSlug, UserSlug, VaultId, VaultSlug};
+pub use inferadb_ledger_types::{
+    OrganizationId, OrganizationSlug, Region, UserSlug, VaultId, VaultSlug,
+};
 pub use metrics::{ConnectionEvent, MetricsSdkMetrics, NoopSdkMetrics, SdkMetrics};
 pub use retry::{with_retry, with_retry_cancellable};
 pub use server::{

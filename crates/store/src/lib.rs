@@ -80,6 +80,8 @@ pub mod backend;
 pub(crate) mod bloom;
 /// B+ tree index structure with get, insert, delete, range, and compaction operations.
 pub mod btree;
+/// Envelope encryption for data at rest (AES-256-GCM + AES-KWP).
+pub mod crypto;
 /// Database API: open, read, write, commit, and iteration.
 pub mod db;
 /// Bitmap for tracking pages modified since the last backup checkpoint.

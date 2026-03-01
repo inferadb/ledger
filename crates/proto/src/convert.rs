@@ -510,13 +510,14 @@ impl From<&proto::EmailVerifyTokenId> for EmailVerifyTokenId {
 }
 
 // =============================================================================
-// VaultEntry to Block conversion (special case - requires ShardBlock context)
+// VaultEntry to Block conversion (special case - requires RegionBlock context)
 // =============================================================================
 
 /// Converts a VaultEntry from storage to a proto Block.
 ///
 /// This is a free function rather than a `From` impl because it requires additional
-/// context (the ShardBlock and vault) to populate the block header.
+/// context (the [`RegionBlock`](inferadb_ledger_types::RegionBlock) and vault) to
+/// populate the block header.
 ///
 /// The `vault` parameter must be provided by the caller (service layer) since
 /// the conversion layer does not have access to the `AppliedState` slug index.
@@ -524,7 +525,7 @@ impl From<&proto::EmailVerifyTokenId> for EmailVerifyTokenId {
 /// sequential `VaultId`.
 pub fn vault_entry_to_proto_block(
     entry: &inferadb_ledger_types::VaultEntry,
-    shard_block: &inferadb_ledger_types::ShardBlock,
+    region_block: &inferadb_ledger_types::RegionBlock,
     vault: VaultSlug,
 ) -> proto::Block {
     use prost_types::Timestamp;
@@ -555,12 +556,12 @@ pub fn vault_entry_to_proto_block(
         tx_merkle_root: Some(proto::Hash { value: entry.tx_merkle_root.to_vec() }),
         state_root: Some(proto::Hash { value: entry.state_root.to_vec() }),
         timestamp: Some(Timestamp {
-            seconds: shard_block.timestamp.timestamp(),
-            nanos: shard_block.timestamp.timestamp_subsec_nanos() as i32,
+            seconds: region_block.timestamp.timestamp(),
+            nanos: region_block.timestamp.timestamp_subsec_nanos() as i32,
         }),
-        leader_id: Some(proto::NodeId { id: shard_block.leader_id.clone() }),
-        term: shard_block.term,
-        committed_index: shard_block.committed_index,
+        leader_id: Some(proto::NodeId { id: region_block.leader_id.clone() }),
+        term: region_block.term,
+        committed_index: region_block.committed_index,
     };
 
     proto::Block { header: Some(header), transactions }
@@ -801,8 +802,93 @@ impl TryFrom<proto::EventEntry> for EventEntry {
 }
 
 // =============================================================================
-// Tests
+// Region conversions (types::Region <-> proto::Region)
 // =============================================================================
+
+/// Converts a domain [`Region`](inferadb_ledger_types::Region) to its protobuf
+/// representation. Infallible — every domain region has a proto counterpart.
+impl From<inferadb_ledger_types::Region> for proto::Region {
+    fn from(region: inferadb_ledger_types::Region) -> Self {
+        use inferadb_ledger_types::Region as D;
+        match region {
+            D::GLOBAL => proto::Region::Global,
+            D::US_EAST_VA => proto::Region::UsEastVa,
+            D::US_WEST_OR => proto::Region::UsWestOr,
+            D::CA_CENTRAL_QC => proto::Region::CaCentralQc,
+            D::BR_SOUTHEAST_SP => proto::Region::BrSoutheastSp,
+            D::IE_EAST_DUBLIN => proto::Region::IeEastDublin,
+            D::FR_NORTH_PARIS => proto::Region::FrNorthParis,
+            D::DE_CENTRAL_FRANKFURT => proto::Region::DeCentralFrankfurt,
+            D::SE_EAST_STOCKHOLM => proto::Region::SeEastStockholm,
+            D::IT_NORTH_MILAN => proto::Region::ItNorthMilan,
+            D::UK_SOUTH_LONDON => proto::Region::UkSouthLondon,
+            D::SA_CENTRAL_RIYADH => proto::Region::SaCentralRiyadh,
+            D::BH_CENTRAL_MANAMA => proto::Region::BhCentralManama,
+            D::AE_CENTRAL_DUBAI => proto::Region::AeCentralDubai,
+            D::IL_CENTRAL_TEL_AVIV => proto::Region::IlCentralTelAviv,
+            D::ZA_SOUTH_CAPE_TOWN => proto::Region::ZaSouthCapeTown,
+            D::NG_WEST_LAGOS => proto::Region::NgWestLagos,
+            D::SG_CENTRAL_SINGAPORE => proto::Region::SgCentralSingapore,
+            D::AU_EAST_SYDNEY => proto::Region::AuEastSydney,
+            D::ID_WEST_JAKARTA => proto::Region::IdWestJakarta,
+            D::JP_EAST_TOKYO => proto::Region::JpEastTokyo,
+            D::KR_CENTRAL_SEOUL => proto::Region::KrCentralSeoul,
+            D::IN_WEST_MUMBAI => proto::Region::InWestMumbai,
+            D::VN_SOUTH_HCMC => proto::Region::VnSouthHcmc,
+            D::CN_NORTH_BEIJING => proto::Region::CnNorthBeijing,
+        }
+    }
+}
+
+/// Converts a protobuf [`Region`](proto::Region) to the domain type.
+///
+/// Returns [`Status::invalid_argument`] for `Unspecified` — every region must
+/// be explicitly declared.
+impl TryFrom<proto::Region> for inferadb_ledger_types::Region {
+    type Error = Status;
+
+    fn try_from(proto: proto::Region) -> Result<Self, Self::Error> {
+        use inferadb_ledger_types::Region as D;
+        match proto {
+            proto::Region::Unspecified => Err(Status::invalid_argument("region must be specified")),
+            proto::Region::Global => Ok(D::GLOBAL),
+            proto::Region::UsEastVa => Ok(D::US_EAST_VA),
+            proto::Region::UsWestOr => Ok(D::US_WEST_OR),
+            proto::Region::CaCentralQc => Ok(D::CA_CENTRAL_QC),
+            proto::Region::BrSoutheastSp => Ok(D::BR_SOUTHEAST_SP),
+            proto::Region::IeEastDublin => Ok(D::IE_EAST_DUBLIN),
+            proto::Region::FrNorthParis => Ok(D::FR_NORTH_PARIS),
+            proto::Region::DeCentralFrankfurt => Ok(D::DE_CENTRAL_FRANKFURT),
+            proto::Region::SeEastStockholm => Ok(D::SE_EAST_STOCKHOLM),
+            proto::Region::ItNorthMilan => Ok(D::IT_NORTH_MILAN),
+            proto::Region::UkSouthLondon => Ok(D::UK_SOUTH_LONDON),
+            proto::Region::SaCentralRiyadh => Ok(D::SA_CENTRAL_RIYADH),
+            proto::Region::BhCentralManama => Ok(D::BH_CENTRAL_MANAMA),
+            proto::Region::AeCentralDubai => Ok(D::AE_CENTRAL_DUBAI),
+            proto::Region::IlCentralTelAviv => Ok(D::IL_CENTRAL_TEL_AVIV),
+            proto::Region::ZaSouthCapeTown => Ok(D::ZA_SOUTH_CAPE_TOWN),
+            proto::Region::NgWestLagos => Ok(D::NG_WEST_LAGOS),
+            proto::Region::SgCentralSingapore => Ok(D::SG_CENTRAL_SINGAPORE),
+            proto::Region::AuEastSydney => Ok(D::AU_EAST_SYDNEY),
+            proto::Region::IdWestJakarta => Ok(D::ID_WEST_JAKARTA),
+            proto::Region::JpEastTokyo => Ok(D::JP_EAST_TOKYO),
+            proto::Region::KrCentralSeoul => Ok(D::KR_CENTRAL_SEOUL),
+            proto::Region::InWestMumbai => Ok(D::IN_WEST_MUMBAI),
+            proto::Region::VnSouthHcmc => Ok(D::VN_SOUTH_HCMC),
+            proto::Region::CnNorthBeijing => Ok(D::CN_NORTH_BEIJING),
+        }
+    }
+}
+
+/// Converts a raw `i32` proto enum value to a domain [`Region`](inferadb_ledger_types::Region).
+///
+/// Combines prost's `proto::Region::try_from(i32)` validation with the
+/// `Unspecified` rejection from `TryFrom<proto::Region>`.
+pub fn region_from_i32(value: i32) -> Result<inferadb_ledger_types::Region, Status> {
+    let proto_region = proto::Region::try_from(value)
+        .map_err(|_| Status::invalid_argument(format!("unknown region value: {value}")))?;
+    inferadb_ledger_types::Region::try_from(proto_region)
+}
 
 #[cfg(test)]
 mod tests {
@@ -1147,10 +1233,10 @@ mod tests {
             state_root: Hash::from([0xEFu8; 32]),
         };
 
-        let shard_block = inferadb_ledger_types::ShardBlock {
-            shard: inferadb_ledger_types::ShardId::new(1),
-            shard_height: 100,
-            previous_shard_hash: Hash::default(),
+        let region_block = inferadb_ledger_types::RegionBlock {
+            region: inferadb_ledger_types::Region::US_EAST_VA,
+            region_height: 100,
+            previous_region_hash: Hash::default(),
             vault_entries: vec![],
             timestamp: Utc::now(),
             leader_id: "node-1".to_string(),
@@ -1158,7 +1244,7 @@ mod tests {
             committed_index: 99,
         };
 
-        let block = vault_entry_to_proto_block(&entry, &shard_block, vault);
+        let block = vault_entry_to_proto_block(&entry, &region_block, vault);
 
         let header = block.header.expect("Block should have header");
         assert_eq!(header.height, 10);
@@ -1199,10 +1285,10 @@ mod tests {
             state_root: Hash::default(),
         };
 
-        let shard_block = inferadb_ledger_types::ShardBlock {
-            shard: inferadb_ledger_types::ShardId::new(1),
-            shard_height: 50,
-            previous_shard_hash: Hash::default(),
+        let region_block = inferadb_ledger_types::RegionBlock {
+            region: inferadb_ledger_types::Region::US_EAST_VA,
+            region_height: 50,
+            previous_region_hash: Hash::default(),
             vault_entries: vec![],
             timestamp: Utc::now(),
             leader_id: "leader-node".to_string(),
@@ -1210,7 +1296,7 @@ mod tests {
             committed_index: 49,
         };
 
-        let block = vault_entry_to_proto_block(&entry, &shard_block, vault);
+        let block = vault_entry_to_proto_block(&entry, &region_block, vault);
 
         let header = block.header.expect("Block should have header");
         assert_eq!(header.vault.unwrap().slug, 77_777_777);
@@ -1238,10 +1324,10 @@ mod tests {
             state_root: Hash::default(),
         };
 
-        let shard_block = inferadb_ledger_types::ShardBlock {
-            shard: inferadb_ledger_types::ShardId::new(1),
-            shard_height: 1,
-            previous_shard_hash: Hash::default(),
+        let region_block = inferadb_ledger_types::RegionBlock {
+            region: inferadb_ledger_types::Region::US_EAST_VA,
+            region_height: 1,
+            previous_region_hash: Hash::default(),
             vault_entries: vec![],
             timestamp: Utc::now(),
             leader_id: "node-1".to_string(),
@@ -1249,7 +1335,7 @@ mod tests {
             committed_index: 0,
         };
 
-        let block = vault_entry_to_proto_block(&entry, &shard_block, vault);
+        let block = vault_entry_to_proto_block(&entry, &region_block, vault);
         let header = block.header.unwrap();
 
         // Vault slug in header should be 12_345_678 (external), NOT 99 (internal)
@@ -1838,6 +1924,151 @@ mod tests {
 
             let recovered = EventEntry::try_from(&proto_entry).unwrap();
             assert_eq!(recovered.action, *action, "failed for {:?}", action);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Region conversion tests
+    // -------------------------------------------------------------------------
+
+    /// Mapping from every domain Region variant to its expected proto counterpart.
+    const REGION_PAIRS: [(inferadb_ledger_types::Region, proto::Region); 25] = {
+        use inferadb_ledger_types::Region as D;
+        [
+            (D::GLOBAL, proto::Region::Global),
+            (D::US_EAST_VA, proto::Region::UsEastVa),
+            (D::US_WEST_OR, proto::Region::UsWestOr),
+            (D::CA_CENTRAL_QC, proto::Region::CaCentralQc),
+            (D::BR_SOUTHEAST_SP, proto::Region::BrSoutheastSp),
+            (D::IE_EAST_DUBLIN, proto::Region::IeEastDublin),
+            (D::FR_NORTH_PARIS, proto::Region::FrNorthParis),
+            (D::DE_CENTRAL_FRANKFURT, proto::Region::DeCentralFrankfurt),
+            (D::SE_EAST_STOCKHOLM, proto::Region::SeEastStockholm),
+            (D::IT_NORTH_MILAN, proto::Region::ItNorthMilan),
+            (D::UK_SOUTH_LONDON, proto::Region::UkSouthLondon),
+            (D::SA_CENTRAL_RIYADH, proto::Region::SaCentralRiyadh),
+            (D::BH_CENTRAL_MANAMA, proto::Region::BhCentralManama),
+            (D::AE_CENTRAL_DUBAI, proto::Region::AeCentralDubai),
+            (D::IL_CENTRAL_TEL_AVIV, proto::Region::IlCentralTelAviv),
+            (D::ZA_SOUTH_CAPE_TOWN, proto::Region::ZaSouthCapeTown),
+            (D::NG_WEST_LAGOS, proto::Region::NgWestLagos),
+            (D::SG_CENTRAL_SINGAPORE, proto::Region::SgCentralSingapore),
+            (D::AU_EAST_SYDNEY, proto::Region::AuEastSydney),
+            (D::ID_WEST_JAKARTA, proto::Region::IdWestJakarta),
+            (D::JP_EAST_TOKYO, proto::Region::JpEastTokyo),
+            (D::KR_CENTRAL_SEOUL, proto::Region::KrCentralSeoul),
+            (D::IN_WEST_MUMBAI, proto::Region::InWestMumbai),
+            (D::VN_SOUTH_HCMC, proto::Region::VnSouthHcmc),
+            (D::CN_NORTH_BEIJING, proto::Region::CnNorthBeijing),
+        ]
+    };
+
+    #[test]
+    fn test_region_pairs_covers_all_variants() {
+        assert_eq!(
+            REGION_PAIRS.len(),
+            inferadb_ledger_types::ALL_REGIONS.len(),
+            "REGION_PAIRS is out of sync with ALL_REGIONS"
+        );
+    }
+
+    #[test]
+    fn test_region_roundtrip_all_variants() {
+        for (domain, expected_proto) in &REGION_PAIRS {
+            // domain → proto
+            let proto_region = proto::Region::from(*domain);
+            assert_eq!(proto_region, *expected_proto, "domain→proto failed for {domain}");
+
+            // proto → domain
+            let recovered = inferadb_ledger_types::Region::try_from(proto_region).unwrap();
+            assert_eq!(*domain, recovered, "proto→domain failed for {domain}");
+        }
+    }
+
+    #[test]
+    fn test_region_unspecified_returns_error() {
+        let result = inferadb_ledger_types::Region::try_from(proto::Region::Unspecified);
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("region must be specified"));
+    }
+
+    #[test]
+    fn test_region_from_i32_valid() {
+        // Global = 1
+        let region = super::region_from_i32(1).unwrap();
+        assert_eq!(region, inferadb_ledger_types::Region::GLOBAL);
+
+        // UsEastVa = 10
+        let region = super::region_from_i32(10).unwrap();
+        assert_eq!(region, inferadb_ledger_types::Region::US_EAST_VA);
+
+        // CnNorthBeijing = 70
+        let region = super::region_from_i32(70).unwrap();
+        assert_eq!(region, inferadb_ledger_types::Region::CN_NORTH_BEIJING);
+    }
+
+    #[test]
+    fn test_region_from_i32_unspecified_returns_error() {
+        let result = super::region_from_i32(0);
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("region must be specified"));
+    }
+
+    #[test]
+    fn test_region_from_i32_unknown_returns_error() {
+        let result = super::region_from_i32(999);
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("unknown region value: 999"));
+    }
+
+    #[test]
+    fn test_region_from_i32_negative_returns_error() {
+        let result = super::region_from_i32(-1);
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("unknown region value: -1"));
+    }
+
+    #[test]
+    fn test_region_from_i32_all_variants_roundtrip() {
+        // Test every known proto Region i32 value round-trips correctly
+        let proto_values: [(i32, inferadb_ledger_types::Region); 25] = {
+            use inferadb_ledger_types::Region as D;
+            [
+                (1, D::GLOBAL),
+                (10, D::US_EAST_VA),
+                (11, D::US_WEST_OR),
+                (12, D::CA_CENTRAL_QC),
+                (20, D::BR_SOUTHEAST_SP),
+                (30, D::IE_EAST_DUBLIN),
+                (31, D::FR_NORTH_PARIS),
+                (32, D::DE_CENTRAL_FRANKFURT),
+                (33, D::SE_EAST_STOCKHOLM),
+                (34, D::IT_NORTH_MILAN),
+                (40, D::UK_SOUTH_LONDON),
+                (50, D::SA_CENTRAL_RIYADH),
+                (51, D::BH_CENTRAL_MANAMA),
+                (52, D::AE_CENTRAL_DUBAI),
+                (53, D::IL_CENTRAL_TEL_AVIV),
+                (54, D::ZA_SOUTH_CAPE_TOWN),
+                (55, D::NG_WEST_LAGOS),
+                (60, D::SG_CENTRAL_SINGAPORE),
+                (61, D::AU_EAST_SYDNEY),
+                (62, D::ID_WEST_JAKARTA),
+                (63, D::JP_EAST_TOKYO),
+                (64, D::KR_CENTRAL_SEOUL),
+                (65, D::IN_WEST_MUMBAI),
+                (66, D::VN_SOUTH_HCMC),
+                (70, D::CN_NORTH_BEIJING),
+            ]
+        };
+
+        for (i32_value, expected_domain) in &proto_values {
+            let domain = super::region_from_i32(*i32_value).unwrap();
+            assert_eq!(domain, *expected_domain, "failed for i32 value {i32_value}");
         }
     }
 

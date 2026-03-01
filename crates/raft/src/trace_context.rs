@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn test_child_inject_extract_roundtrip() {
         // Simulates ForwardClient: create child span, inject into metadata,
-        // extract on receiving side — verifying trace continuity across shard forwarding.
+        // extract on receiving side — verifying trace continuity across region forwarding.
         let parent = TraceContext {
             trace_id: "0af7651916cd43dd8448eb211c80319c".to_string(),
             span_id: "b7ad6b7169203331".to_string(),

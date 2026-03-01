@@ -16,7 +16,7 @@ use snafu::{Location, Snafu};
 
 use crate::{
     hash::Hash,
-    types::{OrganizationId, VaultId},
+    types::{OrganizationId, Region, UserId, VaultId},
 };
 
 /// Unified result type for ledger operations.
@@ -108,6 +108,14 @@ pub enum ErrorCode {
     AppInternal = 3204,
     /// Organization resource quota exceeded (storage, vault count, or rate).
     AppQuotaExceeded = 3205,
+    /// Insufficient in-region nodes for protected region quorum.
+    AppInsufficientRegionNodes = 3206,
+    /// Organization cannot be assigned to the GLOBAL control plane region.
+    AppInvalidRegionAssignment = 3207,
+    /// Organization is currently migrating between regions.
+    AppOrganizationMigrating = 3106,
+    /// User is currently migrating between regions.
+    AppUserMigrating = 3107,
 }
 
 impl ErrorCode {
@@ -150,6 +158,10 @@ impl ErrorCode {
             3203 => Some(Self::AppInvalidArgument),
             3204 => Some(Self::AppInternal),
             3205 => Some(Self::AppQuotaExceeded),
+            3206 => Some(Self::AppInsufficientRegionNodes),
+            3207 => Some(Self::AppInvalidRegionAssignment),
+            3106 => Some(Self::AppOrganizationMigrating),
+            3107 => Some(Self::AppUserMigrating),
             _ => None,
         }
     }
@@ -172,6 +184,8 @@ impl ErrorCode {
                 | Self::AppVaultUnavailable
                 | Self::AppIo
                 | Self::AppQuotaExceeded
+                | Self::AppOrganizationMigrating
+                | Self::AppUserMigrating
         )
     }
 
@@ -266,6 +280,18 @@ impl ErrorCode {
             Self::AppQuotaExceeded => {
                 "Organization resource quota exceeded. Reduce usage or request a quota increase."
             },
+            Self::AppInsufficientRegionNodes => {
+                "Add more nodes tagged with the target region to meet quorum (minimum 3)."
+            },
+            Self::AppInvalidRegionAssignment => {
+                "Choose a data residency region. GLOBAL is reserved for the control plane."
+            },
+            Self::AppOrganizationMigrating => {
+                "Organization is migrating between regions. Retry after the migration completes."
+            },
+            Self::AppUserMigrating => {
+                "User is migrating between regions. Retry after the migration completes."
+            },
         }
     }
 }
@@ -288,6 +314,8 @@ impl fmt::Display for ErrorCode {
 /// | `VaultDiverged`      | No        | Automatic recovery runs; wait for `VaultHealth::Healthy`   |
 /// | `VaultUnavailable`   | Yes       | Vault is recovering; retry after short delay               |
 /// | `OrganizationNotFound` | No      | Verify organization exists via `AdminService::get_organization` |
+/// | `OrganizationMigrating` | Yes    | Retry after migration completes; use `retry_after_ms`      |
+/// | `UserMigrating`      | Yes       | Retry after migration completes; use `retry_after_ms`      |
 /// | `VaultNotFound`      | No        | Verify vault exists via `AdminService::get_vault`          |
 /// | `EntityNotFound`     | No        | Expected for first reads; create the entity first          |
 /// | `PreconditionFailed` | No        | Re-read current state and retry with updated condition     |
@@ -374,6 +402,30 @@ pub enum LedgerError {
     OrganizationNotFound {
         /// Organization identifier.
         organization: OrganizationId,
+    },
+
+    /// Organization is currently migrating between regions.
+    ///
+    /// **Recovery**: Retryable. The migration will complete automatically.
+    /// Retry after the estimated completion time in `retry_after_ms`.
+    #[snafu(display("Organization {organization} is migrating to region {target_region}"))]
+    OrganizationMigrating {
+        /// Organization identifier.
+        organization: OrganizationId,
+        /// Target region the organization is migrating to.
+        target_region: Region,
+    },
+
+    /// User is currently migrating between regions.
+    ///
+    /// **Recovery**: Retryable. The migration will complete automatically.
+    /// Retry after the estimated completion time in `retry_after_ms`.
+    #[snafu(display("User {user} is migrating to region {target_region}"))]
+    UserMigrating {
+        /// User identifier.
+        user: UserId,
+        /// Target region the user is migrating to.
+        target_region: Region,
     },
 
     /// Vault not found within the organization.
@@ -506,6 +558,8 @@ impl LedgerError {
             Self::VaultDiverged { .. } => ErrorCode::AppVaultDiverged,
             Self::VaultUnavailable { .. } => ErrorCode::AppVaultUnavailable,
             Self::OrganizationNotFound { .. } => ErrorCode::AppOrganizationNotFound,
+            Self::OrganizationMigrating { .. } => ErrorCode::AppOrganizationMigrating,
+            Self::UserMigrating { .. } => ErrorCode::AppUserMigrating,
             Self::VaultNotFound { .. } => ErrorCode::AppVaultNotFound,
             Self::EntityNotFound { .. } => ErrorCode::AppEntityNotFound,
             Self::PreconditionFailed { .. } => ErrorCode::AppPreconditionFailed,
@@ -792,6 +846,8 @@ mod tests {
             ErrorCode::AppVaultDiverged,
             ErrorCode::AppVaultUnavailable,
             ErrorCode::AppOrganizationNotFound,
+            ErrorCode::AppOrganizationMigrating,
+            ErrorCode::AppUserMigrating,
             ErrorCode::AppVaultNotFound,
             ErrorCode::AppEntityNotFound,
             ErrorCode::AppPreconditionFailed,
@@ -803,6 +859,8 @@ mod tests {
             ErrorCode::AppInvalidArgument,
             ErrorCode::AppInternal,
             ErrorCode::AppQuotaExceeded,
+            ErrorCode::AppInsufficientRegionNodes,
+            ErrorCode::AppInvalidRegionAssignment,
         ]
     }
 
@@ -897,6 +955,8 @@ mod tests {
             ErrorCode::AppInvalidArgument,
             ErrorCode::AppInternal,
             ErrorCode::AppQuotaExceeded,
+            ErrorCode::AppInsufficientRegionNodes,
+            ErrorCode::AppInvalidRegionAssignment,
         ];
         for code in app_codes {
             let n = code.as_u16();
@@ -919,6 +979,8 @@ mod tests {
             ErrorCode::AppVaultUnavailable,
             ErrorCode::AppIo,
             ErrorCode::AppQuotaExceeded,
+            ErrorCode::AppOrganizationMigrating,
+            ErrorCode::AppUserMigrating,
         ];
         for code in retryable {
             assert!(code.is_retryable(), "{code:?} should be retryable");
@@ -947,6 +1009,8 @@ mod tests {
             ErrorCode::AppConfig,
             ErrorCode::AppInvalidArgument,
             ErrorCode::AppInternal,
+            ErrorCode::AppInsufficientRegionNodes,
+            ErrorCode::AppInvalidRegionAssignment,
         ];
         for code in non_retryable {
             assert!(!code.is_retryable(), "{code:?} should not be retryable");
@@ -1032,6 +1096,11 @@ mod tests {
             LedgerError::VaultDiverged { vault: VaultId::new(0), height: 0 },
             LedgerError::VaultUnavailable { vault: VaultId::new(0), reason: String::new() },
             LedgerError::OrganizationNotFound { organization: OrganizationId::new(0) },
+            LedgerError::OrganizationMigrating {
+                organization: OrganizationId::new(0),
+                target_region: Region::US_EAST_VA,
+            },
+            LedgerError::UserMigrating { user: UserId::new(0), target_region: Region::US_EAST_VA },
             LedgerError::VaultNotFound {
                 organization: OrganizationId::new(0),
                 vault: VaultId::new(0),

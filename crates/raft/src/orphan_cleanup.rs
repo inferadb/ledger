@@ -398,7 +398,7 @@ mod tests {
     use inferadb_ledger_state::StateLayer;
     use inferadb_ledger_store::InMemoryBackend;
     use inferadb_ledger_types::{
-        Operation, OrganizationId, OrganizationSlug, ShardId, VaultId, VaultSlug,
+        Operation, OrganizationId, OrganizationSlug, Region, VaultId, VaultSlug,
     };
     use parking_lot::RwLock;
 
@@ -662,20 +662,20 @@ mod tests {
                     organization: OrganizationId::new(1),
                     slug: OrganizationSlug::new(100),
                     name: "Org1".to_string(),
-                    shard: ShardId::new(0),
+                    region: Region::GLOBAL,
                     status: Default::default(),
                     tier: Default::default(),
-                    pending_shard: None,
+                    pending_region: None,
                     storage_bytes: 0,
                 },
                 OrganizationMeta {
                     organization: OrganizationId::new(2),
                     slug: OrganizationSlug::new(200),
                     name: "Org2".to_string(),
-                    shard: ShardId::new(0),
+                    region: Region::GLOBAL,
                     status: Default::default(),
                     tier: Default::default(),
-                    pending_shard: None,
+                    pending_region: None,
                     storage_bytes: 0,
                 },
             ],

@@ -19,11 +19,12 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use inferadb_ledger_types::{
+    ALL_REGIONS, Region,
     events::{EventAction, EventEmission, EventEntry, EventOutcome, EventScope},
     types::{
         BlockHeader, ChainCommitment, Entity, Operation, OrganizationId, OrganizationSlug,
-        Relationship, SetCondition, ShardBlock, ShardId, Transaction, VaultBlock, VaultEntry,
-        VaultId, VaultSlug,
+        RegionBlock, Relationship, SetCondition, Transaction, VaultBlock, VaultEntry, VaultId,
+        VaultSlug,
     },
 };
 use proptest::prelude::*;
@@ -178,9 +179,9 @@ pub fn arb_vault_id() -> impl Strategy<Value = VaultId> {
     (1i64..10_000).prop_map(VaultId::new)
 }
 
-/// Generates an arbitrary [`ShardId`] in the range 1-999.
-pub fn arb_shard() -> impl Strategy<Value = ShardId> {
-    (1u32..1_000).prop_map(ShardId::new)
+/// Generates an arbitrary [`Region`] from the full set of defined regions.
+pub fn arb_region() -> impl Strategy<Value = Region> {
+    (0usize..ALL_REGIONS.len()).prop_map(|i| ALL_REGIONS[i])
 }
 
 /// Generates an arbitrary [`Transaction`] with 1-20 operations, random client ID, and actor.
@@ -283,10 +284,10 @@ pub fn arb_vault_entry() -> impl Strategy<Value = VaultEntry> {
         )
 }
 
-/// Generates an arbitrary [`ShardBlock`] with height 0-999,999 and 0-2 vault entries.
-pub fn arb_shard_block() -> impl Strategy<Value = ShardBlock> {
+/// Generates an arbitrary [`RegionBlock`] with height 0-999,999 and 0-2 vault entries.
+pub fn arb_region_block() -> impl Strategy<Value = RegionBlock> {
     (
-        arb_shard(),
+        arb_region(),
         0u64..1_000_000,
         arb_hash(),
         proptest::collection::vec(arb_vault_entry(), 0..3),
@@ -297,19 +298,19 @@ pub fn arb_shard_block() -> impl Strategy<Value = ShardBlock> {
     )
         .prop_map(
             |(
-                shard,
-                shard_height,
-                previous_shard_hash,
+                region,
+                region_height,
+                previous_region_hash,
                 vault_entries,
                 timestamp,
                 leader_id,
                 term,
                 committed_index,
             )| {
-                ShardBlock {
-                    shard,
-                    shard_height,
-                    previous_shard_hash,
+                RegionBlock {
+                    region,
+                    region_height,
+                    previous_region_hash,
                     vault_entries,
                     timestamp,
                     leader_id,

@@ -11,6 +11,8 @@
 // procedural code.
 #![allow(clippy::disallowed_methods)]
 
+mod encryption;
+mod key_management;
 mod node;
 mod observability;
 mod raft;
@@ -18,6 +20,8 @@ mod resilience;
 mod runtime;
 mod storage;
 
+pub use encryption::*;
+pub use key_management::*;
 pub use node::*;
 pub use observability::*;
 pub use raft::*;

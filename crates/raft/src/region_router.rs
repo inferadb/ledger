@@ -1,24 +1,24 @@
-//! Shard router for multi-shard request routing.
+//! Region router for multi-region request routing.
 //!
-//! Routes requests to the correct shard based on organization. Maintains a local
-//! cache of organization to shard mappings with TTL-based invalidation.
+//! Routes requests to the correct region based on organization. Maintains a local
+//! cache of organization to region mappings with TTL-based invalidation.
 //!
 //! ## Architecture
 //!
-//! InferaDB uses a multi-Raft architecture where each shard is an independent
+//! InferaDB uses a multi-Raft architecture where each region is an independent
 //! Raft group. The `_system` organization stores the routing table mapping
-//! organizations to shards. This router provides:
+//! organizations to regions. This router provides:
 //!
-//! - Organization → shard lookups via `_system`
+//! - Organization → region lookups via `_system`
 //! - Cached routing with TTL-based expiration
-//! - Connection pooling to shard leaders
+//! - Connection pooling to region leaders
 //! - Leader hint tracking for fast routing
 //!
 //! ## Routing Flow
 //!
-//! 1. Check local cache for organization → shard mapping
+//! 1. Check local cache for organization → region mapping
 //! 2. If miss or stale, query `_system` for current mapping
-//! 3. Connect to shard leader (using `leader_hint` or discovery)
+//! 3. Connect to region leader (using `leader_hint` or discovery)
 //! 4. Cache the connection for subsequent requests
 //!
 //! ## Cache Invalidation
@@ -36,7 +36,7 @@ use std::{
 
 use inferadb_ledger_state::system::{OrganizationStatus, SystemOrganizationService};
 use inferadb_ledger_store::{FileBackend, StorageBackend};
-use inferadb_ledger_types::{OrganizationId, ShardId};
+use inferadb_ledger_types::{OrganizationId, Region};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 use tonic::transport::Channel;
@@ -46,7 +46,7 @@ use tracing::{debug, info, warn};
 // Error Types
 // ============================================================================
 
-/// Errors that can occur during shard routing.
+/// Errors that can occur during region routing.
 #[derive(Debug, Snafu)]
 pub enum RoutingError {
     /// Organization not found in routing table.
@@ -57,13 +57,13 @@ pub enum RoutingError {
     #[snafu(display("Organization {organization} is {status:?}"))]
     OrganizationUnavailable { organization: OrganizationId, status: OrganizationStatus },
 
-    /// Shard has no available nodes.
-    #[snafu(display("Shard {shard} has no available nodes"))]
-    NoAvailableNodes { shard: ShardId },
+    /// Region has no available nodes.
+    #[snafu(display("Region {region} has no available nodes"))]
+    NoAvailableNodes { region: Region },
 
-    /// Failed to connect to shard leader.
-    #[snafu(display("Failed to connect to shard {shard}: {message}"))]
-    ConnectionFailed { shard: ShardId, message: String },
+    /// Failed to connect to region leader.
+    #[snafu(display("Failed to connect to region {region}: {message}"))]
+    ConnectionFailed { region: Region, message: String },
 
     /// System service error during lookup.
     #[snafu(display("System lookup failed: {source}"))]
@@ -83,9 +83,9 @@ pub type Result<T> = std::result::Result<T, RoutingError>;
 /// use by other components (like MultiRaftManager).
 #[derive(Debug, Clone)]
 pub struct RoutingInfo {
-    /// Shard hosting this organization.
-    pub shard: ShardId,
-    /// Member nodes in the shard.
+    /// Region hosting this organization.
+    pub region: Region,
+    /// Member nodes in the region.
     pub member_nodes: Vec<String>,
     /// Hint for current leader (may be stale).
     pub leader_hint: Option<String>,
@@ -98,9 +98,9 @@ pub struct RoutingInfo {
 /// Cached routing information for an organization (internal).
 #[derive(Debug, Clone)]
 struct CacheEntry {
-    /// Shard hosting this organization.
-    shard: ShardId,
-    /// Member nodes in the shard.
+    /// Region hosting this organization.
+    region: Region,
+    /// Member nodes in the region.
     member_nodes: Vec<String>,
     /// Hint for current leader (may be stale).
     leader_hint: Option<String>,
@@ -120,7 +120,7 @@ impl CacheEntry {
     /// Converts to public RoutingInfo.
     fn to_routing_info(&self) -> RoutingInfo {
         RoutingInfo {
-            shard: self.shard,
+            region: self.region,
             member_nodes: self.member_nodes.clone(),
             leader_hint: self.leader_hint.clone(),
         }
@@ -128,15 +128,15 @@ impl CacheEntry {
 }
 
 // ============================================================================
-// Shard Connection
+// Region Connection
 // ============================================================================
 
-/// Connection to a shard for request forwarding.
+/// Connection to a region for request forwarding.
 #[derive(Debug, Clone)]
-pub struct ShardConnection {
-    /// Shard identifier.
-    pub shard: ShardId,
-    /// gRPC channel to the shard leader.
+pub struct RegionConnection {
+    /// Region identifier.
+    pub region: Region,
+    /// gRPC channel to the region leader.
     pub channel: Channel,
     /// Address of the connected node.
     pub address: SocketAddr,
@@ -145,22 +145,22 @@ pub struct ShardConnection {
 }
 
 // ============================================================================
-// Shard Router
+// Region Router
 // ============================================================================
 
-/// Configuration for the shard router.
+/// Configuration for the region router.
 #[derive(Debug, Clone, bon::Builder)]
 pub struct RouterConfig {
     /// Time-to-live for cache entries.
     #[builder(default = Duration::from_secs(60))]
     pub cache_ttl: Duration,
-    /// Connection timeout for shard connections.
+    /// Connection timeout for region connections.
     #[builder(default = Duration::from_secs(5))]
     pub connect_timeout: Duration,
     /// Maximum retry attempts for connection.
     #[builder(default = 3)]
     pub max_retries: u32,
-    /// Base port for shard gRPC services.
+    /// Base port for region gRPC services.
     #[builder(default = 50051)]
     pub grpc_port: u16,
 }
@@ -176,40 +176,49 @@ impl Default for RouterConfig {
     }
 }
 
-/// Shard router for routing requests to the correct shard.
+/// Region router for routing requests to the correct region.
 ///
-/// Maintains a cache of organization → shard mappings and manages
-/// connections to shard leaders.
-pub struct ShardRouter<B: StorageBackend + 'static = FileBackend> {
+/// Maintains a cache of organization → region mappings and manages
+/// connections to region leaders. Uses `local_region` to determine
+/// whether protected-region requests can be served locally or must
+/// be forwarded to an in-region node.
+pub struct RegionRouter<B: StorageBackend + 'static = FileBackend> {
     /// System organization service for organization lookups.
     system: Arc<SystemOrganizationService<B>>,
-    /// Cached organization → shard mappings.
+    /// Cached organization → region mappings.
     cache: RwLock<HashMap<OrganizationId, CacheEntry>>,
-    /// Active shard connections.
-    connections: RwLock<HashMap<ShardId, ShardConnection>>,
+    /// Active region connections.
+    connections: RwLock<HashMap<Region, RegionConnection>>,
     /// Router configuration.
     config: RouterConfig,
+    /// This node's region tag (set at startup from node config).
+    local_region: Region,
 }
 
-impl<B: StorageBackend + 'static> ShardRouter<B> {
-    /// Creates a new shard router.
-    pub fn new(system: Arc<SystemOrganizationService<B>>) -> Self {
-        Self::with_config(system, RouterConfig::default())
+impl<B: StorageBackend + 'static> RegionRouter<B> {
+    /// Creates a new region router.
+    pub fn new(system: Arc<SystemOrganizationService<B>>, local_region: Region) -> Self {
+        Self::with_config(system, RouterConfig::default(), local_region)
     }
 
-    /// Creates a new shard router with custom configuration.
-    pub fn with_config(system: Arc<SystemOrganizationService<B>>, config: RouterConfig) -> Self {
+    /// Creates a new region router with custom configuration.
+    pub fn with_config(
+        system: Arc<SystemOrganizationService<B>>,
+        config: RouterConfig,
+        local_region: Region,
+    ) -> Self {
         Self {
             system,
             cache: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
             config,
+            local_region,
         }
     }
 
-    /// Routes a request to the appropriate shard.
+    /// Routes a request to the appropriate region.
     ///
-    /// Returns the shard connection for the organization. The connection
+    /// Returns the region connection for the organization. The connection
     /// may be cached or freshly established.
     ///
     /// * `organization` - Internal organization identifier (`OrganizationId`).
@@ -217,19 +226,38 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     /// # Errors
     ///
     /// Returns a routing error if the organization is not found in the routing
-    /// table or the gRPC connection to the target shard cannot be established.
-    pub async fn route(&self, organization: OrganizationId) -> Result<ShardConnection> {
+    /// table or the gRPC connection to the target region cannot be established.
+    pub async fn route(&self, organization: OrganizationId) -> Result<RegionConnection> {
         // 1. Check cache
         let routing = self.get_routing_internal(organization)?;
 
         // 2. Get or create connection
-        self.get_connection(routing.shard, &routing.member_nodes, routing.leader_hint.as_deref())
+        self.get_connection(routing.region, &routing.member_nodes, routing.leader_hint.as_deref())
             .await
+    }
+
+    /// Returns this node's region.
+    pub fn local_region(&self) -> Region {
+        self.local_region
+    }
+
+    /// Whether the given region can be served locally by this node.
+    ///
+    /// Non-protected regions are replicated to all nodes, so they are
+    /// always local. Protected regions are local only when this node's
+    /// region matches.
+    pub fn is_region_local(&self, region: Region) -> bool {
+        if !region.requires_residency() {
+            // Non-protected: every node holds a replica
+            return true;
+        }
+        // Protected: only in-region nodes hold replicas
+        self.local_region == region
     }
 
     /// Returns routing information for an organization (public API).
     ///
-    /// Returns the shard assignment and member nodes for the organization.
+    /// Returns the region assignment and member nodes for the organization.
     /// Uses cached data if fresh, otherwise queries `_system`.
     ///
     /// * `organization` - Internal organization identifier (`OrganizationId`).
@@ -237,7 +265,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     /// # Errors
     ///
     /// Returns a routing error if the organization is not found in the `_system`
-    /// organization store or is not assigned to any shard.
+    /// organization store or is not assigned to any region.
     pub fn get_routing(&self, organization: OrganizationId) -> Result<RoutingInfo> {
         self.get_routing_internal(organization).map(|entry| entry.to_routing_info())
     }
@@ -254,7 +282,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
             {
                 debug!(
                     organization = organization.value(),
-                    shard = entry.shard.value(),
+                    region = entry.region.as_str(),
                     "Cache hit"
                 );
                 return Ok(entry.clone());
@@ -282,7 +310,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         }
 
         let entry = CacheEntry {
-            shard: registry.shard,
+            region: registry.region,
             member_nodes: registry.member_nodes.clone(),
             leader_hint: registry.member_nodes.first().cloned(), // First node as hint
             config_version: registry.config_version,
@@ -297,7 +325,7 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
 
         info!(
             organization = organization.value(),
-            shard = registry.shard.value(),
+            region = %registry.region,
             config_version = registry.config_version,
             "Refreshed routing cache"
         );
@@ -305,20 +333,20 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         Ok(entry)
     }
 
-    /// Returns or create a connection to a shard.
+    /// Returns or create a connection to a region.
     ///
     /// Returns an existing cached connection if available, otherwise creates a new one.
     /// The connection will be cached for future use.
     pub async fn get_connection(
         &self,
-        shard: ShardId,
+        region: Region,
         member_nodes: &[String],
         leader_hint: Option<&str>,
-    ) -> Result<ShardConnection> {
+    ) -> Result<RegionConnection> {
         // Check for existing connection
         {
             let connections = self.connections.read();
-            if let Some(conn) = connections.get(&shard) {
+            if let Some(conn) = connections.get(&region) {
                 // Verify connection is still valid
                 // In a real implementation, we'd ping the connection
                 return Ok(conn.clone());
@@ -326,18 +354,18 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         }
 
         // No existing connection - create new one
-        self.create_connection(shard, member_nodes, leader_hint).await
+        self.create_connection(region, member_nodes, leader_hint).await
     }
 
-    /// Creates a new connection to a shard.
+    /// Creates a new connection to a region.
     async fn create_connection(
         &self,
-        shard: ShardId,
+        region: Region,
         member_nodes: &[String],
         leader_hint: Option<&str>,
-    ) -> Result<ShardConnection> {
+    ) -> Result<RegionConnection> {
         if member_nodes.is_empty() {
-            return Err(RoutingError::NoAvailableNodes { shard });
+            return Err(RoutingError::NoAvailableNodes { region });
         }
 
         // Try leader hint first, then other nodes
@@ -354,27 +382,27 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         let mut last_error = None;
 
         for node_id in nodes_to_try {
-            match self.connect_to_node(shard, node_id).await {
+            match self.connect_to_node(region, node_id).await {
                 Ok(conn) => {
                     // Cache the connection
                     {
                         let mut connections = self.connections.write();
-                        connections.insert(shard, conn.clone());
+                        connections.insert(region, conn.clone());
                     }
                     return Ok(conn);
                 },
                 Err(e) => {
-                    warn!(shard = shard.value(), node_id, error = %e, "Failed to connect to node");
+                    warn!(region = region.as_str(), node_id, error = %e, "Failed to connect to node");
                     last_error = Some(e);
                 },
             }
         }
 
-        Err(last_error.unwrap_or(RoutingError::NoAvailableNodes { shard }))
+        Err(last_error.unwrap_or(RoutingError::NoAvailableNodes { region }))
     }
 
     /// Connects to a specific node.
-    async fn connect_to_node(&self, shard: ShardId, node_id: &str) -> Result<ShardConnection> {
+    async fn connect_to_node(&self, region: Region, node_id: &str) -> Result<RegionConnection> {
         // Parse node address (format: "host:port" or just "host")
         let address = self.resolve_node_address(node_id)?;
 
@@ -382,21 +410,21 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
 
         let channel = Channel::from_shared(endpoint.clone())
             .map_err(|e| RoutingError::ConnectionFailed {
-                shard,
+                region,
                 message: format!("Invalid endpoint {}: {}", endpoint, e),
             })?
             .connect_timeout(self.config.connect_timeout)
             .connect()
             .await
             .map_err(|e| RoutingError::ConnectionFailed {
-                shard,
+                region,
                 message: format!("Connection to {} failed: {}", endpoint, e),
             })?;
 
-        debug!(shard = shard.value(), node_id, address = %address, "Connected to shard node");
+        debug!(region = region.as_str(), node_id, address = %address, "Connected to region node");
 
-        Ok(ShardConnection {
-            shard,
+        Ok(RegionConnection {
+            region,
             channel,
             address,
             is_leader: false, // Will be confirmed on first request
@@ -404,25 +432,19 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
     }
 
     /// Resolves a node ID to a socket address.
+    ///
+    /// Accepts either `host:port` or just `host` (default gRPC port appended).
     fn resolve_node_address(&self, node_id: &str) -> Result<SocketAddr> {
-        // Try parsing as socket address first
+        // Try parsing as-is first (covers "host:port" and "ip:port")
         if let Ok(addr) = node_id.parse::<SocketAddr>() {
             return Ok(addr);
         }
 
-        // Try parsing as host:port
-        if node_id.contains(':') {
-            return node_id.parse().map_err(|_| RoutingError::ConnectionFailed {
-                shard: ShardId::new(0),
-                message: format!("Invalid address: {}", node_id),
-            });
-        }
-
-        // Assume it's just a hostname, append default port
+        // Not a valid socket address — assume bare hostname, append default port
         let addr_str = format!("{}:{}", node_id, self.config.grpc_port);
         addr_str.parse().map_err(|_| RoutingError::ConnectionFailed {
-            shard: ShardId::new(0),
-            message: format!("Invalid hostname: {}", node_id),
+            region: Region::GLOBAL,
+            message: format!("Invalid node address: {}", node_id),
         })
     }
 
@@ -438,13 +460,13 @@ impl<B: StorageBackend + 'static> ShardRouter<B> {
         }
     }
 
-    /// Invalidate all cached connections to a shard.
+    /// Invalidate all cached connections to a region.
     ///
-    /// Invalidates all cached connections when a shard leader changes or becomes unavailable.
-    pub fn invalidate_shard(&self, shard: ShardId) {
+    /// Invalidates all cached connections when a region leader changes or becomes unavailable.
+    pub fn invalidate_region(&self, region: Region) {
         let mut connections = self.connections.write();
-        if connections.remove(&shard).is_some() {
-            debug!(shard = shard.value(), "Invalidated shard connection");
+        if connections.remove(&region).is_some() {
+            debug!(region = region.as_str(), "Invalidated region connection");
         }
     }
 
@@ -500,7 +522,7 @@ pub struct RouterStats {
     pub cached_organizations: usize,
     /// Number of stale cache entries.
     pub stale_entries: usize,
-    /// Number of active shard connections.
+    /// Number of active region connections.
     pub active_connections: usize,
 }
 
@@ -519,7 +541,9 @@ mod tests {
 
     use super::*;
 
-    fn create_test_router() -> (ShardRouter<FileBackend>, Arc<StateLayer<FileBackend>>, TestDir) {
+    fn create_test_router_with_region(
+        local_region: Region,
+    ) -> (RegionRouter<FileBackend>, Arc<StateLayer<FileBackend>>, TestDir) {
         let temp_dir = TestDir::new();
         let db = Arc::new(
             Database::<FileBackend>::create(temp_dir.join("test.db")).expect("create database"),
@@ -527,8 +551,12 @@ mod tests {
         let state = Arc::new(StateLayer::new(db));
         let system = Arc::new(SystemOrganizationService::new(Arc::clone(&state)));
 
-        let router = ShardRouter::new(system);
+        let router = RegionRouter::new(system, local_region);
         (router, state, temp_dir)
+    }
+
+    fn create_test_router() -> (RegionRouter<FileBackend>, Arc<StateLayer<FileBackend>>, TestDir) {
+        create_test_router_with_region(Region::GLOBAL)
     }
 
     #[test]
@@ -575,7 +603,7 @@ mod tests {
     #[test]
     fn test_cache_entry_staleness() {
         let entry = CacheEntry {
-            shard: ShardId::new(1),
+            region: Region::GLOBAL,
             member_nodes: vec!["node-1".to_string()],
             leader_hint: Some("node-1".to_string()),
             config_version: 1,
@@ -625,7 +653,7 @@ mod tests {
             cache.insert(
                 OrganizationId::new(1),
                 CacheEntry {
-                    shard: ShardId::new(1),
+                    region: Region::GLOBAL,
                     member_nodes: vec!["node-1".to_string()],
                     leader_hint: None,
                     config_version: 1,
@@ -661,7 +689,7 @@ mod tests {
             cache.insert(
                 OrganizationId::new(1),
                 CacheEntry {
-                    shard: ShardId::new(1),
+                    region: Region::GLOBAL,
                     member_nodes: vec![],
                     leader_hint: None,
                     config_version: 1,
@@ -683,7 +711,7 @@ mod tests {
         let registry = inferadb_ledger_state::system::OrganizationRegistry {
             organization_id: OrganizationId::new(42),
             name: "test-ns".to_string(),
-            shard: ShardId::new(3),
+            region: inferadb_ledger_types::Region::GLOBAL,
             member_nodes: vec!["node-a:50051".to_string(), "node-b:50051".to_string()],
             status: inferadb_ledger_state::system::OrganizationStatus::Active,
             config_version: 1,
@@ -699,9 +727,9 @@ mod tests {
             )
             .expect("register organization");
 
-        // Router should resolve the organization to shard 3
+        // Router should resolve the organization's routing
         let info = router.get_routing(OrganizationId::new(42)).expect("get routing");
-        assert_eq!(info.shard, ShardId::new(3));
+        assert_eq!(info.region, Region::GLOBAL);
         assert_eq!(info.member_nodes.len(), 2);
         assert!(info.leader_hint.is_some(), "should have a leader hint");
 
@@ -713,15 +741,15 @@ mod tests {
     fn test_routing_cache_populated_on_lookup() {
         let (router, state, _temp) = create_test_router();
 
-        // Register two organizations on different shards
+        // Register two organizations on different regions
         let system = SystemOrganizationService::new(Arc::clone(&state));
 
-        for (ns_id, shard) in [(10, 1), (20, 2)] {
+        for (ns_id, region) in [(10, 1), (20, 2)] {
             let registry = inferadb_ledger_state::system::OrganizationRegistry {
                 organization_id: OrganizationId::new(ns_id),
                 name: format!("ns-{}", ns_id),
-                shard: ShardId::new(shard),
-                member_nodes: vec![format!("node-{}:50051", shard)],
+                region: inferadb_ledger_types::Region::GLOBAL,
+                member_nodes: vec![format!("node-{}:50051", region)],
                 status: inferadb_ledger_state::system::OrganizationStatus::Active,
                 config_version: 1,
                 created_at: chrono::Utc::now(),
@@ -740,8 +768,8 @@ mod tests {
         let info1 = router.get_routing(OrganizationId::new(10)).expect("ns 10");
         let info2 = router.get_routing(OrganizationId::new(20)).expect("ns 20");
 
-        assert_eq!(info1.shard, ShardId::new(1));
-        assert_eq!(info2.shard, ShardId::new(2));
+        assert_eq!(info1.region, Region::GLOBAL);
+        assert_eq!(info2.region, Region::GLOBAL);
 
         // Both should be cached
         assert_eq!(router.stats().cached_organizations, 2);
@@ -756,7 +784,7 @@ mod tests {
         let registry = inferadb_ledger_state::system::OrganizationRegistry {
             organization_id: OrganizationId::new(5),
             name: "hint-test".to_string(),
-            shard: ShardId::new(1),
+            region: inferadb_ledger_types::Region::GLOBAL,
             member_nodes: vec!["node-a:50051".to_string(), "node-b:50051".to_string()],
             status: inferadb_ledger_state::system::OrganizationStatus::Active,
             config_version: 1,
@@ -792,7 +820,7 @@ mod tests {
         let registry = inferadb_ledger_state::system::OrganizationRegistry {
             organization_id: OrganizationId::new(77),
             name: "suspended-ns".to_string(),
-            shard: ShardId::new(1),
+            region: inferadb_ledger_types::Region::GLOBAL,
             member_nodes: vec!["node-1:50051".to_string()],
             status: inferadb_ledger_state::system::OrganizationStatus::Suspended,
             config_version: 1,
@@ -820,5 +848,124 @@ mod tests {
             "expected OrganizationUnavailable, got: {:?}",
             result
         );
+    }
+
+    #[test]
+    fn test_local_region_accessor() {
+        let (router, _, _temp) = create_test_router();
+        assert_eq!(router.local_region(), Region::GLOBAL);
+
+        let (router, _, _temp) = create_test_router_with_region(Region::DE_CENTRAL_FRANKFURT);
+        assert_eq!(router.local_region(), Region::DE_CENTRAL_FRANKFURT);
+    }
+
+    #[test]
+    fn test_is_region_local_non_protected_always_true() {
+        // Non-protected regions (GLOBAL, US_EAST_VA, US_WEST_OR) should always be local
+        // regardless of node's own region.
+        let (router, _, _temp) = create_test_router_with_region(Region::DE_CENTRAL_FRANKFURT);
+
+        assert!(router.is_region_local(Region::GLOBAL));
+        assert!(router.is_region_local(Region::US_EAST_VA));
+        assert!(router.is_region_local(Region::US_WEST_OR));
+    }
+
+    #[test]
+    fn test_is_region_local_protected_in_region() {
+        // Protected region matches node region → local
+        let (router, _, _temp) = create_test_router_with_region(Region::DE_CENTRAL_FRANKFURT);
+
+        assert!(router.is_region_local(Region::DE_CENTRAL_FRANKFURT));
+    }
+
+    #[test]
+    fn test_is_region_local_protected_out_of_region() {
+        // Protected region does not match node region → not local
+        let (router, _, _temp) = create_test_router_with_region(Region::DE_CENTRAL_FRANKFURT);
+
+        assert!(!router.is_region_local(Region::FR_NORTH_PARIS));
+        assert!(!router.is_region_local(Region::JP_EAST_TOKYO));
+        assert!(!router.is_region_local(Region::SA_CENTRAL_RIYADH));
+        assert!(!router.is_region_local(Region::CN_NORTH_BEIJING));
+    }
+
+    #[test]
+    fn test_is_region_local_global_node_sees_non_protected_only() {
+        // A GLOBAL-region node can serve non-protected regions locally,
+        // but not protected regions (GLOBAL itself is non-protected).
+        let (router, _, _temp) = create_test_router_with_region(Region::GLOBAL);
+
+        // Non-protected: local
+        assert!(router.is_region_local(Region::GLOBAL));
+        assert!(router.is_region_local(Region::US_EAST_VA));
+        assert!(router.is_region_local(Region::US_WEST_OR));
+
+        // Protected: not local (GLOBAL != DE_CENTRAL_FRANKFURT)
+        assert!(!router.is_region_local(Region::DE_CENTRAL_FRANKFURT));
+        assert!(!router.is_region_local(Region::CA_CENTRAL_QC));
+    }
+
+    #[test]
+    fn test_refresh_routing_uses_actual_region() {
+        // Verifies the refresh_routing bug fix: CacheEntry.region should
+        // use the organization's assigned region, not hardcoded GLOBAL.
+        let (router, state, _temp) = create_test_router_with_region(Region::DE_CENTRAL_FRANKFURT);
+
+        let system = SystemOrganizationService::new(Arc::clone(&state));
+        let registry = inferadb_ledger_state::system::OrganizationRegistry {
+            organization_id: OrganizationId::new(100),
+            name: "de-org".to_string(),
+            region: Region::DE_CENTRAL_FRANKFURT,
+            member_nodes: vec!["node-de:50051".to_string()],
+            status: inferadb_ledger_state::system::OrganizationStatus::Active,
+            config_version: 1,
+            created_at: chrono::Utc::now(),
+        };
+        system
+            .register_organization(&registry, inferadb_ledger_types::OrganizationSlug::new(100))
+            .expect("register");
+
+        let info = router.get_routing(OrganizationId::new(100)).expect("get routing");
+        assert_eq!(
+            info.region,
+            Region::DE_CENTRAL_FRANKFURT,
+            "routing should reflect org's actual region, not hardcoded GLOBAL"
+        );
+    }
+
+    #[test]
+    fn test_routing_preserves_region_from_registry() {
+        // Register orgs on different regions and verify the cache preserves them.
+        let (router, state, _temp) = create_test_router_with_region(Region::GLOBAL);
+        let system = SystemOrganizationService::new(Arc::clone(&state));
+
+        let regions = [
+            (1, "org-us", Region::US_EAST_VA),
+            (2, "org-de", Region::DE_CENTRAL_FRANKFURT),
+            (3, "org-jp", Region::JP_EAST_TOKYO),
+        ];
+
+        for (id, name, region) in &regions {
+            let registry = inferadb_ledger_state::system::OrganizationRegistry {
+                organization_id: OrganizationId::new(*id),
+                name: name.to_string(),
+                region: *region,
+                member_nodes: vec![format!("node-{id}:50051")],
+                status: inferadb_ledger_state::system::OrganizationStatus::Active,
+                config_version: 1,
+                created_at: chrono::Utc::now(),
+            };
+            system
+                .register_organization(
+                    &registry,
+                    inferadb_ledger_types::OrganizationSlug::new(*id as u64),
+                )
+                .expect("register");
+        }
+
+        for (id, _, expected_region) in &regions {
+            let info = router.get_routing(OrganizationId::new(*id)).expect("get routing");
+            assert_eq!(info.region, *expected_region);
+        }
     }
 }

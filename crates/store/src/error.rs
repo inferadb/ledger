@@ -121,6 +121,22 @@ pub enum Error {
     /// Page is full and cannot accept more data even after splitting.
     #[snafu(display("Page is full"))]
     PageFull,
+
+    /// Encryption/decryption operation failed (wrong key, tampered data, etc).
+    #[snafu(display("Encryption error: {reason}"))]
+    Encryption {
+        /// Description of the encryption failure.
+        reason: String,
+    },
+
+    /// Authentication tag verification failed (data tampered or wrong key).
+    #[snafu(display(
+        "Authentication failed for page {page_id}: data may be tampered or wrong key"
+    ))]
+    AuthenticationFailed {
+        /// The page whose authentication check failed.
+        page_id: PageId,
+    },
 }
 
 // Provide automatic conversion from io::Error to Error::Io for ergonomic ? usage

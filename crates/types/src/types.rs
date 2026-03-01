@@ -83,7 +83,7 @@ define_id!(
     /// Internal sequential identifier for an organization (storage-layer only).
     ///
     /// Wraps an `i64` with compile-time type safety to prevent mixing
-    /// with [`VaultId`], [`UserId`], or [`ShardId`]. Never exposed in APIs —
+    /// with [`VaultId`], [`UserId`], or [`UserEmailId`]. Never exposed in APIs —
     /// use [`OrganizationSlug`] for external identification.
     ///
     /// # Display
@@ -261,7 +261,7 @@ define_id!(
     /// Unique identifier for a vault within an organization.
     ///
     /// Wraps an `i64` with compile-time type safety to prevent mixing
-    /// with [`OrganizationId`], [`UserId`], or [`ShardId`].
+    /// with [`OrganizationId`], [`UserId`], or [`UserEmailId`].
     ///
     /// # Display
     ///
@@ -273,24 +273,12 @@ define_id!(
     /// Unique identifier for a user in the `_system` organization.
     ///
     /// Wraps an `i64` with compile-time type safety to prevent mixing
-    /// with [`OrganizationId`], [`VaultId`], or [`ShardId`].
+    /// with [`OrganizationId`], [`VaultId`], or [`UserEmailId`].
     ///
     /// # Display
     ///
     /// Formats with `user:` prefix: `user:1`.
     UserId, i64, "user"
-);
-
-define_id!(
-    /// Unique identifier for a Raft shard group.
-    ///
-    /// Wraps a `u32` with compile-time type safety to prevent mixing
-    /// with [`OrganizationId`], [`VaultId`], or [`UserId`].
-    ///
-    /// # Display
-    ///
-    /// Formats with `shard:` prefix: `shard:3`.
-    ShardId, u32, "shard"
 );
 
 define_id!(
@@ -319,6 +307,237 @@ define_id!(
     /// Formats with `verify:` prefix: `verify:42`.
     EmailVerifyTokenId, i64, "verify"
 );
+
+// ============================================================================
+// Region Type
+// ============================================================================
+
+/// Geographic/jurisdictional region for data residency.
+///
+/// Each variant maps to a data residency jurisdiction. The enum is exhaustive —
+/// adding a region is a code change, not a runtime operation — providing
+/// compile-time guarantees that every match arm handles every region.
+///
+/// `Region` is the horizontal scaling unit: each region maps 1:1 to a Raft
+/// consensus group.
+///
+/// # Display
+///
+/// Formats as lowercase with hyphens: `us-east-va`, `ie-east-dublin`, `global`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema
+)]
+#[allow(non_camel_case_types)]
+pub enum Region {
+    /// Global control plane. Replicated to all nodes in all regions.
+    /// Stores non-PII metadata only (org registry, node discovery, sequences).
+    #[serde(rename = "global")]
+    GLOBAL,
+
+    // ── North America ──────────────────────────────────────────────
+    /// US East Coast, Virginia. No federal data residency requirement.
+    #[serde(rename = "us-east-va")]
+    US_EAST_VA,
+    /// US West Coast, Oregon. No federal data residency requirement.
+    #[serde(rename = "us-west-or")]
+    US_WEST_OR,
+    /// Canada Central, Quebec (Montreal). PIPEDA + provincial privacy laws.
+    #[serde(rename = "ca-central-qc")]
+    CA_CENTRAL_QC,
+
+    // ── South America ──────────────────────────────────────────────
+    /// Brazil Southeast, São Paulo. LGPD.
+    #[serde(rename = "br-southeast-sp")]
+    BR_SOUTHEAST_SP,
+
+    // ── Europe (EU/EEA — GDPR) ────────────────────────────────────
+    /// Ireland East, Dublin. GDPR.
+    #[serde(rename = "ie-east-dublin")]
+    IE_EAST_DUBLIN,
+    /// France North, Paris. GDPR.
+    #[serde(rename = "fr-north-paris")]
+    FR_NORTH_PARIS,
+    /// Germany Central, Frankfurt. GDPR.
+    #[serde(rename = "de-central-frankfurt")]
+    DE_CENTRAL_FRANKFURT,
+    /// Sweden East, Stockholm. GDPR.
+    #[serde(rename = "se-east-stockholm")]
+    SE_EAST_STOCKHOLM,
+    /// Italy North, Milan. GDPR.
+    #[serde(rename = "it-north-milan")]
+    IT_NORTH_MILAN,
+
+    // ── United Kingdom ─────────────────────────────────────────────
+    /// United Kingdom South, London. UK GDPR (post-Brexit, separate jurisdiction).
+    #[serde(rename = "uk-south-london")]
+    UK_SOUTH_LONDON,
+
+    // ── Middle East & Africa ───────────────────────────────────────
+    /// Saudi Arabia Central, Riyadh. PDPL (mandatory in-country processing).
+    #[serde(rename = "sa-central-riyadh")]
+    SA_CENTRAL_RIYADH,
+    /// Bahrain Central, Manama. Bahrain PDPA.
+    #[serde(rename = "bh-central-manama")]
+    BH_CENTRAL_MANAMA,
+    /// UAE Central, Dubai. UAE PDPL.
+    #[serde(rename = "ae-central-dubai")]
+    AE_CENTRAL_DUBAI,
+    /// Israel Central, Tel Aviv. Privacy Protection Law.
+    #[serde(rename = "il-central-tel-aviv")]
+    IL_CENTRAL_TEL_AVIV,
+    /// South Africa South, Cape Town. POPIA.
+    #[serde(rename = "za-south-cape-town")]
+    ZA_SOUTH_CAPE_TOWN,
+    /// Nigeria West, Lagos. NDPA 2023 + NITDA.
+    #[serde(rename = "ng-west-lagos")]
+    NG_WEST_LAGOS,
+
+    // ── Asia Pacific ───────────────────────────────────────────────
+    /// Singapore Central. PDPA.
+    #[serde(rename = "sg-central-singapore")]
+    SG_CENTRAL_SINGAPORE,
+    /// Australia East, Sydney. Australian Privacy Act.
+    #[serde(rename = "au-east-sydney")]
+    AU_EAST_SYDNEY,
+    /// Indonesia West, Jakarta. PDP Law (mandatory local storage).
+    #[serde(rename = "id-west-jakarta")]
+    ID_WEST_JAKARTA,
+    /// Japan East, Tokyo. APPI.
+    #[serde(rename = "jp-east-tokyo")]
+    JP_EAST_TOKYO,
+    /// South Korea Central, Seoul. PIPA.
+    #[serde(rename = "kr-central-seoul")]
+    KR_CENTRAL_SEOUL,
+    /// India West, Mumbai. DPDPA 2023.
+    #[serde(rename = "in-west-mumbai")]
+    IN_WEST_MUMBAI,
+    /// Vietnam South, Ho Chi Minh City. Cybersecurity Law + Decree 53/2022.
+    #[serde(rename = "vn-south-hcmc")]
+    VN_SOUTH_HCMC,
+
+    // ── China ──────────────────────────────────────────────────────
+    /// China North, Beijing. PIPL (mandatory in-country storage).
+    #[serde(rename = "cn-north-beijing")]
+    CN_NORTH_BEIJING,
+}
+
+/// All `Region` variants in definition order.
+pub const ALL_REGIONS: [Region; 25] = [
+    Region::GLOBAL,
+    Region::US_EAST_VA,
+    Region::US_WEST_OR,
+    Region::CA_CENTRAL_QC,
+    Region::BR_SOUTHEAST_SP,
+    Region::IE_EAST_DUBLIN,
+    Region::FR_NORTH_PARIS,
+    Region::DE_CENTRAL_FRANKFURT,
+    Region::SE_EAST_STOCKHOLM,
+    Region::IT_NORTH_MILAN,
+    Region::UK_SOUTH_LONDON,
+    Region::SA_CENTRAL_RIYADH,
+    Region::BH_CENTRAL_MANAMA,
+    Region::AE_CENTRAL_DUBAI,
+    Region::IL_CENTRAL_TEL_AVIV,
+    Region::ZA_SOUTH_CAPE_TOWN,
+    Region::NG_WEST_LAGOS,
+    Region::SG_CENTRAL_SINGAPORE,
+    Region::AU_EAST_SYDNEY,
+    Region::ID_WEST_JAKARTA,
+    Region::JP_EAST_TOKYO,
+    Region::KR_CENTRAL_SEOUL,
+    Region::IN_WEST_MUMBAI,
+    Region::VN_SOUTH_HCMC,
+    Region::CN_NORTH_BEIJING,
+];
+
+impl Region {
+    /// Lowercase hyphenated string for this region.
+    ///
+    /// Single source of truth for the string representation. Used by
+    /// `Display`, `FromStr`, and serde rename attributes.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::GLOBAL => "global",
+            Self::US_EAST_VA => "us-east-va",
+            Self::US_WEST_OR => "us-west-or",
+            Self::CA_CENTRAL_QC => "ca-central-qc",
+            Self::BR_SOUTHEAST_SP => "br-southeast-sp",
+            Self::IE_EAST_DUBLIN => "ie-east-dublin",
+            Self::FR_NORTH_PARIS => "fr-north-paris",
+            Self::DE_CENTRAL_FRANKFURT => "de-central-frankfurt",
+            Self::SE_EAST_STOCKHOLM => "se-east-stockholm",
+            Self::IT_NORTH_MILAN => "it-north-milan",
+            Self::UK_SOUTH_LONDON => "uk-south-london",
+            Self::SA_CENTRAL_RIYADH => "sa-central-riyadh",
+            Self::BH_CENTRAL_MANAMA => "bh-central-manama",
+            Self::AE_CENTRAL_DUBAI => "ae-central-dubai",
+            Self::IL_CENTRAL_TEL_AVIV => "il-central-tel-aviv",
+            Self::ZA_SOUTH_CAPE_TOWN => "za-south-cape-town",
+            Self::NG_WEST_LAGOS => "ng-west-lagos",
+            Self::SG_CENTRAL_SINGAPORE => "sg-central-singapore",
+            Self::AU_EAST_SYDNEY => "au-east-sydney",
+            Self::ID_WEST_JAKARTA => "id-west-jakarta",
+            Self::JP_EAST_TOKYO => "jp-east-tokyo",
+            Self::KR_CENTRAL_SEOUL => "kr-central-seoul",
+            Self::IN_WEST_MUMBAI => "in-west-mumbai",
+            Self::VN_SOUTH_HCMC => "vn-south-hcmc",
+            Self::CN_NORTH_BEIJING => "cn-north-beijing",
+        }
+    }
+
+    /// Whether this region requires data residency enforcement.
+    ///
+    /// Returns `true` for all regions except `GLOBAL`, `US_EAST_VA`, and
+    /// `US_WEST_OR`. Protected regions restrict Raft group membership to nodes
+    /// tagged with the same region.
+    #[inline]
+    pub const fn requires_residency(&self) -> bool {
+        !matches!(self, Self::GLOBAL | Self::US_EAST_VA | Self::US_WEST_OR)
+    }
+}
+
+impl fmt::Display for Region {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Error returned when parsing an invalid region string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionParseError {
+    /// The invalid input string.
+    pub input: String,
+}
+
+impl fmt::Display for RegionParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown region: {}", self.input)
+    }
+}
+
+impl std::error::Error for RegionParseError {}
+
+impl std::str::FromStr for Region {
+    type Err = RegionParseError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        ALL_REGIONS
+            .iter()
+            .find(|r| r.as_str() == s)
+            .copied()
+            .ok_or_else(|| RegionParseError { input: s.to_owned() })
+    }
+}
 
 /// Transaction identifier (16 bytes, typically UUIDv4).
 pub type TxId = [u8; 16];
@@ -394,18 +613,18 @@ impl VaultBlock {
     }
 }
 
-/// Internal shard block stored on disk, containing entries for multiple vaults.
+/// Internal region block stored on disk, containing entries for multiple vaults.
 ///
-/// Multiple vaults share a single Raft group. Shard blocks are the physical
+/// Multiple vaults share a single Raft group. Region blocks are the physical
 /// unit of Raft replication; clients never see them directly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ShardBlock {
-    /// Shard group identifier.
-    pub shard: ShardId,
-    /// Monotonic shard-level height.
-    pub shard_height: u64,
-    /// Hash linking to previous shard block.
-    pub previous_shard_hash: Hash,
+pub struct RegionBlock {
+    /// Region this block belongs to.
+    pub region: Region,
+    /// Monotonic region-level height.
+    pub region_height: u64,
+    /// Hash linking to previous region block.
+    pub previous_region_hash: Hash,
     /// Entries for each vault modified in this block.
     pub vault_entries: Vec<VaultEntry>,
     /// Block creation timestamp.
@@ -418,7 +637,7 @@ pub struct ShardBlock {
     pub committed_index: u64,
 }
 
-/// Per-vault entry within a ShardBlock.
+/// Per-vault entry within a RegionBlock.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultEntry {
     /// Organization owning this vault.
@@ -460,13 +679,13 @@ pub struct ChainCommitment {
     pub to_height: u64,
 }
 
-impl ShardBlock {
-    /// Converts this [`ShardBlock`] to a shard-level [`BlockHeader`] for chain commitment
+impl RegionBlock {
+    /// Converts this [`RegionBlock`] to a region-level [`BlockHeader`] for chain commitment
     /// computation.
     ///
     /// Aggregates vault entry Merkle roots into a single header, enabling
-    /// [`ChainCommitment`] computation over the shard chain for snapshot verification.
-    pub fn to_shard_header(&self) -> BlockHeader {
+    /// [`ChainCommitment`] computation over the region chain for snapshot verification.
+    pub fn to_region_header(&self) -> BlockHeader {
         use crate::merkle::merkle_root;
 
         let (tx_merkle_root, state_root) = if self.vault_entries.is_empty() {
@@ -478,10 +697,10 @@ impl ShardBlock {
         };
 
         BlockHeader {
-            height: self.shard_height,
-            organization: OrganizationId::new(0), // Shard-level aggregate, not vault-specific
-            vault: VaultId::new(self.shard.value() as i64),
-            previous_hash: self.previous_shard_hash,
+            height: self.region_height,
+            organization: OrganizationId::new(0), // Region-level aggregate, not vault-specific
+            vault: VaultId::new(0),
+            previous_hash: self.previous_region_hash,
             tx_merkle_root,
             state_root,
             timestamp: self.timestamp,
@@ -492,9 +711,9 @@ impl ShardBlock {
 
     /// Extracts a standalone VaultBlock for client verification.
     ///
-    /// Clients verify per-vault chains and never see ShardBlock directly.
+    /// Clients verify per-vault chains and never see [`RegionBlock`] directly.
     /// Requires both organization and vault since multiple organizations
-    /// can share a shard.
+    /// can share a region.
     pub fn extract_vault_block(
         &self,
         organization: OrganizationId,
@@ -1083,8 +1302,8 @@ mod tests {
     }
 
     #[test]
-    fn test_shard_id_new_and_value() {
-        let id = ShardId::new(3);
+    fn test_user_email_id_new_and_value() {
+        let id = UserEmailId::new(3);
         assert_eq!(id.value(), 3);
     }
 
@@ -1104,8 +1323,8 @@ mod tests {
     }
 
     #[test]
-    fn test_shard_id_display() {
-        assert_eq!(format!("{}", ShardId::new(10)), "shard:10");
+    fn test_user_email_id_display() {
+        assert_eq!(format!("{}", UserEmailId::new(10)), "email:10");
     }
 
     #[test]
@@ -1122,15 +1341,15 @@ mod tests {
     }
 
     #[test]
-    fn test_shard_id_from_u32() {
-        let id: ShardId = 5_u32.into();
+    fn test_user_email_id_from_i64() {
+        let id: UserEmailId = 5_i64.into();
         assert_eq!(id.value(), 5);
     }
 
     #[test]
-    fn test_shard_id_into_u32() {
-        let id = ShardId::new(3);
-        let raw: u32 = id.into();
+    fn test_user_email_id_into_i64() {
+        let id = UserEmailId::new(3);
+        let raw: i64 = id.into();
         assert_eq!(raw, 3);
     }
 
@@ -1144,7 +1363,7 @@ mod tests {
     fn test_id_ordering() {
         assert!(OrganizationId::new(1) < OrganizationId::new(2));
         assert!(VaultId::new(10) > VaultId::new(5));
-        assert!(ShardId::new(0) < ShardId::new(1));
+        assert!(UserEmailId::new(0) < UserEmailId::new(1));
     }
 
     #[test]
@@ -1183,11 +1402,11 @@ mod tests {
     }
 
     #[test]
-    fn test_shard_id_serde_roundtrip() {
-        let id = ShardId::new(3);
+    fn test_user_email_id_serde_roundtrip() {
+        let id = UserEmailId::new(3);
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(json, "3");
-        let deserialized: ShardId = serde_json::from_str(&json).unwrap();
+        let deserialized: UserEmailId = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, id);
     }
 
@@ -1333,7 +1552,7 @@ mod tests {
     }
 
     // ========================================================================
-    // ShardBlock Tests
+    // RegionBlock Tests
     // ========================================================================
 
     #[test]
@@ -1361,10 +1580,10 @@ mod tests {
             state_root: [0x66; 32],
         };
 
-        let block = ShardBlock {
-            shard: ShardId::new(1),
-            shard_height: 100,
-            previous_shard_hash: ZERO_HASH,
+        let block = RegionBlock {
+            region: Region::US_EAST_VA,
+            region_height: 100,
+            previous_region_hash: ZERO_HASH,
             vault_entries: vec![entry_h5, entry_h6],
             timestamp,
             leader_id: "node-1".into(),
@@ -1387,5 +1606,130 @@ mod tests {
 
         // Different vault returns None
         assert!(block.extract_vault_block(org, VaultId::new(99), 5).is_none());
+    }
+
+    // ========================================================================
+    // Region tests
+    // ========================================================================
+
+    #[test]
+    fn test_region_display_from_str_round_trip() {
+        for region in &ALL_REGIONS {
+            let display = format!("{region}");
+            let parsed: Region = display.parse().unwrap();
+            assert_eq!(parsed, *region);
+        }
+    }
+
+    #[test]
+    fn test_region_from_str_invalid() {
+        let err = "not-a-region".parse::<Region>().unwrap_err();
+        assert_eq!(err.input, "not-a-region");
+        assert_eq!(format!("{err}"), "unknown region: not-a-region");
+    }
+
+    #[test]
+    fn test_region_from_str_case_sensitive() {
+        assert!("GLOBAL".parse::<Region>().is_err());
+        assert!("US_EAST_VA".parse::<Region>().is_err());
+        assert!("Global".parse::<Region>().is_err());
+    }
+
+    #[test]
+    fn test_region_requires_residency_non_protected() {
+        assert!(!Region::GLOBAL.requires_residency());
+        assert!(!Region::US_EAST_VA.requires_residency());
+        assert!(!Region::US_WEST_OR.requires_residency());
+    }
+
+    #[test]
+    fn test_region_requires_residency_exhaustive() {
+        let non_protected_count = ALL_REGIONS.iter().filter(|r| !r.requires_residency()).count();
+        assert_eq!(non_protected_count, 3, "exactly GLOBAL, US_EAST_VA, US_WEST_OR");
+    }
+
+    #[test]
+    fn test_region_serde_json_round_trip() {
+        for region in &ALL_REGIONS {
+            let json = serde_json::to_string(region).unwrap();
+            let deserialized: Region = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, *region);
+        }
+    }
+
+    #[test]
+    fn test_region_serde_json_matches_display() {
+        for region in &ALL_REGIONS {
+            let json = serde_json::to_string(region).unwrap();
+            assert_eq!(json, format!("\"{}\"", region));
+        }
+    }
+
+    #[test]
+    fn test_region_postcard_round_trip() {
+        for region in &ALL_REGIONS {
+            let bytes = crate::encode(region).unwrap();
+            let decoded: Region = crate::decode(&bytes).unwrap();
+            assert_eq!(decoded, *region);
+        }
+    }
+
+    #[test]
+    fn test_region_copy_semantics() {
+        let a = Region::IE_EAST_DUBLIN;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_region_hash_map_key() {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        map.insert(Region::US_EAST_VA, "virginia");
+        map.insert(Region::IE_EAST_DUBLIN, "dublin");
+        assert_eq!(map[&Region::US_EAST_VA], "virginia");
+        assert_eq!(map[&Region::IE_EAST_DUBLIN], "dublin");
+    }
+
+    #[test]
+    fn test_region_ordering() {
+        // GLOBAL is first (lowest) in definition order
+        assert!(Region::GLOBAL < Region::US_EAST_VA);
+        assert!(Region::US_EAST_VA < Region::US_WEST_OR);
+        assert!(Region::US_WEST_OR < Region::CA_CENTRAL_QC);
+        // Last variant
+        assert!(Region::VN_SOUTH_HCMC < Region::CN_NORTH_BEIJING);
+    }
+
+    proptest::proptest! {
+        /// For any valid Region index, `requires_residency() == true` implies the
+        /// region is not GLOBAL, US_EAST_VA, or US_WEST_OR (which have no federal
+        /// data residency requirement).
+        #[test]
+        fn prop_requires_residency_implies_non_global(idx in 0..ALL_REGIONS.len()) {
+            let region = ALL_REGIONS[idx];
+            if region.requires_residency() {
+                proptest::prop_assert!(
+                    !matches!(region, Region::GLOBAL | Region::US_EAST_VA | Region::US_WEST_OR),
+                    "Region {:?} claims residency but is GLOBAL/US",
+                    region
+                );
+            } else {
+                proptest::prop_assert!(
+                    matches!(region, Region::GLOBAL | Region::US_EAST_VA | Region::US_WEST_OR),
+                    "Region {:?} claims no residency but is not GLOBAL/US",
+                    region
+                );
+            }
+        }
+
+        /// Postcard serialization round-trip for any valid Region variant.
+        #[test]
+        fn prop_region_postcard_roundtrip(idx in 0..ALL_REGIONS.len()) {
+            let region = ALL_REGIONS[idx];
+            let bytes = crate::encode(&region).unwrap();
+            let decoded: Region = crate::decode(&bytes).unwrap();
+            proptest::prop_assert_eq!(decoded, region);
+        }
     }
 }

@@ -31,12 +31,6 @@ pub struct UserSlug {
     #[prost(uint64, tag = "1")]
     pub slug: u64,
 }
-/// Unique shard identifier (Raft group hosting multiple organizations)
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ShardId {
-    #[prost(uint32, tag = "1")]
-    pub id: u32,
-}
 /// Unique node identifier
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct NodeId {
@@ -171,7 +165,7 @@ pub struct BlockHeader {
     /// Note: leader_id is included in proto for API completeness but excluded from
     /// the 148-byte deterministic block hash computation. This ensures blocks hash
     /// identically regardless of which leader committed them. The leader_id is stored
-    /// in ShardBlock and populated when extracting VaultBlock for client responses.
+    /// in RegionBlock and populated when extracting VaultBlock for client responses.
     #[prost(message, optional, tag = "8")]
     pub leader_id: ::core::option::Option<NodeId>,
     #[prost(uint64, tag = "9")]
@@ -975,16 +969,16 @@ pub struct BatchWriteSuccess {
     pub assigned_sequence: u64,
 }
 /// Create a new organization. An OrganizationSlug (Snowflake ID) is generated
-/// by the leader and returned. The organization is assigned to the shard with
-/// lowest load, or to the specified shard.
+/// by the leader and returned. Every organization must declare a region
+/// governing where its data is stored.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateOrganizationRequest {
     /// Human-readable name (e.g., "acme_corp")
     #[prost(string, tag = "1")]
     pub name: ::prost::alloc::string::String,
-    /// Target shard (auto-assigned if not specified)
-    #[prost(message, optional, tag = "2")]
-    pub shard: ::core::option::Option<ShardId>,
+    /// Data residency region (required)
+    #[prost(enumeration = "Region", tag = "2")]
+    pub region: i32,
     /// Billing tier (Free if not specified)
     #[prost(enumeration = "OrganizationTier", optional, tag = "3")]
     pub tier: ::core::option::Option<i32>,
@@ -993,9 +987,9 @@ pub struct CreateOrganizationRequest {
 pub struct CreateOrganizationResponse {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<OrganizationSlug>,
-    /// Assigned shard
-    #[prost(message, optional, tag = "2")]
-    pub shard: ::core::option::Option<ShardId>,
+    /// Assigned region
+    #[prost(enumeration = "Region", tag = "2")]
+    pub region: i32,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteOrganizationRequest {
@@ -1022,10 +1016,10 @@ pub struct GetOrganizationResponse {
     pub slug: ::core::option::Option<OrganizationSlug>,
     #[prost(string, tag = "2")]
     pub name: ::prost::alloc::string::String,
-    /// Which shard hosts this organization
-    #[prost(message, optional, tag = "3")]
-    pub shard: ::core::option::Option<ShardId>,
-    /// Nodes in the shard
+    /// Data residency region
+    #[prost(enumeration = "Region", tag = "3")]
+    pub region: i32,
+    /// Nodes in the region's Raft group
     #[prost(message, repeated, tag = "4")]
     pub member_nodes: ::prost::alloc::vec::Vec<NodeId>,
     /// Lifecycle state
@@ -1055,6 +1049,51 @@ pub struct ListOrganizationsResponse {
     /// Absent if no more pages
     #[prost(bytes = "vec", optional, tag = "2")]
     pub next_page_token: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+}
+/// Migrate organization to a different region.
+/// Protected → non-protected requires acknowledge_residency_downgrade = true.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MigrateOrganizationRequest {
+    #[prost(message, optional, tag = "1")]
+    pub slug: ::core::option::Option<OrganizationSlug>,
+    #[prost(enumeration = "Region", tag = "2")]
+    pub target_region: i32,
+    #[prost(bool, tag = "3")]
+    pub acknowledge_residency_downgrade: bool,
+}
+/// Migration response with source/target region and current status.
+/// Status will be MIGRATING while the saga is in progress.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MigrateOrganizationResponse {
+    #[prost(message, optional, tag = "1")]
+    pub slug: ::core::option::Option<OrganizationSlug>,
+    #[prost(enumeration = "Region", tag = "2")]
+    pub source_region: i32,
+    #[prost(enumeration = "Region", tag = "3")]
+    pub target_region: i32,
+    #[prost(enumeration = "OrganizationStatus", tag = "4")]
+    pub status: i32,
+}
+/// Request to migrate a user's PII to a different region.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MigrateUserRegionRequest {
+    #[prost(message, optional, tag = "1")]
+    pub slug: ::core::option::Option<UserSlug>,
+    #[prost(enumeration = "Region", tag = "2")]
+    pub target_region: i32,
+}
+/// Migration response with source/target region and current directory status.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MigrateUserRegionResponse {
+    #[prost(message, optional, tag = "1")]
+    pub slug: ::core::option::Option<UserSlug>,
+    #[prost(enumeration = "Region", tag = "2")]
+    pub source_region: i32,
+    #[prost(enumeration = "Region", tag = "3")]
+    pub target_region: i32,
+    /// User directory status will be MIGRATING while the saga is in progress.
+    #[prost(string, tag = "4")]
+    pub directory_status: ::prost::alloc::string::String,
 }
 /// Create a new vault. A VaultSlug (Snowflake ID) is generated
 /// and returned. Internal sequential VaultId is never exposed.
@@ -1292,7 +1331,7 @@ pub struct GetConfigResponse {
     #[prost(string, tag = "1")]
     pub config_json: ::prost::alloc::string::String,
 }
-/// Create a consistent backup of shard state.
+/// Create a consistent backup of region state.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateBackupRequest {
     /// Optional tag for identifying this backup (e.g., "pre-migration").
@@ -1309,9 +1348,9 @@ pub struct CreateBackupResponse {
     /// Unique backup identifier (timestamp-based).
     #[prost(string, tag = "1")]
     pub backup_id: ::prost::alloc::string::String,
-    /// Shard height at backup time.
+    /// Region height at backup time.
     #[prost(uint64, tag = "2")]
-    pub shard_height: u64,
+    pub region_height: u64,
     /// Path where the backup was written.
     #[prost(string, tag = "3")]
     pub backup_path: ::prost::alloc::string::String,
@@ -1340,9 +1379,9 @@ pub struct BackupInfo {
     /// Unique backup identifier.
     #[prost(string, tag = "1")]
     pub backup_id: ::prost::alloc::string::String,
-    /// Shard height at backup time.
+    /// Region height at backup time.
     #[prost(uint64, tag = "2")]
-    pub shard_height: u64,
+    pub region_height: u64,
     /// Path where the backup is stored.
     #[prost(string, tag = "3")]
     pub backup_path: ::prost::alloc::string::String,
@@ -1392,7 +1431,7 @@ pub struct RestoreBackupResponse {
     /// Human-readable result message.
     #[prost(string, tag = "2")]
     pub message: ::prost::alloc::string::String,
-    /// Shard height after restore.
+    /// Region height after restore.
     #[prost(uint64, tag = "3")]
     pub restored_height: u64,
 }
@@ -1789,10 +1828,12 @@ pub struct GetSystemStateResponse {
     pub version: u64,
     #[prost(message, repeated, tag = "2")]
     pub nodes: ::prost::alloc::vec::Vec<NodeInfo>,
-    /// Routing table: organization → shard
+    /// Routing table: organization → region
     #[prost(message, repeated, tag = "3")]
     pub organizations: ::prost::alloc::vec::Vec<OrganizationRegistry>,
 }
+/// Node physical information. Role (voter/learner) is per-Raft-group, derived
+/// from openraft membership — not a property of the node itself.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct NodeInfo {
     #[prost(message, optional, tag = "1")]
@@ -1805,16 +1846,16 @@ pub struct NodeInfo {
     /// gRPC port (same for all addresses), typically 5000
     #[prost(uint32, tag = "3")]
     pub grpc_port: u32,
-    /// Voter or Learner
-    #[prost(enumeration = "NodeRole", tag = "4")]
-    pub role: i32,
     #[prost(message, optional, tag = "5")]
     pub last_heartbeat: ::core::option::Option<::prost_types::Timestamp>,
     /// For voter election ordering
     #[prost(message, optional, tag = "6")]
     pub joined_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Geographic region this node belongs to
+    #[prost(enumeration = "Region", tag = "7")]
+    pub region: i32,
 }
-/// Routing entry: organization → shard assignment
+/// Routing entry: organization → region assignment
 /// Note: leader_hint is computed dynamically from Raft state, not stored here
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OrganizationRegistry {
@@ -1823,10 +1864,10 @@ pub struct OrganizationRegistry {
     /// Human-readable organization name
     #[prost(string, tag = "2")]
     pub name: ::prost::alloc::string::String,
-    /// Which Raft group hosts this organization
-    #[prost(message, optional, tag = "3")]
-    pub shard: ::core::option::Option<ShardId>,
-    /// Nodes in the shard
+    /// Data residency region (Raft group)
+    #[prost(enumeration = "Region", tag = "3")]
+    pub region: i32,
+    /// Nodes in the region's Raft group
     #[prost(message, repeated, tag = "4")]
     pub members: ::prost::alloc::vec::Vec<NodeId>,
     /// Lifecycle state
@@ -1863,9 +1904,9 @@ pub struct RaftVoteRequest {
     pub vote: ::core::option::Option<RaftVote>,
     #[prost(message, optional, tag = "2")]
     pub last_log_id: ::core::option::Option<RaftLogId>,
-    /// Shard for multi-shard routing (defaults to system shard 0).
-    #[prost(uint64, optional, tag = "3")]
-    pub shard: ::core::option::Option<u64>,
+    /// Region for multi-region routing (defaults to GLOBAL).
+    #[prost(enumeration = "Region", optional, tag = "3")]
+    pub region: ::core::option::Option<i32>,
 }
 /// Vote response.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1889,9 +1930,9 @@ pub struct RaftAppendEntriesRequest {
     pub entries: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
     #[prost(message, optional, tag = "4")]
     pub leader_commit: ::core::option::Option<RaftLogId>,
-    /// Shard for multi-shard routing (defaults to system shard 0).
-    #[prost(uint64, optional, tag = "5")]
-    pub shard: ::core::option::Option<u64>,
+    /// Region for multi-region routing (defaults to GLOBAL).
+    #[prost(enumeration = "Region", optional, tag = "5")]
+    pub region: ::core::option::Option<i32>,
 }
 /// Log replication response.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1916,9 +1957,9 @@ pub struct RaftInstallSnapshotRequest {
     pub data: ::prost::alloc::vec::Vec<u8>,
     #[prost(bool, tag = "5")]
     pub done: bool,
-    /// Shard for multi-shard routing (defaults to system shard 0).
-    #[prost(uint64, optional, tag = "6")]
-    pub shard: ::core::option::Option<u64>,
+    /// Region for multi-region routing (defaults to GLOBAL).
+    #[prost(enumeration = "Region", optional, tag = "6")]
+    pub region: ::core::option::Option<i32>,
 }
 /// Snapshot installation response.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1984,6 +2025,265 @@ pub struct TriggerElectionResponse {
     pub accepted: bool,
     #[prost(string, tag = "2")]
     pub message: ::prost::alloc::string::String,
+}
+/// Request to initiate email blinding key rotation.
+/// The new key version must be pre-provisioned in the external key source.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotateBlindingKeyRequest {
+    /// Version number of the new blinding key (monotonically increasing).
+    #[prost(uint32, tag = "1")]
+    pub new_key_version: u32,
+}
+/// Response from initiating a blinding key rotation.
+/// Returns immediately — the re-hash runs asynchronously.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotateBlindingKeyResponse {
+    /// Total email hash entries to re-hash.
+    #[prost(uint64, tag = "1")]
+    pub total_entries: u64,
+    /// Entries re-hashed so far (0 on initial response).
+    #[prost(uint64, tag = "2")]
+    pub entries_rehashed: u64,
+    /// Whether the rotation is already complete (true if zero entries).
+    #[prost(bool, tag = "3")]
+    pub complete: bool,
+}
+/// Request to check blinding key rehash progress.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetBlindingKeyRehashStatusRequest {}
+/// Status of an in-flight or completed blinding key rotation.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetBlindingKeyRehashStatusResponse {
+    /// Total email hash entries to re-hash.
+    #[prost(uint64, tag = "1")]
+    pub total_entries: u64,
+    /// Entries re-hashed across all regions.
+    #[prost(uint64, tag = "2")]
+    pub entries_rehashed: u64,
+    /// Whether the rotation is fully complete.
+    #[prost(bool, tag = "3")]
+    pub complete: bool,
+    /// Per-region progress: region name → entries re-hashed in that region.
+    #[prost(map = "string, uint64", tag = "4")]
+    pub per_region_progress: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        u64,
+    >,
+    /// Currently active blinding key version.
+    #[prost(uint32, tag = "5")]
+    pub active_key_version: u32,
+}
+/// Request to initiate RMK rotation for a region.
+/// The new key version must be pre-provisioned in the external key source.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotateRegionKeyRequest {
+    /// Region to rotate the RMK for. If empty, uses the node's primary region.
+    #[prost(string, tag = "1")]
+    pub region: ::prost::alloc::string::String,
+    /// Target RMK version to rotate to. If 0, generates a new version.
+    #[prost(uint32, tag = "2")]
+    pub target_version: u32,
+}
+/// Response from initiating an RMK rotation.
+/// Returns immediately — DEK re-wrapping runs asynchronously.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotateRegionKeyResponse {
+    /// New RMK version after rotation.
+    #[prost(uint32, tag = "1")]
+    pub new_version: u32,
+    /// Total pages in the sidecar that need re-wrapping.
+    #[prost(uint64, tag = "2")]
+    pub total_pages: u64,
+    /// Whether re-wrapping is already complete (true if zero pages).
+    #[prost(bool, tag = "3")]
+    pub complete: bool,
+}
+/// Request to check DEK re-wrapping progress.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetRewrapStatusRequest {
+    /// Region to check. If empty, uses the node's primary region.
+    #[prost(string, tag = "1")]
+    pub region: ::prost::alloc::string::String,
+}
+/// Status of an in-flight or completed DEK re-wrapping job.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetRewrapStatusResponse {
+    /// Total pages in the sidecar.
+    #[prost(uint64, tag = "1")]
+    pub total_pages: u64,
+    /// Pages processed so far.
+    #[prost(uint64, tag = "2")]
+    pub pages_processed: u64,
+    /// Pages that were actually re-wrapped (had old version).
+    #[prost(uint64, tag = "3")]
+    pub pages_rewrapped: u64,
+    /// Whether re-wrapping is fully complete.
+    #[prost(bool, tag = "4")]
+    pub complete: bool,
+    /// Current target RMK version being re-wrapped to.
+    #[prost(uint32, tag = "5")]
+    pub target_version: u32,
+    /// Estimated seconds remaining (0 if complete or not started).
+    #[prost(uint64, tag = "6")]
+    pub estimated_remaining_secs: u64,
+}
+/// Erase a user's PII via crypto-shredding.
+/// Forward-only finalization — irreversible by design.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EraseUserRequest {
+    /// User ID to erase.
+    #[prost(int64, tag = "1")]
+    pub user_id: i64,
+    /// Identity of the actor requesting erasure (audit trail).
+    #[prost(string, tag = "2")]
+    pub erased_by: ::prost::alloc::string::String,
+    /// Region where the user's PII resides.
+    #[prost(enumeration = "Region", tag = "3")]
+    pub region: i32,
+    /// Confirmation token from RequestConfirmation RPC (hex-encoded).
+    /// Required — erasure is irreversible.
+    #[prost(string, tag = "4")]
+    pub confirmation_token: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EraseUserResponse {
+    /// User ID that was erased.
+    #[prost(int64, tag = "1")]
+    pub user_id: i64,
+}
+/// Request a confirmation token for an irreversible operation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RequestConfirmationRequest {
+    /// The operation requiring confirmation.
+    #[prost(enumeration = "AdminPermission", tag = "1")]
+    pub operation: i32,
+    /// Target entity identifier (e.g., user ID string for EraseUser).
+    #[prost(string, tag = "2")]
+    pub target_id: ::prost::alloc::string::String,
+    /// Actor (admin user) requesting the confirmation.
+    #[prost(int64, tag = "3")]
+    pub actor_id: i64,
+}
+/// Response containing a time-limited, single-use confirmation token.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RequestConfirmationResponse {
+    /// Opaque confirmation token (hex-encoded 32 random bytes).
+    /// Present this token when executing the confirmed operation.
+    #[prost(string, tag = "1")]
+    pub confirmation_token: ::prost::alloc::string::String,
+    /// When the token expires (RFC 3339 timestamp).
+    #[prost(string, tag = "2")]
+    pub expires_at: ::prost::alloc::string::String,
+    /// Human-readable summary of what the operation will do.
+    #[prost(string, tag = "3")]
+    pub operation_summary: ::prost::alloc::string::String,
+}
+/// Geographic region for data residency. Each Raft consensus group maps 1:1 to
+/// a region. Organizations declare a region governing where their data is stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum Region {
+    Unspecified = 0,
+    Global = 1,
+    /// North America (10-19)
+    UsEastVa = 10,
+    UsWestOr = 11,
+    CaCentralQc = 12,
+    /// South America (20-29)
+    BrSoutheastSp = 20,
+    /// Europe — EU/EEA (30-39)
+    IeEastDublin = 30,
+    FrNorthParis = 31,
+    DeCentralFrankfurt = 32,
+    SeEastStockholm = 33,
+    ItNorthMilan = 34,
+    /// United Kingdom (40-49)
+    UkSouthLondon = 40,
+    /// Middle East & Africa (50-59)
+    SaCentralRiyadh = 50,
+    BhCentralManama = 51,
+    AeCentralDubai = 52,
+    IlCentralTelAviv = 53,
+    ZaSouthCapeTown = 54,
+    NgWestLagos = 55,
+    /// Asia Pacific (60-69)
+    SgCentralSingapore = 60,
+    AuEastSydney = 61,
+    IdWestJakarta = 62,
+    JpEastTokyo = 63,
+    KrCentralSeoul = 64,
+    InWestMumbai = 65,
+    VnSouthHcmc = 66,
+    /// China (70-79)
+    CnNorthBeijing = 70,
+}
+impl Region {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "REGION_UNSPECIFIED",
+            Self::Global => "REGION_GLOBAL",
+            Self::UsEastVa => "REGION_US_EAST_VA",
+            Self::UsWestOr => "REGION_US_WEST_OR",
+            Self::CaCentralQc => "REGION_CA_CENTRAL_QC",
+            Self::BrSoutheastSp => "REGION_BR_SOUTHEAST_SP",
+            Self::IeEastDublin => "REGION_IE_EAST_DUBLIN",
+            Self::FrNorthParis => "REGION_FR_NORTH_PARIS",
+            Self::DeCentralFrankfurt => "REGION_DE_CENTRAL_FRANKFURT",
+            Self::SeEastStockholm => "REGION_SE_EAST_STOCKHOLM",
+            Self::ItNorthMilan => "REGION_IT_NORTH_MILAN",
+            Self::UkSouthLondon => "REGION_UK_SOUTH_LONDON",
+            Self::SaCentralRiyadh => "REGION_SA_CENTRAL_RIYADH",
+            Self::BhCentralManama => "REGION_BH_CENTRAL_MANAMA",
+            Self::AeCentralDubai => "REGION_AE_CENTRAL_DUBAI",
+            Self::IlCentralTelAviv => "REGION_IL_CENTRAL_TEL_AVIV",
+            Self::ZaSouthCapeTown => "REGION_ZA_SOUTH_CAPE_TOWN",
+            Self::NgWestLagos => "REGION_NG_WEST_LAGOS",
+            Self::SgCentralSingapore => "REGION_SG_CENTRAL_SINGAPORE",
+            Self::AuEastSydney => "REGION_AU_EAST_SYDNEY",
+            Self::IdWestJakarta => "REGION_ID_WEST_JAKARTA",
+            Self::JpEastTokyo => "REGION_JP_EAST_TOKYO",
+            Self::KrCentralSeoul => "REGION_KR_CENTRAL_SEOUL",
+            Self::InWestMumbai => "REGION_IN_WEST_MUMBAI",
+            Self::VnSouthHcmc => "REGION_VN_SOUTH_HCMC",
+            Self::CnNorthBeijing => "REGION_CN_NORTH_BEIJING",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "REGION_UNSPECIFIED" => Some(Self::Unspecified),
+            "REGION_GLOBAL" => Some(Self::Global),
+            "REGION_US_EAST_VA" => Some(Self::UsEastVa),
+            "REGION_US_WEST_OR" => Some(Self::UsWestOr),
+            "REGION_CA_CENTRAL_QC" => Some(Self::CaCentralQc),
+            "REGION_BR_SOUTHEAST_SP" => Some(Self::BrSoutheastSp),
+            "REGION_IE_EAST_DUBLIN" => Some(Self::IeEastDublin),
+            "REGION_FR_NORTH_PARIS" => Some(Self::FrNorthParis),
+            "REGION_DE_CENTRAL_FRANKFURT" => Some(Self::DeCentralFrankfurt),
+            "REGION_SE_EAST_STOCKHOLM" => Some(Self::SeEastStockholm),
+            "REGION_IT_NORTH_MILAN" => Some(Self::ItNorthMilan),
+            "REGION_UK_SOUTH_LONDON" => Some(Self::UkSouthLondon),
+            "REGION_SA_CENTRAL_RIYADH" => Some(Self::SaCentralRiyadh),
+            "REGION_BH_CENTRAL_MANAMA" => Some(Self::BhCentralManama),
+            "REGION_AE_CENTRAL_DUBAI" => Some(Self::AeCentralDubai),
+            "REGION_IL_CENTRAL_TEL_AVIV" => Some(Self::IlCentralTelAviv),
+            "REGION_ZA_SOUTH_CAPE_TOWN" => Some(Self::ZaSouthCapeTown),
+            "REGION_NG_WEST_LAGOS" => Some(Self::NgWestLagos),
+            "REGION_SG_CENTRAL_SINGAPORE" => Some(Self::SgCentralSingapore),
+            "REGION_AU_EAST_SYDNEY" => Some(Self::AuEastSydney),
+            "REGION_ID_WEST_JAKARTA" => Some(Self::IdWestJakarta),
+            "REGION_JP_EAST_TOKYO" => Some(Self::JpEastTokyo),
+            "REGION_KR_CENTRAL_SEOUL" => Some(Self::KrCentralSeoul),
+            "REGION_IN_WEST_MUMBAI" => Some(Self::InWestMumbai),
+            "REGION_VN_SOUTH_HCMC" => Some(Self::VnSouthHcmc),
+            "REGION_CN_NORTH_BEIJING" => Some(Self::CnNorthBeijing),
+            _ => None,
+        }
+    }
 }
 /// User account status (lifecycle state machine)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
@@ -2215,7 +2515,7 @@ pub enum OrganizationStatus {
     Unspecified = 0,
     /// Accepting requests
     Active = 1,
-    /// Being migrated to another shard
+    /// Being migrated to another region
     Migrating = 2,
     /// Billing or policy suspension
     Suspended = 3,
@@ -2579,34 +2879,51 @@ impl HealthStatus {
         }
     }
 }
-/// Node role in the cluster (Raft membership type)
+/// Administrative permission for sensitive operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
-pub enum NodeRole {
+pub enum AdminPermission {
     Unspecified = 0,
-    /// Participates in Raft elections (max 5 per cluster)
-    Voter = 1,
-    /// Replicates data but doesn't vote (for scaling)
-    Learner = 2,
+    MigrateOrganization = 1,
+    MigrateUserRegion = 2,
+    EraseUser = 3,
+    RotateRegionKey = 4,
+    DecommissionRegionKey = 5,
+    RotateBlindingKey = 6,
+    ManageRegionMembership = 7,
 }
-impl NodeRole {
+impl AdminPermission {
     /// String value of the enum field names used in the ProtoBuf definition.
     ///
     /// The values are not transformed in any way and thus are considered stable
     /// (if the ProtoBuf definition does not change) and safe for programmatic use.
     pub fn as_str_name(&self) -> &'static str {
         match self {
-            Self::Unspecified => "NODE_ROLE_UNSPECIFIED",
-            Self::Voter => "NODE_ROLE_VOTER",
-            Self::Learner => "NODE_ROLE_LEARNER",
+            Self::Unspecified => "ADMIN_PERMISSION_UNSPECIFIED",
+            Self::MigrateOrganization => "ADMIN_PERMISSION_MIGRATE_ORGANIZATION",
+            Self::MigrateUserRegion => "ADMIN_PERMISSION_MIGRATE_USER_REGION",
+            Self::EraseUser => "ADMIN_PERMISSION_ERASE_USER",
+            Self::RotateRegionKey => "ADMIN_PERMISSION_ROTATE_REGION_KEY",
+            Self::DecommissionRegionKey => "ADMIN_PERMISSION_DECOMMISSION_REGION_KEY",
+            Self::RotateBlindingKey => "ADMIN_PERMISSION_ROTATE_BLINDING_KEY",
+            Self::ManageRegionMembership => "ADMIN_PERMISSION_MANAGE_REGION_MEMBERSHIP",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
-            "NODE_ROLE_UNSPECIFIED" => Some(Self::Unspecified),
-            "NODE_ROLE_VOTER" => Some(Self::Voter),
-            "NODE_ROLE_LEARNER" => Some(Self::Learner),
+            "ADMIN_PERMISSION_UNSPECIFIED" => Some(Self::Unspecified),
+            "ADMIN_PERMISSION_MIGRATE_ORGANIZATION" => Some(Self::MigrateOrganization),
+            "ADMIN_PERMISSION_MIGRATE_USER_REGION" => Some(Self::MigrateUserRegion),
+            "ADMIN_PERMISSION_ERASE_USER" => Some(Self::EraseUser),
+            "ADMIN_PERMISSION_ROTATE_REGION_KEY" => Some(Self::RotateRegionKey),
+            "ADMIN_PERMISSION_DECOMMISSION_REGION_KEY" => {
+                Some(Self::DecommissionRegionKey)
+            }
+            "ADMIN_PERMISSION_ROTATE_BLINDING_KEY" => Some(Self::RotateBlindingKey),
+            "ADMIN_PERMISSION_MANAGE_REGION_MEMBERSHIP" => {
+                Some(Self::ManageRegionMembership)
+            }
             _ => None,
         }
     }
@@ -4290,7 +4607,7 @@ pub mod admin_service_client {
                 .insert(GrpcMethod::new("ledger.v1.AdminService", "DeleteOrganization"));
             self.inner.unary(req, path, codec).await
         }
-        /// Get organization info including shard assignment.
+        /// Get organization info including region assignment.
         /// Lookup by slug only — organization names are not unique.
         pub async fn get_organization(
             &mut self,
@@ -4339,6 +4656,63 @@ pub mod admin_service_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("ledger.v1.AdminService", "ListOrganizations"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Migrate an organization from one region to another.
+        /// Non-protected to non-protected is metadata-only (no data movement).
+        /// Protected region migrations involve full data transfer via saga.
+        /// Writes to the organization are rejected during migration.
+        pub async fn migrate_organization(
+            &mut self,
+            request: impl tonic::IntoRequest<super::MigrateOrganizationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::MigrateOrganizationResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/MigrateOrganization",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.AdminService", "MigrateOrganization"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Migrate a user's PII from one regional store to another.
+        /// Updates the GLOBAL directory entry and moves data via saga.
+        /// Authenticated API calls are rejected during migration.
+        pub async fn migrate_user_region(
+            &mut self,
+            request: impl tonic::IntoRequest<super::MigrateUserRegionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::MigrateUserRegionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/MigrateUserRegion",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "MigrateUserRegion"));
             self.inner.unary(req, path, codec).await
         }
         /// Create a new vault
@@ -4757,7 +5131,7 @@ pub mod admin_service_client {
                 .insert(GrpcMethod::new("ledger.v1.AdminService", "GetConfig"));
             self.inner.unary(req, path, codec).await
         }
-        /// Create a backup of the current shard state.
+        /// Create a backup of the current region state.
         /// Triggers a consistent snapshot, compresses it, and writes to the configured
         /// backup destination. Includes chain commitment for integrity verification.
         pub async fn create_backup(
@@ -4809,7 +5183,7 @@ pub mod admin_service_client {
                 .insert(GrpcMethod::new("ledger.v1.AdminService", "ListBackups"));
             self.inner.unary(req, path, codec).await
         }
-        /// Restore from a backup. Stops the shard, restores state from backup,
+        /// Restore from a backup. Stops the region, restores state from backup,
         /// and resumes. Requires explicit confirmation via the confirm field.
         pub async fn restore_backup(
             &mut self,
@@ -4833,6 +5207,173 @@ pub mod admin_service_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("ledger.v1.AdminService", "RestoreBackup"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Initiate rotation of the email blinding key. Triggers asynchronous
+        /// re-hashing of all email HMAC entries in the global control plane.
+        /// Returns immediately; poll GetBlindingKeyRehashStatus for progress.
+        pub async fn rotate_blinding_key(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RotateBlindingKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RotateBlindingKeyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/RotateBlindingKey",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "RotateBlindingKey"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Check the progress of an in-flight blinding key rotation.
+        pub async fn get_blinding_key_rehash_status(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetBlindingKeyRehashStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetBlindingKeyRehashStatusResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/GetBlindingKeyRehashStatus",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "ledger.v1.AdminService",
+                        "GetBlindingKeyRehashStatus",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Initiate rotation of the Region Master Key (RMK) for a region.
+        /// Triggers asynchronous DEK re-wrapping of all page sidecar metadata.
+        /// Returns immediately; poll GetRewrapStatus for progress.
+        pub async fn rotate_region_key(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RotateRegionKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RotateRegionKeyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/RotateRegionKey",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "RotateRegionKey"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Check the progress of an in-flight DEK re-wrapping job.
+        pub async fn get_rewrap_status(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetRewrapStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetRewrapStatusResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/GetRewrapStatus",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "GetRewrapStatus"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Erase a user's PII via crypto-shredding. Forward-only finalization:
+        /// destroys the per-subject encryption key, scrubs directory entry,
+        /// removes email hash indexes, and creates erasure audit record.
+        /// Each step is idempotent — safe to retry on failure.
+        pub async fn erase_user(
+            &mut self,
+            request: impl tonic::IntoRequest<super::EraseUserRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::EraseUserResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/EraseUser",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "EraseUser"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Request a confirmation token for an irreversible operation.
+        /// Returns a single-use, time-limited token that must be presented
+        /// when executing the operation. Required for EraseUser and
+        /// DecommissionRegionKey.
+        pub async fn request_confirmation(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RequestConfirmationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RequestConfirmationResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/RequestConfirmation",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.AdminService", "RequestConfirmation"),
+                );
             self.inner.unary(req, path, codec).await
         }
     }
@@ -4867,7 +5408,7 @@ pub mod admin_service_server {
             tonic::Response<super::DeleteOrganizationResponse>,
             tonic::Status,
         >;
-        /// Get organization info including shard assignment.
+        /// Get organization info including region assignment.
         /// Lookup by slug only — organization names are not unique.
         async fn get_organization(
             &self,
@@ -4882,6 +5423,27 @@ pub mod admin_service_server {
             request: tonic::Request<super::ListOrganizationsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ListOrganizationsResponse>,
+            tonic::Status,
+        >;
+        /// Migrate an organization from one region to another.
+        /// Non-protected to non-protected is metadata-only (no data movement).
+        /// Protected region migrations involve full data transfer via saga.
+        /// Writes to the organization are rejected during migration.
+        async fn migrate_organization(
+            &self,
+            request: tonic::Request<super::MigrateOrganizationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::MigrateOrganizationResponse>,
+            tonic::Status,
+        >;
+        /// Migrate a user's PII from one regional store to another.
+        /// Updates the GLOBAL directory entry and moves data via saga.
+        /// Authenticated API calls are rejected during migration.
+        async fn migrate_user_region(
+            &self,
+            request: tonic::Request<super::MigrateUserRegionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::MigrateUserRegionResponse>,
             tonic::Status,
         >;
         /// Create a new vault
@@ -5025,7 +5587,7 @@ pub mod admin_service_server {
             tonic::Response<super::GetConfigResponse>,
             tonic::Status,
         >;
-        /// Create a backup of the current shard state.
+        /// Create a backup of the current region state.
         /// Triggers a consistent snapshot, compresses it, and writes to the configured
         /// backup destination. Includes chain commitment for integrity verification.
         async fn create_backup(
@@ -5043,13 +5605,71 @@ pub mod admin_service_server {
             tonic::Response<super::ListBackupsResponse>,
             tonic::Status,
         >;
-        /// Restore from a backup. Stops the shard, restores state from backup,
+        /// Restore from a backup. Stops the region, restores state from backup,
         /// and resumes. Requires explicit confirmation via the confirm field.
         async fn restore_backup(
             &self,
             request: tonic::Request<super::RestoreBackupRequest>,
         ) -> std::result::Result<
             tonic::Response<super::RestoreBackupResponse>,
+            tonic::Status,
+        >;
+        /// Initiate rotation of the email blinding key. Triggers asynchronous
+        /// re-hashing of all email HMAC entries in the global control plane.
+        /// Returns immediately; poll GetBlindingKeyRehashStatus for progress.
+        async fn rotate_blinding_key(
+            &self,
+            request: tonic::Request<super::RotateBlindingKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RotateBlindingKeyResponse>,
+            tonic::Status,
+        >;
+        /// Check the progress of an in-flight blinding key rotation.
+        async fn get_blinding_key_rehash_status(
+            &self,
+            request: tonic::Request<super::GetBlindingKeyRehashStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetBlindingKeyRehashStatusResponse>,
+            tonic::Status,
+        >;
+        /// Initiate rotation of the Region Master Key (RMK) for a region.
+        /// Triggers asynchronous DEK re-wrapping of all page sidecar metadata.
+        /// Returns immediately; poll GetRewrapStatus for progress.
+        async fn rotate_region_key(
+            &self,
+            request: tonic::Request<super::RotateRegionKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RotateRegionKeyResponse>,
+            tonic::Status,
+        >;
+        /// Check the progress of an in-flight DEK re-wrapping job.
+        async fn get_rewrap_status(
+            &self,
+            request: tonic::Request<super::GetRewrapStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetRewrapStatusResponse>,
+            tonic::Status,
+        >;
+        /// Erase a user's PII via crypto-shredding. Forward-only finalization:
+        /// destroys the per-subject encryption key, scrubs directory entry,
+        /// removes email hash indexes, and creates erasure audit record.
+        /// Each step is idempotent — safe to retry on failure.
+        async fn erase_user(
+            &self,
+            request: tonic::Request<super::EraseUserRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::EraseUserResponse>,
+            tonic::Status,
+        >;
+        /// Request a confirmation token for an irreversible operation.
+        /// Returns a single-use, time-limited token that must be presented
+        /// when executing the operation. Required for EraseUser and
+        /// DecommissionRegionKey.
+        async fn request_confirmation(
+            &self,
+            request: tonic::Request<super::RequestConfirmationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RequestConfirmationResponse>,
             tonic::Status,
         >;
     }
@@ -5297,6 +5917,98 @@ pub mod admin_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ListOrganizationsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/MigrateOrganization" => {
+                    #[allow(non_camel_case_types)]
+                    struct MigrateOrganizationSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::MigrateOrganizationRequest>
+                    for MigrateOrganizationSvc<T> {
+                        type Response = super::MigrateOrganizationResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::MigrateOrganizationRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::migrate_organization(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = MigrateOrganizationSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/MigrateUserRegion" => {
+                    #[allow(non_camel_case_types)]
+                    struct MigrateUserRegionSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::MigrateUserRegionRequest>
+                    for MigrateUserRegionSvc<T> {
+                        type Response = super::MigrateUserRegionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::MigrateUserRegionRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::migrate_user_region(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = MigrateUserRegionSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -6154,6 +6866,287 @@ pub mod admin_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = RestoreBackupSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/RotateBlindingKey" => {
+                    #[allow(non_camel_case_types)]
+                    struct RotateBlindingKeySvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::RotateBlindingKeyRequest>
+                    for RotateBlindingKeySvc<T> {
+                        type Response = super::RotateBlindingKeyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RotateBlindingKeyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::rotate_blinding_key(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RotateBlindingKeySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/GetBlindingKeyRehashStatus" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetBlindingKeyRehashStatusSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<
+                        super::GetBlindingKeyRehashStatusRequest,
+                    > for GetBlindingKeyRehashStatusSvc<T> {
+                        type Response = super::GetBlindingKeyRehashStatusResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::GetBlindingKeyRehashStatusRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::get_blinding_key_rehash_status(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetBlindingKeyRehashStatusSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/RotateRegionKey" => {
+                    #[allow(non_camel_case_types)]
+                    struct RotateRegionKeySvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::RotateRegionKeyRequest>
+                    for RotateRegionKeySvc<T> {
+                        type Response = super::RotateRegionKeyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RotateRegionKeyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::rotate_region_key(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RotateRegionKeySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/GetRewrapStatus" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetRewrapStatusSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::GetRewrapStatusRequest>
+                    for GetRewrapStatusSvc<T> {
+                        type Response = super::GetRewrapStatusResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetRewrapStatusRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::get_rewrap_status(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetRewrapStatusSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/EraseUser" => {
+                    #[allow(non_camel_case_types)]
+                    struct EraseUserSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::EraseUserRequest>
+                    for EraseUserSvc<T> {
+                        type Response = super::EraseUserResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::EraseUserRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::erase_user(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = EraseUserSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/RequestConfirmation" => {
+                    #[allow(non_camel_case_types)]
+                    struct RequestConfirmationSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::RequestConfirmationRequest>
+                    for RequestConfirmationSvc<T> {
+                        type Response = super::RequestConfirmationResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RequestConfirmationRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::request_confirmation(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RequestConfirmationSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

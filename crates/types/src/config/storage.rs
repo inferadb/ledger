@@ -1,11 +1,12 @@
 //! Storage engine configuration for B+ tree, compaction, and integrity.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::ConfigError;
+use crate::Region;
 
 /// Minimum cache size: 1 MB.
 const MIN_CACHE_SIZE_BYTES: usize = 1024 * 1024;
@@ -363,6 +364,11 @@ fn default_backup_interval_secs() -> u64 {
     86400
 }
 
+/// Default maximum backup retention in days for GDPR compliance.
+fn default_max_backup_retention_days() -> u32 {
+    90
+}
+
 /// Backup and restore configuration.
 ///
 /// Controls where backups are stored, how many to retain, and whether
@@ -402,6 +408,17 @@ pub struct BackupConfig {
     /// Only used when `enabled` is true. Must be >= 60. Default: 86400 (24 hours).
     #[serde(default = "default_backup_interval_secs")]
     pub interval_secs: u64,
+
+    /// Maximum backup retention period in days for GDPR erasure compliance.
+    ///
+    /// Pre-erasure backups contain subject encryption keys. After a user
+    /// exercises right to erasure, operators should create a fresh backup
+    /// and retire pre-erasure backups within this window. The system emits
+    /// `ledger_backup_pre_erasure_count` gauge for monitoring.
+    ///
+    /// Must be >= 1. Default: 90.
+    #[serde(default = "default_max_backup_retention_days")]
+    pub max_backup_retention_days: u32,
 }
 
 #[bon::bon]
@@ -420,6 +437,7 @@ impl BackupConfig {
         #[builder(default = default_backup_retention_count())] retention_count: usize,
         #[builder(default)] enabled: bool,
         #[builder(default = default_backup_interval_secs())] interval_secs: u64,
+        #[builder(default = default_max_backup_retention_days())] max_backup_retention_days: u32,
     ) -> Result<Self, ConfigError> {
         if destination.is_empty() {
             return Err(ConfigError::Validation {
@@ -436,7 +454,12 @@ impl BackupConfig {
                 message: "backup interval_secs must be >= 60 when enabled".to_string(),
             });
         }
-        Ok(Self { destination, retention_count, enabled, interval_secs })
+        if max_backup_retention_days == 0 {
+            return Err(ConfigError::Validation {
+                message: "backup max_backup_retention_days must be >= 1".to_string(),
+            });
+        }
+        Ok(Self { destination, retention_count, enabled, interval_secs, max_backup_retention_days })
     }
 
     /// Validates an existing backup configuration (e.g., after deserialization).
@@ -458,6 +481,11 @@ impl BackupConfig {
         if self.enabled && self.interval_secs < 60 {
             return Err(ConfigError::Validation {
                 message: "backup interval_secs must be >= 60 when enabled".to_string(),
+            });
+        }
+        if self.max_backup_retention_days == 0 {
+            return Err(ConfigError::Validation {
+                message: "backup max_backup_retention_days must be >= 1".to_string(),
             });
         }
         Ok(())
@@ -550,6 +578,43 @@ pub struct TieredStorageConfig {
     /// Must be >= 5 MB. Default: 50 MB.
     #[serde(default = "default_multipart_threshold_bytes")]
     pub multipart_threshold_bytes: usize,
+
+    /// Per-region warm tier URL overrides.
+    ///
+    /// Protected regions require in-region object storage buckets for data
+    /// residency compliance. This map overrides the default `warm_url` for
+    /// specific regions (e.g., `CA_CENTRAL_QC` → `s3://ca-central-snapshots/`).
+    ///
+    /// Regions not listed here use the default `warm_url`.
+    #[serde(default)]
+    pub region_overrides: HashMap<Region, RegionTieredStorageOverride>,
+}
+
+/// Per-region override for tiered storage configuration.
+///
+/// Allows protected regions to use in-region object storage buckets
+/// for data residency compliance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RegionTieredStorageOverride {
+    /// Object storage URL for this region's warm tier.
+    ///
+    /// Overrides the default `warm_url` from `TieredStorageConfig`.
+    /// Must point to storage within the region's jurisdiction.
+    pub warm_url: String,
+}
+
+impl TieredStorageConfig {
+    /// Returns the warm tier URL for a specific region.
+    ///
+    /// Checks `region_overrides` first, then falls back to the default `warm_url`.
+    /// Returns `None` if neither is configured (local-only mode for this region).
+    pub fn warm_url_for_region(&self, region: Region) -> Option<&str> {
+        if let Some(override_config) = self.region_overrides.get(&region) {
+            Some(&override_config.warm_url)
+        } else {
+            self.warm_url.as_deref()
+        }
+    }
 }
 
 impl Default for TieredStorageConfig {
@@ -561,6 +626,7 @@ impl Default for TieredStorageConfig {
             cold_enabled: false,
             demote_interval_secs: default_demote_interval_secs(),
             multipart_threshold_bytes: default_multipart_threshold_bytes(),
+            region_overrides: HashMap::new(),
         }
     }
 }
@@ -586,6 +652,7 @@ impl TieredStorageConfig {
         #[builder(default)] cold_enabled: bool,
         #[builder(default = default_demote_interval_secs())] demote_interval_secs: u64,
         #[builder(default = default_multipart_threshold_bytes())] multipart_threshold_bytes: usize,
+        #[builder(default)] region_overrides: HashMap<Region, RegionTieredStorageOverride>,
     ) -> Result<Self, ConfigError> {
         let config = Self {
             hot_count,
@@ -594,6 +661,7 @@ impl TieredStorageConfig {
             cold_enabled,
             demote_interval_secs,
             multipart_threshold_bytes,
+            region_overrides,
         };
         config.validate()?;
         Ok(config)
@@ -623,6 +691,96 @@ impl TieredStorageConfig {
                 ),
             });
         }
+        for (region, override_config) in &self.region_overrides {
+            if override_config.warm_url.is_empty() {
+                return Err(ConfigError::Validation {
+                    message: format!(
+                        "tiered storage region override for {} has empty warm_url",
+                        region
+                    ),
+                });
+            }
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tiered_storage_tests {
+    use super::*;
+
+    #[test]
+    fn test_warm_url_for_region_default() {
+        let config = TieredStorageConfig {
+            warm_url: Some("s3://default-bucket/snapshots".to_string()),
+            ..Default::default()
+        };
+        // Region with no override → uses default
+        assert_eq!(
+            config.warm_url_for_region(Region::US_EAST_VA),
+            Some("s3://default-bucket/snapshots")
+        );
+    }
+
+    #[test]
+    fn test_warm_url_for_region_override() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            Region::CA_CENTRAL_QC,
+            RegionTieredStorageOverride {
+                warm_url: "s3://ca-central-bucket/snapshots".to_string(),
+            },
+        );
+        let config = TieredStorageConfig {
+            warm_url: Some("s3://default-bucket/snapshots".to_string()),
+            region_overrides: overrides,
+            ..Default::default()
+        };
+        // Overridden region → uses override
+        assert_eq!(
+            config.warm_url_for_region(Region::CA_CENTRAL_QC),
+            Some("s3://ca-central-bucket/snapshots")
+        );
+        // Non-overridden → uses default
+        assert_eq!(
+            config.warm_url_for_region(Region::US_EAST_VA),
+            Some("s3://default-bucket/snapshots")
+        );
+    }
+
+    #[test]
+    fn test_warm_url_for_region_no_default_no_override() {
+        let config = TieredStorageConfig::default();
+        // No warm_url and no override → None (local-only)
+        assert_eq!(config.warm_url_for_region(Region::GLOBAL), None);
+    }
+
+    #[test]
+    fn test_warm_url_for_region_override_takes_precedence() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            Region::IE_EAST_DUBLIN,
+            RegionTieredStorageOverride { warm_url: "s3://eu-west-bucket/snapshots".to_string() },
+        );
+        let config = TieredStorageConfig {
+            warm_url: Some("s3://us-default/snapshots".to_string()),
+            region_overrides: overrides,
+            ..Default::default()
+        };
+        assert_eq!(
+            config.warm_url_for_region(Region::IE_EAST_DUBLIN),
+            Some("s3://eu-west-bucket/snapshots")
+        );
+    }
+
+    #[test]
+    fn test_region_override_empty_url_rejected() {
+        let mut overrides = HashMap::new();
+        overrides
+            .insert(Region::CA_CENTRAL_QC, RegionTieredStorageOverride { warm_url: String::new() });
+        let config = TieredStorageConfig { region_overrides: overrides, ..Default::default() };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("empty warm_url"));
     }
 }

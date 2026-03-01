@@ -9,22 +9,28 @@ use inferadb_ledger_proto::proto::{
     ClusterMemberRole, CreateBackupRequest, CreateBackupResponse, CreateOrganizationRequest,
     CreateOrganizationResponse, CreateSnapshotRequest, CreateSnapshotResponse, CreateVaultRequest,
     CreateVaultResponse, DeleteOrganizationRequest, DeleteOrganizationResponse, DeleteVaultRequest,
-    DeleteVaultResponse, GetClusterInfoRequest, GetClusterInfoResponse, GetConfigRequest,
-    GetConfigResponse, GetNodeInfoRequest, GetNodeInfoResponse, GetOrganizationRequest,
-    GetOrganizationResponse, GetVaultRequest, GetVaultResponse, Hash, IntegrityIssue,
+    DeleteVaultResponse, EraseUserRequest, EraseUserResponse, GetBlindingKeyRehashStatusRequest,
+    GetBlindingKeyRehashStatusResponse, GetClusterInfoRequest, GetClusterInfoResponse,
+    GetConfigRequest, GetConfigResponse, GetNodeInfoRequest, GetNodeInfoResponse,
+    GetOrganizationRequest, GetOrganizationResponse, GetRewrapStatusRequest,
+    GetRewrapStatusResponse, GetVaultRequest, GetVaultResponse, Hash, IntegrityIssue,
     JoinClusterRequest, JoinClusterResponse, LeaveClusterRequest, LeaveClusterResponse,
     ListBackupsRequest, ListBackupsResponse, ListOrganizationsRequest, ListOrganizationsResponse,
-    ListVaultsRequest, ListVaultsResponse, NodeId, OrganizationSlug, RecoverVaultRequest,
-    RecoverVaultResponse, RestoreBackupRequest, RestoreBackupResponse, ShardId,
+    ListVaultsRequest, ListVaultsResponse, MigrateOrganizationRequest, MigrateOrganizationResponse,
+    MigrateUserRegionRequest, MigrateUserRegionResponse, NodeId, OrganizationSlug,
+    OrganizationStatus as ProtoOrganizationStatus, RecoverVaultRequest, RecoverVaultResponse,
+    Region as ProtoRegion, RestoreBackupRequest, RestoreBackupResponse, RotateBlindingKeyRequest,
+    RotateBlindingKeyResponse, RotateRegionKeyRequest, RotateRegionKeyResponse,
     TransferLeadershipRequest, TransferLeadershipResponse, UpdateConfigRequest,
-    UpdateConfigResponse, VaultHealthProto, VaultSlug as ProtoVaultSlug,
+    UpdateConfigResponse, UserSlug as ProtoUserSlug, VaultHealthProto, VaultSlug as ProtoVaultSlug,
     admin_service_server::AdminService,
 };
-use inferadb_ledger_state::{BlockArchive, StateLayer};
+use inferadb_ledger_state::{BlockArchive, StateLayer, system::SystemOrganizationService};
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{
-    OrganizationId as DomainOrganizationId, OrganizationSlug as DomainOrganizationSlug,
-    ShardId as DomainShardId, VaultEntry, VaultId as DomainVaultId, VaultSlug, ZERO_HASH,
+    ALL_REGIONS, OrganizationId as DomainOrganizationId,
+    OrganizationSlug as DomainOrganizationSlug, VaultEntry, VaultId as DomainVaultId, VaultSlug,
+    ZERO_HASH,
     config::ValidationConfig,
     events::{EventAction, EventOutcome as EventOutcomeType},
     hash_eq, validation,
@@ -44,7 +50,7 @@ use crate::{
     trace_context,
     types::{
         BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
-        RaftPayload,
+        RaftPayload, SystemRequest,
     },
 };
 
@@ -102,6 +108,9 @@ pub struct AdminServiceImpl {
     /// Lock to prevent concurrent leader transfer attempts.
     #[builder(default = Arc::new(std::sync::atomic::AtomicBool::new(false)))]
     transfer_lock: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared DEK re-wrapping progress (read by `GetRewrapStatus`).
+    #[builder(default)]
+    rewrap_progress: Option<Arc<crate::dek_rewrap::RewrapProgress>>,
 }
 
 impl AdminServiceImpl {
@@ -175,7 +184,7 @@ impl AdminServiceImpl {
 
 #[tonic::async_trait]
 impl AdminService for AdminServiceImpl {
-    /// Creates a new organization, generates a Snowflake slug, and assigns it to a shard via Raft.
+    /// Creates a new organization, generates a Snowflake slug, and assigns it to a region via Raft.
     ///
     /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn create_organization(
@@ -217,20 +226,75 @@ impl AdminService for AdminServiceImpl {
         validation::validate_organization_name(&req.name, &self.validation_config)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
+        // Validate and convert proto region to domain region
+        let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
+
+        // GLOBAL is the control plane region — organizations must choose a data
+        // residency region
+        if region == inferadb_ledger_types::Region::GLOBAL {
+            let mut context = std::collections::HashMap::new();
+            context.insert("region".to_string(), "GLOBAL".to_string());
+            let details = super::error_details::build_error_details(
+                inferadb_ledger_types::ErrorCode::AppInvalidRegionAssignment.as_u16(),
+                false,
+                None,
+                context,
+                Some(
+                    inferadb_ledger_types::ErrorCode::AppInvalidRegionAssignment.suggested_action(),
+                ),
+            );
+            let encoded = prost::Message::encode_to_vec(&details);
+            return Err(Status::with_details(
+                tonic::Code::InvalidArgument,
+                "Organizations cannot be assigned to the GLOBAL control plane region",
+                encoded.into(),
+            ));
+        }
+
+        // For protected regions, validate sufficient in-region nodes for quorum
+        if region.requires_residency() {
+            let sys_svc = SystemOrganizationService::new(self.state.clone());
+            let nodes = sys_svc.list_nodes().map_err(|e| {
+                Status::internal(format!("Failed to list nodes for region validation: {e}"))
+            })?;
+            let in_region_count = nodes.iter().filter(|n| n.region == region).count();
+            if in_region_count < 3 {
+                let mut context = std::collections::HashMap::new();
+                context.insert("region".to_string(), region.as_str().to_string());
+                context.insert("available_nodes".to_string(), in_region_count.to_string());
+                context.insert("required_nodes".to_string(), "3".to_string());
+                let details = super::error_details::build_error_details(
+                    inferadb_ledger_types::ErrorCode::AppInsufficientRegionNodes.as_u16(),
+                    false,
+                    None,
+                    context,
+                    Some(
+                        inferadb_ledger_types::ErrorCode::AppInsufficientRegionNodes
+                            .suggested_action(),
+                    ),
+                );
+                let encoded = prost::Message::encode_to_vec(&details);
+                return Err(Status::with_details(
+                    tonic::Code::FailedPrecondition,
+                    format!(
+                        "Insufficient in-region nodes for protected region {}: \
+                         {in_region_count} available, 3 required",
+                        region.as_str()
+                    ),
+                    encoded.into(),
+                ));
+            }
+        }
+
         // Generate a Snowflake slug for the organization
-        let slug = inferadb_ledger_types::snowflake::generate_organization_slug().map_err(|e| {
-            Status::internal(format!("Failed to generate organization slug: {}", e))
-        })?;
+        let slug = inferadb_ledger_types::snowflake::generate_organization_slug()
+            .map_err(|e| Status::internal(format!("Failed to generate organization slug: {e}")))?;
 
         // Submit create organization through Raft
         let tier = crate::proto_compat::organization_tier_from_proto(req.tier());
 
-        let ledger_request = LedgerRequest::CreateOrganization {
-            name: req.name,
-            slug,
-            shard: req.shard.map(|s| DomainShardId::new(s.id)),
-            tier,
-        };
+        let ledger_request =
+            LedgerRequest::CreateOrganization { name: req.name, slug, region, tier };
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
         let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
@@ -268,15 +332,21 @@ impl AdminService for AdminServiceImpl {
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
         match result.data {
-            LedgerResponse::OrganizationCreated { organization: organization_id, shard } => {
+            LedgerResponse::OrganizationCreated {
+                organization: organization_id,
+                region: assigned_region,
+            } => {
                 ctx.set_organization(slug.value());
+                ctx.set_region(assigned_region);
                 ctx.set_success();
                 metrics::record_organization_operation(organization_id, "admin");
                 metrics::record_organization_latency(organization_id, "admin", ctx.elapsed_secs());
                 let organization = slug_resolver.resolve_slug(organization_id)?;
+                // Convert domain Region back to proto Region for response
+                let proto_region: ProtoRegion = assigned_region.into();
                 Ok(Response::new(CreateOrganizationResponse {
                     slug: Some(OrganizationSlug { slug: organization.value() }),
-                    shard: Some(ShardId { id: shard.value() }),
+                    region: proto_region.into(),
                 }))
             },
             LedgerResponse::Error { message } => {
@@ -410,7 +480,7 @@ impl AdminService for AdminServiceImpl {
         }
     }
 
-    /// Retrieves organization metadata by slug, including shard assignment and status.
+    /// Retrieves organization metadata by slug, including region assignment and status.
     ///
     /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn get_organization(
@@ -463,7 +533,7 @@ impl AdminService for AdminServiceImpl {
                 Ok(Response::new(GetOrganizationResponse {
                     slug: Some(OrganizationSlug { slug: organization.value() }),
                     name: org.name,
-                    shard: Some(ShardId { id: org.shard.value() }),
+                    region: ProtoRegion::from(org.region).into(),
                     member_nodes: vec![],
                     status: status.into(),
                     config_version: 0,
@@ -478,7 +548,7 @@ impl AdminService for AdminServiceImpl {
         }
     }
 
-    /// Lists all organizations across all shards with their metadata.
+    /// Lists all organizations across all regions with their metadata.
     ///
     /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn list_organizations(
@@ -508,7 +578,7 @@ impl AdminService for AdminServiceImpl {
                 Ok(inferadb_ledger_proto::proto::GetOrganizationResponse {
                     slug: Some(OrganizationSlug { slug: organization.value() }),
                     name: org.name,
-                    shard: Some(ShardId { id: org.shard.value() }),
+                    region: ProtoRegion::from(org.region).into(),
                     member_nodes: vec![],
                     status: status.into(),
                     config_version: 0,
@@ -962,8 +1032,8 @@ impl AdminService for AdminServiceImpl {
         })?;
         ctx.end_raft_timer();
 
-        // Get actual shard height from applied state
-        let block_height = self.applied_state.shard_height();
+        // Get actual region height from applied state
+        let block_height = self.applied_state.region_height();
         ctx.set_block_height(block_height);
         ctx.set_success();
 
@@ -1096,7 +1166,7 @@ impl AdminService for AdminServiceImpl {
 
                 // Replay all blocks for this vault
                 for height in 1..=*expected_height {
-                    let shard_height = match archive.find_shard_height(*org_id, *v_id, height) {
+                    let region_height = match archive.find_region_height(*org_id, *v_id, height) {
                         Ok(Some(h)) => h,
                         Ok(None) => {
                             issues.push(IntegrityIssue {
@@ -1119,7 +1189,7 @@ impl AdminService for AdminServiceImpl {
                         },
                     };
 
-                    let shard_block = match archive.read_block(shard_height) {
+                    let region_block = match archive.read_block(region_height) {
                         Ok(b) => b,
                         Err(e) => {
                             issues.push(IntegrityIssue {
@@ -1131,8 +1201,8 @@ impl AdminService for AdminServiceImpl {
                         },
                     };
 
-                    // Find the vault entry in this shard block
-                    let vault_entry = shard_block.vault_entries.iter().find(|e| {
+                    // Find the vault entry in this region block
+                    let vault_entry = region_block.vault_entries.iter().find(|e| {
                         e.organization == *org_id && e.vault == *v_id && e.vault_height == height
                     });
 
@@ -1143,7 +1213,7 @@ impl AdminService for AdminServiceImpl {
                                 block_height: height,
                                 issue_type: "missing_entry".to_string(),
                                 description: format!(
-                                    "Vault entry not found in shard block: org={}, vault={}",
+                                    "Vault entry not found in region block: org={}, vault={}",
                                     org_id, v_id
                                 ),
                             });
@@ -1820,8 +1890,9 @@ impl AdminService for AdminServiceImpl {
         let mut final_state_root = ZERO_HASH;
 
         for height in 1..=expected_height {
-            // Find shard height for this vault height
-            let shard_height = match archive.find_shard_height(organization_id, vault_id, height) {
+            // Find region height for this vault height
+            let region_height = match archive.find_region_height(organization_id, vault_id, height)
+            {
                 Ok(Some(h)) => h,
                 Ok(None) => {
                     ctx.end_storage_timer();
@@ -1850,8 +1921,8 @@ impl AdminService for AdminServiceImpl {
                 },
             };
 
-            // Read the shard block
-            let shard_block = match archive.read_block(shard_height) {
+            // Read the region block
+            let region_block = match archive.read_block(region_height) {
                 Ok(b) => b,
                 Err(e) => {
                     ctx.end_storage_timer();
@@ -1867,17 +1938,17 @@ impl AdminService for AdminServiceImpl {
             };
 
             // Find the vault entry
-            let entry = match shard_block.vault_entries.iter().find(|e| {
+            let entry = match region_block.vault_entries.iter().find(|e| {
                 e.organization == organization_id && e.vault == vault_id && e.vault_height == height
             }) {
                 Some(e) => e,
                 None => {
                     ctx.end_storage_timer();
-                    ctx.set_error("MissingEntry", "Vault entry not found in shard block");
+                    ctx.set_error("MissingEntry", "Vault entry not found in region block");
                     return Ok(Response::new(RecoverVaultResponse {
                         success: false,
                         message: format!(
-                            "Vault entry not found in shard block at height {}",
+                            "Vault entry not found in region block at height {}",
                             height
                         ),
                         health_status: VaultHealthProto::Diverged.into(),
@@ -2490,15 +2561,15 @@ impl AdminService for AdminServiceImpl {
                 Status::not_found(format!("Base backup not found: {e}"))
             })?;
 
-            let shard_height = self.applied_state.shard_height();
+            let region_height = self.applied_state.region_height();
             let db = self.state.database();
 
             let meta = backup_manager
                 .create_incremental_backup(
                     db.as_ref(),
                     &base_backup_id,
-                    base_meta.shard,
-                    shard_height,
+                    base_meta.region,
+                    region_height,
                     &tag,
                 )
                 .map_err(|e| {
@@ -2522,7 +2593,7 @@ impl AdminService for AdminServiceImpl {
             };
             use inferadb_ledger_types::EMPTY_HASH;
 
-            let shard_height = self.applied_state.shard_height();
+            let region_height = self.applied_state.region_height();
             let all_vaults = self.applied_state.all_vaults();
             let vault_heights = self.applied_state.all_vault_heights();
 
@@ -2561,8 +2632,8 @@ impl AdminService for AdminServiceImpl {
 
             let state_data = SnapshotStateData { vault_entities };
             let snapshot = Snapshot::new(
-                inferadb_ledger_types::ShardId::new(0),
-                shard_height,
+                inferadb_ledger_types::Region::GLOBAL,
+                region_height,
                 vault_states,
                 state_data,
                 SnapshotChainParams::default(),
@@ -2578,10 +2649,10 @@ impl AdminService for AdminServiceImpl {
             })?
         };
 
-        ctx.set_block_height(meta.shard_height);
+        ctx.set_block_height(meta.region_height);
         ctx.set_success();
 
-        crate::backup::record_backup_created(meta.shard_height, meta.size_bytes);
+        crate::backup::record_backup_created(meta.region_height, meta.size_bytes);
 
         // Emit BackupCreated handler-phase event
         if let Some(node_id) = self.node_id {
@@ -2598,7 +2669,7 @@ impl AdminService for AdminServiceImpl {
 
         Ok(Response::new(CreateBackupResponse {
             backup_id: meta.backup_id,
-            shard_height: meta.shard_height,
+            region_height: meta.region_height,
             backup_path: meta.backup_path,
             size_bytes: meta.size_bytes,
             checksum: Some(Hash { value: meta.checksum.to_vec() }),
@@ -2636,7 +2707,7 @@ impl AdminService for AdminServiceImpl {
 
                 BackupInfo {
                     backup_id: meta.backup_id,
-                    shard_height: meta.shard_height,
+                    region_height: meta.region_height,
                     backup_path: meta.backup_path,
                     size_bytes: meta.size_bytes,
                     created_at: Some(created_at),
@@ -2687,7 +2758,7 @@ impl AdminService for AdminServiceImpl {
         // Safety gate: require explicit confirmation
         if !req.confirm {
             return Err(Status::failed_precondition(
-                "Restore requires confirm=true. This operation will replace current shard state with the backup.",
+                "Restore requires confirm=true. This operation will replace current region state with the backup.",
             ));
         }
 
@@ -2755,7 +2826,7 @@ impl AdminService for AdminServiceImpl {
                 Status::internal(format!("Failed to save backup as snapshot: {e}"))
             })?;
 
-            let height = snapshot.header.shard_height;
+            let height = snapshot.header.region_height;
             let msg = format!(
                 "Backup {} (height {}) restored as snapshot. Restart the node to apply.",
                 meta.backup_id, height
@@ -2859,6 +2930,922 @@ impl AdminService for AdminServiceImpl {
                     },
                 };
                 Err(status)
+            },
+        }
+    }
+
+    /// Initiates rotation of the email blinding key by recording the new version through Raft.
+    ///
+    /// The actual re-hashing of email HMAC entries is performed asynchronously by a background
+    /// job (not part of this RPC). Callers should poll `GetBlindingKeyRehashStatus` for progress.
+    async fn rotate_blinding_key(
+        &self,
+        request: Request<RotateBlindingKeyRequest>,
+    ) -> Result<Response<RotateBlindingKeyResponse>, Status> {
+        crate::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = RequestContext::new("AdminService", "rotate_blinding_key");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.extract_transport_metadata(&grpc_metadata);
+        ctx.set_admin_action("rotate_blinding_key");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
+
+        if req.new_key_version == 0 {
+            ctx.set_error("InvalidArgument", "new_key_version must be > 0");
+            return Err(Status::invalid_argument("new_key_version must be > 0"));
+        }
+
+        // Read current version to validate monotonic increase
+        let system_service = SystemOrganizationService::new(Arc::clone(&self.state));
+        let current_version = system_service
+            .get_blinding_key_version()
+            .map_err(|e| Status::internal(format!("Failed to read blinding key version: {e}")))?
+            .unwrap_or(0);
+
+        if req.new_key_version <= current_version {
+            ctx.set_error(
+                "InvalidArgument",
+                "new_key_version must be greater than the current version",
+            );
+            return Err(Status::invalid_argument(format!(
+                "new_key_version ({}) must be greater than current version ({current_version})",
+                req.new_key_version,
+            )));
+        }
+
+        // Check if a rotation is already in progress
+        let rotation_in_progress = system_service
+            .is_rotation_in_progress()
+            .map_err(|e| Status::internal(format!("Failed to check rotation status: {e}")))?;
+
+        if rotation_in_progress {
+            ctx.set_error("FailedPrecondition", "A blinding key rotation is already in progress");
+            return Err(Status::failed_precondition(
+                "A blinding key rotation is already in progress",
+            ));
+        }
+
+        // Propose the version change through Raft
+        let ledger_request = LedgerRequest::System(SystemRequest::SetBlindingKeyVersion {
+            version: req.new_key_version,
+        });
+        let payload = RaftPayload { request: ledger_request, proposed_at: chrono::Utc::now() };
+
+        // Compute effective timeout: min(proposal_timeout, grpc_deadline)
+        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+        let result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
+
+        let response = match result {
+            Ok(Ok(resp)) => resp.data,
+            Ok(Err(e)) => {
+                ctx.set_error("RaftError", &e.to_string());
+                return Err(classify_raft_error(&e.to_string()));
+            },
+            Err(_) => {
+                ctx.set_error("Timeout", "Raft proposal timed out");
+                return Err(Status::deadline_exceeded("Raft proposal timed out"));
+            },
+        };
+
+        match response {
+            LedgerResponse::Empty => {
+                // Record audit event
+                if let Some(node_id) = self.node_id {
+                    self.record_handler_event(
+                        HandlerPhaseEmitter::for_system(EventAction::ConfigurationChanged, node_id)
+                            .principal("system")
+                            .detail("resource", "blinding_key")
+                            .detail("new_version", &req.new_key_version.to_string())
+                            .detail("previous_version", &current_version.to_string())
+                            .trace_id(&trace_ctx.trace_id)
+                            .outcome(EventOutcomeType::Success)
+                            .build(
+                                self.event_handle
+                                    .as_ref()
+                                    .map_or(90, |h| h.config().default_ttl_days),
+                            ),
+                    );
+                }
+
+                ctx.set_success();
+                Ok(Response::new(RotateBlindingKeyResponse {
+                    total_entries: 0,
+                    entries_rehashed: 0,
+                    complete: true,
+                }))
+            },
+            LedgerResponse::Error { message } => {
+                ctx.set_error("Unspecified", &message);
+                Err(Status::internal(message))
+            },
+            _ => {
+                ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                Err(Status::internal("Unexpected response type"))
+            },
+        }
+    }
+
+    /// Returns the current status of a blinding key rotation, including per-region progress.
+    ///
+    /// This is a local read — no Raft proposal needed.
+    async fn get_blinding_key_rehash_status(
+        &self,
+        request: Request<GetBlindingKeyRehashStatusRequest>,
+    ) -> Result<Response<GetBlindingKeyRehashStatusResponse>, Status> {
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let _req = request.into_inner();
+
+        let mut ctx = RequestContext::new("AdminService", "get_blinding_key_rehash_status");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.extract_transport_metadata(&grpc_metadata);
+        ctx.set_admin_action("get_blinding_key_rehash_status");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
+
+        let system_service = SystemOrganizationService::new(Arc::clone(&self.state));
+
+        let active_key_version = system_service
+            .get_blinding_key_version()
+            .map_err(|e| Status::internal(format!("Failed to read blinding key version: {e}")))?
+            .unwrap_or(0);
+
+        // Collect per-region progress
+        let mut per_region_progress = std::collections::HashMap::new();
+        let mut total_rehashed: u64 = 0;
+
+        for region in ALL_REGIONS {
+            match system_service.get_rehash_progress(region) {
+                Ok(Some(entries)) => {
+                    per_region_progress.insert(region.as_str().to_string(), entries);
+                    total_rehashed = total_rehashed.saturating_add(entries);
+                },
+                Ok(None) => {},
+                Err(e) => {
+                    ctx.set_error("Internal", &e.to_string());
+                    return Err(Status::internal(format!(
+                        "Failed to read rehash progress for region {}: {e}",
+                        region.as_str()
+                    )));
+                },
+            }
+        }
+
+        let complete = per_region_progress.is_empty();
+
+        ctx.set_success();
+        Ok(Response::new(GetBlindingKeyRehashStatusResponse {
+            total_entries: 0,
+            entries_rehashed: total_rehashed,
+            complete,
+            per_region_progress,
+            active_key_version,
+        }))
+    }
+
+    /// Initiates an organization migration to a different region via a saga.
+    ///
+    /// The saga coordinates the migration through status transitions:
+    /// `Active → Migrating → Active` (in new region). Writes are blocked while
+    /// status is `Migrating`, returning `FAILED_PRECONDITION` with retry guidance.
+    ///
+    /// Protected → non-protected migrations require `acknowledge_residency_downgrade = true`.
+    async fn migrate_organization(
+        &self,
+        request: Request<MigrateOrganizationRequest>,
+    ) -> Result<Response<MigrateOrganizationResponse>, Status> {
+        // Reject requests with insufficient remaining deadline
+        crate::deadline::check_near_deadline(&request)?;
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
+
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        // Create logging context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "migrate_organization");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.extract_transport_metadata(&grpc_metadata);
+        ctx.set_admin_action("migrate_organization");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
+
+        // Resolve organization slug → internal ID
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let organization_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
+        let organization_id =
+            slug_resolver.extract_and_resolve(&req.slug).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
+        ctx.set_organization(organization_slug_val);
+
+        // Validate and convert proto region to domain region
+        let target_region = inferadb_ledger_proto::convert::region_from_i32(req.target_region)?;
+
+        // Look up current organization state
+        let org_meta = self.applied_state.get_organization(organization_id).ok_or_else(|| {
+            ctx.set_error("NotFound", "Organization not found");
+            let err: Status =
+                ServiceError::not_found("Organization", organization_slug_val.to_string()).into();
+            err
+        })?;
+
+        let source_region = org_meta.region;
+
+        // Validate: target must differ from source
+        if target_region == source_region {
+            return Err(Status::invalid_argument(format!(
+                "Organization is already in region {}",
+                source_region.as_str()
+            )));
+        }
+
+        // Validate: organization must be Active
+        if org_meta.status != inferadb_ledger_state::system::OrganizationStatus::Active {
+            let mut context = std::collections::HashMap::new();
+            context.insert("status".to_string(), format!("{:?}", org_meta.status));
+            let details = super::error_details::build_error_details(
+                inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.as_u16(),
+                true,
+                None,
+                context,
+                Some(inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.suggested_action()),
+            );
+            let encoded = prost::Message::encode_to_vec(&details);
+            return Err(Status::with_details(
+                tonic::Code::FailedPrecondition,
+                format!("Organization is not Active (current status: {:?})", org_meta.status),
+                encoded.into(),
+            ));
+        }
+
+        // Validate: GLOBAL is not a valid target
+        if target_region == inferadb_ledger_types::Region::GLOBAL {
+            return Err(Status::invalid_argument("Cannot migrate to GLOBAL control plane region"));
+        }
+
+        // Validate: protected → non-protected requires acknowledgment
+        if source_region.requires_residency()
+            && !target_region.requires_residency()
+            && !req.acknowledge_residency_downgrade
+        {
+            let mut context = std::collections::HashMap::new();
+            context.insert("source_region".to_string(), source_region.as_str().to_string());
+            context.insert("target_region".to_string(), target_region.as_str().to_string());
+            let details = super::error_details::build_error_details(
+                inferadb_ledger_types::ErrorCode::AppInvalidRegionAssignment.as_u16(),
+                false,
+                None,
+                context,
+                Some(
+                    "Set acknowledge_residency_downgrade = true to confirm migration from a protected to non-protected region",
+                ),
+            );
+            let encoded = prost::Message::encode_to_vec(&details);
+            return Err(Status::with_details(
+                tonic::Code::FailedPrecondition,
+                "Migration from protected to non-protected region requires explicit acknowledgment",
+                encoded.into(),
+            ));
+        }
+
+        // For protected target regions, validate sufficient in-region nodes
+        if target_region.requires_residency() {
+            let sys_svc = SystemOrganizationService::new(self.state.clone());
+            let nodes = sys_svc.list_nodes().map_err(|e| {
+                Status::internal(format!("Failed to list nodes for region validation: {e}"))
+            })?;
+            let in_region_count = nodes.iter().filter(|n| n.region == target_region).count();
+            if in_region_count < 3 {
+                let mut context = std::collections::HashMap::new();
+                context.insert("region".to_string(), target_region.as_str().to_string());
+                context.insert("available_nodes".to_string(), in_region_count.to_string());
+                context.insert("required_nodes".to_string(), "3".to_string());
+                let details = super::error_details::build_error_details(
+                    inferadb_ledger_types::ErrorCode::AppInsufficientRegionNodes.as_u16(),
+                    false,
+                    None,
+                    context,
+                    Some(
+                        inferadb_ledger_types::ErrorCode::AppInsufficientRegionNodes
+                            .suggested_action(),
+                    ),
+                );
+                let encoded = prost::Message::encode_to_vec(&details);
+                return Err(Status::with_details(
+                    tonic::Code::FailedPrecondition,
+                    format!(
+                        "Insufficient in-region nodes for protected region {}: \
+                         {in_region_count} available, 3 required",
+                        target_region.as_str()
+                    ),
+                    encoded.into(),
+                ));
+            }
+        }
+
+        // Determine migration type: metadata-only for non-protected → non-protected
+        let metadata_only =
+            !source_region.requires_residency() && !target_region.requires_residency();
+
+        // Submit StartMigration through Raft to set status to Migrating
+        let ledger_request = LedgerRequest::StartMigration {
+            organization: organization_id,
+            target_region_group: target_region,
+        };
+
+        // Compute effective timeout
+        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+
+        ctx.start_raft_timer();
+        let result = match tokio::time::timeout(
+            timeout,
+            self.raft.client_write(RaftPayload {
+                request: ledger_request,
+                proposed_at: chrono::Utc::now(),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(result)) => {
+                ctx.end_raft_timer();
+                result
+            },
+            Ok(Err(e)) => {
+                ctx.end_raft_timer();
+                ctx.set_error("RaftError", &e.to_string());
+                return Err(ServiceError::raft(e).into());
+            },
+            Err(_elapsed) => {
+                ctx.end_raft_timer();
+                crate::metrics::record_raft_proposal_timeout();
+                ctx.set_error("Timeout", "Raft proposal timed out");
+                return Err(Status::deadline_exceeded(format!(
+                    "Raft proposal timed out after {}ms",
+                    timeout.as_millis()
+                )));
+            },
+        };
+
+        match result.data {
+            LedgerResponse::MigrationStarted { organization, target_region_group } => {
+                // Create the migration saga for the orchestrator to drive
+                let saga_id = uuid::Uuid::new_v4().to_string();
+                let saga = inferadb_ledger_state::system::MigrateOrgSaga::new(
+                    saga_id,
+                    inferadb_ledger_state::system::MigrateOrgInput {
+                        organization_id: organization,
+                        organization_slug: inferadb_ledger_types::OrganizationSlug::new(
+                            organization_slug_val,
+                        ),
+                        source_region,
+                        target_region: target_region_group,
+                        acknowledge_residency_downgrade: req.acknowledge_residency_downgrade,
+                        metadata_only,
+                    },
+                );
+
+                // Persist the saga to _system for the orchestrator to pick up
+                let saga_key = format!("saga:{}", saga.id);
+                let saga_wrapped = inferadb_ledger_state::system::Saga::MigrateOrg(saga);
+                let saga_bytes = serde_json::to_vec(&saga_wrapped).map_err(|e| {
+                    Status::internal(format!("Failed to serialize migration saga: {e}"))
+                })?;
+
+                let saga_op = inferadb_ledger_types::Operation::SetEntity {
+                    key: saga_key,
+                    value: saga_bytes,
+                    expires_at: None,
+                    condition: Some(inferadb_ledger_types::SetCondition::MustNotExist),
+                };
+
+                let saga_txn = inferadb_ledger_types::Transaction {
+                    id: *uuid::Uuid::new_v4().as_bytes(),
+                    client_id: "system:admin".to_string(),
+                    sequence: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0),
+                    operations: vec![saga_op],
+                    timestamp: chrono::Utc::now(),
+                    actor: "system:admin".to_string(),
+                };
+
+                let saga_request = LedgerRequest::Write {
+                    organization: DomainOrganizationId::new(0), // _system
+                    vault: inferadb_ledger_types::VaultId::new(0),
+                    transactions: vec![saga_txn],
+                    idempotency_key: [0; 16],
+                    request_hash: 0,
+                };
+
+                let _ = self
+                    .raft
+                    .client_write(RaftPayload {
+                        request: saga_request,
+                        proposed_at: chrono::Utc::now(),
+                    })
+                    .await;
+
+                ctx.set_success();
+                metrics::record_organization_operation(organization, "migrate");
+                let proto_source: ProtoRegion = source_region.into();
+                let proto_target: ProtoRegion = target_region_group.into();
+                Ok(Response::new(MigrateOrganizationResponse {
+                    slug: Some(OrganizationSlug { slug: organization_slug_val }),
+                    source_region: proto_source.into(),
+                    target_region: proto_target.into(),
+                    status: ProtoOrganizationStatus::Migrating.into(),
+                }))
+            },
+            LedgerResponse::Error { message } => {
+                ctx.set_error("Unspecified", &message);
+                Err(Status::internal(message))
+            },
+            _ => {
+                ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                Err(Status::internal("Unexpected response type"))
+            },
+        }
+    }
+
+    /// Migrate a user's PII from one regional store to another.
+    ///
+    /// Validates the user directory entry in the GLOBAL control plane, creates a
+    /// [`MigrateUserSaga`], and persists it to `_system` via Raft for the saga
+    /// orchestrator to drive. The directory status transitions through
+    /// `Active → Migrating → Active` (in new region). Authenticated API calls
+    /// for the user are rejected while status is `Migrating`.
+    async fn migrate_user_region(
+        &self,
+        request: Request<MigrateUserRegionRequest>,
+    ) -> Result<Response<MigrateUserRegionResponse>, Status> {
+        // Reject requests with insufficient remaining deadline
+        crate::deadline::check_near_deadline(&request)?;
+        // Reject if node is draining
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
+
+        // Extract trace context from gRPC metadata before consuming the request
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        // Create logging context for this admin operation
+        let mut ctx = RequestContext::new("AdminService", "migrate_user_region");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.extract_transport_metadata(&grpc_metadata);
+        ctx.set_admin_action("migrate_user_region");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
+        // Set trace context for distributed tracing correlation
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
+
+        // Resolve user slug → internal ID
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let user_slug_val = req.slug.as_ref().map_or(0, |s| s.slug);
+        let user_id = slug_resolver.extract_and_resolve_user(&req.slug).inspect_err(|status| {
+            ctx.set_error("InvalidArgument", status.message());
+        })?;
+
+        // Validate and convert proto region to domain region
+        let target_region = inferadb_ledger_proto::convert::region_from_i32(req.target_region)?;
+
+        // Look up current user directory entry from the GLOBAL _system store
+        let sys_svc = SystemOrganizationService::new(self.state.clone());
+        let dir_entry = sys_svc.get_user_directory(user_id).map_err(|e| {
+            ctx.set_error("Internal", &e.to_string());
+            Status::internal(format!("Failed to read user directory: {e}"))
+        })?;
+        let dir_entry = dir_entry.ok_or_else(|| {
+            ctx.set_error("NotFound", "User directory entry not found");
+            let err: Status = ServiceError::not_found("User", user_slug_val.to_string()).into();
+            err
+        })?;
+
+        let source_region = dir_entry.region.unwrap_or(inferadb_ledger_types::Region::GLOBAL);
+
+        // Validate: target must differ from source
+        if target_region == source_region {
+            return Err(Status::invalid_argument(format!(
+                "User is already in region {}",
+                source_region.as_str()
+            )));
+        }
+
+        // Validate: user must be Active
+        if dir_entry.status != inferadb_ledger_state::system::UserDirectoryStatus::Active {
+            let mut context = std::collections::HashMap::new();
+            context.insert("status".to_string(), format!("{:?}", dir_entry.status));
+            let details = super::error_details::build_error_details(
+                inferadb_ledger_types::ErrorCode::AppUserMigrating.as_u16(),
+                true,
+                None,
+                context,
+                Some(inferadb_ledger_types::ErrorCode::AppUserMigrating.suggested_action()),
+            );
+            let encoded = prost::Message::encode_to_vec(&details);
+            return Err(Status::with_details(
+                tonic::Code::FailedPrecondition,
+                format!("User is not Active (current status: {:?})", dir_entry.status),
+                encoded.into(),
+            ));
+        }
+
+        // Validate: GLOBAL is not a valid target
+        if target_region == inferadb_ledger_types::Region::GLOBAL {
+            return Err(Status::invalid_argument("Cannot migrate to GLOBAL control plane region"));
+        }
+
+        // For protected target regions, validate sufficient in-region nodes
+        if target_region.requires_residency() {
+            let nodes = sys_svc.list_nodes().map_err(|e| {
+                Status::internal(format!("Failed to list nodes for region validation: {e}"))
+            })?;
+            let in_region_count = nodes.iter().filter(|n| n.region == target_region).count();
+            if in_region_count < 3 {
+                let mut context = std::collections::HashMap::new();
+                context.insert("region".to_string(), target_region.as_str().to_string());
+                context.insert("available_nodes".to_string(), in_region_count.to_string());
+                context.insert("required_nodes".to_string(), "3".to_string());
+                let details = super::error_details::build_error_details(
+                    inferadb_ledger_types::ErrorCode::AppInsufficientRegionNodes.as_u16(),
+                    false,
+                    None,
+                    context,
+                    Some(
+                        inferadb_ledger_types::ErrorCode::AppInsufficientRegionNodes
+                            .suggested_action(),
+                    ),
+                );
+                let encoded = prost::Message::encode_to_vec(&details);
+                return Err(Status::with_details(
+                    tonic::Code::FailedPrecondition,
+                    format!(
+                        "Insufficient in-region nodes for protected region {}: \
+                         {in_region_count} available, 3 required",
+                        target_region.as_str()
+                    ),
+                    encoded.into(),
+                ));
+            }
+        }
+
+        // Create the migration saga for the orchestrator to drive
+        let saga_id = uuid::Uuid::new_v4().to_string();
+        let saga = inferadb_ledger_state::system::MigrateUserSaga::new(
+            saga_id,
+            inferadb_ledger_state::system::MigrateUserInput {
+                user_id,
+                source_region,
+                target_region,
+            },
+        );
+
+        // Persist the saga to _system for the orchestrator to pick up
+        let saga_key = format!("saga:{}", saga.id);
+        let saga_wrapped = inferadb_ledger_state::system::Saga::MigrateUser(saga);
+        let saga_bytes = serde_json::to_vec(&saga_wrapped).map_err(|e| {
+            Status::internal(format!("Failed to serialize user migration saga: {e}"))
+        })?;
+
+        let saga_op = inferadb_ledger_types::Operation::SetEntity {
+            key: saga_key,
+            value: saga_bytes,
+            expires_at: None,
+            condition: Some(inferadb_ledger_types::SetCondition::MustNotExist),
+        };
+
+        let saga_txn = inferadb_ledger_types::Transaction {
+            id: *uuid::Uuid::new_v4().as_bytes(),
+            client_id: "system:admin".to_string(),
+            sequence: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0),
+            operations: vec![saga_op],
+            timestamp: chrono::Utc::now(),
+            actor: "system:admin".to_string(),
+        };
+
+        let saga_request = LedgerRequest::Write {
+            organization: DomainOrganizationId::new(0), // _system
+            vault: DomainVaultId::new(0),
+            transactions: vec![saga_txn],
+            idempotency_key: [0; 16],
+            request_hash: 0,
+        };
+
+        // Compute effective timeout
+        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+
+        ctx.start_raft_timer();
+        match tokio::time::timeout(
+            timeout,
+            self.raft.client_write(RaftPayload {
+                request: saga_request,
+                proposed_at: chrono::Utc::now(),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                ctx.end_raft_timer();
+            },
+            Ok(Err(e)) => {
+                ctx.end_raft_timer();
+                ctx.set_error("RaftError", &e.to_string());
+                return Err(ServiceError::raft(e).into());
+            },
+            Err(_elapsed) => {
+                ctx.end_raft_timer();
+                crate::metrics::record_raft_proposal_timeout();
+                ctx.set_error("Timeout", "Raft proposal timed out");
+                return Err(Status::deadline_exceeded(format!(
+                    "Raft proposal timed out after {}ms",
+                    timeout.as_millis()
+                )));
+            },
+        }
+
+        ctx.set_success();
+        let proto_source: ProtoRegion = source_region.into();
+        let proto_target: ProtoRegion = target_region.into();
+        Ok(Response::new(MigrateUserRegionResponse {
+            slug: Some(ProtoUserSlug { slug: user_slug_val }),
+            source_region: proto_source.into(),
+            target_region: proto_target.into(),
+            directory_status: "migrating".to_string(),
+        }))
+    }
+
+    /// Initiates RMK rotation and triggers asynchronous DEK re-wrapping.
+    ///
+    /// The re-wrapping runs as a background job. Poll `GetRewrapStatus` for progress.
+    async fn rotate_region_key(
+        &self,
+        request: Request<RotateRegionKeyRequest>,
+    ) -> Result<Response<RotateRegionKeyResponse>, Status> {
+        crate::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = RequestContext::new("AdminService", "rotate_region_key");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.extract_transport_metadata(&grpc_metadata);
+        ctx.set_admin_action("rotate_region_key");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
+
+        let progress = self.rewrap_progress.as_ref().ok_or_else(|| {
+            Status::failed_precondition("DEK re-wrapping not configured for this node")
+        })?;
+
+        // Get total page count from the state layer
+        let total_pages = self.state.sidecar_page_count().map_err(|e| {
+            ctx.set_error("Internal", &e.to_string());
+            Status::internal(format!("Failed to read sidecar page count: {e}"))
+        })?;
+
+        let target_version = if req.target_version > 0 { req.target_version } else { 0 };
+
+        // If no pages, already complete
+        if total_pages == 0 {
+            ctx.set_success();
+            return Ok(Response::new(RotateRegionKeyResponse {
+                new_version: target_version,
+                total_pages: 0,
+                complete: true,
+            }));
+        }
+
+        // Start the re-wrapping cycle
+        progress.start_rotation(target_version, total_pages);
+
+        ctx.set_success();
+        Ok(Response::new(RotateRegionKeyResponse {
+            new_version: target_version,
+            total_pages,
+            complete: false,
+        }))
+    }
+
+    /// Returns the current status of DEK re-wrapping progress.
+    ///
+    /// This is a local read — no Raft proposal needed.
+    async fn get_rewrap_status(
+        &self,
+        request: Request<GetRewrapStatusRequest>,
+    ) -> Result<Response<GetRewrapStatusResponse>, Status> {
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let _req = request.into_inner();
+
+        let mut ctx = RequestContext::new("AdminService", "get_rewrap_status");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.extract_transport_metadata(&grpc_metadata);
+        ctx.set_admin_action("get_rewrap_status");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
+
+        let progress = self.rewrap_progress.as_ref().ok_or_else(|| {
+            Status::failed_precondition("DEK re-wrapping not configured for this node")
+        })?;
+
+        let total = progress.total_pages.load(std::sync::atomic::Ordering::Acquire);
+        let processed = progress.next_page_id.load(std::sync::atomic::Ordering::Acquire);
+        let rewrapped = progress.pages_rewrapped.load(std::sync::atomic::Ordering::Acquire);
+        let complete = progress.complete.load(std::sync::atomic::Ordering::Acquire);
+        let target = progress.target_version.load(std::sync::atomic::Ordering::Acquire);
+        let est_remaining = progress.estimated_remaining_secs();
+
+        ctx.set_success();
+        Ok(Response::new(GetRewrapStatusResponse {
+            total_pages: total,
+            pages_processed: processed,
+            pages_rewrapped: rewrapped,
+            complete,
+            target_version: target as u32,
+            estimated_remaining_secs: est_remaining,
+        }))
+    }
+
+    /// Erases a user's PII via crypto-shredding.
+    ///
+    /// Forward-only finalization sequence: destroys the per-subject encryption
+    /// key, scrubs directory entry, removes email hash indexes, and creates
+    /// erasure audit record. Each step is idempotent.
+    async fn erase_user(
+        &self,
+        request: Request<EraseUserRequest>,
+    ) -> Result<Response<EraseUserResponse>, Status> {
+        crate::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = RequestContext::new("AdminService", "erase_user");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.extract_transport_metadata(&grpc_metadata);
+        ctx.set_admin_action("erase_user");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
+
+        // Validate inputs
+        if req.user_id == 0 {
+            ctx.set_error("InvalidArgument", "user_id must be non-zero");
+            return Err(Status::invalid_argument("user_id must be non-zero"));
+        }
+        if req.erased_by.is_empty() {
+            ctx.set_error("InvalidArgument", "erased_by must be non-empty");
+            return Err(Status::invalid_argument("erased_by must be non-empty"));
+        }
+
+        let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
+
+        let user_id = inferadb_ledger_types::UserId::new(req.user_id);
+
+        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+
+        // Propose erasure through Raft
+        let ledger_request = LedgerRequest::System(SystemRequest::EraseUser {
+            user_id,
+            erased_by: req.erased_by.clone(),
+            region,
+        });
+        let payload = RaftPayload { request: ledger_request, proposed_at: chrono::Utc::now() };
+
+        let erasure_result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
+
+        let response = match erasure_result {
+            Ok(Ok(resp)) => resp.data,
+            Ok(Err(e)) => {
+                ctx.set_error("RaftError", &e.to_string());
+                return Err(classify_raft_error(&e.to_string()));
+            },
+            Err(_) => {
+                ctx.set_error("Timeout", "Raft proposal timed out");
+                return Err(Status::deadline_exceeded("Raft proposal timed out"));
+            },
+        };
+
+        match response {
+            LedgerResponse::UserErased { user_id: erased_id } => {
+                // Record audit event
+                if let Some(node_id) = self.node_id {
+                    self.record_handler_event(
+                        HandlerPhaseEmitter::for_system(EventAction::UserErased, node_id)
+                            .principal(&req.erased_by)
+                            .detail("user_id", &erased_id.to_string())
+                            .detail("region", region.as_str())
+                            .trace_id(&trace_ctx.trace_id)
+                            .outcome(EventOutcomeType::Success)
+                            .build(
+                                self.event_handle
+                                    .as_ref()
+                                    .map_or(90, |h| h.config().default_ttl_days),
+                            ),
+                    );
+                }
+
+                ctx.set_success();
+                Ok(Response::new(EraseUserResponse { user_id: erased_id.value() }))
+            },
+            LedgerResponse::Error { message } => {
+                ctx.set_error("ErasureFailed", &message);
+                Err(Status::internal(format!("Erasure failed: {message}")))
+            },
+            other => {
+                ctx.set_error("UnexpectedResponse", &format!("{other:?}"));
+                Err(Status::internal("Unexpected response from Raft state machine"))
             },
         }
     }

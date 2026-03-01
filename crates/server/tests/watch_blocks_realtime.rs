@@ -30,7 +30,7 @@ async fn create_organization(
     let response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: name.to_string(),
-            shard: None,
+            region: 10, // REGION_US_EAST_VA
             tier: None,
         })
         .await?;

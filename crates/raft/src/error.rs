@@ -37,8 +37,8 @@ pub enum RecoveryError {
     },
 
     /// Failed to read block from archive.
-    #[snafu(display("Block read failed at shard height {shard_height}: {source}"))]
-    BlockRead { shard_height: u64, source: BlockArchiveError },
+    #[snafu(display("Block read failed at region height {region_height}: {source}"))]
+    BlockRead { region_height: u64, source: BlockArchiveError },
 
     /// Failed to apply operations during replay.
     #[snafu(display("Apply operations failed at height {height}: {source}"))]

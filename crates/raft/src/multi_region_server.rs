@@ -1,7 +1,7 @@
-//! Multi-shard gRPC server for InferaDB Ledger.
+//! Multi-region gRPC server for InferaDB Ledger.
 //!
-//! This module provides a server that supports multi-shard deployments,
-//! routing requests to the appropriate shard based on organization.
+//! This module provides a server that supports multi-region deployments,
+//! routing requests to the appropriate region based on organization.
 //!
 //! ## Architecture
 //!
@@ -9,11 +9,11 @@
 //! Client Request
 //!       |
 //!       v
-//! MultiShardLedgerServer
+//! MultiRegionLedgerServer
 //!       |
-//!       +-- MultiShardReadService  --+
+//!       +-- MultiRegionReadService  --+
 //!       |                            |
-//!       +-- MultiShardWriteService --+--> ShardResolver --> Shard N
+//!       +-- MultiRegionWriteService --+--> RegionResolver --> Region N
 //!       |                            |
 //!       +-- AdminService (system)  --+
 //! ```
@@ -38,19 +38,20 @@ use crate::{
     rate_limit::RateLimiter,
     services::{
         AdminServiceImpl, DiscoveryServiceImpl, EventsServiceImpl, HealthServiceImpl,
-        MultiShardRaftService, MultiShardReadService, MultiShardResolver, MultiShardWriteService,
+        MultiRegionRaftService, MultiRegionReadService, MultiRegionResolver,
+        MultiRegionWriteService,
     },
 };
 
-/// Multi-shard Ledger gRPC server.
+/// Multi-region Ledger gRPC server.
 ///
-/// Combines multi-shard read/write services with the MultiRaftManager
-/// for routing requests to the correct shard. Supports graceful shutdown
+/// Combines multi-region read/write services with the MultiRaftManager
+/// for routing requests to the correct region. Supports graceful shutdown
 /// via a `shutdown_rx` watch channel.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
-pub struct MultiShardLedgerServer {
-    /// The multi-raft manager containing all shards.
+pub struct MultiRegionLedgerServer {
+    /// The multi-raft manager containing all regions.
     manager: Arc<MultiRaftManager>,
     /// Idempotency cache for duplicate detection.
     #[builder(default = Arc::new(IdempotencyCache::new()))]
@@ -84,9 +85,12 @@ pub struct MultiShardLedgerServer {
     /// Events database for the events query service (optional).
     #[builder(default)]
     events_db: Option<inferadb_ledger_state::EventsDatabase<inferadb_ledger_store::FileBackend>>,
+    /// Geographic region this node belongs to.
+    #[builder(default = inferadb_ledger_types::Region::GLOBAL)]
+    region: inferadb_ledger_types::Region,
 }
 
-impl MultiShardLedgerServer {
+impl MultiRegionLedgerServer {
     /// Starts the gRPC server.
     ///
     /// This method blocks until the server is shut down. If a `shutdown_rx`
@@ -101,7 +105,7 @@ impl MultiShardLedgerServer {
         tracing::info!(
             max_concurrent = self.max_concurrent,
             timeout_secs = self.timeout_secs,
-            "Configuring multi-shard request limits"
+            "Configuring multi-region request limits"
         );
 
         // Configure backpressure with tower layers
@@ -111,15 +115,15 @@ impl MultiShardLedgerServer {
             .timeout(Duration::from_secs(self.timeout_secs))
             .into_inner();
 
-        // Create the shard resolver
-        let resolver: Arc<dyn crate::services::ShardResolver> =
-            Arc::new(MultiShardResolver::new(self.manager.clone()));
+        // Create the region resolver
+        let resolver: Arc<dyn crate::services::RegionResolver> =
+            Arc::new(MultiRegionResolver::new(self.manager.clone()));
 
-        // Create multi-shard services with forwarding support
+        // Create multi-region services with forwarding support
         let read_service =
-            MultiShardReadService::with_manager(resolver.clone(), self.manager.clone());
+            MultiRegionReadService::with_manager(resolver.clone(), self.manager.clone());
 
-        let write_service = MultiShardWriteService::builder()
+        let write_service = MultiRegionWriteService::builder()
             .resolver(resolver.clone())
             .manager(Some(self.manager.clone()))
             .idempotency(self.idempotency.clone())
@@ -129,18 +133,18 @@ impl MultiShardLedgerServer {
             .health_state(Some(self.health_state.clone()))
             .build();
 
-        // Admin, Health, and Discovery services use the system shard
+        // Admin, Health, and Discovery services use the system region
         // These handle global operations like organization management
-        let system_shard = self.manager.system_shard().map_err(|e| {
-            Box::new(std::io::Error::other(format!("System shard not available: {}", e)))
+        let system_region = self.manager.system_region().map_err(|e| {
+            Box::new(std::io::Error::other(format!("System region not available: {}", e)))
                 as Box<dyn std::error::Error>
         })?;
 
         let admin_service = AdminServiceImpl::builder()
-            .raft(system_shard.raft().clone())
-            .state(system_shard.state().clone())
-            .applied_state(system_shard.applied_state().clone())
-            .block_archive(Some(system_shard.block_archive().clone()))
+            .raft(system_region.raft().clone())
+            .state(system_region.state().clone())
+            .applied_state(system_region.applied_state().clone())
+            .block_archive(Some(system_region.block_archive().clone()))
             .listen_addr(self.addr)
             .proposal_timeout(self.proposal_timeout)
             .build()
@@ -149,25 +153,26 @@ impl MultiShardLedgerServer {
         // Extract connection tracker before health_state is moved into HealthServiceImpl
         let connection_tracker = self.health_state.connection_tracker().clone();
         let health_service = HealthServiceImpl::new(
-            system_shard.raft().clone(),
-            system_shard.state().clone(),
-            system_shard.applied_state().clone(),
+            system_region.raft().clone(),
+            system_region.state().clone(),
+            system_region.applied_state().clone(),
             self.health_state,
         );
 
         let discovery_service = DiscoveryServiceImpl::builder()
-            .raft(system_shard.raft().clone())
-            .state(system_shard.state().clone())
-            .applied_state(system_shard.applied_state().clone())
+            .raft(system_region.raft().clone())
+            .state(system_region.state().clone())
+            .applied_state(system_region.applied_state().clone())
+            .region(self.region)
             .build();
 
-        // Multi-shard Raft service routes inter-node RPCs to the correct shard
-        let raft_service = MultiShardRaftService::new(self.manager.clone());
+        // Multi-region Raft service routes inter-node RPCs to the correct region
+        let raft_service = MultiRegionRaftService::new(self.manager.clone());
 
         tracing::info!(
             addr = %self.addr,
-            shards = self.manager.list_shards().len(),
-            "Starting multi-shard Ledger gRPC server"
+            regions = self.manager.list_regions().len(),
+            "Starting multi-region Ledger gRPC server"
         );
 
         let mut router = Server::builder()
@@ -196,7 +201,7 @@ impl MultiShardLedgerServer {
         if let Some(events_db) = self.events_db {
             let events_service = EventsServiceImpl::builder()
                 .events_db(events_db)
-                .applied_state(system_shard.applied_state().clone())
+                .applied_state(system_region.applied_state().clone())
                 .page_token_codec(crate::pagination::PageTokenCodec::with_random_key())
                 .build();
             router = router.add_service(EventsServiceServer::with_interceptor(
@@ -209,7 +214,7 @@ impl MultiShardLedgerServer {
             router
                 .serve_with_shutdown(self.addr, async move {
                     let _ = shutdown_rx.wait_for(|v| *v).await;
-                    tracing::info!("Shutdown signal received, stopping multi-shard gRPC server");
+                    tracing::info!("Shutdown signal received, stopping multi-region gRPC server");
                 })
                 .await?;
         } else {
@@ -235,7 +240,7 @@ impl MultiShardLedgerServer {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn test_multi_shard_server_creation() {
+    fn test_multi_region_server_creation() {
         // Basic struct test - full testing requires MultiRaftManager setup
     }
 }

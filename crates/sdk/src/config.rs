@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use bon::bon;
-use inferadb_ledger_types::config::ValidationConfig;
+use inferadb_ledger_types::{Region, config::ValidationConfig};
 
 use crate::{
     error::{Result, SdkError},
@@ -55,6 +55,13 @@ pub struct ClientConfig {
 
     /// SDK-side metrics collector.
     pub(crate) metrics: std::sync::Arc<dyn crate::metrics::SdkMetrics>,
+
+    /// Preferred region for latency optimization.
+    ///
+    /// When set, the SDK prefers connecting to nodes in this region for
+    /// lower latency. Does not affect data residency — organizations and
+    /// users still reside in their assigned regions.
+    pub(crate) preferred_region: Option<Region>,
 }
 
 #[bon]
@@ -116,6 +123,7 @@ impl ClientConfig {
         #[builder(default = crate::metrics::default_metrics())] metrics: std::sync::Arc<
             dyn crate::metrics::SdkMetrics,
         >,
+        preferred_region: Option<Region>,
     ) -> Result<Self> {
         // Validate static endpoints
         if let ServerSource::Static(ref endpoints) = servers {
@@ -153,6 +161,7 @@ impl ClientConfig {
             validation,
             circuit_breaker,
             metrics,
+            preferred_region,
         })
     }
 }
@@ -222,6 +231,16 @@ impl ClientConfig {
     #[must_use]
     pub fn metrics(&self) -> &std::sync::Arc<dyn crate::metrics::SdkMetrics> {
         &self.metrics
+    }
+
+    /// Returns the preferred region for latency optimization.
+    ///
+    /// When set, the SDK prefers connecting to nodes in this region.
+    /// Does not affect data residency — organizations and users still
+    /// reside in their assigned regions.
+    #[must_use]
+    pub fn preferred_region(&self) -> Option<Region> {
+        self.preferred_region
     }
 }
 

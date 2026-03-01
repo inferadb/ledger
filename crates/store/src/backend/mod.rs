@@ -97,6 +97,31 @@ pub trait StorageBackend: Send + Sync {
     fn page_offset(&self, page_id: PageId) -> u64 {
         HEADER_SIZE as u64 + (page_id * self.page_size() as u64)
     }
+
+    /// Re-wraps a batch of pages' crypto metadata to a target RMK version.
+    ///
+    /// Non-encrypted backends return `(0, None)` (no-op). Encrypted backends
+    /// scan `batch_size` pages starting from `start_page_id`, unwrapping
+    /// each DEK with the old RMK and re-wrapping with the target version.
+    ///
+    /// Returns `(pages_rewrapped, next_page_id)` where `next_page_id` is
+    /// `None` when all pages have been processed.
+    fn rewrap_pages(
+        &self,
+        _start_page_id: u64,
+        _batch_size: usize,
+        _target_version: Option<u32>,
+    ) -> Result<(usize, Option<u64>)> {
+        Ok((0, None))
+    }
+
+    /// Returns the total number of page slots in the crypto sidecar.
+    ///
+    /// Non-encrypted backends return 0. Encrypted backends return the
+    /// sidecar's page count (file-size / metadata-size or max page ID + 1).
+    fn sidecar_page_count(&self) -> Result<u64> {
+        Ok(0)
+    }
 }
 
 /// A single commit slot containing the database state at a point in time.

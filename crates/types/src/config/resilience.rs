@@ -738,3 +738,50 @@ impl CleanupConfig {
         Ok(())
     }
 }
+
+fn default_migration_timeout_secs() -> u64 {
+    1800
+}
+
+/// Configuration for organization region migration.
+///
+/// Controls timeout behavior for cross-region migration sagas.
+/// Migrations exceeding the timeout are automatically rolled back.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::MigrationConfig;
+/// let config = MigrationConfig::default();
+/// assert_eq!(config.timeout_secs, 1800);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MigrationConfig {
+    /// Maximum time in seconds before a migration is auto-rolled back.
+    ///
+    /// Must be >= 60 (1 minute). Default: 1800 (30 minutes).
+    #[serde(default = "default_migration_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for MigrationConfig {
+    fn default() -> Self {
+        Self { timeout_secs: default_migration_timeout_secs() }
+    }
+}
+
+impl MigrationConfig {
+    /// Validates the configuration values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if `timeout_secs` is less than 60.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.timeout_secs < 60 {
+            return Err(ConfigError::Validation {
+                message: "migration timeout_secs must be >= 60".to_string(),
+            });
+        }
+        Ok(())
+    }
+}

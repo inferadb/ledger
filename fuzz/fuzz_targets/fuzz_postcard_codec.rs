@@ -9,7 +9,7 @@ use libfuzzer_sys::fuzz_target;
 
 use inferadb_ledger_types::codec::{decode, encode};
 use inferadb_ledger_types::types::{
-    BlockHeader, ChainCommitment, Entity, Operation, Relationship, SetCondition, ShardBlock,
+    BlockHeader, ChainCommitment, Entity, Operation, RegionBlock, Relationship, SetCondition,
     Transaction, VaultBlock, VaultEntry,
 };
 
@@ -30,7 +30,7 @@ fuzz_target!(|data: &[u8]| {
         5 => try_roundtrip::<BlockHeader>(payload),
         6 => try_roundtrip::<VaultBlock>(payload),
         7 => try_roundtrip::<VaultEntry>(payload),
-        8 => try_roundtrip::<ShardBlock>(payload),
+        8 => try_roundtrip::<RegionBlock>(payload),
         _ => try_roundtrip::<ChainCommitment>(payload),
     }
 });

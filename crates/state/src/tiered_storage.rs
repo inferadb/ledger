@@ -460,7 +460,7 @@ impl StorageBackend for ObjectStorageBackend {
             let temp_path = temp_dir.path().join("temp.snap");
             snapshot.write_to_file(&temp_path).context(SnapshotSnafu)?;
             let buf = std::fs::read(&temp_path).context(IoSnafu)?;
-            self.test_storage.write().insert(snapshot.shard_height(), buf);
+            self.test_storage.write().insert(snapshot.region_height(), buf);
             return Ok(());
         }
 
@@ -471,7 +471,7 @@ impl StorageBackend for ObjectStorageBackend {
         snapshot.write_to_file(&temp_path).context(SnapshotSnafu)?;
         let data = std::fs::read(&temp_path).context(IoSnafu)?;
 
-        let path = self.object_path(snapshot.shard_height());
+        let path = self.object_path(snapshot.region_height());
 
         if data.len() > self.multipart_threshold {
             // Multipart upload for large snapshots: per-chunk retries and
@@ -666,7 +666,7 @@ impl TieredSnapshotManager {
     ///
     /// Returns an error if the hot tier backend fails to store the snapshot.
     pub fn store(&self, snapshot: &Snapshot) -> Result<()> {
-        let height = snapshot.shard_height();
+        let height = snapshot.region_height();
         self.hot.store(snapshot)?;
         self.locations.write().insert(height, StorageTier::Hot);
         Ok(())
@@ -869,7 +869,7 @@ impl TieredSnapshotManager {
 mod tests {
     use std::collections::HashMap as StdHashMap;
 
-    use inferadb_ledger_types::{EMPTY_HASH, ShardId, VaultId};
+    use inferadb_ledger_types::{EMPTY_HASH, Region, VaultId};
     use tempfile::TempDir;
 
     use super::*;
@@ -889,7 +889,7 @@ mod tests {
 
         let state = SnapshotStateData { vault_entities: StdHashMap::new() };
 
-        Snapshot::new(ShardId::new(1), height, vault_states, state, SnapshotChainParams::default())
+        Snapshot::new(Region::GLOBAL, height, vault_states, state, SnapshotChainParams::default())
             .expect("create snapshot")
     }
 
@@ -912,7 +912,7 @@ mod tests {
 
         // Load it back
         let loaded = backend.load(100).unwrap();
-        assert_eq!(loaded.shard_height(), 100);
+        assert_eq!(loaded.region_height(), 100);
 
         // Delete it
         backend.delete(100).unwrap();
@@ -941,7 +941,7 @@ mod tests {
 
         // Load from hot
         let loaded = manager.load(200).unwrap();
-        assert_eq!(loaded.shard_height(), 200);
+        assert_eq!(loaded.region_height(), 200);
 
         // Find snapshot for height
         assert_eq!(manager.find_snapshot_for(250).unwrap(), Some(200));
@@ -993,7 +993,7 @@ mod tests {
 
         // Can still load from warm
         let loaded = manager.load(100).unwrap();
-        assert_eq!(loaded.shard_height(), 100);
+        assert_eq!(loaded.region_height(), 100);
     }
 
     #[test]
@@ -1037,7 +1037,7 @@ mod tests {
 
         // Load it back
         let loaded = backend.load(100).unwrap();
-        assert_eq!(loaded.shard_height(), 100);
+        assert_eq!(loaded.region_height(), 100);
 
         // Store more snapshots
         for height in [200, 300, 400] {
@@ -1095,7 +1095,7 @@ mod tests {
 
         // Can load from warm (actual object storage, not test mock)
         let loaded = manager.load(100).unwrap();
-        assert_eq!(loaded.shard_height(), 100);
+        assert_eq!(loaded.region_height(), 100);
 
         // Find snapshot for height
         assert_eq!(manager.find_snapshot_for(150).unwrap(), Some(100));

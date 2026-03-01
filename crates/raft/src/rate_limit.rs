@@ -3,15 +3,15 @@
 //! Provides three tiers of admission control for write requests:
 //!
 //! 1. **Per-client** — prevents a single bad actor from monopolizing resources
-//! 2. **Per-organization** — ensures fair sharing across tenants in a multi-tenant shard
+//! 2. **Per-organization** — ensures fair sharing across tenants in a multi-tenant region
 //! 3. **Global backpressure** — throttles all requests when Raft queue depth is high
 //!
 //! Uses the token bucket algorithm, which allows controlled bursts while maintaining
 //! an average rate. Each bucket has a capacity (max burst) and a refill rate (sustained
 //! throughput). Tokens are consumed on each request and refilled over time.
 //!
-//! Mitigates noisy neighbor problems in multi-tenant shards by applying rate
-//! limits per organization at the shard leader.
+//! Mitigates noisy neighbor problems in multi-tenant regions by applying rate
+//! limits per organization at the region leader.
 
 use std::{
     collections::HashMap,
@@ -165,6 +165,7 @@ impl TokenBucket {
 ///     1000, 500.0,  // per-client: burst 1000, 500/s sustained
 ///     5000, 2000.0, // per-organization: burst 5000, 2000/s sustained
 ///     100,          // backpressure threshold: 100 pending proposals
+///     "global",     // region label for metrics
 /// );
 ///
 /// // Check all three tiers
@@ -194,6 +195,9 @@ pub struct RateLimiter {
 
     /// Total rejected requests counter.
     rejected_count: AtomicU64,
+
+    /// Region identifier for metric labels.
+    region: String,
 }
 
 impl RateLimiter {
@@ -212,6 +216,7 @@ impl RateLimiter {
         organization_capacity: u64,
         organization_refill_rate: f64,
         backpressure_threshold: u64,
+        region: impl Into<String>,
     ) -> Self {
         Self {
             client_buckets: Mutex::new(HashMap::new()),
@@ -223,6 +228,7 @@ impl RateLimiter {
             backpressure_threshold: AtomicU64::new(backpressure_threshold),
             pending_proposals: AtomicU64::new(0),
             rejected_count: AtomicU64::new(0),
+            region: region.into(),
         }
     }
 
@@ -316,7 +322,7 @@ impl RateLimiter {
     /// Also emits the `ledger_rate_limit_queue_depth` gauge for SLI monitoring.
     pub fn set_pending_proposals(&self, count: u64) {
         self.pending_proposals.store(count, Ordering::Relaxed);
-        crate::metrics::set_rate_limit_queue_depth(count);
+        crate::metrics::set_rate_limit_queue_depth(count, &self.region);
     }
 
     /// Returns the current pending proposal count.
@@ -402,6 +408,7 @@ mod tests {
             10,   // organization burst: 10
             20.0, // organization refill: 20/s
             50,   // backpressure threshold: 50 pending
+            "global",
         )
     }
 
@@ -506,6 +513,7 @@ mod tests {
             1000,  // high organization burst
             500.0, // high organization refill
             100,   // backpressure threshold
+            "global",
         );
 
         // With empty client_id, should only hit organization limit
@@ -591,7 +599,7 @@ mod tests {
     #[test]
     fn check_order_backpressure_first() {
         // If both backpressure and organization are exceeded, backpressure wins
-        let limiter = RateLimiter::new(100, 100.0, 1, 0.001, 10);
+        let limiter = RateLimiter::new(100, 100.0, 1, 0.001, 10, "global");
 
         // Exhaust organization
         limiter.check("c", 1.into()).unwrap();
@@ -695,6 +703,7 @@ mod tests {
             10_000, 5_000.0, // per-client: high burst, high refill
             50_000, 20_000.0, // per-organization: very high
             1000,     // backpressure threshold
+            "global",
         ));
 
         let running = Arc::new(AtomicBool::new(true));
@@ -786,6 +795,7 @@ mod tests {
             100_000,
             100_000.0, // Organization limits are generous
             10_000,    // No backpressure
+            "global",
         ));
 
         let allowed = Arc::new(AtomicU64::new(0));

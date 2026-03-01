@@ -18,7 +18,7 @@ use openraft::{
 use parking_lot::RwLock;
 
 use super::{
-    ShardChainState,
+    RegionChainState,
     store::RaftLogStore,
     types::{AppliedState, AppliedStateCore, PendingExternalWrites},
 };
@@ -276,8 +276,8 @@ async fn write_snapshot_to_file(
                 let core = AppliedStateCore {
                     last_applied: None,
                     membership: StoredMembership::default(),
-                    shard_height: 0,
-                    previous_shard_hash: inferadb_ledger_types::Hash::default(),
+                    region_height: 0,
+                    previous_region_hash: inferadb_ledger_types::Hash::default(),
                     last_applied_timestamp_ns: 0,
                 };
                 let core_bytes = encode(&core).map_err(|e| SnapshotError::InvalidEntry {
@@ -526,9 +526,9 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             applied_state: Arc::clone(&self.applied_state),
             state_layer: self.state_layer.clone(),
             block_archive: self.block_archive.clone(),
-            shard: self.shard,
+            region: self.region,
             node_id: self.node_id.clone(),
-            shard_chain: RwLock::new(*self.shard_chain.read()),
+            region_chain: RwLock::new(*self.region_chain.read()),
             block_announcements: self.block_announcements.clone(),
             event_writer: None,
             client_sequence_eviction: self.client_sequence_eviction.clone(),
@@ -685,7 +685,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         let _span = tracing::info_span!(
             "apply_to_state_machine",
             entry_count = entries.len(),
-            shard = self.shard.value(),
+            region = self.region.as_str(),
         )
         .entered();
 
@@ -708,7 +708,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         let mut pending = PendingExternalWrites::default();
         let ttl_days = self.event_writer.as_ref().map_or(0, |ew| ew.config().default_ttl_days);
 
-        // Get the committed_index from the last entry (for ShardBlock metadata)
+        // Get the committed_index from the last entry (for RegionBlock metadata)
         let committed_index = entries.last().map_or(0, |e| e.log_id.index);
         // Term is stored in the leader_id
         let term = entries.last().map(|e| e.log_id.leader_id.term).unwrap_or(0);
@@ -736,24 +736,24 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
             responses.push(response);
 
-            // Collect vault entries for ShardBlock creation
+            // Collect vault entries for RegionBlock creation
             if let Some(entry) = vault_entry {
                 vault_entries.push(entry);
             }
         }
 
-        // Create and store ShardBlock if we have vault entries
+        // Create and store RegionBlock if we have vault entries
         if !vault_entries.is_empty() {
             let timestamp = block_timestamp;
 
-            // Read shard chain state (single lock acquisition)
-            let chain_state = *self.shard_chain.read();
-            let new_shard_height = chain_state.height + 1;
+            // Read region chain state (single lock acquisition)
+            let chain_state = *self.region_chain.read();
+            let new_region_height = chain_state.height + 1;
 
-            let shard_block = inferadb_ledger_types::ShardBlock {
-                shard: self.shard,
-                shard_height: new_shard_height,
-                previous_shard_hash: chain_state.previous_hash,
+            let region_block = inferadb_ledger_types::RegionBlock {
+                region: self.region,
+                region_height: new_region_height,
+                previous_region_hash: chain_state.previous_hash,
                 vault_entries: vault_entries.clone(),
                 timestamp,
                 leader_id: self.node_id.clone(),
@@ -763,7 +763,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
             // Store in block archive if configured
             if let Some(archive) = &self.block_archive
-                && let Err(e) = archive.append_block(&shard_block)
+                && let Err(e) = archive.append_block(&region_block)
             {
                 tracing::error!("Failed to store block: {}", e);
                 // Continue - block storage failure is logged but doesn't fail the operation
@@ -808,7 +808,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
             // Update previous vault hashes for each entry
             for entry in &vault_entries {
-                let vault_block = shard_block.extract_vault_block(
+                let vault_block = region_block.extract_vault_block(
                     entry.organization,
                     entry.vault,
                     entry.vault_height,
@@ -821,15 +821,15 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 }
             }
 
-            // Update shard chain tracking (single lock acquisition)
-            let shard_hash =
-                inferadb_ledger_types::sha256(&encode(&shard_block).unwrap_or_default());
-            *self.shard_chain.write() =
-                ShardChainState { height: new_shard_height, previous_hash: shard_hash };
+            // Update region chain tracking (single lock acquisition)
+            let region_hash =
+                inferadb_ledger_types::sha256(&encode(&region_block).unwrap_or_default());
+            *self.region_chain.write() =
+                RegionChainState { height: new_region_height, previous_hash: region_hash };
 
             // Also update AppliedState for snapshot persistence
-            state.shard_height = new_shard_height;
-            state.previous_shard_hash = shard_hash;
+            state.region_height = new_region_height;
+            state.previous_region_hash = region_hash;
         }
 
         // Client sequence TTL eviction — deterministic from log index.
@@ -1133,9 +1133,11 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         let loaded_state = self.load_applied_state_from_db(&core)?;
         *self.applied_state.write() = loaded_state;
 
-        // Restore shard chain tracking
-        *self.shard_chain.write() =
-            ShardChainState { height: core.shard_height, previous_hash: core.previous_shard_hash };
+        // Restore region chain tracking
+        *self.region_chain.write() = RegionChainState {
+            height: core.region_height,
+            previous_hash: core.previous_region_hash,
+        };
 
         tracing::info!(
             snapshot_id = %meta.snapshot_id,
@@ -1202,8 +1204,8 @@ impl RaftLogStore {
         let mut state = AppliedState {
             last_applied: core.last_applied,
             membership: core.membership.clone(),
-            shard_height: core.shard_height,
-            previous_shard_hash: core.previous_shard_hash,
+            region_height: core.region_height,
+            previous_region_hash: core.previous_region_hash,
             last_applied_timestamp_ns: core.last_applied_timestamp_ns,
             ..Default::default()
         };

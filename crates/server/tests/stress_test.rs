@@ -31,15 +31,15 @@
 //!
 //! ## Throughput Scaling Strategy
 //!
-//! Raft consensus overhead (~16-30ms) limits single-shard throughput to ~60 ops/sec.
+//! Raft consensus overhead (~16-30ms) limits single-region throughput to ~60 ops/sec.
 //! To achieve 5000 tx/sec, InferaDB uses two strategies:
 //!
 //! 1. **Write Batching**: Multiple operations in a single Raft entry amortizes consensus overhead.
 //!    With 16KB pages, batch_size=100 achieves ~6000 ops/sec.
 //!
-//! 2. **Multi-Shard**: Multiple parallel Raft groups via MultiRaftManager. Each shard has
-//!    independent consensus, enabling parallel writes. MultiShardTestCluster is implemented (see
-//!    test_stress_multi_shard_*). NOTE: Organization→shard assignment needed for true parallel
+//! 2. **Multi-Region**: Multiple parallel Raft groups via MultiRaftManager. Each region has
+//!    independent consensus, enabling parallel writes. MultiRegionTestCluster is implemented (see
+//!    test_stress_multi_region_*). NOTE: Organization→region assignment needed for true parallel
 //!    writes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
@@ -58,7 +58,7 @@ use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 use parking_lot::Mutex;
 use tokio::sync::Semaphore;
 
-use crate::common::{MultiShardTestCluster, TestCluster};
+use crate::common::{MultiRegionTestCluster, TestCluster};
 
 /// Configuration for the stress test.
 #[derive(Debug, Clone)]
@@ -81,7 +81,7 @@ struct StressConfig {
     max_concurrent_writes: usize,
     /// Maximum concurrent read requests (can be higher since reads are fast).
     max_concurrent_reads: usize,
-    /// Tracks write locations (organization/vault) for multi-shard verification.
+    /// Tracks write locations (organization/vault) for multi-region verification.
     track_write_locations: bool,
 }
 
@@ -133,7 +133,7 @@ fn extract_leader_addr_from_error(error_msg: &str) -> Option<SocketAddr> {
     None
 }
 
-/// Written value with its location for multi-shard consistency verification.
+/// Written value with its location for multi-region consistency verification.
 #[derive(Debug, Clone)]
 struct WrittenValue {
     organization: OrganizationSlug,
@@ -158,7 +158,7 @@ struct StressMetrics {
     read_latencies: Mutex<Vec<u64>>,
     /// Values written (key -> value) for consistency verification.
     written_values: Mutex<HashMap<String, Vec<u8>>>,
-    /// Values written with location for multi-shard consistency verification.
+    /// Values written with location for multi-region consistency verification.
     /// Maps key -> (organization, vault, value).
     written_values_with_location: Mutex<HashMap<String, WrittenValue>>,
 }
@@ -182,7 +182,7 @@ async fn setup_organization_and_vault(
     // Create organization and capture the actual Snowflake slug
     let ns_request = inferadb_ledger_proto::proto::CreateOrganizationRequest {
         name: format!("stress-ns-{}", config.organization.value()),
-        shard: None,
+        region: 10, // REGION_US_EAST_VA
         tier: None,
     };
     let ns_response = admin_client
@@ -219,25 +219,25 @@ async fn setup_organization_and_vault(
     Ok(())
 }
 
-/// Organization and vault assignment for multi-shard stress testing.
+/// Organization and vault assignment for multi-region stress testing.
 #[derive(Debug, Clone)]
-struct ShardAssignment {
-    /// Shard ID (1-based for data shards).
-    shard: u32,
-    /// Organization slug assigned to this shard.
+struct RegionAssignment {
+    /// Region index (1-based for data regions).
+    region_index: u32,
+    /// Organization slug assigned to this region.
     organization: OrganizationSlug,
     /// Vault slug within the organization.
     vault: VaultSlug,
 }
 
-/// Setup multiple organizations across different shards for true multi-shard stress testing.
+/// Setup multiple organizations across different regions for true multi-region stress testing.
 ///
-/// Creates one organization per data shard, each explicitly routed to its shard.
-/// This enables parallel writes since each shard has independent Raft consensus.
-async fn setup_multi_shard_organizations(
+/// Creates one organization per data region, each explicitly routed to its region.
+/// This enables parallel writes since each region has independent Raft consensus.
+async fn setup_multi_region_organizations(
     leader_addr: SocketAddr,
-    num_shards: usize,
-) -> Result<Vec<ShardAssignment>, String> {
+    num_regions: usize,
+) -> Result<Vec<RegionAssignment>, String> {
     let endpoint = format!("http://{}", leader_addr);
     let mut admin_client =
         inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::connect(
@@ -246,28 +246,28 @@ async fn setup_multi_shard_organizations(
         .await
         .map_err(|e| format!("Failed to connect admin client: {}", e))?;
 
-    let mut assignments = Vec::with_capacity(num_shards);
+    let mut assignments = Vec::with_capacity(num_regions);
 
-    for shard in 1..=num_shards {
-        let shard_u32 = shard as u32;
+    for region in 1..=num_regions {
+        let region_u32 = region as u32;
 
-        // Create organization (automatic shard assignment)
+        // Create organization (all assigned to GLOBAL region; server routes internally)
         let ns_request = inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: format!("stress-shard-{}-ns", shard),
-            shard: None,
+            name: format!("stress-region-{}-ns", region),
+            region: 10, // REGION_US_EAST_VA
             tier: None,
         };
 
         let ns_response = admin_client
             .create_organization(ns_request)
             .await
-            .map_err(|e| format!("Failed to create organization for shard {}: {}", shard, e))?;
+            .map_err(|e| format!("Failed to create organization for region {}: {}", region, e))?;
 
         let organization = ns_response
             .into_inner()
             .slug
             .map(|n| OrganizationSlug::new(n.slug))
-            .ok_or_else(|| format!("No organization slug in response for shard {}", shard))?;
+            .ok_or_else(|| format!("No organization slug in response for region {}", region))?;
 
         // Create vault in this organization
         let vault_request = inferadb_ledger_proto::proto::CreateVaultRequest {
@@ -289,7 +289,7 @@ async fn setup_multi_shard_organizations(
             .map(|v| VaultSlug::new(v.slug))
             .ok_or_else(|| format!("No vault in response for organization {}", organization))?;
 
-        assignments.push(ShardAssignment { shard: shard_u32, organization, vault });
+        assignments.push(RegionAssignment { region_index: region_u32, organization, vault });
     }
 
     Ok(assignments)
@@ -306,7 +306,7 @@ impl StressMetrics {
         self.written_values.lock().insert(key, value);
     }
 
-    /// Records a write with its organization/vault location for multi-shard verification.
+    /// Records a write with its organization/vault location for multi-region verification.
     fn record_write_with_location(
         &self,
         latency: Duration,
@@ -929,15 +929,15 @@ async fn verify_consistency(
     }
 }
 
-/// Verifies consistency of written values across multiple shards.
+/// Verifies consistency of written values across multiple regions.
 ///
-/// Unlike single-shard verification, this reads from the correct organization/vault
+/// Unlike single-region verification, this reads from the correct organization/vault
 /// for each key based on where it was written.
-async fn verify_multi_shard_consistency(
+async fn verify_multi_region_consistency(
     leader_addr: SocketAddr,
     metrics: &StressMetrics,
 ) -> Result<(), String> {
-    println!("\n🔍 Verifying consistency across all shards...");
+    println!("\n🔍 Verifying consistency across all regions...");
 
     let endpoint = format!("http://{}", leader_addr);
     let mut client =
@@ -1038,11 +1038,11 @@ async fn verify_multi_shard_consistency(
 
     if mismatches > 0 {
         Err(format!(
-            "Multi-shard consistency check failed: {} mismatches out of {} sampled keys",
+            "Multi-region consistency check failed: {} mismatches out of {} sampled keys",
             mismatches, sample_size
         ))
     } else {
-        println!("  ✅ All {} sampled keys verified successfully across all shards", sample_size);
+        println!("  ✅ All {} sampled keys verified successfully across all regions", sample_size);
         Ok(())
     }
 }
@@ -1220,11 +1220,11 @@ async fn test_stress_single_node() {
 ///
 /// ## Throughput Analysis
 ///
-/// Raft consensus takes ~20-30ms per batch. Single-shard theoretical max:
+/// Raft consensus takes ~20-30ms per batch. Single-region theoretical max:
 /// - batch_size=50 @ 25ms = 2,000 ops/sec max
 /// - batch_size=100 @ 25ms = 4,000 ops/sec max (requires 16KB pages)
 ///
-/// With multi-shard (8 shards) and batch_size=100, achieves 6000+ ops/sec.
+/// With multi-region (8 regions) and batch_size=100, achieves 6000+ ops/sec.
 /// All databases use 16KB pages to support larger batch sizes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_stress_batched() {
@@ -1278,44 +1278,44 @@ async fn test_stress_standard() {
 }
 
 // ============================================================================
-// Multi-Shard Stress Tests
+// Multi-Region Stress Tests
 // ============================================================================
 //
-// These tests use MultiShardTestCluster to achieve higher write throughput
-// via parallel Raft consensus across multiple independent shards.
+// These tests use MultiRegionTestCluster to achieve higher write throughput
+// via parallel Raft consensus across multiple independent regions.
 //
-// Each shard is a separate Raft group, allowing writes to different shards
+// Each region is a separate Raft group, allowing writes to different regions
 // to proceed in parallel without consensus conflicts.
 
-/// Run a stress test using multi-shard architecture.
+/// Run a stress test using multi-region architecture.
 ///
 /// This enables significantly higher write throughput by distributing
-/// writes across multiple independent Raft groups. Each shard has its own
-/// organization, and workers are distributed across shards for parallel consensus.
-async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config: StressConfig) {
-    println!("\n🚀 Starting Multi-Shard Stress Test (PARALLEL WRITES)");
+/// writes across multiple independent Raft groups. Each region has its own
+/// organization, and workers are distributed across regions for parallel consensus.
+async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, config: StressConfig) {
+    println!("\n🚀 Starting Multi-Region Stress Test (PARALLEL WRITES)");
     println!("   Nodes: {}", num_nodes);
-    println!("   Data shards: {}", num_shards);
+    println!("   Data regions: {}", num_regions);
     println!(
-        "   Write workers: {} ({} per shard)",
+        "   Write workers: {} ({} per region)",
         config.write_workers,
-        config.write_workers / num_shards.max(1)
+        config.write_workers / num_regions.max(1)
     );
     println!("   Read workers: {}", config.read_workers);
     println!("   Duration: {:?}", config.duration);
     println!("   Batch size: {}", config.batch_size);
     println!();
 
-    // Start multi-shard cluster
-    println!("📦 Creating {}-node, {}-shard cluster...", num_nodes, num_shards);
-    let cluster = MultiShardTestCluster::new(num_nodes, num_shards).await;
+    // Start multi-region cluster
+    println!("📦 Creating {}-node, {}-region cluster...", num_nodes, num_regions);
+    let cluster = MultiRegionTestCluster::new(num_nodes, num_regions).await;
 
-    // Wait for all shards to have leaders
+    // Wait for all regions to have leaders
     let leaders_ready = cluster.wait_for_leaders(Duration::from_secs(10)).await;
     if !leaders_ready {
-        panic!("Failed to elect leaders on all shards");
+        panic!("Failed to elect leaders on all regions");
     }
-    println!("   ✅ Leaders elected on all {} shards", num_shards + 1); // +1 for system shard
+    println!("   ✅ Leaders elected on all {} regions", num_regions + 1); // +1 for system region
 
     // Allow cluster to stabilize
     println!("   Waiting for cluster stabilization...");
@@ -1325,20 +1325,21 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
     let leader_addr = node.addr;
     let all_addrs = cluster.addresses();
 
-    // Setup organizations across all shards - one organization per shard
-    println!("🔧 Setting up {} organizations (one per shard)...", num_shards);
-    let shard_assignments = match setup_multi_shard_organizations(leader_addr, num_shards).await {
+    // Setup organizations across all regions - one organization per region
+    println!("🔧 Setting up {} organizations (one per region)...", num_regions);
+    let region_assignments = match setup_multi_region_organizations(leader_addr, num_regions).await
+    {
         Ok(assignments) => {
             for assignment in &assignments {
                 println!(
-                    "   ✅ Shard {} → Organization {} → Vault {}",
-                    assignment.shard, assignment.organization, assignment.vault
+                    "   ✅ Region {} → Organization {} → Vault {}",
+                    assignment.region_index, assignment.organization, assignment.vault
                 );
             }
             assignments
         },
         Err(e) => {
-            panic!("Failed to setup multi-shard organizations: {}", e);
+            panic!("Failed to setup multi-region organizations: {}", e);
         },
     };
 
@@ -1348,17 +1349,20 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
     let write_semaphore = Arc::new(Semaphore::new(config.max_concurrent_writes));
     let read_semaphore = Arc::new(Semaphore::new(config.max_concurrent_reads));
 
-    // Spawn write workers - DISTRIBUTED ACROSS SHARDS
-    // Each worker is assigned to a specific shard to enable parallel consensus
-    println!("🔥 Spawning {} write workers across {} shards...", config.write_workers, num_shards);
+    // Spawn write workers - DISTRIBUTED ACROSS REGIONS
+    // Each worker is assigned to a specific region to enable parallel consensus
+    println!(
+        "🔥 Spawning {} write workers across {} regions...",
+        config.write_workers, num_regions
+    );
     let mut handles = Vec::new();
     for i in 0..config.write_workers {
-        // Distribute workers round-robin across shards
-        let assignment = shard_assignments[i % shard_assignments.len()].clone();
+        // Distribute workers round-robin across regions
+        let assignment = region_assignments[i % region_assignments.len()].clone();
         let worker_config = StressConfig {
             organization: assignment.organization,
             vault: assignment.vault,
-            track_write_locations: true, // Enable location tracking for multi-shard verification
+            track_write_locations: true, // Enable location tracking for multi-region verification
             ..config.clone()
         };
         let metrics = metrics.clone();
@@ -1369,15 +1373,15 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
         }));
     }
 
-    // For reads, use the first shard assignment (reads are fast anyway)
+    // For reads, use the first region assignment (reads are fast anyway)
     let read_config = StressConfig {
-        organization: shard_assignments[0].organization,
-        vault: shard_assignments[0].vault,
+        organization: region_assignments[0].organization,
+        vault: region_assignments[0].vault,
         ..config.clone()
     };
 
     // Spawn read workers - distribute across all nodes for load balancing
-    // Note: reads go to the first shard's organization. For read testing, this is fine
+    // Note: reads go to the first region's organization. For read testing, this is fine
     // since read throughput isn't limited by Raft consensus.
     println!("📖 Spawning {} read workers...", read_config.read_workers);
     for i in 0..read_config.read_workers {
@@ -1424,13 +1428,16 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
 
     // Report metrics - reuse existing report() for detailed output
     let actual_duration = start.elapsed();
-    println!("\n📊 Multi-Shard Stress Test Results ({} nodes, {} shards)", num_nodes, num_shards);
+    println!(
+        "\n📊 Multi-Region Stress Test Results ({} nodes, {} regions)",
+        num_nodes, num_regions
+    );
     metrics.report(actual_duration);
 
-    // Verify consistency across all shards - reads from each key's recorded organization/vault
-    let consistency_result = verify_multi_shard_consistency(leader_addr, &metrics).await;
+    // Verify consistency across all regions - reads from each key's recorded organization/vault
+    let consistency_result = verify_multi_region_consistency(leader_addr, &metrics).await;
     if let Err(e) = &consistency_result {
-        eprintln!("  ❌ Multi-shard consistency verification failed: {}", e);
+        eprintln!("  ❌ Multi-region consistency verification failed: {}", e);
     }
 
     // Final assertions
@@ -1445,10 +1452,10 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
     assert!(writes > 0, "Should have completed some writes");
     assert!(error_rate < 0.01, "Write error rate should be <1%, was {:.2}%", error_rate * 100.0);
 
-    // Report multi-shard specific summary
-    println!("\n🎯 Multi-Shard Summary:");
-    println!("   Shards: {} data shards + 1 system shard", num_shards);
-    println!("   Per-shard throughput: {:.0} ops/sec", ops_per_sec / num_shards as f64);
+    // Report multi-region specific summary
+    println!("\n🎯 Multi-Region Summary:");
+    println!("   Regions: {} data regions + 1 system region", num_regions);
+    println!("   Per-region throughput: {:.0} ops/sec", ops_per_sec / num_regions as f64);
     println!("   Total throughput: {:.0} ops/sec", ops_per_sec);
     println!(
         "   Target (5000 ops/sec): {}",
@@ -1456,22 +1463,22 @@ async fn run_multi_shard_stress_test(num_nodes: usize, num_shards: usize, config
     );
 }
 
-/// Quick multi-shard stress test - validates infrastructure works.
-/// Run with: cargo test test_stress_multi_shard_quick -- --nocapture
+/// Quick multi-region stress test - validates infrastructure works.
+/// Run with: cargo test test_stress_multi_region_quick -- --nocapture
 ///
-/// Creates one organization per shard and distributes write workers across them
+/// Creates one organization per region and distributes write workers across them
 /// for true parallel Raft consensus.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn test_stress_multi_shard_quick() {
-    run_multi_shard_stress_test(
+async fn test_stress_multi_region_quick() {
+    run_multi_region_stress_test(
         1, // Single node for speed
-        2, // 2 data shards
+        2, // 2 data regions
         StressConfig {
             write_workers: 4,
             read_workers: 8,
             duration: Duration::from_secs(5),
             batch_size: 10,
-            organization: OrganizationSlug::new(0), // Overridden per-worker by shard assignments
+            organization: OrganizationSlug::new(0), // Overridden per-worker by region assignments
             vault: VaultSlug::new(1),
             max_concurrent_writes: 50,
             max_concurrent_reads: 200,
@@ -1481,27 +1488,27 @@ async fn test_stress_multi_shard_quick() {
     .await;
 }
 
-/// Multi-shard batched throughput test - parallel writes across 4 shards.
-/// Run with: cargo test --release test_stress_multi_shard_batched -- --nocapture
+/// Multi-region batched throughput test - parallel writes across 4 regions.
+/// Run with: cargo test --release test_stress_multi_region_batched -- --nocapture
 ///
-/// This is the multi-shard equivalent of `test_stress_batched`. With 4 shards
-/// and batch_size=50, theoretical max is 4x single-shard (~2300 ops/sec).
+/// This is the multi-region equivalent of `test_stress_batched`. With 4 regions
+/// and batch_size=50, theoretical max is 4x single-region (~2300 ops/sec).
 ///
 /// ## Expected Results (release mode)
-/// - Single shard batched: ~580 ops/sec
-/// - 4 shards batched: ~2000-2300 ops/sec (4x parallel consensus)
+/// - Single region batched: ~580 ops/sec
+/// - 4 regions batched: ~2000-2300 ops/sec (4x parallel consensus)
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
-async fn test_stress_multi_shard_batched() {
-    run_multi_shard_stress_test(
+async fn test_stress_multi_region_batched() {
+    run_multi_region_stress_test(
         1, // Single node
-        4, // 4 data shards for parallel writes
+        4, // 4 data regions for parallel writes
         StressConfig {
-            write_workers: 8, // 2 workers per shard
+            write_workers: 8, // 2 workers per region
             read_workers: 16,
             duration: Duration::from_secs(10),
             batch_size: 50, // Match batched test
             read_batch_size: 50,
-            organization: OrganizationSlug::new(0), // Overridden per-worker by shard assignments
+            organization: OrganizationSlug::new(0), // Overridden per-worker by region assignments
             vault: VaultSlug::new(1),
             max_concurrent_writes: 100,
             max_concurrent_reads: 500,
@@ -1511,22 +1518,22 @@ async fn test_stress_multi_shard_batched() {
     .await;
 }
 
-/// Multi-shard sustained test - 4 shards for 15 seconds.
-/// Run with: cargo test --release test_stress_multi_shard -- --nocapture
+/// Multi-region sustained test - 4 regions for 15 seconds.
+/// Run with: cargo test --release test_stress_multi_region -- --nocapture
 ///
-/// Validates sustained multi-shard throughput over moderate duration.
+/// Validates sustained multi-region throughput over moderate duration.
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
-async fn test_stress_multi_shard() {
-    run_multi_shard_stress_test(
+async fn test_stress_multi_region() {
+    run_multi_region_stress_test(
         1, // Single node
-        4, // 4 data shards for parallel writes
+        4, // 4 data regions for parallel writes
         StressConfig {
             write_workers: 16,
             read_workers: 32,
             duration: Duration::from_secs(15),
             batch_size: 50, // Match batched test for consistency
             read_batch_size: 100,
-            organization: OrganizationSlug::new(0), // Overridden per-worker by shard assignments
+            organization: OrganizationSlug::new(0), // Overridden per-worker by region assignments
             vault: VaultSlug::new(1),
             max_concurrent_writes: 200,
             max_concurrent_reads: 1000,
@@ -1536,31 +1543,31 @@ async fn test_stress_multi_shard() {
     .await;
 }
 
-/// Multi-shard maximum throughput test on single machine.
-/// Uses 8 shards with batch_size=100 to achieve target throughput.
-/// Run with: cargo test --release test_stress_multi_shard_target -- --nocapture
+/// Multi-region maximum throughput test on single machine.
+/// Uses 8 regions with batch_size=100 to achieve target throughput.
+/// Run with: cargo test --release test_stress_multi_region_target -- --nocapture
 ///
 /// ## Expected Results
 /// - Write throughput: ~6000+ ops/sec (exceeds 5000 target)
 /// - Write p99 latency: <5ms (well under 50ms target)
-/// - Per-shard throughput: ~750-800 ops/sec
+/// - Per-region throughput: ~750-800 ops/sec
 ///
 /// ## Technical Notes
 /// - All databases (raft, state, blocks) use 16KB pages
 /// - batch_size=100 requires 16KB pages (~10KB serialized per batch)
-/// - 16 write workers distribute load across 8 shards
+/// - 16 write workers distribute load across 8 regions
 #[tokio::test(flavor = "multi_thread", worker_threads = 32)]
-async fn test_stress_multi_shard_target() {
-    run_multi_shard_stress_test(
+async fn test_stress_multi_region_target() {
+    run_multi_region_stress_test(
         1, // Single node
-        8, // 8 data shards - optimal for single machine
+        8, // 8 data regions - optimal for single machine
         StressConfig {
-            write_workers: 16, // 2 workers per shard
+            write_workers: 16, // 2 workers per region
             read_workers: 16,
             duration: Duration::from_secs(15),
             batch_size: 100, // 16KB pages support larger batches
             read_batch_size: 100,
-            organization: OrganizationSlug::new(0), // Overridden per-worker by shard assignments
+            organization: OrganizationSlug::new(0), // Overridden per-worker by region assignments
             vault: VaultSlug::new(1),
             max_concurrent_writes: 160,
             max_concurrent_reads: 500,

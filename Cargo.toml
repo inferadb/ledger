@@ -48,6 +48,9 @@ hmac = "0.12"
 rs_merkle = "1"
 subtle = "2"
 base64 = "0.22"
+aes-gcm = "0.10"
+aes-kw = "0.2"
+zeroize = { version = "1", features = ["derive"] }
 
 # Compression
 zstd = "0.13"

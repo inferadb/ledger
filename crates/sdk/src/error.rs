@@ -6,6 +6,7 @@
 //!
 //! Errors include retryability classification and recovery context.
 
+use inferadb_ledger_types::Region;
 use tonic::Code;
 
 /// Result type alias for SDK operations.
@@ -149,6 +150,8 @@ pub struct ServerErrorDetails {
 /// | `ProofVerification`  | No        | Merkle proof is invalid; data may be tampered               |
 /// | `Validation`         | No        | Fix request parameters to conform to field limits           |
 /// | `CircuitOpen`        | No        | Wait for `retry_after`; circuit breaker will probe          |
+/// | `OrganizationMigrating` | Yes    | Organization is migrating; wait for `retry_after`           |
+/// | `UserMigrating`         | Yes    | User is migrating between regions; wait for `retry_after`   |
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
     /// Failed to establish connection to the server.
@@ -349,6 +352,35 @@ pub enum SdkError {
         /// Suggested wait duration before retrying.
         retry_after: std::time::Duration,
     },
+
+    /// Organization is being migrated to another region.
+    ///
+    /// Writes are temporarily blocked while the migration is in progress.
+    /// **Recovery**: Retryable. Wait for the suggested duration then retry.
+    #[error(
+        "Organization migrating from {source_region} to {target_region}, retry after {retry_after:?}"
+    )]
+    OrganizationMigrating {
+        /// Source region the organization is migrating from.
+        source_region: Region,
+        /// Target region for the migration.
+        target_region: Region,
+        /// Suggested wait duration before retrying.
+        retry_after: std::time::Duration,
+    },
+
+    /// User is migrating between regions. Authenticated API calls are temporarily blocked.
+    ///
+    /// **Recovery**: Retryable. Wait for the suggested duration then retry.
+    #[error("User migrating from {source_region} to {target_region}, retry after {retry_after:?}")]
+    UserMigrating {
+        /// Source region the user is migrating from.
+        source_region: Region,
+        /// Target region the user is migrating to.
+        target_region: Region,
+        /// Suggested retry delay.
+        retry_after: std::time::Duration,
+    },
 }
 
 impl SdkError {
@@ -395,6 +427,8 @@ impl SdkError {
             Self::ProofVerification { .. } => false, // Data integrity error
             Self::Validation { .. } => false, // Request is malformed
             Self::CircuitOpen { .. } => false, // Fast-fail, don't retry against open circuit
+            Self::OrganizationMigrating { .. } => true, // Migration is temporary
+            Self::UserMigrating { .. } => true, // Migration is temporary
         }
     }
 
@@ -420,6 +454,8 @@ impl SdkError {
             Self::ProofVerification { .. } => "proof_verification".to_owned(),
             Self::Validation { .. } => "validation".to_owned(),
             Self::CircuitOpen { .. } => "circuit_open".to_owned(),
+            Self::OrganizationMigrating { .. } => "organization_migrating".to_owned(),
+            Self::UserMigrating { .. } => "user_migrating".to_owned(),
         }
     }
 
@@ -496,6 +532,52 @@ impl From<tonic::Status> for SdkError {
                 request_id,
                 trace_id,
                 error_details,
+            };
+        }
+
+        // Check for organization migration: FAILED_PRECONDITION + error code 3106
+        if status.code() == Code::FailedPrecondition
+            && let Some(ref details) = error_details
+            && details.error_code == "3106"
+        {
+            let source_region = details
+                .context
+                .get("source_region")
+                .and_then(|s| s.parse::<Region>().ok())
+                .unwrap_or(Region::GLOBAL);
+            let target_region = details
+                .context
+                .get("target_region")
+                .and_then(|s| s.parse::<Region>().ok())
+                .unwrap_or(Region::GLOBAL);
+            let retry_after_ms = details.retry_after_ms.unwrap_or(30_000).max(0) as u64;
+            return Self::OrganizationMigrating {
+                source_region,
+                target_region,
+                retry_after: std::time::Duration::from_millis(retry_after_ms),
+            };
+        }
+
+        // Check for user migration: FAILED_PRECONDITION + error code 3107
+        if status.code() == Code::FailedPrecondition
+            && let Some(ref details) = error_details
+            && details.error_code == "3107"
+        {
+            let source_region = details
+                .context
+                .get("source_region")
+                .and_then(|s| s.parse::<Region>().ok())
+                .unwrap_or(Region::GLOBAL);
+            let target_region = details
+                .context
+                .get("target_region")
+                .and_then(|s| s.parse::<Region>().ok())
+                .unwrap_or(Region::GLOBAL);
+            let retry_after_ms = details.retry_after_ms.unwrap_or(30_000).max(0) as u64;
+            return Self::UserMigrating {
+                source_region,
+                target_region,
+                retry_after: std::time::Duration::from_millis(retry_after_ms),
             };
         }
 
@@ -1200,5 +1282,119 @@ mod tests {
         assert_eq!(decoded.context.get("key1").unwrap(), "val1");
         assert_eq!(decoded.context.get("key2").unwrap(), "val2");
         assert_eq!(decoded.suggested_action.as_deref(), Some("Wait and retry"));
+    }
+
+    // --- OrganizationMigrating tests ---
+
+    #[test]
+    fn test_organization_migrating_is_retryable() {
+        let err = SdkError::OrganizationMigrating {
+            source_region: Region::US_EAST_VA,
+            target_region: Region::IE_EAST_DUBLIN,
+            retry_after: std::time::Duration::from_secs(30),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_organization_migrating_error_type() {
+        let err = SdkError::OrganizationMigrating {
+            source_region: Region::GLOBAL,
+            target_region: Region::US_EAST_VA,
+            retry_after: std::time::Duration::from_secs(10),
+        };
+        assert_eq!(err.error_type(), "organization_migrating");
+    }
+
+    #[test]
+    fn test_organization_migrating_from_status() {
+        use inferadb_ledger_proto::proto::ErrorDetails;
+        use prost::Message;
+
+        let mut context = std::collections::HashMap::new();
+        context.insert("source_region".to_owned(), "us-east-va".to_owned());
+        context.insert("target_region".to_owned(), "ie-east-dublin".to_owned());
+
+        let details = ErrorDetails {
+            error_code: "3106".to_owned(),
+            is_retryable: true,
+            retry_after_ms: Some(15_000),
+            context,
+            suggested_action: None,
+        };
+        let encoded = details.encode_to_vec();
+        let status = tonic::Status::with_details(
+            tonic::Code::FailedPrecondition,
+            "organization is migrating",
+            encoded.into(),
+        );
+
+        let err: SdkError = status.into();
+        match &err {
+            SdkError::OrganizationMigrating { source_region, target_region, retry_after } => {
+                assert_eq!(*source_region, Region::US_EAST_VA);
+                assert_eq!(*target_region, Region::IE_EAST_DUBLIN);
+                assert_eq!(*retry_after, std::time::Duration::from_millis(15_000));
+            },
+            _ => panic!("Expected OrganizationMigrating variant, got {:?}", err),
+        }
+        assert!(err.is_retryable());
+    }
+
+    // --- UserMigrating tests ---
+
+    #[test]
+    fn test_user_migrating_is_retryable() {
+        let err = SdkError::UserMigrating {
+            source_region: Region::US_EAST_VA,
+            target_region: Region::IE_EAST_DUBLIN,
+            retry_after: std::time::Duration::from_secs(30),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_user_migrating_error_type() {
+        let err = SdkError::UserMigrating {
+            source_region: Region::GLOBAL,
+            target_region: Region::US_EAST_VA,
+            retry_after: std::time::Duration::from_secs(10),
+        };
+        assert_eq!(err.error_type(), "user_migrating");
+    }
+
+    #[test]
+    fn test_user_migrating_from_status() {
+        use inferadb_ledger_proto::proto::ErrorDetails;
+        use prost::Message;
+
+        let mut context = std::collections::HashMap::new();
+        context.insert("source_region".to_owned(), "us-east-va".to_owned());
+        context.insert("target_region".to_owned(), "ie-east-dublin".to_owned());
+
+        let details = ErrorDetails {
+            error_code: "3107".to_owned(),
+            is_retryable: true,
+            retry_after_ms: Some(20_000),
+            context,
+            suggested_action: None,
+        };
+        let encoded = details.encode_to_vec();
+        let status = tonic::Status::with_details(
+            tonic::Code::FailedPrecondition,
+            "user is migrating",
+            encoded.into(),
+        );
+
+        let err: SdkError = status.into();
+        match &err {
+            SdkError::UserMigrating { source_region, target_region, retry_after } => {
+                assert_eq!(*source_region, Region::US_EAST_VA);
+                assert_eq!(*target_region, Region::IE_EAST_DUBLIN);
+                assert_eq!(*retry_after, std::time::Duration::from_millis(20_000));
+            },
+            _ => panic!("Expected UserMigrating variant, got {:?}", err),
+        }
+        assert!(err.is_retryable());
     }
 }

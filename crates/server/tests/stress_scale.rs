@@ -31,7 +31,7 @@ async fn create_organization(
     let response = client
         .create_organization(proto::CreateOrganizationRequest {
             name: name.to_string(),
-            shard: None,
+            region: 10, // REGION_US_EAST_VA
             tier: None,
         })
         .await?;

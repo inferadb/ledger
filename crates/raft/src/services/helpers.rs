@@ -1,7 +1,7 @@
 //! Shared service helpers for rate limiting, validation, and hot key detection.
 //!
 //! These functions consolidate logic that was previously duplicated across
-//! `WriteServiceImpl`, `AdminServiceImpl`, and `MultiShardWriteService`.
+//! `WriteServiceImpl`, `AdminServiceImpl`, and `MultiRegionWriteService`.
 
 use std::sync::Arc;
 

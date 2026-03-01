@@ -201,15 +201,15 @@ impl ReadServiceImpl {
             return None;
         }
 
-        // Find the shard height containing this vault block
-        let shard_height =
-            archive.find_shard_height(organization, vault, vault_height).ok().flatten()?;
+        // Find the region height containing this vault block
+        let region_height =
+            archive.find_region_height(organization, vault, vault_height).ok().flatten()?;
 
-        // Read the shard block
-        let shard_block = archive.read_block(shard_height).ok()?;
+        // Read the region block
+        let region_block = archive.read_block(region_height).ok()?;
 
         // Find the vault entry
-        let entry = shard_block.vault_entries.iter().find(|e| {
+        let entry = region_block.vault_entries.iter().find(|e| {
             e.organization == organization && e.vault == vault && e.vault_height == vault_height
         })?;
 
@@ -238,14 +238,14 @@ impl ReadServiceImpl {
                 value: entry.state_root.to_vec(),
             }),
             timestamp: Some(prost_types::Timestamp {
-                seconds: shard_block.timestamp.timestamp(),
-                nanos: shard_block.timestamp.timestamp_subsec_nanos() as i32,
+                seconds: region_block.timestamp.timestamp(),
+                nanos: region_block.timestamp.timestamp_subsec_nanos() as i32,
             }),
             leader_id: Some(inferadb_ledger_proto::proto::NodeId {
-                id: shard_block.leader_id.clone(),
+                id: region_block.leader_id.clone(),
             }),
-            term: shard_block.term,
-            committed_index: shard_block.committed_index,
+            term: region_block.term,
+            committed_index: region_block.committed_index,
         })
     }
 
@@ -260,21 +260,21 @@ impl ReadServiceImpl {
         vault_height: u64,
     ) -> (Option<inferadb_ledger_proto::proto::Hash>, Option<inferadb_ledger_proto::proto::Hash>)
     {
-        // Find the shard height containing this vault block
-        let shard_height =
-            match archive.find_shard_height(organization, vault, vault_height).ok().flatten() {
+        // Find the region height containing this vault block
+        let region_height =
+            match archive.find_region_height(organization, vault, vault_height).ok().flatten() {
                 Some(h) => h,
                 None => return (None, None),
             };
 
-        // Read the shard block
-        let shard_block = match archive.read_block(shard_height) {
+        // Read the region block
+        let region_block = match archive.read_block(region_height) {
             Ok(block) => block,
             Err(_) => return (None, None),
         };
 
         // Find the vault entry
-        let entry = match shard_block.vault_entries.iter().find(|e| {
+        let entry = match region_block.vault_entries.iter().find(|e| {
             e.organization == organization && e.vault == vault && e.vault_height == vault_height
         }) {
             Some(e) => e,
@@ -315,8 +315,8 @@ impl ReadServiceImpl {
         };
 
         // Find the largest snapshot height where the vault's height is <= target
-        for &shard_height in snapshots.iter().rev() {
-            let snapshot = match snapshot_manager.load(shard_height) {
+        for &region_height in snapshots.iter().rev() {
+            let snapshot = match snapshot_manager.load(region_height) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
@@ -357,7 +357,7 @@ impl ReadServiceImpl {
                 }
 
                 debug!(
-                    shard_height,
+                    region_height,
                     vault_height = vault_meta.vault_height,
                     "Loaded snapshot for historical read"
                 );
@@ -425,30 +425,30 @@ impl ReadServiceImpl {
         let mut announcements = Vec::with_capacity((end_height - start_height + 1) as usize);
 
         for height in start_height..=end_height {
-            // Find the shard height containing this vault block
-            let shard_height = match archive.find_shard_height(organization, vault, height) {
+            // Find the region height containing this vault block
+            let region_height = match archive.find_region_height(organization, vault, height) {
                 Ok(Some(h)) => h,
                 Ok(None) => {
                     debug!(height, "Vault block not found in archive");
                     continue;
                 },
                 Err(e) => {
-                    warn!(height, error = %e, "Error finding shard height");
+                    warn!(height, error = %e, "Error finding region height");
                     continue;
                 },
             };
 
-            // Read the shard block
-            let shard_block = match archive.read_block(shard_height) {
+            // Read the region block
+            let region_block = match archive.read_block(region_height) {
                 Ok(block) => block,
                 Err(e) => {
-                    warn!(shard_height, error = %e, "Error reading shard block");
+                    warn!(region_height, error = %e, "Error reading region block");
                     continue;
                 },
             };
 
-            // Find the vault entry in the shard block
-            if let Some(entry) = shard_block.vault_entries.iter().find(|e| {
+            // Find the vault entry in the region block
+            if let Some(entry) = region_block.vault_entries.iter().find(|e| {
                 e.organization == organization && e.vault == vault && e.vault_height == height
             }) {
                 // Compute vault block hash using the same function as get_tip_hashes
@@ -475,8 +475,8 @@ impl ReadServiceImpl {
                         value: entry.state_root.to_vec(),
                     }),
                     timestamp: Some(Timestamp {
-                        seconds: shard_block.timestamp.timestamp(),
-                        nanos: shard_block.timestamp.timestamp_subsec_nanos() as i32,
+                        seconds: region_block.timestamp.timestamp(),
+                        nanos: region_block.timestamp.timestamp_subsec_nanos() as i32,
                     }),
                 });
             }
@@ -1020,8 +1020,9 @@ impl ReadService for ReadServiceImpl {
 
         // Replay blocks from start_height to at_height
         for height in start_height..=req.at_height {
-            // Find shard height for this vault block
-            let shard_height = match archive.find_shard_height(organization_id, vault_id, height) {
+            // Find region height for this vault block
+            let region_height = match archive.find_region_height(organization_id, vault_id, height)
+            {
                 Ok(Some(h)) => h,
                 Ok(None) => continue, // Block might not exist at this height (sparse)
                 Err(e) => {
@@ -1032,8 +1033,8 @@ impl ReadService for ReadServiceImpl {
                 },
             };
 
-            // Read the shard block
-            let shard_block = match archive.read_block(shard_height) {
+            // Read the region block
+            let region_block = match archive.read_block(region_height) {
                 Ok(b) => b,
                 Err(e) => {
                     ctx.end_storage_timer();
@@ -1044,7 +1045,7 @@ impl ReadService for ReadServiceImpl {
             };
 
             // Find the vault entry
-            let vault_entry = shard_block.vault_entries.iter().find(|e| {
+            let vault_entry = region_block.vault_entries.iter().find(|e| {
                 e.organization == organization_id && e.vault == vault_id && e.vault_height == height
             });
 
@@ -1061,7 +1062,7 @@ impl ReadService for ReadServiceImpl {
 
                 // Track block timestamp at the target height for expiration check
                 if height == req.at_height {
-                    block_timestamp = shard_block.timestamp;
+                    block_timestamp = region_block.timestamp;
                 }
             }
         }
@@ -1283,29 +1284,30 @@ impl ReadService for ReadServiceImpl {
             SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let height = req.height;
 
-        // Find the shard height containing this vault block
-        let shard_height = archive
-            .find_shard_height(organization_id, vault_id, height)
+        // Find the region height containing this vault block
+        let region_height = archive
+            .find_region_height(organization_id, vault_id, height)
             .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 
-        let shard_height = match shard_height {
+        let region_height = match region_height {
             Some(h) => h,
             None => return Ok(Response::new(GetBlockResponse { block: None })),
         };
 
-        // Read the shard block
-        let shard_block = archive
-            .read_block(shard_height)
+        // Read the region block
+        let region_block = archive
+            .read_block(region_height)
             .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 
-        // Find the vault entry in the shard block
-        let vault_entry = shard_block.vault_entries.iter().find(|e| {
+        // Find the vault entry in the region block
+        let vault_entry = region_block.vault_entries.iter().find(|e| {
             e.organization == organization_id && e.vault == vault_id && e.vault_height == height
         });
 
         let vault =
             self.applied_state.resolve_vault_id_to_slug(vault_id).unwrap_or(VaultSlug::new(0));
-        let block = vault_entry.map(|entry| vault_entry_to_proto_block(entry, &shard_block, vault));
+        let block =
+            vault_entry.map(|entry| vault_entry_to_proto_block(entry, &region_block, vault));
 
         Ok(Response::new(GetBlockResponse { block }))
     }
@@ -1353,29 +1355,29 @@ impl ReadService for ReadServiceImpl {
 
         // Iterate through the height range
         for height in start_height..=end_height {
-            // Find the shard height for this vault block
-            let shard_height = match archive
-                .find_shard_height(organization_id, vault_id, height)
+            // Find the region height for this vault block
+            let region_height = match archive
+                .find_region_height(organization_id, vault_id, height)
                 .map_err(|e| Status::internal(format!("Storage error: {}", e)))?
             {
                 Some(h) => h,
                 None => continue, // Block not found, skip
             };
 
-            // Read the shard block
-            let shard_block = archive
-                .read_block(shard_height)
+            // Read the region block
+            let region_block = archive
+                .read_block(region_height)
                 .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
 
             // Find the vault entry
-            if let Some(entry) = shard_block.vault_entries.iter().find(|e| {
+            if let Some(entry) = region_block.vault_entries.iter().find(|e| {
                 e.organization == organization_id && e.vault == vault_id && e.vault_height == height
             }) {
                 let vault = self
                     .applied_state
                     .resolve_vault_id_to_slug(vault_id)
                     .unwrap_or(VaultSlug::new(0));
-                blocks.push(vault_entry_to_proto_block(entry, &shard_block, vault));
+                blocks.push(vault_entry_to_proto_block(entry, &region_block, vault));
             }
         }
 

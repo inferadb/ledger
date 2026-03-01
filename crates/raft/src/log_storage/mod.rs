@@ -7,18 +7,18 @@
 //! log storage and state machine into one implementation. The v2 traits
 //! (`RaftLogStorage`, `RaftStateMachine`) are sealed in OpenRaft 0.9.
 //!
-//! Each shard group has its own storage located at:
-//! `shards/{shard}/raft/log.db`
+//! Each region group has its own storage located at:
+//! `regions/{region}/raft/log.db`
 //!
 //! # Lock Ordering Convention
 //!
 //! To prevent deadlocks, locks in this module must be acquired in the following order:
 //!
 //! 1. `applied_state` - Raft state machine state
-//! 2. `shard_chain` - Shard chain tracking (height + previous hash)
+//! 2. `region_chain` - Region chain tracking (height + previous hash)
 //! 3. `vote_cache`, `last_purged_cache` - Caches (independent, no ordering requirement)
 //!
-//! The `shard_chain` lock consolidates `shard_height` and `previous_shard_hash`
+//! The `region_chain` lock consolidates `region_height` and `previous_region_hash`
 //! into a single lock to eliminate internal ordering issues.
 
 mod accessor;
@@ -45,18 +45,18 @@ const KEY_LAST_PURGED: &str = "last_purged";
 const KEY_APPLIED_STATE: &str = "applied_state";
 
 // ============================================================================
-// Shard Chain State (Lock Consolidated)
+// Region Chain State (Lock Consolidated)
 // ============================================================================
 
-/// Shard chain tracking state.
+/// Region chain tracking state.
 ///
 /// These fields are grouped into a single lock to avoid lock ordering issues.
-/// They track the shard-level blockchain state for creating ShardBlocks.
+/// They track the region-level blockchain state for creating RegionBlocks.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct ShardChainState {
-    /// Current shard height for block creation.
+pub struct RegionChainState {
+    /// Current region height for block creation.
     pub height: u64,
-    /// Previous shard hash for chain continuity.
+    /// Previous region hash for chain continuity.
     pub previous_hash: Hash,
 }
 
@@ -72,7 +72,7 @@ mod tests {
     };
     use inferadb_ledger_store::{FileBackend, tables};
     use inferadb_ledger_types::{
-        EmailVerifyTokenId, Operation, OrganizationId, ShardId, Transaction, UserEmailId, UserId,
+        EmailVerifyTokenId, Operation, OrganizationId, Region, Transaction, UserEmailId, UserId,
         UserSlug, VaultId, VaultSlug,
         events::{EventAction, EventConfig, EventEntry, EventScope},
     };
@@ -154,7 +154,7 @@ mod tests {
         let request = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: None,
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
 
@@ -168,336 +168,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_select_least_loaded_shard_empty() {
-        let organizations = HashMap::new();
-        assert_eq!(select_least_loaded_shard(&organizations), ShardId::new(0));
-    }
-
-    #[test]
-    fn test_select_least_loaded_shard_single_shard() {
-        let mut organizations = HashMap::new();
-        organizations.insert(
-            OrganizationId::new(1),
-            OrganizationMeta {
-                organization: OrganizationId::new(1),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns1".to_string(),
-                shard: ShardId::new(0),
-                status: OrganizationStatus::Active,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        organizations.insert(
-            OrganizationId::new(2),
-            OrganizationMeta {
-                organization: OrganizationId::new(2),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns2".to_string(),
-                shard: ShardId::new(0),
-                status: OrganizationStatus::Active,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        // Only shard 0 exists, so it should be selected
-        assert_eq!(select_least_loaded_shard(&organizations), ShardId::new(0));
-    }
-
-    #[test]
-    fn test_select_least_loaded_shard_equal_load_prefers_lower_id() {
-        let mut organizations = HashMap::new();
-        // Shard 0: 2 organizations
-        organizations.insert(
-            OrganizationId::new(1),
-            OrganizationMeta {
-                organization: OrganizationId::new(1),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns1".to_string(),
-                shard: ShardId::new(0),
-                status: OrganizationStatus::Active,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        organizations.insert(
-            OrganizationId::new(2),
-            OrganizationMeta {
-                organization: OrganizationId::new(2),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns2".to_string(),
-                shard: ShardId::new(0),
-                status: OrganizationStatus::Active,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        // Shard 1: 2 organizations (equal load)
-        organizations.insert(
-            OrganizationId::new(3),
-            OrganizationMeta {
-                organization: OrganizationId::new(3),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns3".to_string(),
-                shard: ShardId::new(1),
-                status: OrganizationStatus::Active,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        organizations.insert(
-            OrganizationId::new(4),
-            OrganizationMeta {
-                organization: OrganizationId::new(4),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns4".to_string(),
-                shard: ShardId::new(1),
-                status: OrganizationStatus::Active,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        // Tie-breaker: lower shard wins
-        assert_eq!(select_least_loaded_shard(&organizations), ShardId::new(0));
-    }
-
-    #[test]
-    fn test_select_least_loaded_shard_unequal_load() {
-        let mut organizations = HashMap::new();
-        // Shard 0: 3 organizations
-        organizations.insert(
-            OrganizationId::new(1),
-            OrganizationMeta {
-                organization: OrganizationId::new(1),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns1".to_string(),
-                shard: ShardId::new(0),
-                status: OrganizationStatus::Active,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        organizations.insert(
-            OrganizationId::new(2),
-            OrganizationMeta {
-                organization: OrganizationId::new(2),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns2".to_string(),
-                shard: ShardId::new(0),
-                status: OrganizationStatus::Active,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        organizations.insert(
-            OrganizationId::new(3),
-            OrganizationMeta {
-                organization: OrganizationId::new(3),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns3".to_string(),
-                shard: ShardId::new(0),
-                status: OrganizationStatus::Active,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        // Shard 1: 1 organization (lighter)
-        organizations.insert(
-            OrganizationId::new(4),
-            OrganizationMeta {
-                organization: OrganizationId::new(4),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns4".to_string(),
-                shard: ShardId::new(1),
-                status: OrganizationStatus::Active,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        // Shard 1 has fewer organizations
-        assert_eq!(select_least_loaded_shard(&organizations), ShardId::new(1));
-    }
-
-    #[test]
-    fn test_select_least_loaded_shard_ignores_deleted() {
-        let mut organizations = HashMap::new();
-        // Shard 0: 1 active, 2 deleted
-        organizations.insert(
-            OrganizationId::new(1),
-            OrganizationMeta {
-                organization: OrganizationId::new(1),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns1".to_string(),
-                shard: ShardId::new(0),
-                status: OrganizationStatus::Active,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        organizations.insert(
-            OrganizationId::new(2),
-            OrganizationMeta {
-                organization: OrganizationId::new(2),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns2".to_string(),
-                shard: ShardId::new(0),
-                status: OrganizationStatus::Deleted,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        organizations.insert(
-            OrganizationId::new(3),
-            OrganizationMeta {
-                organization: OrganizationId::new(3),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns3".to_string(),
-                shard: ShardId::new(0),
-                status: OrganizationStatus::Deleted,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        // Shard 1: 2 active
-        organizations.insert(
-            OrganizationId::new(4),
-            OrganizationMeta {
-                organization: OrganizationId::new(4),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns4".to_string(),
-                shard: ShardId::new(1),
-                status: OrganizationStatus::Active,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        organizations.insert(
-            OrganizationId::new(5),
-            OrganizationMeta {
-                organization: OrganizationId::new(5),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "ns5".to_string(),
-                shard: ShardId::new(1),
-                status: OrganizationStatus::Active,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        // Shard 0 has only 1 active organization (deleted don't count)
-        assert_eq!(select_least_loaded_shard(&organizations), ShardId::new(0));
-    }
-
-    #[test]
-    fn test_select_least_loaded_shard_many_shards() {
-        let mut organizations = HashMap::new();
-        // Shard 0: 5 organizations
-        for i in 1..=5i64 {
-            organizations.insert(
-                OrganizationId::new(i),
-                OrganizationMeta {
-                    organization: OrganizationId::new(i),
-                    slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                    name: format!("ns{}", i),
-                    shard: ShardId::new(0),
-                    status: OrganizationStatus::Active,
-                    tier: OrganizationTier::Free,
-                    pending_shard: None,
-                    storage_bytes: 0,
-                },
-            );
-        }
-        // Shard 1: 3 organizations
-        for i in 6..=8i64 {
-            organizations.insert(
-                OrganizationId::new(i),
-                OrganizationMeta {
-                    organization: OrganizationId::new(i),
-                    slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                    name: format!("ns{}", i),
-                    shard: ShardId::new(1),
-                    status: OrganizationStatus::Active,
-                    tier: OrganizationTier::Free,
-                    pending_shard: None,
-                    storage_bytes: 0,
-                },
-            );
-        }
-        // Shard 2: 2 organizations (minimum)
-        for i in 9..=10i64 {
-            organizations.insert(
-                OrganizationId::new(i),
-                OrganizationMeta {
-                    organization: OrganizationId::new(i),
-                    slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                    name: format!("ns{}", i),
-                    shard: ShardId::new(2),
-                    status: OrganizationStatus::Active,
-                    tier: OrganizationTier::Free,
-                    pending_shard: None,
-                    storage_bytes: 0,
-                },
-            );
-        }
-        // Shard 2 has the fewest organizations
-        assert_eq!(select_least_loaded_shard(&organizations), ShardId::new(2));
-    }
-
     #[tokio::test]
-    async fn test_apply_create_organization_load_balanced() {
+    async fn test_apply_create_organization_uses_provided_region() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Pre-populate with organizations on different shards
-        // Shard 0: 3 organizations
-        for i in 1..=3i64 {
-            state.organizations.insert(
-                OrganizationId::new(i),
-                OrganizationMeta {
-                    organization: OrganizationId::new(i),
-                    slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                    name: format!("existing-ns-{}", i),
-                    shard: ShardId::new(0),
-                    status: OrganizationStatus::Active,
-                    tier: OrganizationTier::Free,
-                    pending_shard: None,
-                    storage_bytes: 0,
-                },
-            );
-        }
-        // Shard 1: 1 organization
-        state.organizations.insert(
-            OrganizationId::new(4),
-            OrganizationMeta {
-                organization: OrganizationId::new(4),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "existing-ns-4".to_string(),
-                shard: ShardId::new(1),
-                status: OrganizationStatus::Active,
-                tier: OrganizationTier::Free,
-                pending_shard: None,
-                storage_bytes: 0,
-            },
-        );
-        state.sequences.organization = OrganizationId::new(5); // Next ID is 5
+        state.sequences.organization = OrganizationId::new(1);
 
         drop(state);
 
@@ -505,61 +184,64 @@ mod tests {
         let request = LedgerRequest::CreateOrganization {
             name: "new-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: None,
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, shard } => {
-                assert_eq!(organization_id, OrganizationId::new(5));
-                // Should be assigned to shard 1 (fewer organizations)
-                assert_eq!(shard, ShardId::new(1), "Should assign to least-loaded shard");
+            LedgerResponse::OrganizationCreated { organization: organization_id, region } => {
+                assert_eq!(organization_id, OrganizationId::new(1));
+                assert_eq!(region, Region::US_EAST_VA, "Should use provided region");
             },
             _ => panic!("unexpected response"),
         }
     }
 
     #[tokio::test]
-    async fn test_apply_create_organization_explicit_shard_overrides() {
+    async fn test_apply_create_organization_explicit_region_overrides() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Pre-populate: shard 0 has fewer organizations
+        // Pre-populate: region 0 has fewer organizations
         state.organizations.insert(
             OrganizationId::new(1),
             OrganizationMeta {
                 organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 name: "existing".to_string(),
-                shard: ShardId::new(0),
+                region: Region::GLOBAL,
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
-                pending_shard: None,
+                pending_region: None,
                 storage_bytes: 0,
             },
         );
         state.sequences.organization = OrganizationId::new(2);
 
-        // Request explicit shard 5 (even though it would be "heavy" if it existed)
+        // Create organization with explicit IE_EAST_DUBLIN region
         let request = LedgerRequest::CreateOrganization {
             name: "new-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(5)),
+            region: Region::IE_EAST_DUBLIN,
             tier: Default::default(),
         };
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, shard } => {
+            LedgerResponse::OrganizationCreated { organization: organization_id, region } => {
                 assert_eq!(organization_id, OrganizationId::new(2));
-                // Explicit shard should override load balancing
-                assert_eq!(shard, ShardId::new(5), "Explicit shard should override load balancing");
+                // Explicit region should override load balancing
+                assert_eq!(
+                    region,
+                    Region::IE_EAST_DUBLIN,
+                    "Explicit region should override load balancing"
+                );
             },
             _ => panic!("unexpected response"),
         }
@@ -805,7 +487,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -874,7 +556,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -938,7 +620,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "empty-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -996,7 +678,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1069,7 +751,7 @@ mod tests {
     // ========================================================================
     //
     // These tests verify organization migration behavior via
-    // SystemRequest::UpdateOrganizationRouting. Migration changes the shard for a
+    // SystemRequest::UpdateOrganizationRouting. Migration changes the region for a
     // organization, updating routing without data movement.
 
     #[tokio::test]
@@ -1080,17 +762,17 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create organization on shard 0
+        // Create organization on US_EAST_VA
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, shard } => {
-                assert_eq!(shard, ShardId::new(0));
+            LedgerResponse::OrganizationCreated { organization: organization_id, region } => {
+                assert_eq!(region, Region::US_EAST_VA);
                 organization_id
             },
             _ => panic!("expected OrganizationCreated"),
@@ -1098,28 +780,32 @@ mod tests {
 
         // Verify initial state
         let meta = state.organizations.get(&organization_id).expect("organization should exist");
-        assert_eq!(meta.shard, ShardId::new(0));
+        assert_eq!(meta.region, Region::US_EAST_VA);
         assert_eq!(meta.status, OrganizationStatus::Active);
 
-        // Migrate to shard 1
+        // Migrate to IE_EAST_DUBLIN
         let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
             organization: organization_id,
-            shard: ShardId::new(1),
+            region: Region::IE_EAST_DUBLIN,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
 
         match response {
-            LedgerResponse::OrganizationMigrated { organization: ns_id, old_shard, new_shard } => {
+            LedgerResponse::OrganizationMigrated {
+                organization: ns_id,
+                old_region,
+                new_region,
+            } => {
                 assert_eq!(ns_id, organization_id);
-                assert_eq!(old_shard, ShardId::new(0));
-                assert_eq!(new_shard, ShardId::new(1));
+                assert_eq!(old_region, Region::US_EAST_VA);
+                assert_eq!(new_region, Region::IE_EAST_DUBLIN);
             },
             _ => panic!("expected OrganizationMigrated, got {:?}", response),
         }
 
         // Verify updated state
         let meta = state.organizations.get(&organization_id).expect("organization should exist");
-        assert_eq!(meta.shard, ShardId::new(1), "shard should be updated");
+        assert_eq!(meta.region, Region::IE_EAST_DUBLIN, "region should be updated");
         assert_eq!(meta.status, OrganizationStatus::Active, "status should remain unchanged");
     }
 
@@ -1134,7 +820,7 @@ mod tests {
         // Try to migrate non-existent organization
         let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
             organization: OrganizationId::new(999),
-            shard: ShardId::new(1),
+            region: Region::US_EAST_VA,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
 
@@ -1159,7 +845,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "deleted-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1185,7 +871,7 @@ mod tests {
         // Try to migrate deleted organization
         let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
             organization: organization_id,
-            shard: ShardId::new(1),
+            region: Region::US_EAST_VA,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
 
@@ -1198,48 +884,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_migrate_organization_idempotent_same_shard() {
+    async fn test_migrate_organization_idempotent_same_region() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create organization on shard 0
+        // Create organization on US_EAST_VA
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
         let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, shard } => {
-                assert_eq!(shard, ShardId::new(0));
+            LedgerResponse::OrganizationCreated { organization: organization_id, region } => {
+                assert_eq!(region, Region::US_EAST_VA);
                 organization_id
             },
             _ => panic!("expected OrganizationCreated"),
         };
 
-        // Migrate to same shard (idempotent case)
+        // Migrate to same region (idempotent case)
         let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
             organization: organization_id,
-            shard: ShardId::new(0),
+            region: Region::US_EAST_VA,
         });
         let (response, _) = store.apply_request(&migrate, &mut state);
 
         match response {
-            LedgerResponse::OrganizationMigrated { organization: ns_id, old_shard, new_shard } => {
+            LedgerResponse::OrganizationMigrated {
+                organization: ns_id,
+                old_region,
+                new_region,
+            } => {
                 assert_eq!(ns_id, organization_id);
-                assert_eq!(old_shard, ShardId::new(0));
-                assert_eq!(new_shard, ShardId::new(0), "should be idempotent - same shard");
+                assert_eq!(old_region, Region::US_EAST_VA);
+                assert_eq!(new_region, Region::US_EAST_VA, "should be idempotent - same region");
             },
             _ => panic!("expected OrganizationMigrated (idempotent), got {:?}", response),
         }
 
         // Verify state remains consistent
         let meta = state.organizations.get(&organization_id).expect("organization should exist");
-        assert_eq!(meta.shard, ShardId::new(0));
+        assert_eq!(meta.region, Region::US_EAST_VA);
         assert_eq!(meta.status, OrganizationStatus::Active);
     }
 
@@ -1255,7 +945,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "migrating-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1266,51 +956,51 @@ mod tests {
             _ => panic!("expected OrganizationCreated"),
         };
 
-        // Migration 1: shard 0 -> shard 1
+        // Migration 1: US_EAST_VA -> IE_EAST_DUBLIN
         let migrate1 = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
             organization: organization_id,
-            shard: ShardId::new(1),
+            region: Region::IE_EAST_DUBLIN,
         });
         let (response, _) = store.apply_request(&migrate1, &mut state);
         match response {
-            LedgerResponse::OrganizationMigrated { old_shard, new_shard, .. } => {
-                assert_eq!(old_shard, ShardId::new(0));
-                assert_eq!(new_shard, ShardId::new(1));
+            LedgerResponse::OrganizationMigrated { old_region, new_region, .. } => {
+                assert_eq!(old_region, Region::US_EAST_VA);
+                assert_eq!(new_region, Region::IE_EAST_DUBLIN);
             },
             _ => panic!("expected OrganizationMigrated"),
         }
 
-        // Migration 2: shard 1 -> shard 2
+        // Migration 2: IE_EAST_DUBLIN -> US_WEST_OR
         let migrate2 = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
             organization: organization_id,
-            shard: ShardId::new(2),
+            region: Region::US_WEST_OR,
         });
         let (response, _) = store.apply_request(&migrate2, &mut state);
         match response {
-            LedgerResponse::OrganizationMigrated { old_shard, new_shard, .. } => {
-                assert_eq!(old_shard, ShardId::new(1));
-                assert_eq!(new_shard, ShardId::new(2));
+            LedgerResponse::OrganizationMigrated { old_region, new_region, .. } => {
+                assert_eq!(old_region, Region::IE_EAST_DUBLIN);
+                assert_eq!(new_region, Region::US_WEST_OR);
             },
             _ => panic!("expected OrganizationMigrated"),
         }
 
-        // Migration 3: shard 2 -> shard 0 (back to original)
+        // Migration 3: US_WEST_OR -> US_EAST_VA (back to original)
         let migrate3 = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
             organization: organization_id,
-            shard: ShardId::new(0),
+            region: Region::US_EAST_VA,
         });
         let (response, _) = store.apply_request(&migrate3, &mut state);
         match response {
-            LedgerResponse::OrganizationMigrated { old_shard, new_shard, .. } => {
-                assert_eq!(old_shard, ShardId::new(2));
-                assert_eq!(new_shard, ShardId::new(0));
+            LedgerResponse::OrganizationMigrated { old_region, new_region, .. } => {
+                assert_eq!(old_region, Region::US_WEST_OR);
+                assert_eq!(new_region, Region::US_EAST_VA);
             },
             _ => panic!("expected OrganizationMigrated"),
         }
 
         // Verify final state
         let meta = state.organizations.get(&organization_id).expect("organization should exist");
-        assert_eq!(meta.shard, ShardId::new(0));
+        assert_eq!(meta.region, Region::US_EAST_VA);
     }
 
     // ========================================================================
@@ -1332,7 +1022,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1378,7 +1068,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1425,11 +1115,11 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create organization on shard 0
+        // Create organization on region 0
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1440,26 +1130,26 @@ mod tests {
             _ => panic!("expected OrganizationCreated"),
         };
 
-        // Start migration to shard 1
+        // Start migration to IE_EAST_DUBLIN
         let start_migration = LedgerRequest::StartMigration {
             organization: organization_id,
-            target_shard: ShardId::new(1),
+            target_region_group: Region::IE_EAST_DUBLIN,
         };
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
-            LedgerResponse::MigrationStarted { organization: ns_id, target_shard } => {
+            LedgerResponse::MigrationStarted { organization: ns_id, target_region_group } => {
                 assert_eq!(ns_id, organization_id);
-                assert_eq!(target_shard, ShardId::new(1));
+                assert_eq!(target_region_group, Region::IE_EAST_DUBLIN);
             },
             _ => panic!("expected MigrationStarted"),
         }
 
-        // Verify organization is in Migrating state with pending shard
+        // Verify organization is in Migrating state with pending region
         let ns = state.organizations.get(&organization_id).unwrap();
         assert_eq!(ns.status, OrganizationStatus::Migrating);
-        assert_eq!(ns.shard, ShardId::new(0)); // Still on old shard
-        assert_eq!(ns.pending_shard, Some(ShardId::new(1))); // Target shard stored
+        assert_eq!(ns.region, Region::US_EAST_VA); // Still on old region
+        assert_eq!(ns.pending_region, Some(Region::IE_EAST_DUBLIN)); // Target region stored
     }
 
     #[tokio::test]
@@ -1472,7 +1162,7 @@ mod tests {
 
         let start_migration = LedgerRequest::StartMigration {
             organization: OrganizationId::new(999),
-            target_shard: ShardId::new(1),
+            target_region_group: Region::US_EAST_VA,
         };
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
@@ -1496,7 +1186,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1510,7 +1200,7 @@ mod tests {
         // Start migration
         let start_migration = LedgerRequest::StartMigration {
             organization: organization_id,
-            target_shard: ShardId::new(1),
+            target_region_group: Region::IE_EAST_DUBLIN,
         };
         let (response, _) = store.apply_request(&start_migration, &mut state);
         assert!(matches!(response, LedgerResponse::MigrationStarted { .. }));
@@ -1518,7 +1208,7 @@ mod tests {
         // Try to start another migration - should fail
         let start_migration2 = LedgerRequest::StartMigration {
             organization: organization_id,
-            target_shard: ShardId::new(2),
+            target_region_group: Region::US_WEST_OR,
         };
         let (response, _) = store.apply_request(&start_migration2, &mut state);
 
@@ -1542,7 +1232,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1560,7 +1250,7 @@ mod tests {
         // Try to start migration - should fail
         let start_migration = LedgerRequest::StartMigration {
             organization: organization_id,
-            target_shard: ShardId::new(1),
+            target_region_group: Region::IE_EAST_DUBLIN,
         };
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
@@ -1580,11 +1270,11 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create organization on shard 0
+        // Create organization on region 0
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1595,10 +1285,10 @@ mod tests {
             _ => panic!("expected OrganizationCreated"),
         };
 
-        // Start migration to shard 1
+        // Start migration to IE_EAST_DUBLIN
         let start_migration = LedgerRequest::StartMigration {
             organization: organization_id,
-            target_shard: ShardId::new(1),
+            target_region_group: Region::IE_EAST_DUBLIN,
         };
         store.apply_request(&start_migration, &mut state);
 
@@ -1607,19 +1297,19 @@ mod tests {
         let (response, _) = store.apply_request(&complete_migration, &mut state);
 
         match response {
-            LedgerResponse::MigrationCompleted { organization: ns_id, old_shard, new_shard } => {
+            LedgerResponse::MigrationCompleted { organization: ns_id, old_region, new_region } => {
                 assert_eq!(ns_id, organization_id);
-                assert_eq!(old_shard, ShardId::new(0));
-                assert_eq!(new_shard, ShardId::new(1));
+                assert_eq!(old_region, Region::US_EAST_VA);
+                assert_eq!(new_region, Region::IE_EAST_DUBLIN);
             },
             _ => panic!("expected MigrationCompleted"),
         }
 
-        // Verify organization is back to Active on new shard
+        // Verify organization is back to Active on new region
         let ns = state.organizations.get(&organization_id).unwrap();
         assert_eq!(ns.status, OrganizationStatus::Active);
-        assert_eq!(ns.shard, ShardId::new(1));
-        assert_eq!(ns.pending_shard, None);
+        assert_eq!(ns.region, Region::IE_EAST_DUBLIN);
+        assert_eq!(ns.pending_region, None);
     }
 
     #[tokio::test]
@@ -1634,7 +1324,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1669,7 +1359,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1695,7 +1385,7 @@ mod tests {
         // Start migration
         let start_migration = LedgerRequest::StartMigration {
             organization: organization_id,
-            target_shard: ShardId::new(1),
+            target_region_group: Region::IE_EAST_DUBLIN,
         };
         store.apply_request(&start_migration, &mut state);
 
@@ -1729,7 +1419,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1743,7 +1433,7 @@ mod tests {
         // Start migration
         let start_migration = LedgerRequest::StartMigration {
             organization: organization_id,
-            target_shard: ShardId::new(1),
+            target_region_group: Region::IE_EAST_DUBLIN,
         };
         store.apply_request(&start_migration, &mut state);
 
@@ -1780,7 +1470,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1858,7 +1548,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1915,7 +1605,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -1967,7 +1657,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -2030,7 +1720,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -2083,7 +1773,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -2133,7 +1823,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -2168,7 +1858,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -2261,7 +1951,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test-ns".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -2327,13 +2017,13 @@ mod tests {
             LedgerRequest::CreateOrganization {
                 name: "acme-corp".to_string(),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard: None,
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             },
             LedgerRequest::CreateOrganization {
                 name: "startup-inc".to_string(),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard: None,
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             },
             LedgerRequest::CreateVault {
@@ -2380,12 +2070,14 @@ mod tests {
                 email: "alice@example.com".to_string(),
                 admin: false,
                 slug: UserSlug::new(111),
+                region: Region::US_EAST_VA,
             }),
             LedgerRequest::System(SystemRequest::CreateUser {
                 name: "Bob".to_string(),
                 email: "bob@example.com".to_string(),
                 admin: false,
                 slug: UserSlug::new(222),
+                region: Region::US_EAST_VA,
             }),
         ];
 
@@ -2572,7 +2264,7 @@ mod tests {
             LedgerRequest::CreateOrganization {
                 name: "ns1".to_string(),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard: None,
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             },
             LedgerRequest::CreateVault {
@@ -2735,7 +2427,7 @@ mod tests {
             &LedgerRequest::CreateOrganization {
                 name: "test".to_string(),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard: None,
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             },
             &mut state,
@@ -2793,25 +2485,25 @@ mod tests {
         // but the structure should be correct
     }
 
-    /// Test that shard_height is tracked in AppliedState for snapshot persistence.
+    /// Test that region_height is tracked in AppliedState for snapshot persistence.
     #[tokio::test]
-    async fn test_shard_height_tracked_in_applied_state() {
+    async fn test_region_height_tracked_in_applied_state() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
-        // Initial shard height should be 0
-        assert_eq!(store.current_shard_height(), 0);
+        // Initial region height should be 0
+        assert_eq!(store.current_region_height(), 0);
 
-        // After applying entries, shard height should increment
-        // Note: full shard height increment requires apply_to_state_machine
-        // which creates ShardBlocks. This test verifies the accessor.
+        // After applying entries, region height should increment
+        // Note: full region height increment requires apply_to_state_machine
+        // which creates RegionBlocks. This test verifies the accessor.
         let state = store.applied_state.read();
-        assert_eq!(state.shard_height, 0, "Initial shard height should be 0");
+        assert_eq!(state.region_height, 0, "Initial region height should be 0");
     }
 
-    /// Test that AppliedState serialization preserves all fields including shard tracking.
+    /// Test that AppliedState serialization preserves all fields including region tracking.
     #[tokio::test]
     async fn test_applied_state_snapshot_round_trip() {
         use openraft::StoredMembership;
@@ -2825,8 +2517,8 @@ mod tests {
             previous_vault_hashes: HashMap::new(),
             organizations: HashMap::new(),
             vaults: HashMap::new(),
-            shard_height: 42,
-            previous_shard_hash: [0xAB; 32],
+            region_height: 42,
+            previous_region_hash: [0xAB; 32],
             client_sequences: HashMap::new(),
             organization_storage_bytes: HashMap::new(),
             slug_index: HashMap::new(),
@@ -2855,11 +2547,11 @@ mod tests {
             OrganizationMeta {
                 organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard: ShardId::new(0),
+                region: Region::GLOBAL,
                 name: "test-ns".to_string(),
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
-                pending_shard: None,
+                pending_region: None,
                 storage_bytes: 0,
             },
         );
@@ -2885,10 +2577,10 @@ mod tests {
         assert_eq!(restored.vault_heights, original.vault_heights);
         assert_eq!(restored.vault_health, original.vault_health);
         assert_eq!(restored.previous_vault_hashes, original.previous_vault_hashes);
-        assert_eq!(restored.shard_height, 42, "shard_height must be preserved");
+        assert_eq!(restored.region_height, 42, "region_height must be preserved");
         assert_eq!(
-            restored.previous_shard_hash, [0xAB; 32],
-            "previous_shard_hash must be preserved"
+            restored.previous_region_hash, [0xAB; 32],
+            "previous_region_hash must be preserved"
         );
         // Verify organization and vault counts (HashMaps don't implement PartialEq for complex
         // types)
@@ -2912,17 +2604,17 @@ mod tests {
             let mut state = store.applied_state.write();
             state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 42);
             state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 100);
-            state.shard_height = 99;
+            state.region_height = 99;
             state.organizations.insert(
                 OrganizationId::new(1),
                 OrganizationMeta {
                     organization: OrganizationId::new(1),
                     slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                    shard: ShardId::new(0),
+                    region: Region::GLOBAL,
                     name: "test".to_string(),
                     status: OrganizationStatus::Active,
                     tier: OrganizationTier::Free,
-                    pending_shard: None,
+                    pending_region: None,
                     storage_bytes: 0,
                 },
             );
@@ -2932,7 +2624,7 @@ mod tests {
         assert_eq!(accessor.vault_height(OrganizationId::new(1), VaultId::new(1)), 42);
         assert_eq!(accessor.vault_height(OrganizationId::new(1), VaultId::new(2)), 100);
         assert_eq!(accessor.vault_height(OrganizationId::new(1), VaultId::new(99)), 0); // Non-existent returns 0
-        assert_eq!(accessor.shard_height(), 99);
+        assert_eq!(accessor.region_height(), 99);
 
         let all_heights = accessor.all_vault_heights();
         assert_eq!(all_heights.len(), 2);
@@ -2999,7 +2691,7 @@ mod tests {
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateOrganization {
                     name: format!("ns-{}", i),
                     slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                    shard: None,
+                    region: Region::US_EAST_VA,
                     tier: Default::default(),
                 })),
             })
@@ -3058,7 +2750,7 @@ mod tests {
             let create_ns = LedgerRequest::CreateOrganization {
                 name: "test-ns".to_string(),
                 slug: inferadb_ledger_types::OrganizationSlug::new(42),
-                shard: Some(ShardId::new(0)),
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             };
             let (response, _) = store.apply_request(&create_ns, &mut state);
@@ -3153,7 +2845,7 @@ mod tests {
             let create_ns = LedgerRequest::CreateOrganization {
                 name: "test-ns".to_string(),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard: Some(ShardId::new(0)),
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             };
             store.apply_request(&create_ns, &mut state);
@@ -3262,8 +2954,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shard_block_uses_proposed_at_timestamp() {
-        // Verify that ShardBlock timestamp also comes from proposed_at,
+    async fn test_region_block_uses_proposed_at_timestamp() {
+        // Verify that RegionBlock timestamp also comes from proposed_at,
         // not a separate Utc::now() call.
         use chrono::TimeZone;
         use inferadb_ledger_proto::proto::BlockAnnouncement;
@@ -3283,7 +2975,7 @@ mod tests {
             let create_ns = LedgerRequest::CreateOrganization {
                 name: "test-ns".to_string(),
                 slug: inferadb_ledger_types::OrganizationSlug::new(99),
-                shard: Some(ShardId::new(0)),
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             };
             store.apply_request(&create_ns, &mut state);
@@ -3319,7 +3011,7 @@ mod tests {
         assert_eq!(
             ts.seconds,
             far_future.timestamp(),
-            "ShardBlock timestamp should use proposed_at (2099), not Utc::now()"
+            "RegionBlock timestamp should use proposed_at (2099), not Utc::now()"
         );
     }
 
@@ -3586,7 +3278,7 @@ mod tests {
         let create_ns = LedgerRequest::CreateOrganization {
             name: "test".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            shard: Some(ShardId::new(0)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         store.apply_request(&create_ns, &mut state);
@@ -3818,7 +3510,7 @@ mod tests {
             &LedgerRequest::CreateOrganization {
                 name: "test-ns".to_string(),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard: None,
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             },
             &mut state,
@@ -3913,7 +3605,7 @@ mod tests {
             &LedgerRequest::CreateOrganization {
                 name: "ns".to_string(),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard: None,
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             },
             &mut state,
@@ -3994,7 +3686,7 @@ mod tests {
             &LedgerRequest::CreateOrganization {
                 name: "ns".to_string(),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard: None,
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             },
             &mut state,
@@ -4050,7 +3742,7 @@ mod tests {
             &LedgerRequest::CreateOrganization {
                 name: "ns-alpha".to_string(),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard: None,
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             },
             &mut state,
@@ -4059,7 +3751,7 @@ mod tests {
             &LedgerRequest::CreateOrganization {
                 name: "ns-beta".to_string(),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard: None,
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             },
             &mut state,
@@ -4173,7 +3865,7 @@ mod tests {
             &LedgerRequest::CreateOrganization {
                 name: "usage-ns".to_string(),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard: None,
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             },
             &mut state,
@@ -4245,7 +3937,7 @@ mod tests {
             &LedgerRequest::CreateOrganization {
                 name: "del-ns".to_string(),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                shard: None,
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             },
             &mut state,
@@ -4306,7 +3998,7 @@ mod tests {
                 &LedgerRequest::CreateOrganization {
                     name: "conc-ns".to_string(),
                     slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                    shard: None,
+                    region: Region::US_EAST_VA,
                     tier: Default::default(),
                 },
                 &mut state,
@@ -4419,10 +4111,10 @@ mod tests {
                 organization: org_id,
                 slug: org_slug,
                 name: "test-org".to_string(),
-                shard: ShardId::new(0),
+                region: Region::GLOBAL,
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
-                pending_shard: None,
+                pending_region: None,
                 storage_bytes: 0,
             },
         );
@@ -4489,7 +4181,7 @@ mod tests {
         assert_eq!(
             write_event.block_height,
             Some(1),
-            "event block_height should match shard chain height + 1"
+            "event block_height should match region chain height + 1"
         );
         assert_eq!(write_event.organization_id, org_id);
         assert!(
@@ -4682,7 +4374,7 @@ mod tests {
         let request = LedgerRequest::CreateOrganization {
             name: "slug-test-org".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(42_000),
-            shard: None,
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
 
@@ -4839,6 +4531,7 @@ mod tests {
             email: "alice@example.com".to_string(),
             admin: true,
             slug: UserSlug::new(333),
+            region: Region::US_EAST_VA,
         });
 
         let mut events: Vec<EventEntry> = Vec::new();
@@ -4951,7 +4644,7 @@ mod tests {
         let create_org = LedgerRequest::CreateOrganization {
             name: "second-org".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(9999),
-            shard: None,
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let mut all_events: Vec<EventEntry> = Vec::new();
@@ -5066,7 +4759,7 @@ mod tests {
         let create_org = LedgerRequest::CreateOrganization {
             name: "events-test-org".to_string(),
             slug: inferadb_ledger_types::OrganizationSlug::new(5000),
-            shard: None,
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
         let ts = fixed_timestamp();
@@ -5288,10 +4981,10 @@ mod tests {
                 organization: org_b,
                 slug: org_b_slug,
                 name: "org-b".to_string(),
-                shard: ShardId::new(0),
+                region: Region::GLOBAL,
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
-                pending_shard: None,
+                pending_region: None,
                 storage_bytes: 0,
             },
         );
@@ -5443,7 +5136,7 @@ mod tests {
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
 
-        // First write — block_height should reference the shard chain height + 1
+        // First write — block_height should reference the region chain height + 1
         store.apply_request_with_events(
             &simple_write_request(org_id, vault_id),
             &mut state,
@@ -5501,8 +5194,8 @@ mod tests {
             .find(|e| e.action == EventAction::WriteCommitted)
             .expect("second WriteCommitted event emitted");
 
-        // block_height references the shard chain height, which is still 1
-        // (shard chain only increments on actual block archival)
+        // block_height references the region chain height, which is still 1
+        // (region chain only increments on actual block archival)
         assert!(
             second_write.block_height.is_some(),
             "second WriteCommitted should also have block_height reference"
@@ -5532,10 +5225,10 @@ mod tests {
                 organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(100),
                 name: "test-org".to_string(),
-                shard: ShardId::new(0),
+                region: Region::GLOBAL,
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
-                pending_shard: None,
+                pending_region: None,
                 storage_bytes: 0,
             };
             let encoded = postcard::to_allocvec(&org_meta).expect("encode org meta");
@@ -5644,10 +5337,10 @@ mod tests {
                 organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(100),
                 name: "test-org".to_string(),
-                shard: ShardId::new(0),
+                region: Region::GLOBAL,
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
-                pending_shard: None,
+                pending_region: None,
                 storage_bytes: 0,
             };
             let encoded = postcard::to_allocvec(&org_meta).expect("encode org meta");
@@ -6094,7 +5787,7 @@ mod tests {
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateOrganization {
                     name: "snapshot-org-1".to_string(),
                     slug: inferadb_ledger_types::OrganizationSlug::new(1000),
-                    shard: Some(ShardId::new(0)),
+                    region: Region::US_EAST_VA,
                     tier: Default::default(),
                 })),
             },
@@ -6125,7 +5818,7 @@ mod tests {
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateOrganization {
                     name: "snapshot-org-2".to_string(),
                     slug: inferadb_ledger_types::OrganizationSlug::new(2000),
-                    shard: Some(ShardId::new(0)),
+                    region: Region::US_EAST_VA,
                     tier: Default::default(),
                 })),
             },

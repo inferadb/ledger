@@ -231,6 +231,8 @@ where
     config: BatchConfig,
     /// Function to submit batched requests to Raft.
     submit_fn: F,
+    /// Region identifier for metric labels.
+    region: String,
 }
 
 impl<F> BatchWriter<F>
@@ -243,8 +245,13 @@ where
         + 'static,
 {
     /// Creates a new batch writer.
-    pub fn new(config: BatchConfig, submit_fn: F) -> Self {
-        Self { state: Arc::new(Mutex::new(BatchState::new())), config, submit_fn }
+    pub fn new(config: BatchConfig, submit_fn: F, region: impl Into<String>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(BatchState::new())),
+            config,
+            submit_fn,
+            region: region.into(),
+        }
     }
 
     /// Returns a handle for submitting writes.
@@ -276,7 +283,7 @@ where
                 let mut state = self.state.lock();
 
                 // Emit batch queue depth gauge for SLI monitoring
-                metrics::set_batch_queue_depth(state.pending.len());
+                metrics::set_batch_queue_depth(state.pending.len(), &self.region);
 
                 // Track whether this is an eager commit (queue drained)
                 let is_eager = self.config.eager_commit
@@ -396,13 +403,21 @@ mod tests {
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_clone = call_count.clone();
 
-        let writer = BatchWriter::new(config, move |requests| {
-            let count = call_count_clone.clone();
-            Box::pin(async move {
-                count.fetch_add(1, Ordering::SeqCst);
-                Ok(requests.into_iter().enumerate().map(|(i, _)| make_response(i as u64)).collect())
-            })
-        });
+        let writer = BatchWriter::new(
+            config,
+            move |requests| {
+                let count = call_count_clone.clone();
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(requests
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, _)| make_response(i as u64))
+                        .collect())
+                })
+            },
+            "global",
+        );
 
         let handle = writer.handle();
 
@@ -445,13 +460,21 @@ mod tests {
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_clone = call_count.clone();
 
-        let writer = BatchWriter::new(config, move |requests| {
-            let count = call_count_clone.clone();
-            Box::pin(async move {
-                count.fetch_add(1, Ordering::SeqCst);
-                Ok(requests.into_iter().enumerate().map(|(i, _)| make_response(i as u64)).collect())
-            })
-        });
+        let writer = BatchWriter::new(
+            config,
+            move |requests| {
+                let count = call_count_clone.clone();
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(requests
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, _)| make_response(i as u64))
+                        .collect())
+                })
+            },
+            "global",
+        );
 
         let handle = writer.handle();
         let writer_task = tokio::spawn(writer.run());
@@ -586,13 +609,21 @@ mod tests {
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_clone = call_count.clone();
 
-        let writer = BatchWriter::new(config, move |requests| {
-            let count = call_count_clone.clone();
-            Box::pin(async move {
-                count.fetch_add(1, Ordering::SeqCst);
-                Ok(requests.into_iter().enumerate().map(|(i, _)| make_response(i as u64)).collect())
-            })
-        });
+        let writer = BatchWriter::new(
+            config,
+            move |requests| {
+                let count = call_count_clone.clone();
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(requests
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, _)| make_response(i as u64))
+                        .collect())
+                })
+            },
+            "global",
+        );
 
         let handle = writer.handle();
         let writer_task = tokio::spawn(writer.run());

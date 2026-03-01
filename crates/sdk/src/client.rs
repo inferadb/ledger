@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use inferadb_ledger_proto::proto;
-use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
 use tonic::service::interceptor::InterceptedService;
 
 use crate::{
@@ -142,6 +142,12 @@ pub enum OrganizationStatus {
     Unspecified,
     /// Organization is active and operational.
     Active,
+    /// Organization is being migrated to another region.
+    Migrating,
+    /// Organization is suspended (billing or policy).
+    Suspended,
+    /// Organization deletion is in progress.
+    Deleting,
     /// Organization has been deleted.
     Deleted,
 }
@@ -151,6 +157,9 @@ impl OrganizationStatus {
     fn from_proto(value: i32) -> Self {
         match proto::OrganizationStatus::try_from(value) {
             Ok(proto::OrganizationStatus::Active) => OrganizationStatus::Active,
+            Ok(proto::OrganizationStatus::Migrating) => OrganizationStatus::Migrating,
+            Ok(proto::OrganizationStatus::Suspended) => OrganizationStatus::Suspended,
+            Ok(proto::OrganizationStatus::Deleting) => OrganizationStatus::Deleting,
             Ok(proto::OrganizationStatus::Deleted) => OrganizationStatus::Deleted,
             _ => OrganizationStatus::Unspecified,
         }
@@ -183,9 +192,78 @@ impl VaultStatus {
     }
 }
 
+/// Converts a protobuf region `i32` to a domain [`Region`].
+///
+/// Returns `None` for unspecified (0) or unknown values, allowing callers
+/// to decide the fallback behavior.
+pub(crate) fn region_from_proto_i32(value: i32) -> Option<Region> {
+    let proto_region = proto::Region::try_from(value).ok()?;
+    Region::try_from(proto_region).ok()
+}
+
+/// Converts a domain [`Region`] to a protobuf `i32` value.
+pub(crate) fn region_to_proto_i32(region: Region) -> i32 {
+    let proto_region: proto::Region = region.into();
+    proto_region.into()
+}
+
+/// Information about an in-progress organization migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationInfo {
+    /// Organization slug (Snowflake ID).
+    pub slug: u64,
+    /// Source region for the migration.
+    pub source_region: Region,
+    /// Target region for the migration.
+    pub target_region: Region,
+    /// Current organization status (should be `Migrating`).
+    pub status: OrganizationStatus,
+}
+
+/// Information about a user region migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserMigrationInfo {
+    /// User slug.
+    pub slug: u64,
+    /// Source region for the migration.
+    pub source_region: Region,
+    /// Target region for the migration.
+    pub target_region: Region,
+    /// Current directory status.
+    pub directory_status: String,
+}
+
+/// Status of a blinding key rotation initiated by [`LedgerClient::rotate_blinding_key`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlindingKeyRotationStatus {
+    /// Total email hash entries to re-hash.
+    pub total_entries: u64,
+    /// Entries re-hashed so far (0 on initial response).
+    pub entries_rehashed: u64,
+    /// Whether the rotation is already complete (true if zero entries).
+    pub complete: bool,
+}
+
+/// Status of a blinding key rehash operation.
+///
+/// Returned by [`LedgerClient::get_blinding_key_rehash_status`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlindingKeyRehashStatus {
+    /// Total email hash entries to re-hash.
+    pub total_entries: u64,
+    /// Entries re-hashed across all regions.
+    pub entries_rehashed: u64,
+    /// Whether the rotation is fully complete.
+    pub complete: bool,
+    /// Per-region progress: region name to entries re-hashed in that region.
+    pub per_region_progress: std::collections::HashMap<String, u64>,
+    /// Currently active blinding key version.
+    pub active_key_version: u32,
+}
+
 /// Information about an organization.
 ///
-/// Contains metadata about an organization including its ID, name, shard assignment,
+/// Contains metadata about an organization including its ID, name, region assignment,
 /// and current status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrganizationInfo {
@@ -193,9 +271,9 @@ pub struct OrganizationInfo {
     pub slug: OrganizationSlug,
     /// Human-readable organization name.
     pub name: String,
-    /// Shard ID hosting this organization.
-    pub shard: u32,
-    /// Node IDs of shard members (node IDs are strings).
+    /// Data residency region for this organization.
+    pub region: Region,
+    /// Node IDs in the region's Raft group (node IDs are strings).
     pub member_nodes: Vec<String>,
     /// Configuration version number.
     pub config_version: u64,
@@ -205,14 +283,14 @@ pub struct OrganizationInfo {
 
 impl OrganizationInfo {
     /// Creates from protobuf response.
-    fn from_proto(proto: proto::GetOrganizationResponse) -> Self {
+    fn from_proto(response: proto::GetOrganizationResponse) -> Self {
         Self {
-            slug: OrganizationSlug::new(proto.slug.map_or(0, |n| n.slug)),
-            name: proto.name,
-            shard: proto.shard.map_or(0, |s| s.id),
-            member_nodes: proto.member_nodes.into_iter().map(|n| n.id).collect(),
-            config_version: proto.config_version,
-            status: OrganizationStatus::from_proto(proto.status),
+            slug: OrganizationSlug::new(response.slug.map_or(0, |n| n.slug)),
+            name: response.name,
+            region: region_from_proto_i32(response.region).unwrap_or(Region::GLOBAL),
+            member_nodes: response.member_nodes.into_iter().map(|n| n.id).collect(),
+            config_version: response.config_version,
+            status: OrganizationStatus::from_proto(response.status),
         }
     }
 }
@@ -3181,14 +3259,17 @@ impl LedgerClient {
     // Admin Operations
     // =========================================================================
 
-    /// Creates a new organization.
+    /// Creates a new organization with the specified data residency region.
     ///
-    /// Creates an organization with the given name. The organization slug
-    /// (external identifier) is assigned by the leader and returned in the response.
+    /// Every organization must declare a region at creation time. The region
+    /// determines where the organization's data is stored and which data
+    /// protection regulations apply.
     ///
     /// # Arguments
     ///
     /// * `name` - Human-readable name for the organization (e.g., "acme_corp").
+    /// * `region` - Data residency region. Must not be `Region::Global` (the control plane) or
+    ///   `Region::Unspecified`.
     ///
     /// # Returns
     ///
@@ -3198,23 +3279,31 @@ impl LedgerClient {
     ///
     /// Returns an error if:
     /// - Connection fails after retry attempts
-    /// - The organization name is invalid or already exists
+    /// - The organization name is invalid
+    /// - The region is `Global` or `Unspecified`
+    /// - A protected region has insufficient in-region nodes (< 3)
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use inferadb_ledger_sdk::LedgerClient;
+    /// # use inferadb_ledger_sdk::{LedgerClient, Region};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// let org = client.create_organization("my-org").await?;
+    /// let org = client.create_organization("my-org", Region::US_EAST_VA).await?;
     /// println!("Created organization with slug: {}", org.slug);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn create_organization(&self, name: impl Into<String>) -> Result<OrganizationInfo> {
+    pub async fn create_organization(
+        &self,
+        name: impl Into<String>,
+        region: Region,
+    ) -> Result<OrganizationInfo> {
         self.check_shutdown(None)?;
 
         let name = name.into();
+        let proto_region: proto::Region = region.into();
+        let region_i32: i32 = proto_region.into();
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
@@ -3238,7 +3327,7 @@ impl LedgerClient {
 
                     let request = proto::CreateOrganizationRequest {
                         name: name.clone(),
-                        shard: None, // Auto-assigned
+                        region: region_i32,
                         tier: None,
                     };
 
@@ -3250,7 +3339,7 @@ impl LedgerClient {
                     Ok(OrganizationInfo {
                         slug: OrganizationSlug::new(response.slug.map_or(0, |n| n.slug)),
                         name: name.clone(),
-                        shard: response.shard.map_or(0, |s| s.id),
+                        region: region_from_proto_i32(response.region).unwrap_or(region),
                         member_nodes: Vec::new(),
                         config_version: 0,
                         status: OrganizationStatus::Active,
@@ -3454,6 +3543,337 @@ impl LedgerClient {
                         .into_iter()
                         .map(OrganizationInfo::from_proto)
                         .collect())
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Initiates migration of an organization to a different region.
+    ///
+    /// Transitions the organization to `Migrating` status and creates a background
+    /// saga to drive the migration through. Writes are blocked during migration.
+    ///
+    /// # Arguments
+    ///
+    /// * `slug` - Organization slug (external identifier).
+    /// * `target_region` - Target region for the migration.
+    /// * `acknowledge_residency_downgrade` - Required for protected → non-protected.
+    ///
+    /// # Returns
+    ///
+    /// Returns [`MigrationInfo`] with source/target regions and current status.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Organization does not exist
+    /// - Organization is not in `Active` status
+    /// - Target region is the same as current region
+    /// - Protected → non-protected without acknowledgment
+    pub async fn migrate_organization(
+        &self,
+        slug: OrganizationSlug,
+        target_region: Region,
+        acknowledge_residency_downgrade: bool,
+    ) -> Result<MigrationInfo> {
+        self.check_shutdown(None)?;
+
+        let proto_target: proto::Region = target_region.into();
+        let target_i32: i32 = proto_target.into();
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "migrate_organization",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "migrate_organization",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_admin_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
+
+                    let request = proto::MigrateOrganizationRequest {
+                        slug: Some(proto::OrganizationSlug { slug: slug.value() }),
+                        target_region: target_i32,
+                        acknowledge_residency_downgrade,
+                    };
+
+                    let response = client
+                        .migrate_organization(tonic::Request::new(request))
+                        .await?
+                        .into_inner();
+
+                    Ok(MigrationInfo {
+                        slug: response.slug.map_or(0, |s| s.slug),
+                        source_region: region_from_proto_i32(response.source_region)
+                            .unwrap_or(Region::GLOBAL),
+                        target_region: region_from_proto_i32(response.target_region)
+                            .unwrap_or(target_region),
+                        status: OrganizationStatus::from_proto(response.status),
+                    })
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Initiates a user region migration.
+    ///
+    /// Moves the user's data residency to the target region. Authenticated API
+    /// calls for this user are temporarily blocked while the migration is in
+    /// progress.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_slug` - User slug (external identifier).
+    /// * `target_region` - Target region for the migration.
+    ///
+    /// # Returns
+    ///
+    /// Returns [`UserMigrationInfo`] with source/target regions and current directory status.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - User does not exist
+    /// - Target region is the same as current region
+    /// - Connection fails after retry attempts
+    pub async fn migrate_user_region(
+        &self,
+        user_slug: u64,
+        target_region: Region,
+    ) -> Result<UserMigrationInfo> {
+        self.check_shutdown(None)?;
+
+        let proto_target: proto::Region = target_region.into();
+        let target_i32: i32 = proto_target.into();
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "migrate_user_region",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "migrate_user_region",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_admin_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
+
+                    let request = proto::MigrateUserRegionRequest {
+                        slug: Some(proto::UserSlug { slug: user_slug }),
+                        target_region: target_i32,
+                    };
+
+                    let response = client
+                        .migrate_user_region(tonic::Request::new(request))
+                        .await?
+                        .into_inner();
+
+                    Ok(UserMigrationInfo {
+                        slug: response.slug.map_or(0, |s| s.slug),
+                        source_region: region_from_proto_i32(response.source_region)
+                            .unwrap_or(Region::GLOBAL),
+                        target_region: region_from_proto_i32(response.target_region)
+                            .unwrap_or(target_region),
+                        directory_status: response.directory_status,
+                    })
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Erases a user's PII through crypto-shredding.
+    ///
+    /// Permanently destroys the user's blinding key material, rendering all
+    /// associated email hashes unrecoverable. This operation is irreversible.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_id` - Internal user ID to erase.
+    /// * `erased_by` - Identity of the actor requesting erasure (audit trail).
+    /// * `region` - Region where the user's PII resides.
+    ///
+    /// # Returns
+    ///
+    /// Returns the user ID that was erased.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - User does not exist
+    /// - Confirmation token is invalid, expired, or missing
+    /// - Connection fails after retry attempts
+    pub async fn erase_user(
+        &self,
+        user_id: i64,
+        erased_by: impl Into<String>,
+        region: Region,
+    ) -> Result<i64> {
+        self.check_shutdown(None)?;
+
+        let erased_by = erased_by.into();
+        let proto_region: proto::Region = region.into();
+        let region_i32: i32 = proto_region.into();
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "erase_user",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "erase_user",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_admin_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
+
+                    let request = proto::EraseUserRequest {
+                        user_id,
+                        erased_by: erased_by.clone(),
+                        region: region_i32,
+                    };
+
+                    let response =
+                        client.erase_user(tonic::Request::new(request)).await?.into_inner();
+
+                    Ok(response.user_id)
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Initiates a blinding key rotation.
+    ///
+    /// Starts an asynchronous re-hashing of all email hash entries with the new
+    /// blinding key version. Returns immediately with initial progress.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_key_version` - Version number of the new blinding key (monotonically increasing).
+    ///
+    /// # Returns
+    ///
+    /// Returns [`BlindingKeyRotationStatus`] with initial progress.
+    pub async fn rotate_blinding_key(
+        &self,
+        new_key_version: u32,
+    ) -> Result<BlindingKeyRotationStatus> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "rotate_blinding_key",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "rotate_blinding_key",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_admin_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
+
+                    let request = proto::RotateBlindingKeyRequest { new_key_version };
+
+                    let response = client
+                        .rotate_blinding_key(tonic::Request::new(request))
+                        .await?
+                        .into_inner();
+
+                    Ok(BlindingKeyRotationStatus {
+                        total_entries: response.total_entries,
+                        entries_rehashed: response.entries_rehashed,
+                        complete: response.complete,
+                    })
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Gets the current status of a blinding key rotation.
+    ///
+    /// Returns progress information about an in-flight or completed rotation,
+    /// including per-region breakdown.
+    ///
+    /// # Returns
+    ///
+    /// Returns [`BlindingKeyRehashStatus`] with progress details.
+    pub async fn get_blinding_key_rehash_status(&self) -> Result<BlindingKeyRehashStatus> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "get_blinding_key_rehash_status",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "get_blinding_key_rehash_status",
+                || async {
+                    let channel = pool.get_channel().await?;
+                    let mut client = Self::create_admin_client(
+                        channel,
+                        pool.compression_enabled(),
+                        TraceContextInterceptor::with_timeout(
+                            pool.config().trace(),
+                            pool.config().timeout(),
+                        ),
+                    );
+
+                    let request = proto::GetBlindingKeyRehashStatusRequest {};
+
+                    let response = client
+                        .get_blinding_key_rehash_status(tonic::Request::new(request))
+                        .await?
+                        .into_inner();
+
+                    Ok(BlindingKeyRehashStatus {
+                        total_entries: response.total_entries,
+                        entries_rehashed: response.entries_rehashed,
+                        complete: response.complete,
+                        per_region_progress: response.per_region_progress,
+                        active_key_version: response.active_key_version,
+                    })
                 },
             ),
         )
@@ -5480,7 +5900,7 @@ mod tests {
         let proto = proto::GetOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: 42 }),
             name: "test-organization".to_string(),
-            shard: Some(proto::ShardId { id: 1 }),
+            region: proto::Region::Global.into(),
             member_nodes: vec![
                 proto::NodeId { id: "node-100".to_string() },
                 proto::NodeId { id: "node-101".to_string() },
@@ -5495,7 +5915,7 @@ mod tests {
 
         assert_eq!(info.slug, OrganizationSlug::new(42));
         assert_eq!(info.name, "test-organization");
-        assert_eq!(info.shard, 1);
+        assert_eq!(info.region, Region::GLOBAL);
         assert_eq!(info.member_nodes, vec!["node-100", "node-101"]);
         assert_eq!(info.config_version, 5);
         assert_eq!(info.status, OrganizationStatus::Active);
@@ -5506,7 +5926,7 @@ mod tests {
         let proto = proto::GetOrganizationResponse {
             slug: None,
             name: "minimal".to_string(),
-            shard: None,
+            region: proto::Region::Unspecified.into(),
             member_nodes: vec![],
             status: proto::OrganizationStatus::Unspecified as i32,
             config_version: 0,
@@ -5518,7 +5938,8 @@ mod tests {
 
         assert_eq!(info.slug, OrganizationSlug::new(0));
         assert_eq!(info.name, "minimal");
-        assert_eq!(info.shard, 0);
+        // Unspecified (0) falls back to GLOBAL
+        assert_eq!(info.region, Region::GLOBAL);
         assert!(info.member_nodes.is_empty());
         assert_eq!(info.config_version, 0);
         assert_eq!(info.status, OrganizationStatus::Unspecified);
@@ -5580,7 +6001,7 @@ mod tests {
         let info1 = OrganizationInfo {
             slug: ORG,
             name: "test".to_string(),
-            shard: 1,
+            region: Region::GLOBAL,
             member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
             config_version: 1,
             status: OrganizationStatus::Active,
@@ -5622,7 +6043,7 @@ mod tests {
             .expect("valid config");
 
         let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client.create_organization("test-ns").await;
+        let result = client.create_organization("test-ns", Region::US_EAST_VA).await;
 
         assert!(result.is_err(), "expected connection error");
     }
@@ -7100,7 +7521,7 @@ mod tests {
 
         // Test various admin operations
         assert!(matches!(
-            client.create_organization("test").await,
+            client.create_organization("test", Region::US_EAST_VA).await,
             Err(crate::error::SdkError::Shutdown)
         ));
         assert!(matches!(
@@ -7907,5 +8328,42 @@ mod tests {
             SdkIngestEventEntry::new("test.event", "user:x", EventOutcome::Success).details(map);
         let proto = entry.into_proto();
         assert_eq!(proto.details.len(), 2);
+    }
+
+    // =========================================================================
+    // Migration Status Tests
+    // =========================================================================
+
+    #[test]
+    fn test_organization_status_from_proto_migrating() {
+        let status = OrganizationStatus::from_proto(proto::OrganizationStatus::Migrating as i32);
+        assert_eq!(status, OrganizationStatus::Migrating);
+    }
+
+    #[test]
+    fn test_organization_status_from_proto_suspended() {
+        let status = OrganizationStatus::from_proto(proto::OrganizationStatus::Suspended as i32);
+        assert_eq!(status, OrganizationStatus::Suspended);
+    }
+
+    #[test]
+    fn test_organization_status_from_proto_deleting() {
+        let status = OrganizationStatus::from_proto(proto::OrganizationStatus::Deleting as i32);
+        assert_eq!(status, OrganizationStatus::Deleting);
+    }
+
+    #[test]
+    fn test_migration_info_construction() {
+        let info = MigrationInfo {
+            slug: 42,
+            source_region: Region::US_EAST_VA,
+            target_region: Region::IE_EAST_DUBLIN,
+            status: OrganizationStatus::Migrating,
+        };
+
+        assert_eq!(info.slug, 42);
+        assert_eq!(info.source_region, Region::US_EAST_VA);
+        assert_eq!(info.target_region, Region::IE_EAST_DUBLIN);
+        assert_eq!(info.status, OrganizationStatus::Migrating);
     }
 }

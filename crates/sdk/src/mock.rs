@@ -59,7 +59,7 @@ use inferadb_ledger_proto::proto::{
     system_discovery_service_server::{SystemDiscoveryService, SystemDiscoveryServiceServer},
     write_service_server::{WriteService, WriteServiceServer},
 };
-use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
 use parking_lot::RwLock;
 use tokio::sync::oneshot;
 use tonic::{Request, Response, Status, transport::Server};
@@ -132,7 +132,7 @@ struct MockState {
 #[derive(Debug, Clone)]
 struct OrganizationData {
     name: String,
-    shard: u32,
+    region: Region,
     status: i32,
 }
 
@@ -434,14 +434,14 @@ impl MockLedgerServer {
     ///
     /// * `organization` - Organization slug (external identifier).
     /// * `name` - Human-readable organization name.
-    /// * `shard` - Shard assignment for the organization.
-    pub fn add_organization(&self, organization: OrganizationSlug, name: &str, shard: u32) {
+    /// * `region` - Data residency region for the organization.
+    pub fn add_organization(&self, organization: OrganizationSlug, name: &str, region: Region) {
         let mut organizations = self.state.organizations.write();
         organizations.insert(
             organization,
             OrganizationData {
                 name: name.to_string(),
-                shard,
+                region,
                 status: proto::OrganizationStatus::Active as i32,
             },
         );
@@ -1125,13 +1125,15 @@ impl AdminService for MockAdminService {
         let organization =
             OrganizationSlug::new(self.state.next_organization.fetch_add(1, Ordering::SeqCst));
 
+        let region = crate::client::region_from_proto_i32(req.region).unwrap_or(Region::GLOBAL);
+
         {
             let mut organizations = self.state.organizations.write();
             organizations.insert(
                 organization,
                 OrganizationData {
                     name: req.name,
-                    shard: req.shard.map_or(1, |s| s.id),
+                    region,
                     status: proto::OrganizationStatus::Active as i32,
                 },
             );
@@ -1139,7 +1141,7 @@ impl AdminService for MockAdminService {
 
         Ok(Response::new(proto::CreateOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: organization.value() }),
-            shard: Some(proto::ShardId { id: 1 }),
+            region: req.region,
         }))
     }
 
@@ -1173,7 +1175,7 @@ impl AdminService for MockAdminService {
         Ok(Response::new(proto::GetOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: organization.value() }),
             name: data.name.clone(),
-            shard: Some(proto::ShardId { id: data.shard }),
+            region: crate::client::region_to_proto_i32(data.region),
             member_nodes: vec![],
             status: data.status,
             config_version: 1,
@@ -1194,7 +1196,7 @@ impl AdminService for MockAdminService {
             .map(|(slug, data)| proto::GetOrganizationResponse {
                 slug: Some(proto::OrganizationSlug { slug: slug.value() }),
                 name: data.name.clone(),
-                shard: Some(proto::ShardId { id: data.shard }),
+                region: crate::client::region_to_proto_i32(data.region),
                 member_nodes: vec![],
                 status: data.status,
                 config_version: 1,
@@ -1477,6 +1479,97 @@ impl AdminService for MockAdminService {
     ) -> Result<Response<proto::TransferLeadershipResponse>, Status> {
         Err(Status::unimplemented("Leader transfer not supported in mock"))
     }
+
+    async fn rotate_blinding_key(
+        &self,
+        _request: Request<proto::RotateBlindingKeyRequest>,
+    ) -> Result<Response<proto::RotateBlindingKeyResponse>, Status> {
+        Err(Status::unimplemented("Blinding key rotation not supported in mock"))
+    }
+
+    async fn get_blinding_key_rehash_status(
+        &self,
+        _request: Request<proto::GetBlindingKeyRehashStatusRequest>,
+    ) -> Result<Response<proto::GetBlindingKeyRehashStatusResponse>, Status> {
+        Err(Status::unimplemented("Blinding key rehash status not supported in mock"))
+    }
+
+    async fn rotate_region_key(
+        &self,
+        _request: Request<proto::RotateRegionKeyRequest>,
+    ) -> Result<Response<proto::RotateRegionKeyResponse>, Status> {
+        Err(Status::unimplemented("Region key rotation not supported in mock"))
+    }
+
+    async fn get_rewrap_status(
+        &self,
+        _request: Request<proto::GetRewrapStatusRequest>,
+    ) -> Result<Response<proto::GetRewrapStatusResponse>, Status> {
+        Err(Status::unimplemented("Rewrap status not supported in mock"))
+    }
+
+    async fn erase_user(
+        &self,
+        request: Request<proto::EraseUserRequest>,
+    ) -> Result<Response<proto::EraseUserResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        Ok(Response::new(proto::EraseUserResponse { user_id: req.user_id }))
+    }
+
+    async fn migrate_organization(
+        &self,
+        request: Request<proto::MigrateOrganizationRequest>,
+    ) -> Result<Response<proto::MigrateOrganizationResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let slug_val = req.slug.map_or(0, |s| s.slug);
+
+        // Look up existing org to get source region
+        let source_region_i32 = {
+            let organizations = self.state.organizations.read();
+            let slug = OrganizationSlug::new(slug_val);
+            organizations
+                .get(&slug)
+                .map(|org| crate::client::region_to_proto_i32(org.region))
+                .unwrap_or(0)
+        };
+
+        // Update status to Migrating
+        {
+            let mut organizations = self.state.organizations.write();
+            let slug = OrganizationSlug::new(slug_val);
+            if let Some(org) = organizations.get_mut(&slug) {
+                org.status = proto::OrganizationStatus::Migrating as i32;
+            }
+        }
+
+        Ok(Response::new(proto::MigrateOrganizationResponse {
+            slug: Some(proto::OrganizationSlug { slug: slug_val }),
+            source_region: source_region_i32,
+            target_region: req.target_region,
+            status: proto::OrganizationStatus::Migrating as i32,
+        }))
+    }
+
+    async fn migrate_user_region(
+        &self,
+        request: Request<proto::MigrateUserRegionRequest>,
+    ) -> Result<Response<proto::MigrateUserRegionResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let slug_val = req.slug.map_or(0, |s| s.slug);
+
+        Ok(Response::new(proto::MigrateUserRegionResponse {
+            slug: Some(proto::UserSlug { slug: slug_val }),
+            source_region: crate::client::region_to_proto_i32(Region::GLOBAL),
+            target_region: req.target_region,
+            directory_status: "migrating".to_string(),
+        }))
+    }
 }
 
 // =============================================================================
@@ -1671,7 +1764,7 @@ mod tests {
         async fn test_mock_server_add_organization() {
             let server = MockLedgerServer::start().await.unwrap();
 
-            server.add_organization(ORG, "test-organization", 1);
+            server.add_organization(ORG, "test-organization", Region::US_EAST_VA);
 
             // Organization should be stored (verify no panic)
         }
@@ -1702,7 +1795,7 @@ mod tests {
             server.set_entity(ORG, VAULT, "key", b"value");
             server.set_client_state(ORG, VAULT, "client", 5);
             server.add_relationship(ORG, VAULT, "r", "rel", "s");
-            server.add_organization(ORG, "ns", 1);
+            server.add_organization(ORG, "ns", Region::US_EAST_VA);
             server.add_vault(ORG, VAULT);
             server.add_peer("node", vec![], 5000);
             server.inject_unavailable(3);
@@ -2177,7 +2270,8 @@ mod tests {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
-            let org = client.create_organization("test-organization").await.unwrap();
+            let org =
+                client.create_organization("test-organization", Region::US_EAST_VA).await.unwrap();
             assert!(org.slug.value() > 0);
 
             let org_info = client.get_organization(org.slug).await.unwrap();
@@ -2188,8 +2282,8 @@ mod tests {
         #[tokio::test]
         async fn test_list_organizations() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.add_organization(ORG, "ns1", 1);
-            server.add_organization(OrganizationSlug::new(2), "ns2", 1);
+            server.add_organization(ORG, "ns1", Region::US_EAST_VA);
+            server.add_organization(OrganizationSlug::new(2), "ns2", Region::US_EAST_VA);
             let client = create_client_for_mock(&server).await;
 
             let organizations = client.list_organizations().await.unwrap();
@@ -2203,7 +2297,7 @@ mod tests {
         #[tokio::test]
         async fn test_create_and_get_vault() {
             let server = MockLedgerServer::start().await.unwrap();
-            server.add_organization(ORG, "ns", 1);
+            server.add_organization(ORG, "ns", Region::US_EAST_VA);
             let client = create_client_for_mock(&server).await;
 
             let vault_info = client.create_vault(ORG).await.unwrap();

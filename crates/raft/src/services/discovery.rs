@@ -12,8 +12,8 @@ use std::{
 
 use inferadb_ledger_proto::proto::{
     AnnouncePeerRequest, AnnouncePeerResponse, GetPeersRequest, GetPeersResponse,
-    GetSystemStateRequest, GetSystemStateResponse, NodeId, NodeInfo, NodeRole,
-    OrganizationRegistry, OrganizationSlug, PeerInfo, ShardId,
+    GetSystemStateRequest, GetSystemStateResponse, NodeId, NodeInfo, OrganizationRegistry,
+    OrganizationSlug, PeerInfo, Region as ProtoRegion,
     system_discovery_service_server::SystemDiscoveryService,
 };
 use inferadb_ledger_state::StateLayer;
@@ -184,6 +184,11 @@ pub struct DiscoveryServiceImpl {
     /// Learner cache TTL (stale after this duration).
     #[builder(default = DEFAULT_LEARNER_CACHE_TTL)]
     learner_cache_ttl: std::time::Duration,
+    /// Geographic region this node belongs to.
+    ///
+    /// Included in system state responses for peer region awareness.
+    #[builder(default = inferadb_ledger_types::Region::GLOBAL)]
+    region: inferadb_ledger_types::Region,
 }
 
 impl DiscoveryServiceImpl {
@@ -356,19 +361,25 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
 
         // Build node info from Raft membership
         let membership = metrics.membership_config.membership();
-        let voter_ids: std::collections::HashSet<_> = membership.voter_ids().collect();
+
+        let own_region: i32 = ProtoRegion::from(self.region).into();
 
         let nodes: Vec<NodeInfo> = membership
             .nodes()
             .map(|(id, node)| {
-                let role = if voter_ids.contains(id) { NodeRole::Voter } else { NodeRole::Learner };
+                // Report this node's region for its own entry;
+                // other nodes' regions are unknown from Raft membership alone.
+                let region = match self.node_id {
+                    Some(own_id) if *id == own_id => own_region,
+                    _ => ProtoRegion::Unspecified.into(),
+                };
                 NodeInfo {
                     node_id: Some(NodeId { id: id.to_string() }),
                     addresses: vec![node.addr.clone()],
                     grpc_port: 5000,
-                    role: role.into(),
                     last_heartbeat: None,
                     joined_at: None,
+                    region,
                 }
             })
             .collect();
@@ -391,7 +402,7 @@ impl SystemDiscoveryService for DiscoveryServiceImpl {
                             .map_or(ns.organization.value() as u64, |s| s.value()),
                     }),
                     name: ns.name,
-                    shard: Some(ShardId { id: ns.shard.value() }),
+                    region: ProtoRegion::Global.into(),
                     members: member_nodes.clone(),
                     status: status.into(),
                     config_version: current_version,

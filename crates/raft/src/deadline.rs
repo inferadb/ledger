@@ -11,7 +11,7 @@
 //! 2. Server extracts the deadline via the `grpc-timeout` metadata header
 //! 3. The effective timeout is `min(proposal_timeout, grpc_deadline)`
 //! 4. Requests with < 100ms remaining are rejected early with `DEADLINE_EXCEEDED`
-//! 5. `ForwardClient` propagates remaining deadline to downstream shards
+//! 5. `ForwardClient` propagates remaining deadline to downstream regions
 
 use std::time::Duration;
 

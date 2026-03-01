@@ -17,7 +17,7 @@ use super::{
     store::RaftLogStore,
     types::{
         AppliedState, ClientSequenceEntry, OrganizationMeta, PendingExternalWrites,
-        VaultHealthStatus, VaultMeta, estimate_write_storage_delta, select_least_loaded_shard,
+        VaultHealthStatus, VaultMeta, estimate_write_storage_delta,
     },
 };
 use crate::{
@@ -30,8 +30,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// Applies a single request and returns the response plus optional vault entry.
     ///
     /// For Write requests, this also returns a VaultEntry that should be included
-    /// in the ShardBlock. The caller is responsible for collecting these entries
-    /// and creating the ShardBlock.
+    /// in the RegionBlock. The caller is responsible for collecting these entries
+    /// and creating the RegionBlock.
     ///
     /// This is the backward-compatible entry point used by tests. Events are
     /// discarded. For event-aware apply, use [`apply_request_with_events`].
@@ -73,8 +73,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
         ttl_days: u32,
         pending: &mut PendingExternalWrites,
     ) -> (LedgerResponse, Option<VaultEntry>) {
-        // Block height for event emission (from shard chain state)
-        let block_height = self.shard_chain.read().height + 1;
+        // Block height for event emission (from region chain state)
+        let block_height = self.region_chain.read().height + 1;
 
         match request {
             LedgerRequest::Write {
@@ -262,7 +262,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     })
                     .collect();
 
-                // Build VaultEntry for ShardBlock with server-assigned sequences
+                // Build VaultEntry for RegionBlock with server-assigned sequences
                 let vault_entry = VaultEntry {
                     organization: *organization,
                     vault: *vault,
@@ -349,19 +349,16 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 )
             },
 
-            LedgerRequest::CreateOrganization { name, slug, shard, tier } => {
+            LedgerRequest::CreateOrganization { name, slug, region, tier } => {
                 let organization_id = state.sequences.next_organization();
-                // Use provided shard or select least-loaded shard
-                let assigned_shard =
-                    shard.unwrap_or_else(|| select_least_loaded_shard(&state.organizations));
                 let org_meta = OrganizationMeta {
                     organization: organization_id,
                     slug: *slug,
                     name: name.clone(),
-                    shard: assigned_shard,
+                    region: *region,
                     status: OrganizationStatus::Active,
                     tier: *tier,
-                    pending_shard: None,
+                    pending_region: None,
                     storage_bytes: 0,
                 };
                 // Mirror to pending external writes
@@ -375,13 +372,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 state.id_to_slug.insert(organization_id, *slug);
                 pending.slug_index.push((*slug, organization_id));
 
-                // Persist organization to StateLayer for ShardRouter discovery.
-                // This enables the ShardRouter to find the organization->shard mapping.
+                // Persist organization to StateLayer for RegionRouter discovery.
+                // This enables the RegionRouter to find the organization->region mapping.
                 if let Some(state_layer) = &self.state_layer {
                     let registry = OrganizationRegistry {
                         organization_id,
                         name: name.clone(),
-                        shard: assigned_shard,
+                        region: *region,
                         member_nodes: state
                             .membership
                             .membership()
@@ -423,7 +420,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         .detail("organization_name", name)
                         .detail("organization_id", &organization_id.to_string())
                         .detail("organization_slug", &slug.value().to_string())
-                        .detail("shard", &assigned_shard.to_string())
+                        .detail("region", region.as_str())
                         .outcome(EventOutcome::Success)
                         .build(block_height, *op_index, block_timestamp, ttl_days),
                 );
@@ -432,7 +429,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (
                     LedgerResponse::OrganizationCreated {
                         organization: organization_id,
-                        shard: assigned_shard,
+                        region: *region,
                     },
                     None,
                 )
@@ -793,27 +790,27 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (response, None)
             },
 
-            LedgerRequest::StartMigration { organization, target_shard } => {
+            LedgerRequest::StartMigration { organization, target_region_group } => {
                 let response = if let Some(org) = state.organizations.get_mut(organization) {
                     match org.status {
                         OrganizationStatus::Active => {
-                            // Validate target shard is different
-                            if *target_shard == org.shard {
+                            // Validate target region is different
+                            if *target_region_group == org.region {
                                 LedgerResponse::Error {
                                     message: format!(
-                                        "Organization {} is already on shard {}",
-                                        organization, target_shard
+                                        "Organization {} is already on region {}",
+                                        organization, target_region_group
                                     ),
                                 }
                             } else {
                                 org.status = OrganizationStatus::Migrating;
-                                org.pending_shard = Some(*target_shard);
+                                org.pending_region = Some(*target_region_group);
                                 if let Ok(blob) = encode(org) {
                                     pending.organizations.push((*organization, blob));
                                 }
                                 LedgerResponse::MigrationStarted {
                                     organization: *organization,
-                                    target_shard: *target_shard,
+                                    target_region_group: *target_region_group,
                                 }
                             }
                         },
@@ -846,7 +843,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     events.push(
                         ApplyPhaseEmitter::for_system(EventAction::MigrationStarted)
                             .detail("organization_id", &organization.to_string())
-                            .detail("target_shard", &target_shard.to_string())
+                            .detail("target_region_group", &target_region_group.to_string())
                             .outcome(EventOutcome::Success)
                             .build(block_height, *op_index, block_timestamp, ttl_days),
                     );
@@ -860,24 +857,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let response = if let Some(org) = state.organizations.get_mut(organization) {
                     match org.status {
                         OrganizationStatus::Migrating => {
-                            if let Some(target_shard) = org.pending_shard {
-                                let old_shard = org.shard;
-                                org.shard = target_shard;
+                            if let Some(target_region_group) = org.pending_region {
+                                let old_region = org.region;
+                                org.region = target_region_group;
                                 org.status = OrganizationStatus::Active;
-                                org.pending_shard = None;
+                                org.pending_region = None;
                                 if let Ok(blob) = encode(org) {
                                     pending.organizations.push((*organization, blob));
                                 }
                                 LedgerResponse::MigrationCompleted {
                                     organization: *organization,
-                                    old_shard,
-                                    new_shard: target_shard,
+                                    old_region,
+                                    new_region: target_region_group,
                                 }
                             } else {
                                 // Should not happen, but handle gracefully
                                 LedgerResponse::Error {
                                     message: format!(
-                                        "Organization {} is migrating but has no target shard",
+                                        "Organization {} is migrating but has no target region",
                                         organization
                                     ),
                                 }
@@ -900,11 +897,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 };
 
                 // Emit MigrationCompleted event on success
-                if let LedgerResponse::MigrationCompleted { new_shard, .. } = &response {
+                if let LedgerResponse::MigrationCompleted { new_region, .. } = &response {
                     events.push(
                         ApplyPhaseEmitter::for_system(EventAction::MigrationCompleted)
                             .detail("organization_id", &organization.to_string())
-                            .detail("shard", &new_shard.to_string())
+                            .detail("region", &new_region.to_string())
                             .outcome(EventOutcome::Success)
                             .build(block_height, *op_index, block_timestamp, ttl_days),
                     );
@@ -1008,7 +1005,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     SystemRequest::AddNode { .. } | SystemRequest::RemoveNode { .. } => {
                         LedgerResponse::Empty
                     },
-                    SystemRequest::UpdateOrganizationRouting { organization, shard } => {
+                    SystemRequest::UpdateOrganizationRouting { organization, region } => {
                         if let Some(org) = state.organizations.get_mut(organization) {
                             if org.status == OrganizationStatus::Deleted {
                                 LedgerResponse::Error {
@@ -1018,15 +1015,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     ),
                                 }
                             } else {
-                                let old_shard = org.shard;
-                                org.shard = *shard;
+                                let old_region = org.region;
+                                org.region = *region;
                                 if let Ok(blob) = encode(org) {
                                     pending.organizations.push((*organization, blob));
                                 }
                                 LedgerResponse::OrganizationMigrated {
                                     organization: *organization,
-                                    old_shard,
-                                    new_shard: *shard,
+                                    old_region,
+                                    new_region: *region,
                                 }
                             }
                         } else {
@@ -1035,13 +1032,152 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }
                         }
                     },
+
+                    // Email hash index and blinding key operations apply to the
+                    // system entity store (vault 0). They flow through Raft for
+                    // consistency — every node applies the same writes.
+                    SystemRequest::RegisterEmailHash { hmac_hex, user_id } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            let sys = inferadb_ledger_state::system::SystemOrganizationService::new(
+                                state_layer.clone(),
+                            );
+                            match sys.register_email_hash(hmac_hex, *user_id) {
+                                Ok(()) => LedgerResponse::Empty,
+                                Err(
+                                    inferadb_ledger_state::system::SystemError::AlreadyExists {
+                                        ..
+                                    },
+                                ) => LedgerResponse::Error {
+                                    message: format!("Email hash already registered: {hmac_hex}"),
+                                },
+                                Err(e) => LedgerResponse::Error {
+                                    message: format!("Failed to register email hash: {e}"),
+                                },
+                            }
+                        } else {
+                            LedgerResponse::Empty
+                        }
+                    },
+                    SystemRequest::RemoveEmailHash { hmac_hex } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            let sys = inferadb_ledger_state::system::SystemOrganizationService::new(
+                                state_layer.clone(),
+                            );
+                            if let Err(e) = sys.remove_email_hash(hmac_hex) {
+                                LedgerResponse::Error {
+                                    message: format!("Failed to remove email hash: {e}"),
+                                }
+                            } else {
+                                LedgerResponse::Empty
+                            }
+                        } else {
+                            LedgerResponse::Empty
+                        }
+                    },
+                    SystemRequest::SetBlindingKeyVersion { version } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            let sys = inferadb_ledger_state::system::SystemOrganizationService::new(
+                                state_layer.clone(),
+                            );
+                            if let Err(e) = sys.set_blinding_key_version(*version) {
+                                LedgerResponse::Error {
+                                    message: format!("Failed to set blinding key version: {e}"),
+                                }
+                            } else {
+                                LedgerResponse::Empty
+                            }
+                        } else {
+                            LedgerResponse::Empty
+                        }
+                    },
+                    SystemRequest::UpdateRehashProgress { region, entries_rehashed } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            let sys = inferadb_ledger_state::system::SystemOrganizationService::new(
+                                state_layer.clone(),
+                            );
+                            if let Err(e) = sys.set_rehash_progress(*region, *entries_rehashed) {
+                                LedgerResponse::Error {
+                                    message: format!("Failed to update rehash progress: {e}"),
+                                }
+                            } else {
+                                LedgerResponse::Empty
+                            }
+                        } else {
+                            LedgerResponse::Empty
+                        }
+                    },
+                    SystemRequest::ClearRehashProgress { region } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            let sys = inferadb_ledger_state::system::SystemOrganizationService::new(
+                                state_layer.clone(),
+                            );
+                            if let Err(e) = sys.clear_rehash_progress(*region) {
+                                LedgerResponse::Error {
+                                    message: format!("Failed to clear rehash progress: {e}"),
+                                }
+                            } else {
+                                LedgerResponse::Empty
+                            }
+                        } else {
+                            LedgerResponse::Empty
+                        }
+                    },
+                    SystemRequest::UpdateUserDirectoryStatus { user_id, status, region } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            let sys = inferadb_ledger_state::system::SystemOrganizationService::new(
+                                state_layer.clone(),
+                            );
+                            // Update status first
+                            if let Err(e) = sys.update_user_directory_status(*user_id, *status) {
+                                LedgerResponse::Error {
+                                    message: format!("Failed to update user directory status: {e}"),
+                                }
+                            } else if let Some(new_region) = region {
+                                // Then update region if provided
+                                if let Err(e) =
+                                    sys.update_user_directory_region(*user_id, *new_region)
+                                {
+                                    LedgerResponse::Error {
+                                        message: format!(
+                                            "Failed to update user directory region: {e}"
+                                        ),
+                                    }
+                                } else {
+                                    LedgerResponse::Empty
+                                }
+                            } else {
+                                LedgerResponse::Empty
+                            }
+                        } else {
+                            LedgerResponse::Empty
+                        }
+                    },
+                    SystemRequest::EraseUser { user_id, erased_by, region } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            let sys = inferadb_ledger_state::system::SystemOrganizationService::new(
+                                state_layer.clone(),
+                            );
+                            // Forward-only finalization: each step idempotent.
+                            // The service method handles directory update, email hash
+                            // removal, subject key deletion, and audit record creation.
+                            if let Err(e) = sys.erase_user(*user_id, erased_by, *region) {
+                                LedgerResponse::Error {
+                                    message: format!("Failed to erase user: {e}"),
+                                }
+                            } else {
+                                LedgerResponse::UserErased { user_id: *user_id }
+                            }
+                        } else {
+                            LedgerResponse::Empty
+                        }
+                    },
                 };
 
                 // Emit events for system request variants
                 match (&response, system_request) {
                     (
                         LedgerResponse::UserCreated { user_id, slug },
-                        SystemRequest::CreateUser { name, email, admin, .. },
+                        SystemRequest::CreateUser { name, email, admin, region, .. },
                     ) => {
                         events.push(
                             ApplyPhaseEmitter::for_system(EventAction::UserCreated)
@@ -1051,6 +1187,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 .detail("name", name)
                                 .detail("email", email)
                                 .detail("admin", &admin.to_string())
+                                .detail("region", region.as_str())
                                 .outcome(EventOutcome::Success)
                                 .build(block_height, *op_index, block_timestamp, ttl_days),
                         );
@@ -1078,13 +1215,27 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         *op_index += 1;
                     },
                     (
-                        LedgerResponse::OrganizationMigrated { new_shard, .. },
+                        LedgerResponse::OrganizationMigrated { new_region, .. },
                         SystemRequest::UpdateOrganizationRouting { organization, .. },
                     ) => {
                         events.push(
                             ApplyPhaseEmitter::for_system(EventAction::RoutingUpdated)
                                 .detail("organization_id", &organization.to_string())
-                                .detail("shard", &new_shard.to_string())
+                                .detail("region", &new_region.to_string())
+                                .outcome(EventOutcome::Success)
+                                .build(block_height, *op_index, block_timestamp, ttl_days),
+                        );
+                        *op_index += 1;
+                    },
+                    (
+                        LedgerResponse::UserErased { user_id },
+                        SystemRequest::EraseUser { erased_by, region, .. },
+                    ) => {
+                        events.push(
+                            ApplyPhaseEmitter::for_system(EventAction::UserErased)
+                                .principal(erased_by)
+                                .detail("user_id", &user_id.to_string())
+                                .detail("region", region.as_str())
                                 .outcome(EventOutcome::Success)
                                 .build(block_height, *op_index, block_timestamp, ttl_days),
                         );

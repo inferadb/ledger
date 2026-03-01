@@ -28,10 +28,10 @@ pub enum TableId {
     // ========================================================================
     // Block Archive Tables
     // ========================================================================
-    /// Block storage: shard_height -> serialized ShardBlock
+    /// Block storage: region_height -> serialized RegionBlock
     Blocks = 4,
 
-    /// Vault block index: (organization_id, vault_id, vault_height) -> shard_height
+    /// Vault block index: (organization_id, vault_id, vault_height) -> region_height
     VaultBlockIndex = 5,
 
     // ========================================================================

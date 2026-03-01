@@ -43,9 +43,49 @@ message UserSlug {
   uint64 slug = 1;
 }
 
-// Unique shard identifier (Raft group hosting multiple organizations)
-message ShardId {
-  uint32 id = 1;
+// Geographic region for data residency. Each Raft consensus group maps 1:1 to
+// a region. Organizations declare a region governing where their data is stored.
+enum Region {
+  REGION_UNSPECIFIED = 0;
+  REGION_GLOBAL = 1;
+
+  // North America (10-19)
+  REGION_US_EAST_VA = 10;
+  REGION_US_WEST_OR = 11;
+  REGION_CA_CENTRAL_QC = 12;
+
+  // South America (20-29)
+  REGION_BR_SOUTHEAST_SP = 20;
+
+  // Europe — EU/EEA (30-39)
+  REGION_IE_EAST_DUBLIN = 30;
+  REGION_FR_NORTH_PARIS = 31;
+  REGION_DE_CENTRAL_FRANKFURT = 32;
+  REGION_SE_EAST_STOCKHOLM = 33;
+  REGION_IT_NORTH_MILAN = 34;
+
+  // United Kingdom (40-49)
+  REGION_UK_SOUTH_LONDON = 40;
+
+  // Middle East & Africa (50-59)
+  REGION_SA_CENTRAL_RIYADH = 50;
+  REGION_BH_CENTRAL_MANAMA = 51;
+  REGION_AE_CENTRAL_DUBAI = 52;
+  REGION_IL_CENTRAL_TEL_AVIV = 53;
+  REGION_ZA_SOUTH_CAPE_TOWN = 54;
+  REGION_NG_WEST_LAGOS = 55;
+
+  // Asia Pacific (60-69)
+  REGION_SG_CENTRAL_SINGAPORE = 60;
+  REGION_AU_EAST_SYDNEY = 61;
+  REGION_ID_WEST_JAKARTA = 62;
+  REGION_JP_EAST_TOKYO = 63;
+  REGION_KR_CENTRAL_SEOUL = 64;
+  REGION_IN_WEST_MUMBAI = 65;
+  REGION_VN_SOUTH_HCMC = 66;
+
+  // China (70-79)
+  REGION_CN_NORTH_BEIJING = 70;
 }
 
 // Unique node identifier
@@ -153,7 +193,7 @@ message BlockHeader {
   // Note: leader_id is included in proto for API completeness but excluded from
   // the 148-byte deterministic block hash computation. This ensures blocks hash
   // identically regardless of which leader committed them. The leader_id is stored
-  // in ShardBlock and populated when extracting VaultBlock for client responses.
+  // in RegionBlock and populated when extracting VaultBlock for client responses.
   NodeId leader_id = 8;
   uint64 term = 9;
   uint64 committed_index = 10;
@@ -741,12 +781,23 @@ service AdminService {
   // Delete an organization (marks for garbage collection, fails if vaults exist)
   rpc DeleteOrganization(DeleteOrganizationRequest) returns (DeleteOrganizationResponse);
 
-  // Get organization info including shard assignment.
+  // Get organization info including region assignment.
   // Lookup by slug only — organization names are not unique.
   rpc GetOrganization(GetOrganizationRequest) returns (GetOrganizationResponse);
 
   // List all organizations (paginated)
   rpc ListOrganizations(ListOrganizationsRequest) returns (ListOrganizationsResponse);
+
+  // Migrate an organization from one region to another.
+  // Non-protected to non-protected is metadata-only (no data movement).
+  // Protected region migrations involve full data transfer via saga.
+  // Writes to the organization are rejected during migration.
+  rpc MigrateOrganization(MigrateOrganizationRequest) returns (MigrateOrganizationResponse);
+
+  // Migrate a user's PII from one regional store to another.
+  // Updates the GLOBAL directory entry and moves data via saga.
+  // Authenticated API calls are rejected during migration.
+  rpc MigrateUserRegion(MigrateUserRegionRequest) returns (MigrateUserRegionResponse);
 
   // ==========================================================================
   // Vault Management
@@ -828,7 +879,7 @@ service AdminService {
   // Backup & Restore
   // ==========================================================================
 
-  // Create a backup of the current shard state.
+  // Create a backup of the current region state.
   // Triggers a consistent snapshot, compresses it, and writes to the configured
   // backup destination. Includes chain commitment for integrity verification.
   rpc CreateBackup(CreateBackupRequest) returns (CreateBackupResponse);
@@ -836,9 +887,43 @@ service AdminService {
   // List available backups with metadata.
   rpc ListBackups(ListBackupsRequest) returns (ListBackupsResponse);
 
-  // Restore from a backup. Stops the shard, restores state from backup,
+  // Restore from a backup. Stops the region, restores state from backup,
   // and resumes. Requires explicit confirmation via the confirm field.
   rpc RestoreBackup(RestoreBackupRequest) returns (RestoreBackupResponse);
+
+  // ==========================================================================
+  // Blinding Key Rotation
+  // ==========================================================================
+
+  // Initiate rotation of the email blinding key. Triggers asynchronous
+  // re-hashing of all email HMAC entries in the global control plane.
+  // Returns immediately; poll GetBlindingKeyRehashStatus for progress.
+  rpc RotateBlindingKey(RotateBlindingKeyRequest) returns (RotateBlindingKeyResponse);
+
+  // Check the progress of an in-flight blinding key rotation.
+  rpc GetBlindingKeyRehashStatus(GetBlindingKeyRehashStatusRequest) returns (GetBlindingKeyRehashStatusResponse);
+
+  // ==========================================================================
+  // Region Key Rotation
+  // ==========================================================================
+
+  // Initiate rotation of the Region Master Key (RMK) for a region.
+  // Triggers asynchronous DEK re-wrapping of all page sidecar metadata.
+  // Returns immediately; poll GetRewrapStatus for progress.
+  rpc RotateRegionKey(RotateRegionKeyRequest) returns (RotateRegionKeyResponse);
+
+  // Check the progress of an in-flight DEK re-wrapping job.
+  rpc GetRewrapStatus(GetRewrapStatusRequest) returns (GetRewrapStatusResponse);
+
+  // ==========================================================================
+  // User Erasure (GDPR Article 17)
+  // ==========================================================================
+
+  // Erase a user's PII via crypto-shredding. Forward-only finalization:
+  // destroys the per-subject encryption key, scrubs directory entry,
+  // removes email hash indexes, and creates erasure audit record.
+  // Each step is idempotent — safe to retry on failure.
+  rpc EraseUser(EraseUserRequest) returns (EraseUserResponse);
 }
 
 // -----------------------------------------------------------------------------
@@ -846,17 +931,17 @@ service AdminService {
 // -----------------------------------------------------------------------------
 
 // Create a new organization. An OrganizationSlug (Snowflake ID) is generated
-// by the leader and returned. The organization is assigned to the shard with
-// lowest load, or to the specified shard.
+// by the leader and returned. Every organization must declare a region
+// governing where its data is stored.
 message CreateOrganizationRequest {
   string name = 1; // Human-readable name (e.g., "acme_corp")
-  optional ShardId shard = 2; // Target shard (auto-assigned if not specified)
+  Region region = 2; // Data residency region (required)
   optional OrganizationTier tier = 3; // Billing tier (Free if not specified)
 }
 
 message CreateOrganizationResponse {
   OrganizationSlug slug = 1;
-  ShardId shard = 2; // Assigned shard
+  Region region = 2; // Assigned region
 }
 
 message DeleteOrganizationRequest {
@@ -878,8 +963,8 @@ message GetOrganizationRequest {
 message GetOrganizationResponse {
   OrganizationSlug slug = 1;
   string name = 2;
-  ShardId shard = 3;             // Which shard hosts this organization
-  repeated NodeId member_nodes = 4; // Nodes in the shard
+  Region region = 3;                // Data residency region
+  repeated NodeId member_nodes = 4; // Nodes in the region's Raft group
   OrganizationStatus status = 5;    // Lifecycle state
   uint64 config_version = 6;        // For cache invalidation
   google.protobuf.Timestamp created_at = 7;
@@ -889,7 +974,7 @@ message GetOrganizationResponse {
 enum OrganizationStatus {
   ORGANIZATION_STATUS_UNSPECIFIED = 0;
   ORGANIZATION_STATUS_ACTIVE = 1;    // Accepting requests
-  ORGANIZATION_STATUS_MIGRATING = 2; // Being migrated to another shard
+  ORGANIZATION_STATUS_MIGRATING = 2; // Being migrated to another region
   ORGANIZATION_STATUS_SUSPENDED = 3; // Billing or policy suspension
   ORGANIZATION_STATUS_DELETING = 4;  // Deletion in progress
   ORGANIZATION_STATUS_DELETED = 5;   // Tombstone
@@ -910,6 +995,38 @@ message ListOrganizationsRequest {
 message ListOrganizationsResponse {
   repeated GetOrganizationResponse organizations = 1;
   optional bytes next_page_token = 2; // Absent if no more pages
+}
+
+// Migrate organization to a different region.
+// Protected → non-protected requires acknowledge_residency_downgrade = true.
+message MigrateOrganizationRequest {
+  OrganizationSlug slug = 1;
+  Region target_region = 2;
+  bool acknowledge_residency_downgrade = 3;
+}
+
+// Migration response with source/target region and current status.
+// Status will be MIGRATING while the saga is in progress.
+message MigrateOrganizationResponse {
+  OrganizationSlug slug = 1;
+  Region source_region = 2;
+  Region target_region = 3;
+  OrganizationStatus status = 4;
+}
+
+// Request to migrate a user's PII to a different region.
+message MigrateUserRegionRequest {
+  UserSlug slug = 1;
+  Region target_region = 2;
+}
+
+// Migration response with source/target region and current directory status.
+message MigrateUserRegionResponse {
+  UserSlug slug = 1;
+  Region source_region = 2;
+  Region target_region = 3;
+  // User directory status will be MIGRATING while the saga is in progress.
+  string directory_status = 4;
 }
 
 // -----------------------------------------------------------------------------
@@ -1128,7 +1245,7 @@ enum BackupType {
   BACKUP_TYPE_INCREMENTAL = 1;
 }
 
-// Create a consistent backup of shard state.
+// Create a consistent backup of region state.
 message CreateBackupRequest {
   // Optional tag for identifying this backup (e.g., "pre-migration").
   optional string tag = 1;
@@ -1141,8 +1258,8 @@ message CreateBackupRequest {
 message CreateBackupResponse {
   // Unique backup identifier (timestamp-based).
   string backup_id = 1;
-  // Shard height at backup time.
-  uint64 shard_height = 2;
+  // Region height at backup time.
+  uint64 region_height = 2;
   // Path where the backup was written.
   string backup_path = 3;
   // Size of the backup in bytes.
@@ -1165,8 +1282,8 @@ message ListBackupsResponse {
 message BackupInfo {
   // Unique backup identifier.
   string backup_id = 1;
-  // Shard height at backup time.
-  uint64 shard_height = 2;
+  // Region height at backup time.
+  uint64 region_height = 2;
   // Path where the backup is stored.
   string backup_path = 3;
   // Size in bytes.
@@ -1202,7 +1319,7 @@ message RestoreBackupResponse {
   bool success = 1;
   // Human-readable result message.
   string message = 2;
-  // Shard height after restore.
+  // Region height after restore.
   uint64 restored_height = 3;
 }
 
@@ -1575,16 +1692,11 @@ message GetSystemStateRequest {
 message GetSystemStateResponse {
   uint64 version = 1;
   repeated NodeInfo nodes = 2;
-  repeated OrganizationRegistry organizations = 3; // Routing table: organization → shard
+  repeated OrganizationRegistry organizations = 3; // Routing table: organization → region
 }
 
-// Node role in the cluster (Raft membership type)
-enum NodeRole {
-  NODE_ROLE_UNSPECIFIED = 0;
-  NODE_ROLE_VOTER = 1;   // Participates in Raft elections (max 5 per cluster)
-  NODE_ROLE_LEARNER = 2; // Replicates data but doesn't vote (for scaling)
-}
-
+// Node physical information. Role (voter/learner) is per-Raft-group, derived
+// from openraft membership — not a property of the node itself.
 message NodeInfo {
   NodeId node_id = 1;
   // IP addresses only (no port). IPv4 or IPv6, e.g., ["10.0.0.1", "fd00::1"].
@@ -1592,18 +1704,20 @@ message NodeInfo {
   // Connect via: addresses[i] + ":" + grpc_port
   repeated string addresses = 2;
   uint32 grpc_port = 3; // gRPC port (same for all addresses), typically 5000
-  NodeRole role = 4;    // Voter or Learner
+  // Field 4 reserved: was NodeRole role (now per-group, from openraft)
+  reserved 4;
   google.protobuf.Timestamp last_heartbeat = 5;
   google.protobuf.Timestamp joined_at = 6; // For voter election ordering
+  Region region = 7;    // Geographic region this node belongs to
 }
 
-// Routing entry: organization → shard assignment
+// Routing entry: organization → region assignment
 // Note: leader_hint is computed dynamically from Raft state, not stored here
 message OrganizationRegistry {
   OrganizationSlug slug = 1;
   string name = 2;                // Human-readable organization name
-  ShardId shard = 3;           // Which Raft group hosts this organization
-  repeated NodeId members = 4;    // Nodes in the shard
+  Region region = 3;              // Data residency region (Raft group)
+  repeated NodeId members = 4;    // Nodes in the region's Raft group
   OrganizationStatus status = 5;  // Lifecycle state
   uint64 config_version = 6;      // For cache invalidation
   google.protobuf.Timestamp created_at = 7;
@@ -1648,8 +1762,8 @@ message RaftLogId {
 message RaftVoteRequest {
   RaftVote vote = 1;
   optional RaftLogId last_log_id = 2;
-  // Shard for multi-shard routing (defaults to system shard 0).
-  optional uint64 shard = 3;
+  // Region for multi-region routing (defaults to GLOBAL).
+  optional Region region = 3;
 }
 
 // Vote response.
@@ -1665,8 +1779,8 @@ message RaftAppendEntriesRequest {
   optional RaftLogId prev_log_id = 2;
   repeated bytes entries = 3; // Serialized log entries
   optional RaftLogId leader_commit = 4;
-  // Shard for multi-shard routing (defaults to system shard 0).
-  optional uint64 shard = 5;
+  // Region for multi-region routing (defaults to GLOBAL).
+  optional Region region = 5;
 }
 
 // Log replication response.
@@ -1683,8 +1797,8 @@ message RaftInstallSnapshotRequest {
   uint64 offset = 3;
   bytes data = 4;
   bool done = 5;
-  // Shard for multi-shard routing (defaults to system shard 0).
-  optional uint64 shard = 6;
+  // Region for multi-region routing (defaults to GLOBAL).
+  optional Region region = 6;
 }
 
 // Snapshot installation response.
@@ -1740,3 +1854,109 @@ message TriggerElectionResponse {
   bool accepted = 1;
   string message = 2;
 }
+
+// -----------------------------------------------------------------------------
+// Blinding Key Rotation Messages
+// -----------------------------------------------------------------------------
+
+// Request to initiate email blinding key rotation.
+// The new key version must be pre-provisioned in the external key source.
+message RotateBlindingKeyRequest {
+  // Version number of the new blinding key (monotonically increasing).
+  uint32 new_key_version = 1;
+}
+
+// Response from initiating a blinding key rotation.
+// Returns immediately — the re-hash runs asynchronously.
+message RotateBlindingKeyResponse {
+  // Total email hash entries to re-hash.
+  uint64 total_entries = 1;
+  // Entries re-hashed so far (0 on initial response).
+  uint64 entries_rehashed = 2;
+  // Whether the rotation is already complete (true if zero entries).
+  bool complete = 3;
+}
+
+// Request to check blinding key rehash progress.
+message GetBlindingKeyRehashStatusRequest {}
+
+// Status of an in-flight or completed blinding key rotation.
+message GetBlindingKeyRehashStatusResponse {
+  // Total email hash entries to re-hash.
+  uint64 total_entries = 1;
+  // Entries re-hashed across all regions.
+  uint64 entries_rehashed = 2;
+  // Whether the rotation is fully complete.
+  bool complete = 3;
+  // Per-region progress: region name → entries re-hashed in that region.
+  map<string, uint64> per_region_progress = 4;
+  // Currently active blinding key version.
+  uint32 active_key_version = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Region Key Rotation Messages
+// -----------------------------------------------------------------------------
+
+// Request to initiate RMK rotation for a region.
+// The new key version must be pre-provisioned in the external key source.
+message RotateRegionKeyRequest {
+  // Region to rotate the RMK for. If empty, uses the node's primary region.
+  string region = 1;
+  // Target RMK version to rotate to. If 0, generates a new version.
+  uint32 target_version = 2;
+}
+
+// Response from initiating an RMK rotation.
+// Returns immediately — DEK re-wrapping runs asynchronously.
+message RotateRegionKeyResponse {
+  // New RMK version after rotation.
+  uint32 new_version = 1;
+  // Total pages in the sidecar that need re-wrapping.
+  uint64 total_pages = 2;
+  // Whether re-wrapping is already complete (true if zero pages).
+  bool complete = 3;
+}
+
+// Request to check DEK re-wrapping progress.
+message GetRewrapStatusRequest {
+  // Region to check. If empty, uses the node's primary region.
+  string region = 1;
+}
+
+// Status of an in-flight or completed DEK re-wrapping job.
+message GetRewrapStatusResponse {
+  // Total pages in the sidecar.
+  uint64 total_pages = 1;
+  // Pages processed so far.
+  uint64 pages_processed = 2;
+  // Pages that were actually re-wrapped (had old version).
+  uint64 pages_rewrapped = 3;
+  // Whether re-wrapping is fully complete.
+  bool complete = 4;
+  // Current target RMK version being re-wrapped to.
+  uint32 target_version = 5;
+  // Estimated seconds remaining (0 if complete or not started).
+  uint64 estimated_remaining_secs = 6;
+}
+
+// -----------------------------------------------------------------------------
+// User Erasure Messages (GDPR Article 17)
+// -----------------------------------------------------------------------------
+
+// Erase a user's PII via crypto-shredding.
+// Forward-only finalization — irreversible by design.
+message EraseUserRequest {
+  // User ID to erase.
+  int64 user_id = 1;
+  // Identity of the actor requesting erasure (audit trail).
+  string erased_by = 2;
+  // Region where the user's PII resides.
+  Region region = 3;
+}
+
+message EraseUserResponse {
+  // User ID that was erased.
+  int64 user_id = 1;
+}
+

@@ -1,6 +1,6 @@
-//! gRPC client for forwarding requests to remote shards.
+//! gRPC client for forwarding requests to remote regions.
 //!
-//! When a organization is assigned to a shard on a different node, requests
+//! When an organization is assigned to a region on a different node, requests
 //! must be forwarded via gRPC. This module provides the client infrastructure
 //! for transparent request forwarding.
 //!
@@ -9,15 +9,15 @@
 //! ```no_run
 //! # use std::net::SocketAddr;
 //! # use inferadb_ledger_raft::services::ForwardClient;
-//! # use inferadb_ledger_raft::shard_router::ShardConnection;
-//! # use inferadb_ledger_types::ShardId;
+//! # use inferadb_ledger_raft::region_router::RegionConnection;
+//! # use inferadb_ledger_types::Region;
 //! # use inferadb_ledger_proto::proto::ReadRequest;
 //! # use tonic::transport::Channel;
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
 //! # let addr: SocketAddr = "[::1]:50051".parse()?;
-//! # let connection = ShardConnection {
-//! #     shard: ShardId::new(1), channel, address: addr, is_leader: true,
+//! # let connection = RegionConnection {
+//! #     region: Region::US_EAST_VA, channel, address: addr, is_leader: true,
 //! # };
 //! let mut client = ForwardClient::new(connection);
 //!
@@ -40,58 +40,58 @@ use inferadb_ledger_proto::proto::{
     WatchBlocksRequest, WriteRequest, WriteResponse, read_service_client::ReadServiceClient,
     write_service_client::WriteServiceClient,
 };
-use inferadb_ledger_types::ShardId;
+use inferadb_ledger_types::Region;
 use tonic::{Request, Response, Status, transport::Channel};
 use tracing::{debug, warn};
 
 use crate::{
-    shard_router::ShardConnection,
+    region_router::RegionConnection,
     trace_context::{self, TraceContext},
 };
 
 /// Default timeout for forwarded requests.
 const DEFAULT_FORWARD_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Client for forwarding requests to remote shards.
+/// Client for forwarding requests to remote regions.
 ///
 /// Wraps gRPC clients for ReadService and WriteService to forward
-/// requests transparently to the correct shard.
+/// requests transparently to the correct region.
 pub struct ForwardClient {
     read_client: ReadServiceClient<Channel>,
     write_client: WriteServiceClient<Channel>,
-    shard: ShardId,
+    region: Region,
 }
 
 impl ForwardClient {
-    /// Creates a new forward client from a shard connection.
-    pub fn new(connection: ShardConnection) -> Self {
+    /// Creates a new forward client from a region connection.
+    pub fn new(connection: RegionConnection) -> Self {
         let channel = connection.channel;
         Self {
             read_client: ReadServiceClient::new(channel.clone()),
             write_client: WriteServiceClient::new(channel),
-            shard: connection.shard,
+            region: connection.region,
         }
     }
 
     /// Creates a new forward client from a channel directly.
-    pub fn from_channel(channel: Channel, shard: ShardId) -> Self {
+    pub fn from_channel(channel: Channel, region: Region) -> Self {
         Self {
             read_client: ReadServiceClient::new(channel.clone()),
             write_client: WriteServiceClient::new(channel),
-            shard,
+            region,
         }
     }
 
-    /// Returns the shard ID this client forwards to.
-    pub fn shard(&self) -> ShardId {
-        self.shard
+    /// Returns the region ID this client forwards to.
+    pub fn region(&self) -> Region {
+        self.region
     }
 
     /// Creates a gRPC request with trace context and deadline propagation.
     ///
     /// Injects W3C Trace Context headers (`traceparent`, `tracestate`) into
     /// the outgoing request metadata, enabling distributed trace continuity
-    /// across shard boundaries.
+    /// across region boundaries.
     ///
     /// If a gRPC deadline is provided (extracted from the original incoming
     /// request), it is propagated as the forwarded request's timeout. Otherwise
@@ -116,52 +116,52 @@ impl ForwardClient {
     // Read Service Forwarding
     // ========================================================================
 
-    /// Forwards a Read request to the remote shard.
+    /// Forwards a Read request to the remote region.
     pub async fn forward_read(
         &mut self,
         request: ReadRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<ReadResponse>, Status> {
-        debug!(shard = self.shard.value(), "Forwarding read request");
+        debug!(region = self.region.as_str(), "Forwarding read request");
         let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.read(req).await.map_err(|e| {
-            warn!(shard = self.shard.value(), error = %e, "Forward read failed");
+            warn!(region = self.region.as_str(), error = %e, "Forward read failed");
             e
         })
     }
 
-    /// Forwards a VerifiedRead request to the remote shard.
+    /// Forwards a VerifiedRead request to the remote region.
     pub async fn forward_verified_read(
         &mut self,
         request: VerifiedReadRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<VerifiedReadResponse>, Status> {
-        debug!(shard = self.shard.value(), "Forwarding verified_read request");
+        debug!(region = self.region.as_str(), "Forwarding verified_read request");
         let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.verified_read(req).await.map_err(|e| {
-            warn!(shard = self.shard.value(), error = %e, "Forward verified_read failed");
+            warn!(region = self.region.as_str(), error = %e, "Forward verified_read failed");
             e
         })
     }
 
-    /// Forwards a HistoricalRead request to the remote shard.
+    /// Forwards a HistoricalRead request to the remote region.
     pub async fn forward_historical_read(
         &mut self,
         request: HistoricalReadRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<HistoricalReadResponse>, Status> {
-        debug!(shard = self.shard.value(), "Forwarding historical_read request");
+        debug!(region = self.region.as_str(), "Forwarding historical_read request");
         let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.historical_read(req).await.map_err(|e| {
-            warn!(shard = self.shard.value(), error = %e, "Forward historical_read failed");
+            warn!(region = self.region.as_str(), error = %e, "Forward historical_read failed");
             e
         })
     }
 
-    /// Forwards a WatchBlocks request to the remote shard.
+    /// Forwards a WatchBlocks request to the remote region.
     ///
     /// Note: This returns a streaming response that must be handled appropriately.
     pub async fn forward_watch_blocks(
@@ -170,130 +170,130 @@ impl ForwardClient {
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<tonic::Streaming<BlockAnnouncement>>, Status> {
-        debug!(shard = self.shard.value(), "Forwarding watch_blocks request");
+        debug!(region = self.region.as_str(), "Forwarding watch_blocks request");
         let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.watch_blocks(req).await.map_err(|e| {
-            warn!(shard = self.shard.value(), error = %e, "Forward watch_blocks failed");
+            warn!(region = self.region.as_str(), error = %e, "Forward watch_blocks failed");
             e
         })
     }
 
-    /// Forwards a GetBlock request to the remote shard.
+    /// Forwards a GetBlock request to the remote region.
     pub async fn forward_get_block(
         &mut self,
         request: GetBlockRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<GetBlockResponse>, Status> {
-        debug!(shard = self.shard.value(), "Forwarding get_block request");
+        debug!(region = self.region.as_str(), "Forwarding get_block request");
         let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.get_block(req).await.map_err(|e| {
-            warn!(shard = self.shard.value(), error = %e, "Forward get_block failed");
+            warn!(region = self.region.as_str(), error = %e, "Forward get_block failed");
             e
         })
     }
 
-    /// Forwards a GetBlockRange request to the remote shard.
+    /// Forwards a GetBlockRange request to the remote region.
     pub async fn forward_get_block_range(
         &mut self,
         request: GetBlockRangeRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<GetBlockRangeResponse>, Status> {
-        debug!(shard = self.shard.value(), "Forwarding get_block_range request");
+        debug!(region = self.region.as_str(), "Forwarding get_block_range request");
         let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.get_block_range(req).await.map_err(|e| {
-            warn!(shard = self.shard.value(), error = %e, "Forward get_block_range failed");
+            warn!(region = self.region.as_str(), error = %e, "Forward get_block_range failed");
             e
         })
     }
 
-    /// Forwards a GetTip request to the remote shard.
+    /// Forwards a GetTip request to the remote region.
     pub async fn forward_get_tip(
         &mut self,
         request: GetTipRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<GetTipResponse>, Status> {
-        debug!(shard = self.shard.value(), "Forwarding get_tip request");
+        debug!(region = self.region.as_str(), "Forwarding get_tip request");
         let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.get_tip(req).await.map_err(|e| {
-            warn!(shard = self.shard.value(), error = %e, "Forward get_tip failed");
+            warn!(region = self.region.as_str(), error = %e, "Forward get_tip failed");
             e
         })
     }
 
-    /// Forwards a GetClientState request to the remote shard.
+    /// Forwards a GetClientState request to the remote region.
     pub async fn forward_get_client_state(
         &mut self,
         request: GetClientStateRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<GetClientStateResponse>, Status> {
-        debug!(shard = self.shard.value(), "Forwarding get_client_state request");
+        debug!(region = self.region.as_str(), "Forwarding get_client_state request");
         let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.get_client_state(req).await.map_err(|e| {
-            warn!(shard = self.shard.value(), error = %e, "Forward get_client_state failed");
+            warn!(region = self.region.as_str(), error = %e, "Forward get_client_state failed");
             e
         })
     }
 
-    /// Forwards a ListRelationships request to the remote shard.
+    /// Forwards a ListRelationships request to the remote region.
     pub async fn forward_list_relationships(
         &mut self,
         request: ListRelationshipsRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<ListRelationshipsResponse>, Status> {
-        debug!(shard = self.shard.value(), "Forwarding list_relationships request");
+        debug!(region = self.region.as_str(), "Forwarding list_relationships request");
         let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.list_relationships(req).await.map_err(|e| {
-            warn!(shard = self.shard.value(), error = %e, "Forward list_relationships failed");
+            warn!(region = self.region.as_str(), error = %e, "Forward list_relationships failed");
             e
         })
     }
 
-    /// Forwards a ListResources request to the remote shard.
+    /// Forwards a ListResources request to the remote region.
     pub async fn forward_list_resources(
         &mut self,
         request: ListResourcesRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<ListResourcesResponse>, Status> {
-        debug!(shard = self.shard.value(), "Forwarding list_resources request");
+        debug!(region = self.region.as_str(), "Forwarding list_resources request");
         let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.list_resources(req).await.map_err(|e| {
-            warn!(shard = self.shard.value(), error = %e, "Forward list_resources failed");
+            warn!(region = self.region.as_str(), error = %e, "Forward list_resources failed");
             e
         })
     }
 
-    /// Forwards a ListEntities request to the remote shard.
+    /// Forwards a ListEntities request to the remote region.
     pub async fn forward_list_entities(
         &mut self,
         request: ListEntitiesRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
-        debug!(shard = self.shard.value(), "Forwarding list_entities request");
+        debug!(region = self.region.as_str(), "Forwarding list_entities request");
         let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.list_entities(req).await.map_err(|e| {
-            warn!(shard = self.shard.value(), error = %e, "Forward list_entities failed");
+            warn!(region = self.region.as_str(), error = %e, "Forward list_entities failed");
             e
         })
     }
 
-    /// Forwards a BatchRead request to the remote shard.
+    /// Forwards a BatchRead request to the remote region.
     pub async fn forward_batch_read(
         &mut self,
         request: BatchReadRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<BatchReadResponse>, Status> {
-        debug!(shard = self.shard.value(), "Forwarding batch_read request");
+        debug!(region = self.region.as_str(), "Forwarding batch_read request");
         let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.read_client.batch_read(req).await.map_err(|e| {
-            warn!(shard = self.shard.value(), error = %e, "Forward batch_read failed");
+            warn!(region = self.region.as_str(), error = %e, "Forward batch_read failed");
             e
         })
     }
@@ -302,32 +302,32 @@ impl ForwardClient {
     // Write Service Forwarding
     // ========================================================================
 
-    /// Forwards a Write request to the remote shard.
+    /// Forwards a Write request to the remote region.
     pub async fn forward_write(
         &mut self,
         request: WriteRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<WriteResponse>, Status> {
-        debug!(shard = self.shard.value(), "Forwarding write request");
+        debug!(region = self.region.as_str(), "Forwarding write request");
         let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.write_client.write(req).await.map_err(|e| {
-            warn!(shard = self.shard.value(), error = %e, "Forward write failed");
+            warn!(region = self.region.as_str(), error = %e, "Forward write failed");
             e
         })
     }
 
-    /// Forwards a BatchWrite request to the remote shard.
+    /// Forwards a BatchWrite request to the remote region.
     pub async fn forward_batch_write(
         &mut self,
         request: BatchWriteRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<BatchWriteResponse>, Status> {
-        debug!(shard = self.shard.value(), "Forwarding batch_write request");
+        debug!(region = self.region.as_str(), "Forwarding batch_write request");
         let req = self.make_request(request, trace_ctx, grpc_deadline);
         self.write_client.batch_write(req).await.map_err(|e| {
-            warn!(shard = self.shard.value(), error = %e, "Forward batch_write failed");
+            warn!(region = self.region.as_str(), error = %e, "Forward batch_write failed");
             e
         })
     }
@@ -384,7 +384,7 @@ impl LeaderChannelCache {
             if let Some((cached_id, ref channel)) = *cache
                 && cached_id == leader_id
             {
-                return Ok(Some(ForwardClient::from_channel(channel.clone(), ShardId::new(0))));
+                return Ok(Some(ForwardClient::from_channel(channel.clone(), Region::GLOBAL)));
             }
         }
 
@@ -402,7 +402,7 @@ impl LeaderChannelCache {
 
         debug!(leader_id, %leader_addr, "Cached new leader channel");
 
-        let client = ForwardClient::from_channel(channel.clone(), ShardId::new(0));
+        let client = ForwardClient::from_channel(channel.clone(), Region::GLOBAL);
         {
             let mut cache = self.inner.lock();
             *cache = Some((leader_id, channel));

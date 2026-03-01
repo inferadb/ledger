@@ -23,7 +23,8 @@ use inferadb_ledger_proto::proto::{
     GetClusterInfoRequest, admin_service_client::AdminServiceClient,
 };
 use inferadb_ledger_sdk::{
-    ClientConfig, LedgerClient, Operation, OrganizationSlug, RetryPolicy, ServerSource, VaultSlug,
+    ClientConfig, LedgerClient, Operation, OrganizationSlug, Region, RetryPolicy, ServerSource,
+    VaultSlug,
 };
 
 // ============================================================================
@@ -102,7 +103,10 @@ async fn create_single_endpoint_client(endpoint: &str, client_id: &str) -> Ledge
 /// Creates a test organization and vault, returning (organization, vault).
 async fn setup_test_org_vault(client: &LedgerClient) -> (OrganizationSlug, VaultSlug) {
     let ns_name = format!("test-ns-{}", uuid::Uuid::new_v4());
-    let org = client.create_organization(&ns_name).await.expect("create organization");
+    let org = client
+        .create_organization(&ns_name, Region::US_EAST_VA)
+        .await
+        .expect("create organization");
     let vault_info = client.create_vault(org.slug).await.expect("create vault");
     (org.slug, vault_info.vault)
 }
@@ -441,7 +445,10 @@ async fn test_admin_operations() {
 
     // Create an organization
     let ns_name = format!("test-admin-{}", uuid::Uuid::new_v4());
-    let org = client.create_organization(&ns_name).await.expect("create organization");
+    let org = client
+        .create_organization(&ns_name, Region::US_EAST_VA)
+        .await
+        .expect("create organization");
     let organization = org.slug;
     assert!(organization.value() > 0, "should get valid organization slug");
 

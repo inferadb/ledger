@@ -25,7 +25,7 @@ use std::{
 };
 
 use inferadb_ledger_store::{Database, StorageBackend, tables};
-use inferadb_ledger_types::{OrganizationId, ShardBlock, VaultId, decode, encode};
+use inferadb_ledger_types::{OrganizationId, RegionBlock, VaultId, decode, encode};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 
@@ -95,7 +95,7 @@ pub struct CompactionStats {
 #[derive(Debug, Clone, Copy)]
 struct BlockIndex {
     /// Shard height of this block.
-    _shard_height: u64,
+    _region_height: u64,
     /// Offset in segment file.
     _offset: u64,
     /// Length of serialized block (including 4-byte length prefix).
@@ -109,7 +109,7 @@ struct SegmentWriter {
     index: Vec<BlockIndex>,
 }
 
-/// Block archive for a shard.
+/// Block archive for a region.
 ///
 /// Uses inferadb-ledger-store for the primary block storage (tables::Blocks) and maintains
 /// a vault_block_index for looking up shard heights by vault/organization/height.
@@ -149,16 +149,16 @@ impl<B: StorageBackend> BlockArchive<B> {
     /// Returns [`BlockArchiveError::Codec`] if serialization of the block fails.
     /// Returns [`BlockArchiveError::Store`] if the write transaction or commit fails.
     /// Returns [`BlockArchiveError::Io`] if writing to a segment file fails.
-    pub fn append_block(&self, block: &ShardBlock) -> Result<()> {
+    pub fn append_block(&self, block: &RegionBlock) -> Result<()> {
         let encoded = encode(block).context(CodecSnafu)?;
 
         let mut txn = self.db.write().context(StoreSnafu)?;
-        txn.insert::<tables::Blocks>(&block.shard_height, &encoded).context(StoreSnafu)?;
+        txn.insert::<tables::Blocks>(&block.region_height, &encoded).context(StoreSnafu)?;
 
         for entry in &block.vault_entries {
             let index_key =
                 encode_vault_block_index_key(entry.organization, entry.vault, entry.vault_height);
-            txn.insert::<tables::VaultBlockIndex>(&index_key.to_vec(), &block.shard_height)
+            txn.insert::<tables::VaultBlockIndex>(&index_key.to_vec(), &block.region_height)
                 .context(StoreSnafu)?;
         }
 
@@ -172,8 +172,8 @@ impl<B: StorageBackend> BlockArchive<B> {
     }
 
     /// Append block to segment file.
-    fn append_to_segment(&self, block: &ShardBlock, encoded: &[u8]) -> Result<()> {
-        let segment_id = block.shard_height / SEGMENT_SIZE;
+    fn append_to_segment(&self, block: &RegionBlock, encoded: &[u8]) -> Result<()> {
+        let segment_id = block.region_height / SEGMENT_SIZE;
 
         let mut current = self.current_segment.write();
 
@@ -203,7 +203,7 @@ impl<B: StorageBackend> BlockArchive<B> {
 
         // Update index
         writer.index.push(BlockIndex {
-            _shard_height: block.shard_height,
+            _region_height: block.region_height,
             _offset: offset,
             _length: (encoded.len() + 4) as u32,
         });
@@ -211,26 +211,26 @@ impl<B: StorageBackend> BlockArchive<B> {
         Ok(())
     }
 
-    /// Reads a block by shard height.
+    /// Reads a block by region height.
     ///
     /// # Errors
     ///
     /// Returns [`BlockArchiveError::Store`] if the read transaction fails.
     /// Returns [`BlockArchiveError::Codec`] if deserialization of the block fails.
     /// Returns [`BlockArchiveError::BlockNotFound`] if no block exists at the given height.
-    pub fn read_block(&self, shard_height: u64) -> Result<ShardBlock> {
+    pub fn read_block(&self, region_height: u64) -> Result<RegionBlock> {
         let txn = self.db.read().context(StoreSnafu)?;
 
-        match txn.get::<tables::Blocks>(&shard_height).context(StoreSnafu)? {
+        match txn.get::<tables::Blocks>(&region_height).context(StoreSnafu)? {
             Some(data) => {
                 let block = decode(&data).context(CodecSnafu)?;
                 Ok(block)
             },
-            None => Err(BlockArchiveError::BlockNotFound { height: shard_height }),
+            None => Err(BlockArchiveError::BlockNotFound { height: region_height }),
         }
     }
 
-    /// Finds the shard height containing a specific vault block.
+    /// Finds the region height containing a specific vault block.
     ///
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     /// * `vault` - Internal vault identifier (`VaultId`).
@@ -238,7 +238,7 @@ impl<B: StorageBackend> BlockArchive<B> {
     /// # Errors
     ///
     /// Returns [`BlockArchiveError::Store`] if the read transaction fails.
-    pub fn find_shard_height(
+    pub fn find_region_height(
         &self,
         organization: OrganizationId,
         vault: VaultId,
@@ -261,7 +261,7 @@ impl<B: StorageBackend> BlockArchive<B> {
         }
     }
 
-    /// Returns the latest shard height in the archive.
+    /// Returns the latest region height in the archive.
     ///
     /// # Errors
     ///
@@ -308,7 +308,7 @@ impl<B: StorageBackend> BlockArchive<B> {
     ///
     /// Returns [`BlockArchiveError::Store`] if the read transaction or iteration fails.
     /// Returns [`BlockArchiveError::Codec`] if deserialization of any block fails.
-    pub fn read_range(&self, start: u64, end: u64) -> Result<Vec<ShardBlock>> {
+    pub fn read_range(&self, start: u64, end: u64) -> Result<Vec<RegionBlock>> {
         let txn = self.db.read().context(StoreSnafu)?;
         let mut blocks = Vec::new();
 
@@ -414,7 +414,7 @@ impl<B: StorageBackend> BlockArchive<B> {
                 break;
             }
 
-            let mut block: ShardBlock = decode(&value).context(CodecSnafu)?;
+            let mut block: RegionBlock = decode(&value).context(CodecSnafu)?;
 
             let needs_compaction = block.vault_entries.iter().any(|e| !e.transactions.is_empty());
 
@@ -525,29 +525,29 @@ fn encode_vault_block_index_key(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use chrono::Utc;
-    use inferadb_ledger_types::{ShardId, VaultEntry};
+    use inferadb_ledger_types::{Region, VaultEntry};
 
     use super::*;
     use crate::engine::InMemoryStorageEngine;
 
-    fn create_test_block(shard_height: u64) -> ShardBlock {
-        ShardBlock {
-            shard: ShardId::new(1),
-            shard_height,
-            previous_shard_hash: [0u8; 32],
+    fn create_test_block(region_height: u64) -> RegionBlock {
+        RegionBlock {
+            region: Region::US_EAST_VA,
+            region_height,
+            previous_region_hash: [0u8; 32],
             vault_entries: vec![VaultEntry {
                 organization: OrganizationId::new(1),
                 vault: VaultId::new(1),
-                vault_height: shard_height, // Simplify: vault_height == shard_height
+                vault_height: region_height, // Simplify: vault_height == region_height
                 previous_vault_hash: [0u8; 32],
                 transactions: vec![],
                 tx_merkle_root: [0u8; 32],
-                state_root: [shard_height as u8; 32],
+                state_root: [region_height as u8; 32],
             }],
             timestamp: Utc::now(),
             leader_id: "node-1".to_string(),
             term: 1,
-            committed_index: shard_height,
+            committed_index: region_height,
         }
     }
 
@@ -560,7 +560,7 @@ mod tests {
         archive.append_block(&block).expect("append block");
 
         let loaded = archive.read_block(100).expect("read block");
-        assert_eq!(loaded.shard_height, 100);
+        assert_eq!(loaded.region_height, 100);
         assert_eq!(loaded.vault_entries.len(), 1);
     }
 
@@ -572,16 +572,16 @@ mod tests {
         let block = create_test_block(100);
         archive.append_block(&block).expect("append block");
 
-        // Should find the shard height from vault coordinates
-        let shard_height = archive
-            .find_shard_height(OrganizationId::new(1), VaultId::new(1), 100)
+        // Should find the region height from vault coordinates
+        let region_height = archive
+            .find_region_height(OrganizationId::new(1), VaultId::new(1), 100)
             .expect("find")
             .expect("should exist");
-        assert_eq!(shard_height, 100);
+        assert_eq!(region_height, 100);
 
         // Non-existent vault block
         let not_found =
-            archive.find_shard_height(OrganizationId::new(1), VaultId::new(1), 999).expect("find");
+            archive.find_region_height(OrganizationId::new(1), VaultId::new(1), 999).expect("find");
         assert!(not_found.is_none());
     }
 
@@ -599,9 +599,9 @@ mod tests {
         // Read range
         let blocks = archive.read_range(101, 103).expect("read range");
         assert_eq!(blocks.len(), 3);
-        assert_eq!(blocks[0].shard_height, 101);
-        assert_eq!(blocks[1].shard_height, 102);
-        assert_eq!(blocks[2].shard_height, 103);
+        assert_eq!(blocks[0].region_height, 101);
+        assert_eq!(blocks[1].region_height, 102);
+        assert_eq!(blocks[2].region_height, 103);
     }
 
     #[test]
@@ -655,11 +655,11 @@ mod tests {
 
         archive.append_block(&block).expect("append block");
 
-        // Both vaults should point to same shard height
+        // Both vaults should point to same region height
         let h1 =
-            archive.find_shard_height(OrganizationId::new(1), VaultId::new(1), 100).expect("find");
+            archive.find_region_height(OrganizationId::new(1), VaultId::new(1), 100).expect("find");
         let h2 =
-            archive.find_shard_height(OrganizationId::new(1), VaultId::new(2), 50).expect("find");
+            archive.find_region_height(OrganizationId::new(1), VaultId::new(2), 50).expect("find");
 
         assert_eq!(h1, Some(100));
         assert_eq!(h2, Some(100));
@@ -669,7 +669,7 @@ mod tests {
     // Compaction Tests
     // =========================================================================
 
-    fn create_block_with_transactions(shard_height: u64, tx_count: usize) -> ShardBlock {
+    fn create_block_with_transactions(region_height: u64, tx_count: usize) -> RegionBlock {
         use inferadb_ledger_types::{Operation, Transaction};
 
         let transactions: Vec<Transaction> = (0..tx_count)
@@ -688,23 +688,23 @@ mod tests {
             })
             .collect();
 
-        ShardBlock {
-            shard: ShardId::new(1),
-            shard_height,
-            previous_shard_hash: [shard_height as u8; 32],
+        RegionBlock {
+            region: Region::US_EAST_VA,
+            region_height,
+            previous_region_hash: [region_height as u8; 32],
             vault_entries: vec![VaultEntry {
                 organization: OrganizationId::new(1),
                 vault: VaultId::new(1),
-                vault_height: shard_height,
-                previous_vault_hash: [(shard_height.saturating_sub(1)) as u8; 32],
+                vault_height: region_height,
+                previous_vault_hash: [(region_height.saturating_sub(1)) as u8; 32],
                 transactions,
                 tx_merkle_root: [100u8; 32],
-                state_root: [shard_height as u8; 32],
+                state_root: [region_height as u8; 32],
             }],
             timestamp: Utc::now(),
             leader_id: "node-1".to_string(),
             term: 1,
-            committed_index: shard_height,
+            committed_index: region_height,
         }
     }
 
@@ -858,10 +858,10 @@ mod tests {
         archive.compact_before(101).expect("compact");
 
         // Index should still work
-        let shard_height = archive
-            .find_shard_height(OrganizationId::new(1), VaultId::new(1), 100)
+        let region_height = archive
+            .find_region_height(OrganizationId::new(1), VaultId::new(1), 100)
             .expect("find")
             .expect("should exist");
-        assert_eq!(shard_height, 100);
+        assert_eq!(region_height, 100);
     }
 }

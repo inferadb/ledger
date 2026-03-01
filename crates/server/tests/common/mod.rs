@@ -4,11 +4,11 @@
 //!
 //! ## Cluster Types
 //!
-//! - `TestCluster`: Single-shard cluster using the standard bootstrap flow. Best for testing Raft
+//! - `TestCluster`: Single-region cluster using the standard bootstrap flow. Best for testing Raft
 //!   consensus, membership changes, and basic operations.
 //!
-//! - `MultiShardTestCluster`: Multi-shard cluster using `MultiRaftManager`. Best for testing
-//!   horizontal scaling, shard routing, and high-throughput.
+//! - `MultiRegionTestCluster`: Multi-region cluster using `MultiRaftManager`. Best for testing
+//!   horizontal scaling, region routing, and high-throughput.
 
 #![allow(
     dead_code,
@@ -38,8 +38,8 @@ pub fn allocate_ports(count: u16) -> u16 {
 
 use inferadb_ledger_proto::proto::{JoinClusterRequest, admin_service_client::AdminServiceClient};
 use inferadb_ledger_raft::{
-    LedgerTypeConfig, MultiRaftConfig, MultiRaftManager, MultiShardLedgerServer, ShardConfig,
-    ShardGroup,
+    LedgerTypeConfig, MultiRaftConfig, MultiRaftManager, MultiRegionLedgerServer, RegionConfig,
+    RegionGroup,
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
@@ -528,19 +528,19 @@ pub async fn create_admin_client(
 }
 
 // ============================================================================
-// Multi-Shard Test Infrastructure
+// Multi-Region Test Infrastructure
 // ============================================================================
 
-/// A test node with multiple shards.
+/// A test node with multiple regions.
 ///
-/// Uses `MultiRaftManager` to manage independent Raft groups per shard,
+/// Uses `MultiRaftManager` to manage independent Raft groups per region,
 /// enabling horizontal scaling and parallel consensus.
-pub struct MultiShardTestNode {
+pub struct MultiRegionTestNode {
     /// The node ID.
     pub id: u64,
     /// The gRPC address.
     pub addr: SocketAddr,
-    /// The multi-raft manager containing all shards.
+    /// The multi-raft manager containing all regions.
     pub manager: Arc<MultiRaftManager>,
     /// Temporary directory for node data.
     _temp_dir: TestDir,
@@ -548,82 +548,82 @@ pub struct MultiShardTestNode {
     _server_handle: tokio::task::JoinHandle<()>,
 }
 
-impl MultiShardTestNode {
-    /// Returns the system shard (shard 0).
-    pub fn system_shard(&self) -> Arc<ShardGroup> {
-        self.manager.system_shard().expect("system shard exists")
+impl MultiRegionTestNode {
+    /// Returns the system region (Global).
+    pub fn system_region(&self) -> Arc<RegionGroup> {
+        self.manager.system_region().expect("system region exists")
     }
 
-    /// Returns a data shard by ID.
-    pub fn shard(&self, shard: inferadb_ledger_types::ShardId) -> Option<Arc<ShardGroup>> {
-        self.manager.get_shard(shard).ok()
+    /// Returns a region group by region.
+    pub fn region_group(&self, region: inferadb_ledger_types::Region) -> Option<Arc<RegionGroup>> {
+        self.manager.get_region_group(region).ok()
     }
 
-    /// Returns all shard IDs.
-    pub fn shard_ids(&self) -> Vec<inferadb_ledger_types::ShardId> {
-        self.manager.list_shards()
+    /// Returns all region IDs.
+    pub fn regions(&self) -> Vec<inferadb_ledger_types::Region> {
+        self.manager.list_regions()
     }
 
-    /// Checks if this node is leader for the system shard.
+    /// Checks if this node is leader for the system region.
     pub fn is_system_leader(&self) -> bool {
-        let shard = self.system_shard();
-        let metrics = shard.raft().metrics().borrow().clone();
+        let region = self.system_region();
+        let metrics = region.raft().metrics().borrow().clone();
         metrics.current_leader == Some(self.id)
     }
 
-    /// Returns leader ID for the system shard.
+    /// Returns leader ID for the system region.
     pub fn system_leader(&self) -> Option<u64> {
-        let shard = self.system_shard();
-        shard.raft().metrics().borrow().current_leader
+        let region = self.system_region();
+        region.raft().metrics().borrow().current_leader
     }
 }
 
-/// A multi-shard test cluster.
+/// A multi-region test cluster.
 ///
-/// Each node runs multiple independent Raft groups (shards), allowing
+/// Each node runs multiple independent Raft groups (regions), allowing
 /// horizontal scaling of both reads and writes.
 ///
 /// ## Architecture
 ///
 /// ```text
-/// MultiShardTestCluster
+/// MultiRegionTestCluster
 ///     |
 ///     +-- Node 1 (MultiRaftManager)
-///     |       +-- Shard 0 (system): organization/vault metadata
-///     |       +-- Shard 1 (data): entity storage
-///     |       +-- Shard 2 (data): entity storage
+///     |       +-- Global (system): organization/vault metadata
+///     |       +-- Region 1 (data): entity storage
+///     |       +-- Region 2 (data): entity storage
 ///     |
 ///     +-- Node 2 (MultiRaftManager)
-///     |       +-- Shard 0, 1, 2 (same structure)
+///     |       +-- Global, Region 1, 2 (same structure)
 ///     |
 ///     +-- Node 3 ...
 /// ```
-pub struct MultiShardTestCluster {
+pub struct MultiRegionTestCluster {
     /// The nodes in the cluster.
-    nodes: Vec<MultiShardTestNode>,
-    /// Number of data shards.
-    num_shards: usize,
+    nodes: Vec<MultiRegionTestNode>,
+    /// Number of data regions.
+    num_regions: usize,
 }
 
-impl MultiShardTestCluster {
-    /// Creates a new multi-shard test cluster.
+impl MultiRegionTestCluster {
+    /// Creates a new multi-region test cluster.
     ///
     /// # Arguments
     ///
     /// * `num_nodes` - Number of nodes in the cluster (typically 1 or 3)
-    /// * `num_data_shards` - Number of data shards (in addition to system shard 0)
+    /// * `num_data_regions` - Number of data regions (in addition to the Global system region)
     ///
-    /// Each node will have `num_data_shards + 1` Raft groups running.
-    pub async fn new(num_nodes: usize, num_data_shards: usize) -> Self {
+    /// Each node will have `num_data_regions + 1` Raft groups running.
+    pub async fn new(num_nodes: usize, num_data_regions: usize) -> Self {
         assert!(num_nodes >= 1, "cluster must have at least 1 node");
-        assert!(num_data_shards >= 1, "must have at least 1 data shard");
+        assert!(num_data_regions >= 1, "must have at least 1 data region");
 
         let base_port = allocate_ports(num_nodes as u16);
         let mut nodes = Vec::with_capacity(num_nodes);
         let mut health_states: Vec<inferadb_ledger_raft::HealthState> =
             Vec::with_capacity(num_nodes);
 
-        // Build the member list for all shards
+        // Build the member list for all regions
         let members: Vec<(u64, String)> = (0..num_nodes)
             .map(|i| {
                 let node_id = (i + 1) as u64;
@@ -641,37 +641,42 @@ impl MultiShardTestCluster {
             let temp_dir = TestDir::new();
 
             // Create MultiRaftManager config
-            let config = MultiRaftConfig::new(temp_dir.path().to_path_buf(), node_id);
+            let config = MultiRaftConfig::new(
+                temp_dir.path().to_path_buf(),
+                node_id,
+                inferadb_ledger_types::Region::GLOBAL,
+            );
             let manager = Arc::new(MultiRaftManager::new(config));
 
-            // Start system shard (shard 0) - required first
-            let system_config = ShardConfig {
-                shard: inferadb_ledger_types::ShardId::new(0),
+            // Start system region (Global) - required first
+            let system_config = RegionConfig {
+                region: inferadb_ledger_types::Region::GLOBAL,
                 initial_members: members.clone(),
                 bootstrap: i == 0, // Only first node bootstraps
                 enable_background_jobs: true,
             };
-            manager.start_system_shard(system_config).await.expect("start system shard");
+            manager.start_system_region(system_config).await.expect("start system region");
 
-            // Start data shards (shard 1, 2, ...)
-            for shard in 1..=num_data_shards {
-                let shard_config = ShardConfig {
-                    shard: inferadb_ledger_types::ShardId::new(shard as u32),
+            // Start data regions
+            let data_regions = &inferadb_ledger_types::ALL_REGIONS[1..];
+            for &data_region in data_regions.iter().take(num_data_regions) {
+                let region_config = RegionConfig {
+                    region: data_region,
                     initial_members: members.clone(),
                     bootstrap: i == 0,
                     enable_background_jobs: true,
                 };
                 manager
-                    .start_data_shard(shard_config)
+                    .start_data_region(region_config)
                     .await
-                    .unwrap_or_else(|_| panic!("start data shard {}", shard));
+                    .unwrap_or_else(|_| panic!("start data region {:?}", data_region));
             }
 
             // Create health state (starts in Starting phase, marked Ready after leader election)
             let health_state = inferadb_ledger_raft::HealthState::new();
 
-            // Create and start the multi-shard gRPC server
-            let server = MultiShardLedgerServer::builder()
+            // Create and start the multi-region gRPC server
+            let server = MultiRegionLedgerServer::builder()
                 .manager(manager.clone())
                 .addr(addr)
                 .max_concurrent(1000)
@@ -681,7 +686,7 @@ impl MultiShardTestCluster {
 
             let server_handle = tokio::spawn(async move {
                 if let Err(e) = server.serve().await {
-                    tracing::error!("multi-shard server error: {}", e);
+                    tracing::error!("multi-region server error: {}", e);
                 }
             });
 
@@ -694,7 +699,7 @@ impl MultiShardTestCluster {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
 
-            nodes.push(MultiShardTestNode {
+            nodes.push(MultiRegionTestNode {
                 id: node_id,
                 addr,
                 manager,
@@ -704,20 +709,18 @@ impl MultiShardTestCluster {
             health_states.push(health_state);
         }
 
-        // Wait for all shards to elect leaders
+        // Wait for all regions to elect leaders
         let start = tokio::time::Instant::now();
         let timeout_duration = Duration::from_secs(10);
 
         'outer: while start.elapsed() < timeout_duration {
             let mut all_ready = true;
 
-            // Check each shard on the first node
+            // Check each region on the first node
             if let Some(node) = nodes.first() {
-                for shard in 0..=num_data_shards as u32 {
-                    if let Ok(shard_group) =
-                        node.manager.get_shard(inferadb_ledger_types::ShardId::new(shard))
-                    {
-                        let metrics = shard_group.raft().metrics().borrow().clone();
+                for region in node.manager.list_regions() {
+                    if let Ok(region_group) = node.manager.get_region_group(region) {
+                        let metrics = region_group.raft().metrics().borrow().clone();
                         if metrics.current_leader.is_none() {
                             all_ready = false;
                             break;
@@ -741,32 +744,32 @@ impl MultiShardTestCluster {
             hs.mark_ready();
         }
 
-        Self { nodes, num_shards: num_data_shards }
+        Self { nodes, num_regions: num_data_regions }
     }
 
     /// Returns all nodes.
-    pub fn nodes(&self) -> &[MultiShardTestNode] {
+    pub fn nodes(&self) -> &[MultiRegionTestNode] {
         &self.nodes
     }
 
     /// Returns a node by ID.
-    pub fn node(&self, id: u64) -> Option<&MultiShardTestNode> {
+    pub fn node(&self, id: u64) -> Option<&MultiRegionTestNode> {
         self.nodes.iter().find(|n| n.id == id)
     }
 
-    /// Returns the leader node for the system shard.
-    pub fn system_leader(&self) -> Option<&MultiShardTestNode> {
+    /// Returns the leader node for the system region.
+    pub fn system_leader(&self) -> Option<&MultiRegionTestNode> {
         self.nodes.iter().find(|n| n.is_system_leader())
     }
 
     /// Returns any node (for client connections).
-    pub fn any_node(&self) -> &MultiShardTestNode {
+    pub fn any_node(&self) -> &MultiRegionTestNode {
         &self.nodes[0]
     }
 
-    /// Returns the number of data shards.
-    pub fn num_data_shards(&self) -> usize {
-        self.num_shards
+    /// Returns the number of data regions.
+    pub fn num_data_regions(&self) -> usize {
+        self.num_regions
     }
 
     /// Returns all node addresses.
@@ -774,7 +777,7 @@ impl MultiShardTestCluster {
         self.nodes.iter().map(|n| n.addr).collect()
     }
 
-    /// Waits for a leader to be elected on all shards.
+    /// Waits for a leader to be elected on all regions.
     pub async fn wait_for_leaders(&self, timeout_duration: Duration) -> bool {
         let start = tokio::time::Instant::now();
 
@@ -782,9 +785,9 @@ impl MultiShardTestCluster {
             let mut all_have_leaders = true;
 
             for node in &self.nodes {
-                for shard in node.shard_ids() {
-                    if let Some(shard_group) = node.shard(shard) {
-                        let metrics = shard_group.raft().metrics().borrow().clone();
+                for region in node.regions() {
+                    if let Some(region_group) = node.region_group(region) {
+                        let metrics = region_group.raft().metrics().borrow().clone();
                         if metrics.current_leader.is_none() {
                             all_have_leaders = false;
                             break;

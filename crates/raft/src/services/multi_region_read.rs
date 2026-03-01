@@ -1,13 +1,13 @@
-//! Multi-shard read service implementation.
+//! Multi-region read service implementation.
 //!
-//! Routes read requests to the appropriate shard based on organization.
-//! Each organization is assigned to a shard, and requests are routed to the
-//! state layer for that shard.
+//! Routes read requests to the appropriate region based on organization.
+//! Each organization is assigned to a region, and requests are routed to the
+//! state layer for that region.
 //!
 //! ## Request Forwarding
 //!
-//! When an organization is on a remote shard, this service forwards the request
-//! via gRPC using `ForwardClient`. This enables transparent multi-shard reads
+//! When an organization is on a remote region, this service forwards the request
+//! via gRPC using `ForwardClient`. This enables transparent multi-region reads
 //! where clients don't need to know which node hosts their data.
 
 use std::{pin::Pin, sync::Arc, time::Instant};
@@ -35,55 +35,55 @@ use crate::{
     multi_raft::MultiRaftManager,
     services::{
         ForwardClient,
-        shard_resolver::{RemoteShardInfo, ResolveResult, ShardResolver},
+        region_resolver::{RegionResolver, RemoteRegionInfo, ResolveResult},
         slug_resolver::SlugResolver,
     },
     trace_context,
 };
 
-/// Routes read requests to the correct shard based on organization ID.
+/// Routes read requests to the correct region based on organization ID.
 ///
 /// Supports both local processing and remote forwarding for transparent
-/// multi-shard deployments.
-pub struct MultiShardReadService {
-    /// Shard resolver for routing requests.
-    resolver: Arc<dyn ShardResolver>,
+/// multi-region deployments.
+pub struct MultiRegionReadService {
+    /// Region resolver for routing requests.
+    resolver: Arc<dyn RegionResolver>,
     /// Multi-raft manager for creating forward clients when needed.
-    /// Optional to support standalone single-shard deployments.
+    /// Optional to support standalone single-region deployments.
     manager: Option<Arc<MultiRaftManager>>,
 }
 
-impl MultiShardReadService {
-    /// Creates a new multi-shard read service.
-    pub fn new(resolver: Arc<dyn ShardResolver>) -> Self {
+impl MultiRegionReadService {
+    /// Creates a new multi-region read service.
+    pub fn new(resolver: Arc<dyn RegionResolver>) -> Self {
         Self { resolver, manager: None }
     }
 
-    /// Creates a new multi-shard read service with forwarding support.
-    pub fn with_manager(resolver: Arc<dyn ShardResolver>, manager: Arc<MultiRaftManager>) -> Self {
+    /// Creates a new multi-region read service with forwarding support.
+    pub fn with_manager(resolver: Arc<dyn RegionResolver>, manager: Arc<MultiRaftManager>) -> Self {
         Self { resolver, manager: Some(manager) }
     }
 
-    /// Returns a forward client for a remote shard.
+    /// Returns a forward client for a remote region.
     ///
-    /// Creates a gRPC connection to the remote shard's leader (or any member if leader unknown).
-    async fn get_forward_client(&self, remote: &RemoteShardInfo) -> Result<ForwardClient, Status> {
+    /// Creates a gRPC connection to the remote region's leader (or any member if leader unknown).
+    async fn get_forward_client(&self, remote: &RemoteRegionInfo) -> Result<ForwardClient, Status> {
         let manager = self.manager.as_ref().ok_or_else(|| {
             Status::unavailable("Request forwarding not configured for this service")
         })?;
 
         let router =
-            manager.router().ok_or_else(|| Status::unavailable("Shard router not initialized"))?;
+            manager.router().ok_or_else(|| Status::unavailable("Region router not initialized"))?;
 
         let connection = router
             .get_connection(
-                remote.shard,
+                remote.region,
                 &remote.routing.member_nodes,
                 remote.routing.leader_hint.as_deref(),
             )
             .await
             .map_err(|e| {
-                Status::unavailable(format!("Failed to connect to remote shard: {}", e))
+                Status::unavailable(format!("Failed to connect to remote region: {}", e))
             })?;
 
         Ok(ForwardClient::new(connection))
@@ -119,14 +119,14 @@ impl MultiShardReadService {
         }
     }
 
-    /// Processes a historical read request locally using the shard's block archive.
+    /// Processes a historical read request locally using the region's block archive.
     ///
     /// Replays state from blocks up to the requested height to reconstruct
     /// the entity's value at that point in time.
     async fn historical_read_local(
         &self,
         req: &HistoricalReadRequest,
-        ctx: &crate::services::shard_resolver::ShardContext,
+        ctx: &crate::services::region_resolver::RegionContext,
         organization: OrganizationId,
         vault: VaultId,
         start: Instant,
@@ -157,9 +157,9 @@ impl MultiShardReadService {
         // Replay blocks from height 1 to at_height
         // Note: In production, we'd use snapshots to optimize this
         for height in 1..=req.at_height {
-            // Find shard height for this vault block
-            let shard_height =
-                match ctx.block_archive.find_shard_height(organization, vault, height) {
+            // Find region height for this vault block
+            let region_height =
+                match ctx.block_archive.find_region_height(organization, vault, height) {
                     Ok(Some(h)) => h,
                     Ok(None) => continue, // Block might not exist at this height (sparse)
                     Err(e) => {
@@ -167,14 +167,14 @@ impl MultiShardReadService {
                     },
                 };
 
-            // Read the shard block
-            let shard_block = ctx
+            // Read the region block
+            let region_block = ctx
                 .block_archive
-                .read_block(shard_height)
+                .read_block(region_height)
                 .map_err(|e| Status::internal(format!("Block read failed: {:?}", e)))?;
 
             // Find the vault entry
-            let vault_entry = shard_block.vault_entries.iter().find(|e| {
+            let vault_entry = region_block.vault_entries.iter().find(|e| {
                 e.organization == organization && e.vault == vault && e.vault_height == height
             });
 
@@ -188,7 +188,7 @@ impl MultiShardReadService {
 
                 // Track block timestamp at the target height
                 if height == req.at_height {
-                    block_timestamp = shard_block.timestamp;
+                    block_timestamp = region_block.timestamp;
                 }
             }
         }
@@ -225,11 +225,11 @@ impl MultiShardReadService {
         }))
     }
 
-    /// Processes a watch_blocks request locally using the shard's broadcast channel.
+    /// Processes a watch_blocks request locally using the region's broadcast channel.
     async fn watch_blocks_local(
         &self,
         req: &WatchBlocksRequest,
-        ctx: &crate::services::shard_resolver::ShardContext,
+        ctx: &crate::services::region_resolver::RegionContext,
         organization: OrganizationId,
         vault: VaultId,
     ) -> Result<
@@ -247,7 +247,7 @@ impl MultiShardReadService {
 
         // Get broadcast channel - required for local watch
         let announcements = ctx.block_announcements.as_ref().ok_or_else(|| {
-            Status::unavailable("Block announcements not available for this shard")
+            Status::unavailable("Block announcements not available for this region")
         })?;
 
         // Get current tip for this vault
@@ -316,7 +316,7 @@ impl MultiShardReadService {
     /// Fetches historical block announcements from the block archive.
     fn fetch_historical_announcements(
         &self,
-        ctx: &crate::services::shard_resolver::ShardContext,
+        ctx: &crate::services::region_resolver::RegionContext,
         organization: OrganizationId,
         vault: VaultId,
         start_height: u64,
@@ -325,8 +325,8 @@ impl MultiShardReadService {
         let mut announcements = Vec::new();
 
         for height in start_height..=end_height {
-            // Find shard height for this vault block
-            let shard_height = match ctx.block_archive.find_shard_height(
+            // Find region height for this vault block
+            let region_height = match ctx.block_archive.find_region_height(
                 organization,
                 vault,
                 height,
@@ -334,22 +334,22 @@ impl MultiShardReadService {
                 Ok(Some(h)) => h,
                 Ok(None) => continue,
                 Err(e) => {
-                    warn!(error = %e, height, "Failed to find shard height for historical block");
+                    warn!(error = %e, height, "Failed to find region height for historical block");
                     continue;
                 },
             };
 
-            // Read the shard block
-            let shard_block = match ctx.block_archive.read_block(shard_height) {
+            // Read the region block
+            let region_block = match ctx.block_archive.read_block(region_height) {
                 Ok(block) => block,
                 Err(e) => {
-                    warn!(error = ?e, shard_height, "Failed to read historical block");
+                    warn!(error = ?e, region_height, "Failed to read historical block");
                     continue;
                 },
             };
 
             // Find the vault entry
-            if let Some(entry) = shard_block.vault_entries.iter().find(|e| {
+            if let Some(entry) = region_block.vault_entries.iter().find(|e| {
                 e.organization == organization && e.vault == vault && e.vault_height == height
             }) {
                 // Compute block hash from vault entry (hash of previous_hash || state_root ||
@@ -379,8 +379,8 @@ impl MultiShardReadService {
                     block_hash,
                     state_root,
                     timestamp: Some(prost_types::Timestamp {
-                        seconds: shard_block.timestamp.timestamp(),
-                        nanos: shard_block.timestamp.timestamp_subsec_nanos() as i32,
+                        seconds: region_block.timestamp.timestamp(),
+                        nanos: region_block.timestamp.timestamp_subsec_nanos() as i32,
                     }),
                 });
             }
@@ -391,14 +391,14 @@ impl MultiShardReadService {
 }
 
 #[tonic::async_trait]
-impl ReadService for MultiShardReadService {
+impl ReadService for MultiRegionReadService {
     #[instrument(skip(self, request), fields(organization_id, vault, key))]
     async fn read(&self, request: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
         let start = Instant::now();
         let req = request.into_inner();
 
         // Extract organization_id for routing
-        let system = self.resolver.system_shard()?;
+        let system = self.resolver.system_region()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let ctx = self.resolver.resolve(organization_id)?;
@@ -430,7 +430,8 @@ impl ReadService for MultiShardReadService {
             )));
         }
 
-        // Read from the shard's state layer (internally thread-safe via inferadb-ledger-store MVCC)
+        // Read from the region's state layer (internally thread-safe via inferadb-ledger-store
+        // MVCC)
         let entity = ctx.state.get_entity(vault_id, req.key.as_bytes()).map_err(|e| {
             warn!(error = %e, "Read failed");
             metrics::record_read(false, start.elapsed().as_secs_f64());
@@ -460,7 +461,7 @@ impl ReadService for MultiShardReadService {
         let req = request.into_inner();
 
         // Extract organization_id for routing
-        let system = self.resolver.system_shard()?;
+        let system = self.resolver.system_region()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let ctx = self.resolver.resolve(organization_id)?;
@@ -502,7 +503,7 @@ impl ReadService for MultiShardReadService {
             )));
         }
 
-        // Read all keys from the shard's state layer
+        // Read all keys from the region's state layer
         let mut results = Vec::with_capacity(req.keys.len());
 
         for key in &req.keys {
@@ -543,7 +544,7 @@ impl ReadService for MultiShardReadService {
         let req = request.into_inner();
 
         // Extract organization_id for routing
-        let system = self.resolver.system_shard()?;
+        let system = self.resolver.system_region()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let ctx = self.resolver.resolve(organization_id)?;
@@ -590,7 +591,7 @@ impl ReadService for MultiShardReadService {
         Ok(Response::new(VerifiedReadResponse {
             value: entity.map(|e| e.value),
             block_height,
-            // Proof generation requires block archive access per shard
+            // Proof generation requires block archive access per region
             // For now, we return None - full proof support requires more infrastructure
             block_header: None,
             merkle_proof: None,
@@ -605,7 +606,7 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<GetTipResponse>, Status> {
         let req = request.into_inner();
 
-        let system = self.resolver.system_shard()?;
+        let system = self.resolver.system_region()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let ctx = self.resolver.resolve(organization_id)?;
@@ -632,7 +633,7 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<ListRelationshipsResponse>, Status> {
         let req = request.into_inner();
 
-        let system = self.resolver.system_shard()?;
+        let system = self.resolver.system_region()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let ctx = self.resolver.resolve(organization_id)?;
@@ -704,7 +705,7 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<ListEntitiesResponse>, Status> {
         let req = request.into_inner();
 
-        let system = self.resolver.system_shard()?;
+        let system = self.resolver.system_region()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
@@ -715,7 +716,7 @@ impl ReadService for MultiShardReadService {
         // Check consistency
         self.check_consistency(organization_id, req.consistency)?;
 
-        // Resolve shard
+        // Resolve region
         let ctx = self.resolver.resolve(organization_id)?;
 
         // Entities are organization-level (stored in vault_id=0 by convention)
@@ -761,7 +762,7 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<ListResourcesResponse>, Status> {
         let req = request.into_inner();
 
-        let system = self.resolver.system_shard()?;
+        let system = self.resolver.system_region()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let ctx = self.resolver.resolve(organization_id)?;
@@ -810,7 +811,7 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<GetClientStateResponse>, Status> {
         let req = request.into_inner();
 
-        let system = self.resolver.system_shard()?;
+        let system = self.resolver.system_region()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let ctx = self.resolver.resolve(organization_id)?;
@@ -829,7 +830,7 @@ impl ReadService for MultiShardReadService {
     }
 
     // Block-related methods - simplified implementations
-    // Full block retrieval would require per-shard block archive infrastructure
+    // Full block retrieval would require per-region block archive infrastructure
 
     #[instrument(skip(self, request), fields(organization_id, vault, height))]
     async fn get_block(
@@ -838,15 +839,15 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<GetBlockResponse>, Status> {
         let req = request.into_inner();
 
-        let system = self.resolver.system_shard()?;
+        let system = self.resolver.system_region()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
 
-        // Block retrieval is complex for multi-shard
+        // Block retrieval is complex for multi-region
         // Return None for now - full implementation would use vault_entry_to_proto_block helper
         warn!(
             organization_id = organization_id.value(),
-            "get_block: block retrieval not yet fully implemented for multi-shard"
+            "get_block: block retrieval not yet fully implemented for multi-region"
         );
 
         Ok(Response::new(GetBlockResponse { block: None }))
@@ -859,11 +860,11 @@ impl ReadService for MultiShardReadService {
     ) -> Result<Response<GetBlockRangeResponse>, Status> {
         let req = request.into_inner();
 
-        let system = self.resolver.system_shard()?;
+        let system = self.resolver.system_region()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
 
-        // Resolve shard to get current tip
+        // Resolve region to get current tip
         let ctx = self.resolver.resolve(organization_id)?;
         let vault_id =
             SlugResolver::new(ctx.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
@@ -871,7 +872,7 @@ impl ReadService for MultiShardReadService {
 
         warn!(
             organization_id = organization_id.value(),
-            "get_block_range: not yet optimized for multi-shard"
+            "get_block_range: not yet optimized for multi-region"
         );
 
         // Return empty for now - full implementation would iterate blocks
@@ -888,7 +889,7 @@ impl ReadService for MultiShardReadService {
         let req = request.into_inner();
 
         // Extract identifiers
-        let system = self.resolver.system_shard()?;
+        let system = self.resolver.system_region()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let resolved_ctx = self.resolver.resolve(organization_id)?;
@@ -906,21 +907,35 @@ impl ReadService for MultiShardReadService {
 
         // Check if resolver supports forwarding
         if self.resolver.supports_forwarding() {
-            // Use resolve_with_forward to handle both local and remote shards
+            // Use resolve_with_forward to handle both local and remote regions
             match self.resolver.resolve_with_forward(organization_id)? {
                 ResolveResult::Local(ctx) => {
                     // Process locally using block archive
                     self.historical_read_local(&req, &ctx, organization_id, vault_id, start).await
                 },
                 ResolveResult::Remote(remote) => {
-                    // Forward to the remote shard
+                    // Forward to the remote region
+                    let source_region = self
+                        .manager
+                        .as_ref()
+                        .map(|m| m.local_region().as_str())
+                        .unwrap_or("unknown");
                     debug!(
                         organization_id = organization_id.value(),
-                        shard = remote.shard.value(),
-                        "Forwarding historical_read to remote shard"
+                        target_region = remote.region.as_str(),
+                        source_region,
+                        "Forwarding historical_read to remote region"
                     );
+                    let forward_start = std::time::Instant::now();
                     let mut client = self.get_forward_client(&remote).await?;
-                    client.forward_historical_read(req, Some(&trace_ctx), None).await
+                    let result = client.forward_historical_read(req, Some(&trace_ctx), None).await;
+                    metrics::record_cross_region_forward(
+                        "historical_read",
+                        source_region,
+                        remote.region.as_str(),
+                        forward_start.elapsed().as_secs_f64(),
+                    );
+                    result
                 },
             }
         } else {
@@ -940,7 +955,7 @@ impl ReadService for MultiShardReadService {
         let req = request.into_inner();
 
         // Extract identifiers
-        let system = self.resolver.system_shard()?;
+        let system = self.resolver.system_region()?;
         let organization_id =
             SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
         let resolved_ctx = self.resolver.resolve(organization_id)?;
@@ -953,21 +968,34 @@ impl ReadService for MultiShardReadService {
 
         // Check if resolver supports forwarding
         if self.resolver.supports_forwarding() {
-            // Use resolve_with_forward to handle both local and remote shards
+            // Use resolve_with_forward to handle both local and remote regions
             match self.resolver.resolve_with_forward(organization_id)? {
                 ResolveResult::Local(ctx) => {
                     // Process locally using broadcast channel
                     self.watch_blocks_local(&req, &ctx, organization_id, vault_id).await
                 },
                 ResolveResult::Remote(remote) => {
-                    // Forward to the remote shard
+                    // Forward to the remote region
+                    let source_region = self
+                        .manager
+                        .as_ref()
+                        .map(|m| m.local_region().as_str())
+                        .unwrap_or("unknown");
                     debug!(
                         organization_id = organization_id.value(),
-                        shard = remote.shard.value(),
-                        "Forwarding watch_blocks to remote shard"
+                        target_region = remote.region.as_str(),
+                        source_region,
+                        "Forwarding watch_blocks to remote region"
                     );
+                    let forward_start = std::time::Instant::now();
                     let mut client = self.get_forward_client(&remote).await?;
                     let response = client.forward_watch_blocks(req, Some(&trace_ctx), None).await?;
+                    metrics::record_cross_region_forward(
+                        "watch_blocks",
+                        source_region,
+                        remote.region.as_str(),
+                        forward_start.elapsed().as_secs_f64(),
+                    );
 
                     // Convert the streaming response to our expected type
                     let stream = response.into_inner();
@@ -991,7 +1019,7 @@ impl ReadService for MultiShardReadService {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn test_multi_shard_read_service_creation() {
+    fn test_multi_region_read_service_creation() {
         // Basic struct test - full testing requires state setup
     }
 }

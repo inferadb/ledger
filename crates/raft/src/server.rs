@@ -117,6 +117,11 @@ pub struct LedgerServer {
     /// Handler-phase event handle for recording denial and admin events.
     #[builder(default)]
     event_handle: Option<crate::event_writer::EventHandle<FileBackend>>,
+    /// Geographic region this node belongs to.
+    ///
+    /// Included in discovery responses so peers know this node's region.
+    #[builder(default = inferadb_ledger_types::Region::GLOBAL)]
+    region: inferadb_ledger_types::Region,
 }
 
 impl LedgerServer {
@@ -263,6 +268,7 @@ impl LedgerServer {
             .raft(self.raft.clone())
             .state(self.state.clone())
             .applied_state(self.applied_state.clone())
+            .region(self.region)
             .build();
 
         // RaftService handles inter-node Raft RPCs (Vote, AppendEntries, InstallSnapshot)

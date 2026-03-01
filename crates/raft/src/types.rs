@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 // Re-export domain types that originated here but now live in types crate.
 pub use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId};
 use inferadb_ledger_types::{
-    Hash, OrganizationId, OrganizationSlug, SetCondition, ShardId, Transaction, UserId, UserSlug,
+    Hash, OrganizationId, OrganizationSlug, Region, SetCondition, Transaction, UserId, UserSlug,
     VaultId, VaultSlug,
 };
 use openraft::{BasicNode, impls::OneshotResponder};
@@ -95,8 +95,8 @@ pub enum LedgerRequest {
         name: String,
         /// External slug for API lookups (generated before Raft proposal).
         slug: OrganizationSlug,
-        /// Target shard (None = auto-assign to shard 0).
-        shard: Option<ShardId>,
+        /// Target data residency region (required, must not be GLOBAL).
+        region: Region,
         /// Billing tier (defaults to Free).
         #[serde(default)]
         tier: inferadb_ledger_state::system::OrganizationTier,
@@ -144,17 +144,17 @@ pub enum LedgerRequest {
         organization: OrganizationId,
     },
 
-    /// Starts organization migration to a new shard.
+    /// Starts organization migration to a new region.
     /// Sets status to Migrating, blocking writes until CompleteMigration.
     StartMigration {
         /// Organization to migrate.
         organization: OrganizationId,
-        /// Target shard for migration.
-        target_shard: ShardId,
+        /// Target region for migration.
+        target_region_group: Region,
     },
 
     /// Completes a pending organization migration.
-    /// Updates shard and returns status to Active.
+    /// Updates region and returns status to Active.
     CompleteMigration {
         /// Organization being migrated.
         organization: OrganizationId,
@@ -210,6 +210,8 @@ pub enum SystemRequest {
         admin: bool,
         /// External Snowflake identifier.
         slug: UserSlug,
+        /// Data residency region for the user's PII.
+        region: Region,
     },
 
     /// Adds a node to the cluster.
@@ -226,12 +228,73 @@ pub enum SystemRequest {
         node_id: LedgerNodeId,
     },
 
-    /// Updates organization-to-shard mapping.
+    /// Updates organization-to-region mapping.
     UpdateOrganizationRouting {
         /// Organization to update.
         organization: OrganizationId,
-        /// New shard assignment.
-        shard: ShardId,
+        /// New region assignment.
+        region: Region,
+    },
+
+    /// Registers an email HMAC hash in the global control plane.
+    /// Uses CAS (`MustNotExist`) for uniqueness enforcement.
+    RegisterEmailHash {
+        /// Hex-encoded HMAC-SHA256 of the normalized email.
+        hmac_hex: String,
+        /// User ID to associate with this email hash.
+        user_id: UserId,
+    },
+
+    /// Removes an email HMAC hash from the global control plane.
+    RemoveEmailHash {
+        /// Hex-encoded HMAC-SHA256 to remove.
+        hmac_hex: String,
+    },
+
+    /// Sets the active email blinding key version.
+    SetBlindingKeyVersion {
+        /// New active key version number.
+        version: u32,
+    },
+
+    /// Updates rehash progress for a region during blinding key rotation.
+    UpdateRehashProgress {
+        /// Region whose progress is being updated.
+        region: Region,
+        /// Number of entries rehashed so far.
+        entries_rehashed: u64,
+    },
+
+    /// Clears rehash progress for a region (rotation complete for that region).
+    ClearRehashProgress {
+        /// Region whose progress is being cleared.
+        region: Region,
+    },
+
+    /// Updates a user's directory entry status and optionally their region.
+    /// Used during user region migration (mark Migrating, update region, revert).
+    UpdateUserDirectoryStatus {
+        /// User whose directory entry to update.
+        user_id: UserId,
+        /// New directory status.
+        status: inferadb_ledger_state::system::UserDirectoryStatus,
+        /// If `Some`, update the region. If `None`, keep current region.
+        region: Option<Region>,
+    },
+
+    /// Erases a user's PII via crypto-shredding.
+    ///
+    /// Forward-only finalization: destroys the per-subject encryption key,
+    /// scrubs the directory entry, records an erasure audit trail, and
+    /// marks the user for snapshot tombstoning. Each step is idempotent
+    /// but irreversible.
+    EraseUser {
+        /// User whose data to erase.
+        user_id: UserId,
+        /// Identity of the actor requesting erasure (audit trail).
+        erased_by: String,
+        /// Region where the user's PII resides.
+        region: Region,
     },
 }
 
@@ -258,8 +321,8 @@ pub enum LedgerResponse {
     OrganizationCreated {
         /// Assigned organization ID.
         organization: OrganizationId,
-        /// Assigned shard.
-        shard: ShardId,
+        /// Assigned region.
+        region: Region,
     },
 
     /// Vault created.
@@ -280,14 +343,14 @@ pub enum LedgerResponse {
         blocking_vault_ids: Vec<VaultId>,
     },
 
-    /// Organization migrated to a new shard.
+    /// Organization migrated to a new region.
     OrganizationMigrated {
         /// Organization that was migrated.
         organization: OrganizationId,
-        /// Previous shard assignment.
-        old_shard: ShardId,
-        /// New shard assignment.
-        new_shard: ShardId,
+        /// Previous region assignment.
+        old_region: Region,
+        /// New region assignment.
+        new_region: Region,
     },
 
     /// Organization suspended.
@@ -306,18 +369,18 @@ pub enum LedgerResponse {
     MigrationStarted {
         /// Organization entering migration.
         organization: OrganizationId,
-        /// Target shard for migration.
-        target_shard: ShardId,
+        /// Target region for migration.
+        target_region_group: Region,
     },
 
     /// Organization migration completed.
     MigrationCompleted {
         /// Organization that was migrated.
         organization: OrganizationId,
-        /// Previous shard assignment.
-        old_shard: ShardId,
-        /// New shard assignment.
-        new_shard: ShardId,
+        /// Previous region assignment.
+        old_region: Region,
+        /// New region assignment.
+        new_region: Region,
     },
 
     /// Organization marked for deletion (has active vaults).
@@ -347,6 +410,12 @@ pub enum LedgerResponse {
         user_id: UserId,
         /// External Snowflake identifier.
         slug: UserSlug,
+    },
+
+    /// User data erased via crypto-shredding.
+    UserErased {
+        /// User whose data was erased.
+        user_id: UserId,
     },
 
     /// Error response.
@@ -385,8 +454,8 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::Write { block_height, .. } => {
                 write!(f, "Write(height={})", block_height)
             },
-            LedgerResponse::OrganizationCreated { organization, shard } => {
-                write!(f, "OrganizationCreated(id={}, shard={})", organization, shard)
+            LedgerResponse::OrganizationCreated { organization, region } => {
+                write!(f, "OrganizationCreated(id={}, region={})", organization, region)
             },
             LedgerResponse::VaultCreated { vault, slug } => {
                 write!(f, "VaultCreated(id={}, slug={})", vault, slug)
@@ -405,8 +474,12 @@ impl fmt::Display for LedgerResponse {
                     )
                 }
             },
-            LedgerResponse::OrganizationMigrated { organization, old_shard, new_shard } => {
-                write!(f, "OrganizationMigrated(id={}, {}->{})", organization, old_shard, new_shard)
+            LedgerResponse::OrganizationMigrated { organization, old_region, new_region } => {
+                write!(
+                    f,
+                    "OrganizationMigrated(id={}, {}->{})",
+                    organization, old_region, new_region
+                )
             },
             LedgerResponse::OrganizationSuspended { organization } => {
                 write!(f, "OrganizationSuspended(id={})", organization)
@@ -414,11 +487,11 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::OrganizationResumed { organization } => {
                 write!(f, "OrganizationResumed(id={})", organization)
             },
-            LedgerResponse::MigrationStarted { organization, target_shard } => {
-                write!(f, "MigrationStarted(id={}, target={})", organization, target_shard)
+            LedgerResponse::MigrationStarted { organization, target_region_group } => {
+                write!(f, "MigrationStarted(id={}, target={})", organization, target_region_group)
             },
-            LedgerResponse::MigrationCompleted { organization, old_shard, new_shard } => {
-                write!(f, "MigrationCompleted(id={}, {}->{})", organization, old_shard, new_shard)
+            LedgerResponse::MigrationCompleted { organization, old_region, new_region } => {
+                write!(f, "MigrationCompleted(id={}, {}->{})", organization, old_region, new_region)
             },
             LedgerResponse::OrganizationDeleting { organization, blocking_vault_ids } => {
                 write!(
@@ -432,6 +505,9 @@ impl fmt::Display for LedgerResponse {
             },
             LedgerResponse::VaultHealthUpdated { success } => {
                 write!(f, "VaultHealthUpdated(success={})", success)
+            },
+            LedgerResponse::UserErased { user_id } => {
+                write!(f, "UserErased(id={})", user_id)
             },
             LedgerResponse::Error { message } => {
                 write!(f, "Error({})", message)
@@ -456,7 +532,7 @@ mod tests {
         let request = LedgerRequest::CreateOrganization {
             name: "test-org".to_string(),
             slug: OrganizationSlug::new(12345),
-            shard: Some(ShardId::new(1)),
+            region: Region::US_EAST_VA,
             tier: Default::default(),
         };
 
@@ -464,10 +540,10 @@ mod tests {
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::CreateOrganization { name, slug, shard, .. } => {
+            LedgerRequest::CreateOrganization { name, slug, region, .. } => {
                 assert_eq!(name, "test-org");
                 assert_eq!(slug, OrganizationSlug::new(12345));
-                assert_eq!(shard, Some(ShardId::new(1)));
+                assert_eq!(region, Region::US_EAST_VA);
             },
             _ => panic!("unexpected variant"),
         }
@@ -487,17 +563,102 @@ mod tests {
             email: "alice@example.com".to_string(),
             admin: false,
             slug: UserSlug::new(12345),
+            region: Region::US_EAST_VA,
         };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            SystemRequest::CreateUser { name, email, admin, slug } => {
+            SystemRequest::CreateUser { name, email, admin, slug, region } => {
                 assert_eq!(name, "Alice");
                 assert_eq!(email, "alice@example.com");
                 assert!(!admin);
                 assert_eq!(slug, UserSlug::new(12345));
+                assert_eq!(region, Region::US_EAST_VA);
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_system_request_register_email_hash_serialization() {
+        let request = SystemRequest::RegisterEmailHash {
+            hmac_hex: "a1b2c3".to_string(),
+            user_id: UserId::new(42),
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            SystemRequest::RegisterEmailHash { hmac_hex, user_id } => {
+                assert_eq!(hmac_hex, "a1b2c3");
+                assert_eq!(user_id, UserId::new(42));
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_system_request_remove_email_hash_serialization() {
+        let request = SystemRequest::RemoveEmailHash { hmac_hex: "deadbeef".to_string() };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            SystemRequest::RemoveEmailHash { hmac_hex } => {
+                assert_eq!(hmac_hex, "deadbeef");
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_system_request_set_blinding_key_version_serialization() {
+        let request = SystemRequest::SetBlindingKeyVersion { version: 3 };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            SystemRequest::SetBlindingKeyVersion { version } => {
+                assert_eq!(version, 3);
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_system_request_update_rehash_progress_serialization() {
+        let request = SystemRequest::UpdateRehashProgress {
+            region: Region::IE_EAST_DUBLIN,
+            entries_rehashed: 1500,
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            SystemRequest::UpdateRehashProgress { region, entries_rehashed } => {
+                assert_eq!(region, Region::IE_EAST_DUBLIN);
+                assert_eq!(entries_rehashed, 1500);
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_system_request_clear_rehash_progress_serialization() {
+        let request = SystemRequest::ClearRehashProgress { region: Region::IN_WEST_MUMBAI };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            SystemRequest::ClearRehashProgress { region } => {
+                assert_eq!(region, Region::IN_WEST_MUMBAI);
             },
             _ => panic!("unexpected variant"),
         }
@@ -511,7 +672,7 @@ mod tests {
             request: LedgerRequest::CreateOrganization {
                 name: "test-org".to_string(),
                 slug: OrganizationSlug::new(999),
-                shard: Some(ShardId::new(1)),
+                region: Region::US_EAST_VA,
                 tier: Default::default(),
             },
             proposed_at: Utc.with_ymd_and_hms(2099, 6, 15, 12, 30, 0).unwrap(),
@@ -559,7 +720,7 @@ mod tests {
     // ============================================
 
     mod proptest_raft_log {
-        use inferadb_ledger_types::{OrganizationId, ShardId, VaultId, VaultSlug};
+        use inferadb_ledger_types::{OrganizationId, VaultId, VaultSlug};
         use openraft::{CommittedLeaderId, LogId};
         use proptest::prelude::*;
 
@@ -700,13 +861,14 @@ mod tests {
                 name in "[a-z]{1,16}",
                 organization in (1i64..10_000).prop_map(OrganizationId::new),
                 vault in (1i64..10_000).prop_map(VaultId::new),
-                shard in (1u32..1_000).prop_map(ShardId::new),
+                region_idx in 0usize..inferadb_ledger_types::ALL_REGIONS.len(),
             ) {
+                let region = inferadb_ledger_types::ALL_REGIONS[region_idx];
                 let request = match variant_idx {
                     0 => LedgerRequest::CreateOrganization {
                         name: name.clone(),
                         slug: inferadb_ledger_types::OrganizationSlug::new(42),
-                        shard: Some(shard),
+                        region,
                         tier: Default::default(),
                     },
                     1 => LedgerRequest::CreateVault {

@@ -95,7 +95,7 @@ async fn test_vault_health_tracking() {
     let ns_response = admin_client
         .create_organization(proto::CreateOrganizationRequest {
             name: ns_name,
-            shard: None,
+            region: 10, // REGION_US_EAST_VA
             tier: None,
         })
         .await
@@ -206,7 +206,7 @@ async fn test_learner_cache_initialization() {
     let ns_response = admin_client
         .create_organization(proto::CreateOrganizationRequest {
             name: ns_name.clone(),
-            shard: None,
+            region: 10, // REGION_US_EAST_VA
             tier: None,
         })
         .await
@@ -255,7 +255,7 @@ async fn test_concurrent_background_jobs() {
     let ns_response = admin_client
         .create_organization(proto::CreateOrganizationRequest {
             name: ns_name,
-            shard: None,
+            region: 10, // REGION_US_EAST_VA
             tier: None,
         })
         .await

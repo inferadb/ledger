@@ -10,6 +10,7 @@
 
 use std::time::Instant;
 
+use inferadb_ledger_state::system::MIN_NODES_PER_PROTECTED_REGION;
 use inferadb_ledger_types::{OrganizationId, VaultId};
 use metrics::{counter, gauge, histogram};
 
@@ -28,6 +29,13 @@ const READS_TOTAL: &str = "ledger_reads_total";
 const READS_LATENCY: &str = "ledger_read_latency_seconds";
 const VERIFIED_READS_TOTAL: &str = "ledger_verified_reads_total";
 const READ_FORWARDS_TOTAL: &str = "ledger_read_forwards_total";
+
+// Cross-region forwarding metrics
+const CROSS_REGION_FORWARD_TOTAL: &str = "ledger_cross_region_forward_total";
+const CROSS_REGION_FORWARD_LATENCY: &str = "ledger_cross_region_forward_latency_seconds";
+
+// Data residency violation metrics
+const DATA_RESIDENCY_VIOLATION_TOTAL: &str = "ledger_data_residency_violation_total";
 
 // Raft consensus metrics
 const RAFT_PROPOSALS_TOTAL: &str = "inferadb_ledger_raft_proposals_total";
@@ -157,6 +165,53 @@ pub fn record_verified_read(success: bool, latency_secs: f64) {
 #[inline]
 pub fn record_read_forward(method: &str) {
     counter!(READ_FORWARDS_TOTAL, "method" => method.to_string()).increment(1);
+}
+
+// =============================================================================
+// Cross-Region Forwarding Metrics
+// =============================================================================
+
+/// Records a cross-region request forward.
+///
+/// Increments `ledger_cross_region_forward_total{method, source_region, target_region}`
+/// and records latency in `ledger_cross_region_forward_latency_seconds`.
+///
+/// Emitted when a request for a protected-region organization arrives at an
+/// out-of-region node and is forwarded to an in-region node.
+#[inline]
+pub fn record_cross_region_forward(
+    method: &str,
+    source_region: &str,
+    target_region: &str,
+    latency_secs: f64,
+) {
+    counter!(
+        CROSS_REGION_FORWARD_TOTAL,
+        "method" => method.to_string(),
+        "source_region" => source_region.to_string(),
+        "target_region" => target_region.to_string()
+    )
+    .increment(1);
+    histogram!(
+        CROSS_REGION_FORWARD_LATENCY,
+        "source_region" => source_region.to_string(),
+        "target_region" => target_region.to_string()
+    )
+    .record(latency_secs);
+}
+
+/// Records a data residency violation attempt.
+///
+/// Incremented when a request arrives at a node outside the organization's
+/// protected region. The request is forwarded, but the violation is tracked
+/// for operational alerting.
+#[inline]
+pub fn record_data_residency_violation(region: &str) {
+    counter!(
+        DATA_RESIDENCY_VIOLATION_TOTAL,
+        "region" => region.to_string()
+    )
+    .increment(1);
 }
 
 // =============================================================================
@@ -315,6 +370,7 @@ pub fn decrement_connections() {
 ///   `"permission_denied"`, `"validation"`, `"rate_limited"`, `"internal"`, or `"none"` for
 ///   successful requests. See [`error_class_from_grpc_code`] for the mapping.
 /// * `latency_secs` - Request latency in seconds.
+/// * `region` - Region identifier string (e.g., `"us-east-va"`, `"global"`).
 #[inline]
 pub fn record_grpc_request(
     service: &str,
@@ -322,17 +378,20 @@ pub fn record_grpc_request(
     status: &str,
     error_class: &str,
     latency_secs: f64,
+    region: &str,
 ) {
     counter!(GRPC_REQUESTS_TOTAL,
         "service" => service.to_string(),
         "method" => method.to_string(),
         "status" => status.to_string(),
-        "error_class" => error_class.to_string()
+        "error_class" => error_class.to_string(),
+        "region" => region.to_string()
     )
     .increment(1);
     histogram!(GRPC_REQUEST_LATENCY,
         "service" => service.to_string(),
-        "method" => method.to_string()
+        "method" => method.to_string(),
+        "region" => region.to_string()
     )
     .record(latency_secs);
 }
@@ -606,18 +665,20 @@ const LEADER_ELECTIONS_TOTAL: &str = "ledger_leader_elections_total";
 ///
 /// Tracks how many write operations are pending in the batch writer,
 /// serving as a leading indicator of write saturation.
+/// The `region` label identifies which region's batch writer is being measured.
 #[inline]
-pub fn set_batch_queue_depth(depth: usize) {
-    gauge!(BATCH_QUEUE_DEPTH).set(depth as f64);
+pub fn set_batch_queue_depth(depth: usize, region: &str) {
+    gauge!(BATCH_QUEUE_DEPTH, "region" => region.to_string()).set(depth as f64);
 }
 
 /// Sets the current rate limiter queue depth.
 ///
 /// Tracks the number of pending proposals seen by the rate limiter's
 /// backpressure tier, indicating write pipeline saturation.
+/// The `region` label identifies which region's rate limiter is being measured.
 #[inline]
-pub fn set_rate_limit_queue_depth(depth: u64) {
-    gauge!(RATE_LIMIT_QUEUE_DEPTH).set(depth as f64);
+pub fn set_rate_limit_queue_depth(depth: u64, region: &str) {
+    gauge!(RATE_LIMIT_QUEUE_DEPTH, "region" => region.to_string()).set(depth as f64);
 }
 
 /// Sets the cluster quorum status.
@@ -673,50 +734,60 @@ const SNAPSHOT_DISK_BYTES: &str = "ledger_snapshot_disk_bytes";
 /// Sets disk space metrics.
 ///
 /// Updates total, free, and used disk bytes for the data directory's filesystem.
+/// The `region` label identifies which region's storage is being measured.
 #[inline]
-pub fn set_disk_bytes(total: u64, free: u64) {
-    gauge!(DISK_BYTES_TOTAL).set(total as f64);
-    gauge!(DISK_BYTES_FREE).set(free as f64);
-    gauge!(DISK_BYTES_USED).set((total.saturating_sub(free)) as f64);
+pub fn set_disk_bytes(total: u64, free: u64, region: &str) {
+    gauge!(DISK_BYTES_TOTAL, "region" => region.to_string()).set(total as f64);
+    gauge!(DISK_BYTES_FREE, "region" => region.to_string()).set(free as f64);
+    gauge!(DISK_BYTES_USED, "region" => region.to_string())
+        .set((total.saturating_sub(free)) as f64);
 }
 
 /// Sets page cache counters.
 ///
 /// Reports cumulative cache hit/miss totals and current cache size.
+/// The `region` label identifies which region's database is being measured.
 #[inline]
-pub fn set_page_cache_metrics(hits: u64, misses: u64, size: usize) {
-    counter!(PAGE_CACHE_HITS_TOTAL).absolute(hits);
-    counter!(PAGE_CACHE_MISSES_TOTAL).absolute(misses);
-    gauge!(PAGE_CACHE_SIZE).set(size as f64);
+pub fn set_page_cache_metrics(hits: u64, misses: u64, size: usize, region: &str) {
+    counter!(PAGE_CACHE_HITS_TOTAL, "region" => region.to_string()).absolute(hits);
+    counter!(PAGE_CACHE_MISSES_TOTAL, "region" => region.to_string()).absolute(misses);
+    gauge!(PAGE_CACHE_SIZE, "region" => region.to_string()).set(size as f64);
 }
 
 /// Sets B-tree depth for a given table.
+///
+/// The `region` label identifies which region's database is being measured.
 #[inline]
-pub fn set_btree_depth(table: &str, depth: u32) {
-    gauge!(BTREE_DEPTH, "table" => table.to_string()).set(f64::from(depth));
+pub fn set_btree_depth(table: &str, depth: u32, region: &str) {
+    gauge!(BTREE_DEPTH, "table" => table.to_string(), "region" => region.to_string())
+        .set(f64::from(depth));
 }
 
 /// Sets B-tree page splits total.
+///
+/// The `region` label identifies which region's database is being measured.
 #[inline]
-pub fn set_btree_page_splits(total: u64) {
-    counter!(BTREE_PAGE_SPLITS_TOTAL).absolute(total);
+pub fn set_btree_page_splits(total: u64, region: &str) {
+    counter!(BTREE_PAGE_SPLITS_TOTAL, "region" => region.to_string()).absolute(total);
 }
 
 /// Sets compaction lag blocks gauge.
 ///
 /// Tracks the number of free pages (reclaimable space) as a proxy for
 /// compaction backlog. High values indicate that compaction is falling behind.
+/// The `region` label identifies which region's database is being measured.
 #[inline]
-pub fn set_compaction_lag_blocks(blocks: usize) {
-    gauge!(COMPACTION_LAG_BLOCKS).set(blocks as f64);
+pub fn set_compaction_lag_blocks(blocks: usize, region: &str) {
+    gauge!(COMPACTION_LAG_BLOCKS, "region" => region.to_string()).set(blocks as f64);
 }
 
 /// Sets snapshot total disk bytes.
 ///
 /// Tracks the total disk space used by all snapshots in the snapshot directory.
+/// The `region` label identifies which region's snapshots are being measured.
 #[inline]
-pub fn set_snapshot_disk_bytes(bytes: u64) {
-    gauge!(SNAPSHOT_DISK_BYTES).set(bytes as f64);
+pub fn set_snapshot_disk_bytes(bytes: u64, region: &str) {
+    gauge!(SNAPSHOT_DISK_BYTES, "region" => region.to_string()).set(bytes as f64);
 }
 
 /// SLI-aligned histogram bucket boundaries (in seconds).
@@ -899,6 +970,35 @@ pub fn record_background_job_items(job: &str, count: u64) {
     .increment(count);
 }
 
+// ─── DEK Re-Wrapping Metrics ──────────────────────────────────
+
+/// Total pages re-wrapped during RMK rotation (counter).
+const REWRAP_PAGES_TOTAL: &str = "ledger_rewrap_pages_total";
+
+/// Remaining pages to process during re-wrapping (gauge).
+const REWRAP_PAGES_REMAINING: &str = "ledger_rewrap_pages_remaining";
+
+/// Duration of a single re-wrapping batch in seconds (histogram).
+const REWRAP_DURATION_SECONDS: &str = "ledger_rewrap_duration_seconds";
+
+/// Records pages re-wrapped during a batch cycle.
+#[inline]
+pub fn record_rewrap_pages(count: u64) {
+    counter!(REWRAP_PAGES_TOTAL).increment(count);
+}
+
+/// Records remaining pages to re-wrap (gauge).
+#[inline]
+pub fn record_rewrap_remaining(remaining: u64) {
+    gauge!(REWRAP_PAGES_REMAINING).set(remaining as f64);
+}
+
+/// Records re-wrapping batch duration.
+#[inline]
+pub fn record_rewrap_duration(duration_secs: f64) {
+    histogram!(REWRAP_DURATION_SECONDS).record(duration_secs);
+}
+
 // ─── Metric Cardinality Budget Metrics ────────────────────────
 
 /// Total metric observations dropped due to cardinality budget overflow (counter).
@@ -1048,6 +1148,15 @@ const LEADER_TRANSFER_LATENCY: &str = "ledger_leader_transfer_latency_seconds";
 /// Labels: `result` = accepted | rejected.
 const TRIGGER_ELECTIONS_TOTAL: &str = "ledger_trigger_elections_total";
 
+/// Number of nodes in each region (gauge).
+///
+/// Labels: `region` = region identifier string.
+/// Emitted when membership changes. Protected regions emit a warning when
+/// the count drops below
+/// [`MIN_NODES_PER_PROTECTED_REGION`](inferadb_ledger_state::system::MIN_NODES_PER_PROTECTED_REGION)
+/// + 1.
+const REGION_NODE_COUNT: &str = "ledger_region_node_count";
+
 /// Records the number of expired event entries deleted in a GC cycle.
 #[inline]
 pub fn record_events_gc_entries_deleted(count: u64) {
@@ -1089,6 +1198,21 @@ pub fn record_trigger_election(accepted: bool) {
     counter!(TRIGGER_ELECTIONS_TOTAL, "result" => result).increment(1);
 }
 
+/// Records the current node count for a region and emits a warning if a
+/// protected region is critically low (below `min_threshold + 1`).
+#[inline]
+pub fn record_region_node_count(region: &str, count: usize, is_protected: bool) {
+    gauge!(REGION_NODE_COUNT, "region" => region.to_owned()).set(count as f64);
+    if is_protected && count < MIN_NODES_PER_PROTECTED_REGION + 1 {
+        tracing::warn!(
+            region,
+            count,
+            min_required = MIN_NODES_PER_PROTECTED_REGION,
+            "Protected region node count critically low"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1110,7 +1234,7 @@ mod tests {
         set_raft_commit_index(100);
         set_is_leader(true);
         record_idempotency_hit();
-        record_grpc_request("WriteService", "write", "OK", "none", 0.001);
+        record_grpc_request("WriteService", "write", "OK", "none", 0.001, "global");
     }
 
     #[test]
@@ -1132,16 +1256,37 @@ mod tests {
     #[test]
     fn test_sli_metrics_dont_panic() {
         // SLI/SLO metrics should not panic without a recorder
-        set_batch_queue_depth(42);
-        set_rate_limit_queue_depth(10);
+        set_batch_queue_depth(42, "global");
+        set_rate_limit_queue_depth(10, "global");
         set_cluster_quorum_status(true);
         set_cluster_quorum_status(false);
         record_leader_election();
-        record_grpc_request("WriteService", "write", "Internal", "internal", 0.5);
-        record_grpc_request("ReadService", "read", "DeadlineExceeded", "timeout", 1.0);
-        record_grpc_request("AdminService", "create", "InvalidArgument", "validation", 0.01);
-        record_grpc_request("WriteService", "write", "ResourceExhausted", "rate_limited", 0.1);
-        record_grpc_request("WriteService", "write", "Unavailable", "unavailable", 0.05);
+        record_grpc_request("WriteService", "write", "Internal", "internal", 0.5, "us-east-va");
+        record_grpc_request("ReadService", "read", "DeadlineExceeded", "timeout", 1.0, "global");
+        record_grpc_request(
+            "AdminService",
+            "create",
+            "InvalidArgument",
+            "validation",
+            0.01,
+            "global",
+        );
+        record_grpc_request(
+            "WriteService",
+            "write",
+            "ResourceExhausted",
+            "rate_limited",
+            0.1,
+            "ie-east-dublin",
+        );
+        record_grpc_request(
+            "WriteService",
+            "write",
+            "Unavailable",
+            "unavailable",
+            0.05,
+            "de-central-frankfurt",
+        );
     }
 
     #[test]
@@ -1211,5 +1356,49 @@ mod tests {
     fn test_cardinality_overflow_metric_name() {
         assert!(CARDINALITY_OVERFLOW_TOTAL.starts_with("ledger_"));
         assert!(CARDINALITY_OVERFLOW_TOTAL.ends_with("_total"));
+    }
+
+    #[test]
+    fn test_cross_region_forward_metrics_dont_panic() {
+        record_cross_region_forward("write", "us-east-va", "ie-east-dublin", 0.123);
+        record_cross_region_forward("read", "global", "ca-central-qc", 0.456);
+        record_cross_region_forward("batch_write", "us-west-or", "de-central-frankfurt", 0.789);
+    }
+
+    #[test]
+    fn test_data_residency_violation_metrics_dont_panic() {
+        record_data_residency_violation("ie-east-dublin");
+        record_data_residency_violation("de-central-frankfurt");
+        record_data_residency_violation("ca-central-qc");
+    }
+
+    #[test]
+    fn test_cross_region_metric_names() {
+        assert!(CROSS_REGION_FORWARD_TOTAL.starts_with("ledger_"));
+        assert!(CROSS_REGION_FORWARD_TOTAL.ends_with("_total"));
+        assert!(CROSS_REGION_FORWARD_LATENCY.starts_with("ledger_"));
+        assert!(CROSS_REGION_FORWARD_LATENCY.ends_with("_seconds"));
+        assert!(DATA_RESIDENCY_VIOLATION_TOTAL.starts_with("ledger_"));
+        assert!(DATA_RESIDENCY_VIOLATION_TOTAL.ends_with("_total"));
+    }
+
+    #[test]
+    fn test_resource_saturation_metrics_with_region_dont_panic() {
+        set_disk_bytes(1_000_000_000, 500_000_000, "global");
+        set_disk_bytes(2_000_000_000, 1_000_000_000, "us-east-va");
+        set_page_cache_metrics(100, 50, 75, "global");
+        set_page_cache_metrics(200, 100, 150, "ie-east-dublin");
+        set_btree_depth("entities", 3, "global");
+        set_btree_depth("relationships", 2, "us-east-va");
+        set_btree_page_splits(42, "global");
+        set_btree_page_splits(10, "de-central-frankfurt");
+        set_compaction_lag_blocks(10, "global");
+        set_compaction_lag_blocks(5, "ca-central-qc");
+        set_snapshot_disk_bytes(1_048_576, "global");
+        set_snapshot_disk_bytes(2_097_152, "us-west-or");
+        set_batch_queue_depth(42, "global");
+        set_batch_queue_depth(10, "us-east-va");
+        set_rate_limit_queue_depth(10, "global");
+        set_rate_limit_queue_depth(5, "ie-east-dublin");
     }
 }

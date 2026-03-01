@@ -122,9 +122,9 @@ impl AppliedStateAccessor {
             .map_or(0, |entry| entry.sequence)
     }
 
-    /// Returns the current shard height (for snapshot info).
-    pub fn shard_height(&self) -> u64 {
-        self.state.read().shard_height
+    /// Returns the current region height (for snapshot info).
+    pub fn region_height(&self) -> u64 {
+        self.state.read().region_height
     }
 
     /// Returns all vault metadata (for retention policy checks).

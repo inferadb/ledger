@@ -23,10 +23,10 @@ use inferadb_ledger_raft::{
     event_writer::{EventHandle, EventWriter},
 };
 use inferadb_ledger_state::{
-    BlockArchive, EventsDatabase, LocalBackend, ObjectStorageBackend, SnapshotManager, StateLayer,
+    BlockArchive, LocalBackend, ObjectStorageBackend, SnapshotManager, StateLayer,
     TieredSnapshotManager,
 };
-use inferadb_ledger_store::{Database, FileBackend};
+use inferadb_ledger_store::FileBackend;
 use openraft::{BasicNode, Raft, storage::Adaptor};
 use tokio::sync::broadcast;
 use tonic::transport::Channel;
@@ -166,29 +166,21 @@ pub async fn bootstrap_node(
     std::fs::create_dir_all(data_dir)
         .map_err(|e| BootstrapError::Database(format!("failed to create data dir: {}", e)))?;
 
-    let state_db_path = data_dir.join("state.db");
-    let state_db = Arc::new(
-        Database::<FileBackend>::create(&state_db_path)
-            .map_err(|e| BootstrapError::Database(format!("failed to create state db: {}", e)))?,
-    );
-    // StateLayer is internally thread-safe via MVCC - no external lock needed
-    let state = Arc::new(StateLayer::new(state_db));
+    // Detect legacy flat layout (state.db in data_dir root). Per-region layout
+    // places databases under global/ and regions/{name}/.
+    let storage_manager = inferadb_ledger_raft::RegionStorageManager::new(data_dir.to_path_buf());
+    storage_manager.detect_legacy_layout().map_err(|e| BootstrapError::Database(e.to_string()))?;
 
-    let blocks_db_path = data_dir.join("blocks.db");
-    let blocks_db = Arc::new(
-        Database::<FileBackend>::create(&blocks_db_path)
-            .map_err(|e| BootstrapError::Database(format!("failed to create blocks db: {}", e)))?,
-    );
-    let block_archive = Arc::new(BlockArchive::new(blocks_db));
+    // Open GLOBAL region databases (state.db, blocks.db, events.db under global/)
+    let region_storage = storage_manager
+        .open_region(inferadb_ledger_types::Region::GLOBAL)
+        .map_err(|e| BootstrapError::Database(e.to_string()))?;
 
-    // Open events database for audit event persistence (separate from state.db).
-    // events.db uses an independent write lock to avoid contention with Raft
-    // state mutations. The same Arc is shared across EventWriter (apply-phase),
-    // EventHandle (handler-phase), EventsGarbageCollector, and EventsServiceImpl.
-    let events_db = Arc::new(
-        EventsDatabase::<FileBackend>::open(data_dir)
-            .map_err(|e| BootstrapError::Database(format!("failed to open events db: {e}")))?,
-    );
+    // Wrap raw databases in domain-specific types
+    // StateLayer is internally thread-safe via MVCC — no external lock needed
+    let state = Arc::new(StateLayer::new(region_storage.state_db().clone()));
+    let block_archive = Arc::new(BlockArchive::new(region_storage.blocks_db().clone()));
+    let events_db = region_storage.events_db().clone();
 
     // Create block announcements broadcast channel for real-time notifications.
     // Buffer size of 1024 allows for burst handling during high commit rates.
@@ -199,12 +191,12 @@ pub async fn bootstrap_node(
     // and is called during Raft apply_to_state_machine().
     let event_writer = EventWriter::new(Arc::clone(&events_db), config.events.clone());
 
-    let log_path = data_dir.join("raft.db");
+    let log_path = storage_manager.raft_db_path(inferadb_ledger_types::Region::GLOBAL);
     let log_store = RaftLogStore::open(&log_path)
         .map_err(|e| BootstrapError::Storage(format!("failed to open log store: {}", e)))?
         .with_state_layer(state.clone())
         .with_block_archive(block_archive.clone())
-        .with_shard_config(inferadb_ledger_types::ShardId::new(0), node_id.to_string()) // Default shard 0
+        .with_region_config(inferadb_ledger_types::Region::GLOBAL, node_id.to_string())
         .with_block_announcements(block_announcements.clone())
         .with_event_writer(event_writer);
 
@@ -254,7 +246,7 @@ pub async fn bootstrap_node(
 
     let block_archive_for_compactor = block_archive.clone();
     let block_archive_for_recovery = block_archive.clone();
-    let snapshot_dir = data_dir.join("snapshots");
+    let snapshot_dir = storage_manager.snapshot_dir(inferadb_ledger_types::Region::GLOBAL);
     let snapshot_manager = Arc::new(SnapshotManager::new(snapshot_dir.clone(), 5));
     let snapshot_manager_for_backup = snapshot_manager.clone();
 
@@ -317,6 +309,7 @@ pub async fn bootstrap_node(
         .data_dir(Some(data_dir.to_path_buf()))
         .events_db(Some((*events_db).clone()))
         .event_handle(Some(event_handle))
+        .region(config.region)
         .build();
     // Wire backup support into server if configured.
     // Done post-construction because bon type-state builders don't support
@@ -487,11 +480,13 @@ pub async fn bootstrap_node(
     tracing::info!("Started learner refresh job");
 
     // Start resource saturation metrics collector
-    let snapshot_dir_for_metrics = data_dir.join("snapshots");
+    let snapshot_dir_for_metrics =
+        storage_manager.snapshot_dir(inferadb_ledger_types::Region::GLOBAL);
     let resource_metrics_handle = ResourceMetricsCollector::builder()
         .state(state.clone())
         .data_dir(data_dir.to_path_buf())
         .snapshot_dir(snapshot_dir_for_metrics)
+        .region(config.region.as_str())
         .watchdog_handle(watchdog.map(|w| w.register("resource_metrics", 30)))
         .build()
         .start();
@@ -833,7 +828,7 @@ async fn try_join_via_leader(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use tempfile::tempdir;
 
@@ -852,7 +847,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bootstrap_creates_events_db() {
+    async fn test_bootstrap_creates_per_region_databases() {
         let temp_dir = tempdir().expect("create temp dir");
         let data_dir = temp_dir.path().to_path_buf();
         let config = Config::for_test(1, 50052, data_dir.clone());
@@ -862,9 +857,16 @@ mod tests {
         let node =
             bootstrap_node(&config, &data_dir, health, rx).await.expect("bootstrap should succeed");
 
-        // events.db should be created alongside state.db
-        assert!(data_dir.join("events.db").exists(), "events.db should be created in data_dir");
-        assert!(data_dir.join("state.db").exists(), "state.db should be created in data_dir");
+        // Per-region databases should be under global/ directory
+        let global_dir = data_dir.join("global");
+        assert!(global_dir.join("events.db").exists(), "events.db should be in global/");
+        assert!(global_dir.join("state.db").exists(), "state.db should be in global/");
+        assert!(global_dir.join("blocks.db").exists(), "blocks.db should be in global/");
+        assert!(global_dir.join("raft.db").exists(), "raft.db should be in global/");
+
+        // No databases in root (flat layout is legacy)
+        assert!(!data_dir.join("state.db").exists(), "state.db should not be in root");
+        assert!(!data_dir.join("events.db").exists(), "events.db should not be in root");
 
         // Events GC should be running (default config has events.enabled = true)
         assert!(
@@ -887,12 +889,32 @@ mod tests {
 
         // events.db is still created (needed for snapshot restore), but GC is not started
         assert!(
-            data_dir.join("events.db").exists(),
+            data_dir.join("global").join("events.db").exists(),
             "events.db should still be created even when disabled"
         );
         assert!(
             node.events_gc_handle.is_none(),
             "events GC should not be started when events are disabled"
         );
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_rejects_legacy_flat_layout() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().to_path_buf();
+
+        // Simulate legacy flat layout
+        std::fs::write(data_dir.join("state.db"), b"legacy").expect("create legacy file");
+
+        let config = Config::for_test(1, 50054, data_dir.clone());
+        let health = inferadb_ledger_raft::HealthState::new();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let result = bootstrap_node(&config, &data_dir, health, rx).await;
+
+        let err = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("bootstrap should fail with legacy layout"),
+        };
+        assert!(err.contains("Legacy flat layout"), "error should mention legacy layout: {err}");
     }
 }

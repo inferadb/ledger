@@ -166,7 +166,7 @@ impl WriteServiceImpl {
                 as futures::future::BoxFuture<'static, Result<Vec<LedgerResponse>, String>>
         };
 
-        let writer = BatchWriter::new(config, submit_fn);
+        let writer = BatchWriter::new(config, submit_fn, "global");
         let handle = writer.handle();
         let run_future = writer.run();
 
@@ -587,6 +587,31 @@ impl WriteService for WriteServiceImpl {
                     .ok_or_else(|| Status::invalid_argument("Missing vault"))?,
             )
         };
+
+        // Reject writes to organizations undergoing migration
+        if let Some(ref state) = self.applied_state
+            && let Some(org_meta) = state.get_organization(organization_id)
+            && org_meta.status == inferadb_ledger_state::system::OrganizationStatus::Migrating
+        {
+            let mut context = std::collections::HashMap::new();
+            context.insert("organization".to_string(), organization_id.value().to_string());
+            if let Some(pending) = org_meta.pending_region {
+                context.insert("target_region".to_string(), pending.as_str().to_string());
+            }
+            let details = super::error_details::build_error_details(
+                inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.as_u16(),
+                true,
+                Some(30_000), // suggest retry after 30s
+                context,
+                Some(inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.suggested_action()),
+            );
+            let encoded = prost::Message::encode_to_vec(&details);
+            return Err(Status::with_details(
+                tonic::Code::FailedPrecondition,
+                "Organization is being migrated to another region; writes are temporarily blocked",
+                encoded.into(),
+            ));
+        }
 
         // Parse idempotency key (must be exactly 16 bytes for UUID)
         let idempotency_key: [u8; 16] =
@@ -1072,6 +1097,31 @@ impl WriteService for WriteServiceImpl {
                     .ok_or_else(|| Status::invalid_argument("Missing vault"))?,
             )
         };
+
+        // Reject writes to organizations undergoing migration
+        if let Some(ref state) = self.applied_state
+            && let Some(org_meta) = state.get_organization(organization_id)
+            && org_meta.status == inferadb_ledger_state::system::OrganizationStatus::Migrating
+        {
+            let mut context = std::collections::HashMap::new();
+            context.insert("organization".to_string(), organization_id.value().to_string());
+            if let Some(pending) = org_meta.pending_region {
+                context.insert("target_region".to_string(), pending.as_str().to_string());
+            }
+            let details = super::error_details::build_error_details(
+                inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.as_u16(),
+                true,
+                Some(30_000), // suggest retry after 30s
+                context,
+                Some(inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.suggested_action()),
+            );
+            let encoded = prost::Message::encode_to_vec(&details);
+            return Err(Status::with_details(
+                tonic::Code::FailedPrecondition,
+                "Organization is being migrated to another region; writes are temporarily blocked",
+                encoded.into(),
+            ));
+        }
 
         // Parse idempotency key (must be exactly 16 bytes for UUID)
         let idempotency_key: [u8; 16] =

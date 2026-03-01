@@ -370,19 +370,19 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
 
         // Replay blocks from start_height to tip
         for height in start_height..=tip_height {
-            let shard_height = archive
-                .find_shard_height(organization, vault, height)
+            let region_height = archive
+                .find_region_height(organization, vault, height)
                 .context(IndexLookupSnafu { organization, vault, height })?;
 
-            let shard_height = match shard_height {
+            let region_height = match region_height {
                 Some(h) => h,
                 None => continue,
             };
 
-            let shard_block =
-                archive.read_block(shard_height).context(BlockReadSnafu { shard_height })?;
+            let region_block =
+                archive.read_block(region_height).context(BlockReadSnafu { region_height })?;
 
-            let vault_entry = shard_block.vault_entries.iter().find(|e| {
+            let vault_entry = region_block.vault_entries.iter().find(|e| {
                 e.organization == organization && e.vault == vault && e.vault_height == height
             });
 
@@ -416,8 +416,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         if let Some(snapshot_manager) = &self.snapshot_manager
             && let Ok(snapshots) = snapshot_manager.list_snapshots()
         {
-            for &shard_height in snapshots.iter().rev() {
-                if let Ok(snapshot) = snapshot_manager.load(shard_height)
+            for &region_height in snapshots.iter().rev() {
+                if let Ok(snapshot) = snapshot_manager.load(region_height)
                     && let Some(vault_state) =
                         snapshot.header.vault_states.iter().find(|v| v.vault == vault)
                 {

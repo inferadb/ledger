@@ -31,7 +31,8 @@ const DEFAULT_COLLECTION_INTERVAL: Duration = Duration::from_secs(30);
 /// Background collector for resource saturation metrics.
 ///
 /// Samples disk space, page cache statistics, B-tree health, and snapshot
-/// disk usage at a configurable interval.
+/// disk usage at a configurable interval. All metrics include a `region`
+/// label identifying which region's resources are being measured.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct ResourceMetricsCollector<B: StorageBackend + 'static> {
@@ -41,6 +42,9 @@ pub struct ResourceMetricsCollector<B: StorageBackend + 'static> {
     data_dir: PathBuf,
     /// Path to the snapshot directory (for snapshot disk usage).
     snapshot_dir: PathBuf,
+    /// Region identifier for metric labels (e.g., `"global"`, `"us-east-va"`).
+    #[builder(into)]
+    region: String,
     /// Collection interval.
     #[builder(default = DEFAULT_COLLECTION_INTERVAL)]
     interval: Duration,
@@ -61,11 +65,12 @@ impl<B: StorageBackend + 'static> ResourceMetricsCollector<B> {
     fn collect_disk_metrics(&self) {
         match disk_space(&self.data_dir) {
             Some((total, free)) => {
-                metrics::set_disk_bytes(total, free);
+                metrics::set_disk_bytes(total, free, &self.region);
             },
             None => {
                 debug!(
                     data_dir = %self.data_dir.display(),
+                    region = %self.region,
                     "Could not read disk space metrics"
                 );
             },
@@ -76,18 +81,23 @@ impl<B: StorageBackend + 'static> ResourceMetricsCollector<B> {
     fn collect_database_metrics(&self) {
         let stats = self.state.database_stats();
 
-        metrics::set_page_cache_metrics(stats.cache_hits, stats.cache_misses, stats.cached_pages);
-        metrics::set_btree_page_splits(stats.page_splits);
-        metrics::set_compaction_lag_blocks(stats.free_pages);
+        metrics::set_page_cache_metrics(
+            stats.cache_hits,
+            stats.cache_misses,
+            stats.cached_pages,
+            &self.region,
+        );
+        metrics::set_btree_page_splits(stats.page_splits, &self.region);
+        metrics::set_compaction_lag_blocks(stats.free_pages, &self.region);
 
         match self.state.table_depths() {
             Ok(depths) => {
                 for (table, depth) in depths {
-                    metrics::set_btree_depth(table, depth);
+                    metrics::set_btree_depth(table, depth, &self.region);
                 }
             },
             Err(e) => {
-                debug!(error = %e, "Could not read B-tree depths");
+                debug!(error = %e, region = %self.region, "Could not read B-tree depths");
             },
         }
     }
@@ -95,10 +105,11 @@ impl<B: StorageBackend + 'static> ResourceMetricsCollector<B> {
     /// Collects snapshot directory disk usage.
     fn collect_snapshot_metrics(&self) {
         match snapshot_disk_bytes(&self.snapshot_dir) {
-            Some(bytes) => metrics::set_snapshot_disk_bytes(bytes),
+            Some(bytes) => metrics::set_snapshot_disk_bytes(bytes, &self.region),
             None => {
                 debug!(
                     snapshot_dir = %self.snapshot_dir.display(),
+                    region = %self.region,
                     "Could not read snapshot directory size"
                 );
             },
@@ -220,6 +231,7 @@ mod tests {
             .state(state)
             .data_dir(dir.path().to_path_buf())
             .snapshot_dir(dir.path().join("snapshots"))
+            .region("global")
             .build();
 
         // Should not panic
@@ -260,11 +272,11 @@ mod tests {
     #[test]
     fn test_resource_metrics_no_panic_without_recorder() {
         // Metrics crate is safe to call without a recorder
-        metrics::set_disk_bytes(1_000_000_000, 500_000_000);
-        metrics::set_page_cache_metrics(100, 50, 75);
-        metrics::set_btree_depth("entities", 3);
-        metrics::set_btree_page_splits(42);
-        metrics::set_compaction_lag_blocks(10);
-        metrics::set_snapshot_disk_bytes(1_048_576);
+        metrics::set_disk_bytes(1_000_000_000, 500_000_000, "global");
+        metrics::set_page_cache_metrics(100, 50, 75, "global");
+        metrics::set_btree_depth("entities", 3, "global");
+        metrics::set_btree_page_splits(42, "global");
+        metrics::set_compaction_lag_blocks(10, "global");
+        metrics::set_snapshot_disk_bytes(1_048_576, "global");
     }
 }

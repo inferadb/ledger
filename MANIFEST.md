@@ -7,7 +7,7 @@ InferaDB Ledger is a blockchain database for cryptographically verifiable author
 ```
 gRPC Services (Admin, Read, Write, Events, Health, Discovery, Raft)
     ↓
-  raft — openraft consensus, batching, rate limiting, multi-shard
+  raft — openraft consensus, batching, rate limiting, multi-region
     ↓
   state — domain model, vaults, entities, relationships, state roots
     ↓
@@ -378,7 +378,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Re-exports from `events`: `EventIndex`, `EventStore`, `Events`, `EventsDatabase`, `EventsDatabaseError`, `EventStoreError`
   - Re-exports from `events_keys`: `encode_event_key`, `encode_event_index_key`, `encode_event_index_value`, `primary_key_from_index_value`, `EVENT_INDEX_KEY_LEN`, `EVENT_INDEX_VALUE_LEN`, `EVENT_KEY_LEN`, `DecodedEventKey`, `decode_event_key`, `org_prefix`, `org_time_prefix`
   - Re-exports from `tiered_storage`: `LocalBackend`, `ObjectStorageBackend`, `StorageBackend`, `StorageTier`, `TieredSnapshotManager`, `TieredStorageConfig`, `TieredStorageError`
-- **Insights**: Rich feature set: snapshots, tiered storage, multi-shard, saga-based cross-shard transactions, and dedicated events storage.
+- **Insights**: Rich feature set: snapshots, tiered storage, multi-region, saga-based cross-region transactions, and dedicated events storage.
 
 #### `engine.rs` (118 lines)
 
@@ -558,7 +558,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `Saga`: Multi-step distributed transaction
   - `SagaStep`: Individual step with compensating action
   - `SagaExecutor`: Orchestrates execution, handles failures
-- **Insights**: Saga pattern for cross-shard transactions. Compensating actions ensure eventual consistency.
+- **Insights**: Saga pattern for cross-region transactions. Compensating actions ensure eventual consistency.
 
 #### `system/service.rs` (686 lines)
 
@@ -644,7 +644,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 ## Crate: `inferadb-ledger-raft`
 
-- **Purpose**: Raft consensus integration with openraft, gRPC services, batching, rate limiting, multi-shard support, and 40+ production features.
+- **Purpose**: Raft consensus integration with openraft, gRPC services, batching, rate limiting, multi-region support, and 40+ production features.
 - **Dependencies**: `types`, `store`, `state`, `proto`, `openraft`, `tonic`
 - **Quality Rating**: ★★★★☆
 
@@ -709,7 +709,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `LedgerServer::builder()`: bon-based builder with 20+ config options
   - `serve(addr) -> Result<()>`: Start gRPC server with all services
   - `serve_with_shutdown(addr, shutdown_signal) -> Result<()>`: Graceful shutdown support
-  - `health_state: HealthState` field — threaded to `WriteServiceImpl`, `MultiShardWriteService`, and `AdminServiceImpl` for drain-phase proposal rejection
+  - `health_state: HealthState` field — threaded to `WriteServiceImpl`, `MultiRegionWriteService`, and `AdminServiceImpl` for drain-phase proposal rejection
   - Optional `events_db: Option<EventsDatabase<FileBackend>>` for EventsService registration
   - Optional `event_handle: Option<EventHandle<FileBackend>>` for handler-phase event recording in services
   - Integrates: Raft node, all services, metrics, tracing, event logging, health checks
@@ -790,11 +790,11 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Shared service utilities (rate limiting, validation, metadata extraction, drain guard)
 - **Key Types/Functions**:
-  - `check_not_draining(health_state: Option<&HealthState>) -> Result<(), Status>`: Returns `UNAVAILABLE` if node is in Draining or ShuttingDown phase. Used by write, multi-shard write, and admin services before proposal submission.
+  - `check_not_draining(health_state: Option<&HealthState>) -> Result<(), Status>`: Returns `UNAVAILABLE` if node is in Draining or ShuttingDown phase. Used by write, multi-region write, and admin services before proposal submission.
   - `check_rate_limit()`: Rate limit check with rich ErrorDetails
   - `validation_status()`: Wraps validation errors with gRPC status
   - `extract_organization_from_request()`: Common metadata extraction
-- **Insights**: Phase 2 Task 1 extracted shared code from write/multi-shard/admin services. `check_not_draining()` added for leader transfer sprint — centralizes the drain guard pattern.
+- **Insights**: Phase 2 Task 1 extracted shared code from write/multi-region/admin services. `check_not_draining()` added for leader transfer sprint — centralizes the drain guard pattern.
 
 #### `services/metadata.rs` (219 lines)
 
@@ -807,14 +807,14 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### Additional Services
 
-- `services/raft.rs` (1196 lines): RaftService (inter-node Raft RPCs) including `TriggerElection` RPC handler — validates leader term (rejects stale), calls `raft.trigger().elect()`, records metrics via `record_trigger_election()`. Implemented on both `RaftServiceImpl` (single-shard) and `MultiShardRaftService` (routes to system shard).
+- `services/raft.rs` (1196 lines): RaftService (inter-node Raft RPCs) including `TriggerElection` RPC handler — validates leader term (rejects stale), calls `raft.trigger().elect()`, records metrics via `record_trigger_election()`. Implemented on both `RaftServiceImpl` (single-region) and `MultiRegionRaftService` (routes to system region).
 - `services/discovery.rs`: DiscoveryService (cluster membership)
 - `services/forward_client.rs`: Leader forwarding
-- `services/multi_shard_read.rs`: Multi-shard read coordination
-- `services/multi_shard_write.rs` (1010 lines): Multi-shard write coordination (2PC + saga). `health_state: Option<HealthState>` field with drain guard at outermost layer (before shard resolution). Holds `manager: Option<Arc<MultiRaftManager>>` for automatic write forwarding — `resolve_with_forward()` detects remote-shard organizations and forwards raw requests via `ForwardClient` (destination resolves vault slugs).
+- `services/multi_region_read.rs`: Multi-region read coordination
+- `services/multi_region_write.rs` (1010 lines): Multi-region write coordination (2PC + saga). `health_state: Option<HealthState>` field with drain guard at outermost layer (before region resolution). Holds `manager: Option<Arc<MultiRaftManager>>` for automatic write forwarding — `resolve_with_forward()` detects remote-region organizations and forwards raw requests via `ForwardClient` (destination resolves vault slugs).
 - `services/events.rs` (~1785 lines): `EventsServiceImpl` — EventsService gRPC implementation with 4 RPCs (`ListEvents`, `GetEvent`, `CountEvents`, `IngestEvents`). `GetEvent` uses O(log n) `EventStore::get_by_id()` via secondary index (replaces former O(n) full-org scan with `COUNT_SCAN_LIMIT` cap, eliminating false-not-found for orgs with >100k events). `ListEvents` supports HMAC-signed `EventPageToken` pagination with in-memory filtering (actions, event_type_prefix, principal, outcome, emission_path, correlation_id). `IngestEvents` implements 10-step pipeline: master switch → source allow-list → batch size → rate limit → org resolution → validation → write → metrics → log. 30+ unit tests.
 - `services/slug_resolver.rs` (795 lines): Organization and vault slug ↔ internal ID resolution at gRPC boundary. `SlugResolver` wraps `AppliedStateAccessor`. Organization methods: `extract_slug`, `resolve`, `resolve_slug`, `extract_and_resolve`, `extract_and_resolve_optional`. Vault methods: `extract_vault_slug`, `resolve_vault`, `resolve_vault_slug`, `extract_and_resolve_vault`, `extract_and_resolve_vault_optional`. Events method: `extract_and_resolve_for_events()` (slug=0 → system org bypass). 37 unit tests (14 org + 19 vault + 4 events).
-- `services/shard_resolver.rs`: Organization→shard routing
+- `services/region_resolver.rs`: Organization→region routing
 - `services/error_details.rs`: ErrorDetails proto builder
 
 ### Features (40+ files)
@@ -855,13 +855,13 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 #### Advanced Features
 
 - `multi_raft.rs`: Multi-Raft orchestration
-- `multi_shard_server.rs` (241 lines): Multi-shard LedgerServer (with optional `events_db` for EventsService registration, threads `HealthState` to multi-shard write service)
+- `multi_region_server.rs` (241 lines): Multi-region LedgerServer (with optional `events_db` for EventsService registration, threads `HealthState` to multi-region write service)
 - `raft_network.rs`: gRPC-based Raft transport
 - `proto_compat.rs`: Orphan rule workarounds (`organization_status_to_proto`)
 - `trace_context.rs`: W3C Trace Context
 - `logging.rs`: Canonical log lines (vault_slug field, `set_target(organization, vault_slug)`)
 - `proof.rs`: Merkle proof generation (accepts `vault_slug: Option<VaultSlug>` parameter)
-- `shard_router.rs`: Dynamic shard routing
+- `region_router.rs`: Dynamic region routing
 - `saga_orchestrator.rs` (758 lines): Distributed transaction orchestration — CAS-based sequence ID allocation (prevents duplicates on leader failover), watchdog/metrics integration, configurable via `SagaConfig`, with optional `event_handle` for UserDeleted handler-phase events
 - `vip_cache.rs` (524 lines): VIP organization cache with static + dynamic discovery, `OrganizationSlug` typed keys
 - `cardinality.rs`: HyperLogLog for metrics
@@ -1104,7 +1104,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### Integration Tests (25 test files + 2 helper modules, 12,823 lines total)
 
-- **Purpose**: End-to-end tests covering replication, failover, multi-shard, chaos, and more
+- **Purpose**: End-to-end tests covering replication, failover, multi-region, chaos, and more
 - **Test Helper Modules**:
   - `tests/common/mod.rs` (971 lines): Shared cluster setup, assertions, test harness
   - `tests/turmoil_common/mod.rs` (197 lines): Turmoil-based network simulation helpers
@@ -1119,7 +1119,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `tests/stress_integration.rs` (547 lines): Integration-level stress tests
   - `tests/leader_failover.rs` (473 lines): Leader failure and re-election
   - `tests/ttl_gc.rs` (468 lines): Time-to-live garbage collection
-  - `tests/multi_shard.rs` (452 lines): Cross-shard queries and transactions
+  - `tests/multi_region.rs` (452 lines): Cross-region queries and transactions
   - `tests/saga_orchestrator.rs` (385 lines): Distributed transaction orchestration
   - `tests/bootstrap_coordination.rs` (376 lines): Multi-node cluster bootstrap
   - `tests/orphan_cleanup.rs` (367 lines): Resource leak cleanup
@@ -1187,7 +1187,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: 30 proptest strategy generators for all domain types
 - **Key Types/Functions** (all `pub fn arb_*() -> impl Strategy<Value = T>`):
   - Primitives: `arb_key()`, `arb_value()`, `arb_small_value()`, `arb_hash()`, `arb_tx_id()`, `arb_timestamp()`
-  - IDs: `arb_organization_id()`, `arb_organization_slug()`, `arb_vault_id()`, `arb_vault_slug()`, `arb_shard()`
+  - IDs: `arb_organization_id()`, `arb_organization_slug()`, `arb_vault_id()`, `arb_vault_slug()`, `arb_region()`, `arb_shard_id()`
   - Relationship components: `arb_resource()`, `arb_relation()`, `arb_subject()`
   - Domain types: `arb_entity()`, `arb_relationship()`, `arb_set_condition()`, `arb_operation()`, `arb_operation_sequence()`
   - Blocks: `arb_transaction()`, `arb_block_header()`, `arb_vault_block()`, `arb_vault_entry()`, `arb_shard_block()`, `arb_chain_commitment()`
@@ -1238,7 +1238,7 @@ The codebase has exceptional test coverage:
 - **Crash recovery testing**: 17 crash injection tests in store crate using `CrashInjector`. Validates durability guarantees.
 - **Chaos testing**: Integration tests cover network partitions, node crashes, Byzantine faults. 22 in-process unit tests for Byzantine scenarios.
 - **Benchmarks**: Criterion benchmarks for B+ tree, read/write operations, whitepaper validation. CI tracks regressions via benchmark.yml workflow.
-- **Integration tests**: 25 integration test files in server crate (12,823 lines total) covering replication, failover, multi-shard, backup/restore, rate limiting, cancellation, circuit breaker, API version, quotas, resource metrics, dependency health, canonical log lines, config reload, externalized state persistence, streaming snapshots, and stress testing.
+- **Integration tests**: 25 integration test files in server crate (12,823 lines total) covering replication, failover, multi-region, backup/restore, rate limiting, cancellation, circuit breaker, API version, quotas, resource metrics, dependency health, canonical log lines, config reload, externalized state persistence, streaming snapshots, and stress testing.
 - **Unit tests**: ~2,458 `#[test]` and `#[tokio::test]` functions across all crates. Coverage target: 90%+.
 
 ### 4. Security Practices
@@ -1281,7 +1281,7 @@ The codebase includes 40+ production-ready features:
 - **Hot key detection**: Count-Min Sketch with rotating windows, top-k via min-heap, rate-limited warnings.
 - **Auto divergence recovery**: Background job comparing Raft log vs. state, automatic recovery from divergence.
 - **Tiered storage**: Hot/warm/cold tiers with S3/GCS/Azure backends. Multipart upload for large snapshots (>50 MB). `load_latest_hot()` for Raft follower catch-up (avoids S3 latency). Background demotion task with graceful S3 degradation. Age-based or access-based promotion/demotion.
-- **Multi-shard**: Horizontal scaling via multiple Raft groups. Cross-shard queries and transactions via saga pattern.
+- **Multi-region**: Horizontal scaling via multiple Raft groups. Cross-region queries and transactions via saga pattern.
 - **Resource quotas**: Per-organization limits (vault count, storage size, request rate). 3-tier resolution (organization → tier → global).
 - **B+ tree compaction**: Merge underfull leaves, reclaim dead space. Background job with configurable interval.
 - **Event logging**: Organization-scoped audit trails in dedicated `events.db`. Apply-phase (deterministic via `RaftPayload` timestamps, byte-identical across replicas) and handler-phase (node-local) emission. O(log n) `GetEvent` via `EventIndex` secondary index (eliminates false-not-found from former 100k scan cap). Optimized `scan_apply_phase` via `EmissionMeta` thin deserialization. GC with TTL. EventsService for queries. IngestEvents for cross-service audit aggregation.
@@ -1328,7 +1328,7 @@ InferaDB Ledger is a **production-grade blockchain database** with exceptional e
 - **8 crates**, 157 Rust source files, ~129,000 lines of Rust (excluding generated), 2,458 test functions, 90%+ coverage
 - **Zero `unsafe` code**, comprehensive error handling (snafu), structured error taxonomy
 - **Custom B+ tree engine** with ACID transactions, crash recovery, compaction
-- **Raft consensus** via openraft, batching, idempotency, multi-shard horizontal scaling
+- **Raft consensus** via openraft, batching, idempotency, multi-region horizontal scaling
 - **Enterprise features**: graceful shutdown with leader transfer (Draining phase, best-effort handoff before election timeout), circuit breaker, rate limiting, hot key detection, quota enforcement, backup/restore, tiered storage with multipart upload, API versioning, deadline propagation, dependency health checks, runtime reconfiguration, organization-scoped event logging, externalized state persistence, streaming snapshots, automatic write forwarding, and 30+ more
 - **Excellent observability**: OpenTelemetry tracing, Prometheus metrics, canonical log lines, structured request logging, SDK-side metrics, queryable event audit trails via gRPC EventsService
 - **Comprehensive testing**: 2,458 test functions, property-based tests (proptest), crash recovery tests, chaos tests, 25 integration test files

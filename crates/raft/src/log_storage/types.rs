@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
 use inferadb_ledger_types::{
-    EmailVerifyTokenId, Hash, Operation, OrganizationId, OrganizationSlug, ShardId, Transaction,
+    EmailVerifyTokenId, Hash, Operation, OrganizationId, OrganizationSlug, Region, Transaction,
     UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
 use openraft::{LogId, StoredMembership};
@@ -38,12 +38,12 @@ pub struct AppliedState {
     pub vaults: HashMap<(OrganizationId, VaultId), VaultMeta>,
     /// Previous vault block hashes (for chaining).
     pub previous_vault_hashes: HashMap<(OrganizationId, VaultId), Hash>,
-    /// Current shard height for block creation.
+    /// Current region height for block creation.
     #[serde(default)]
-    pub shard_height: u64,
-    /// Previous shard hash for chain continuity.
+    pub region_height: u64,
+    /// Previous region hash for chain continuity.
     #[serde(default)]
-    pub previous_shard_hash: Hash,
+    pub previous_region_hash: Hash,
     /// Per-client sequence tracking with cross-failover idempotency metadata.
     /// Key: (organization, vault, client_id), Value: sequence + dedup fields.
     #[serde(default)]
@@ -92,17 +92,17 @@ pub struct OrganizationMeta {
     pub slug: OrganizationSlug,
     /// Human-readable name.
     pub name: String,
-    /// Shard hosting this organization (0 for default).
-    pub shard: ShardId,
+    /// Data residency region for this organization.
+    pub region: Region,
     /// Organization lifecycle status.
     #[serde(default)]
     pub status: OrganizationStatus,
     /// Billing tier (Free, Pro, Enterprise).
     #[serde(default)]
     pub tier: OrganizationTier,
-    /// Target shard for pending migration (only set when status is Migrating).
+    /// Target region for pending migration (only set when status is Migrating).
     #[serde(default)]
-    pub pending_shard: Option<ShardId>,
+    pub pending_region: Option<Region>,
     /// Accumulated storage bytes for this organization.
     ///
     /// Persisted within the `OrganizationMeta` table entry so it survives restarts
@@ -252,10 +252,10 @@ pub struct AppliedStateCore {
     pub last_applied: Option<LogId<LedgerNodeId>>,
     /// Stored membership configuration.
     pub membership: StoredMembership<LedgerNodeId, openraft::BasicNode>,
-    /// Current shard height for block creation.
-    pub shard_height: u64,
-    /// Previous shard hash for chain continuity.
-    pub previous_shard_hash: Hash,
+    /// Current region height for block creation.
+    pub region_height: u64,
+    /// Previous region hash for chain continuity.
+    pub previous_region_hash: Hash,
     /// Deterministic timestamp (nanoseconds since epoch) from the last applied
     /// Raft entry's `proposed_at`. Used for snapshot event collection cutoff.
     #[serde(default)]
@@ -383,43 +383,11 @@ impl From<&AppliedState> for AppliedStateCore {
         Self {
             last_applied: state.last_applied,
             membership: state.membership.clone(),
-            shard_height: state.shard_height,
-            previous_shard_hash: state.previous_shard_hash,
+            region_height: state.region_height,
+            previous_region_hash: state.previous_region_hash,
             last_applied_timestamp_ns: state.last_applied_timestamp_ns,
         }
     }
-}
-
-/// Selects the least-loaded shard for a new organization.
-///
-/// Returns the shard with the fewest active (non-deleted) organizations.
-/// Tie-breaker: lowest shard wins.
-/// Fallback: shard 0 if no organizations exist.
-pub fn select_least_loaded_shard(
-    organizations: &HashMap<OrganizationId, OrganizationMeta>,
-) -> ShardId {
-    // Count active organizations per shard
-    let mut shard_counts: HashMap<ShardId, usize> = HashMap::new();
-
-    for meta in organizations.values() {
-        if meta.status != OrganizationStatus::Deleted {
-            *shard_counts.entry(meta.shard).or_insert(0) += 1;
-        }
-    }
-
-    // If no organizations exist, default to shard 0
-    if shard_counts.is_empty() {
-        return ShardId::new(0);
-    }
-
-    // Find shard with minimum count, preferring lower shard on ties
-    shard_counts
-        .into_iter()
-        .min_by(|(shard_a, count_a), (shard_b, count_b)| {
-            count_a.cmp(count_b).then_with(|| shard_a.cmp(shard_b))
-        })
-        .map(|(shard, _)| shard)
-        .unwrap_or(ShardId::new(0))
 }
 
 /// Estimates the net storage delta (in bytes) for a batch of transactions.
@@ -530,8 +498,8 @@ mod tests {
         let core = AppliedStateCore {
             last_applied: Some(LogId::new(CommittedLeaderId::new(5, 42), 100)),
             membership: membership.clone(),
-            shard_height: 999,
-            previous_shard_hash: hash,
+            region_height: 999,
+            previous_region_hash: hash,
             last_applied_timestamp_ns: 0,
         };
 
@@ -539,8 +507,8 @@ mod tests {
         let decoded: AppliedStateCore = postcard::from_bytes(&encoded).expect("deserialize");
 
         assert_eq!(decoded.last_applied, core.last_applied);
-        assert_eq!(decoded.shard_height, core.shard_height);
-        assert_eq!(decoded.previous_shard_hash, core.previous_shard_hash);
+        assert_eq!(decoded.region_height, core.region_height);
+        assert_eq!(decoded.previous_region_hash, core.previous_region_hash);
         assert_eq!(decoded, core);
     }
 
@@ -552,8 +520,8 @@ mod tests {
         let core = AppliedStateCore {
             last_applied: Some(LogId::new(CommittedLeaderId::new(u64::MAX, u64::MAX), u64::MAX)),
             membership,
-            shard_height: u64::MAX,
-            previous_shard_hash: [0xFF; 32],
+            region_height: u64::MAX,
+            previous_region_hash: [0xFF; 32],
             last_applied_timestamp_ns: i64::MAX,
         };
 
@@ -573,8 +541,8 @@ mod tests {
         let core = AppliedStateCore {
             last_applied: Some(LogId::new(CommittedLeaderId::new(1, 1), 1000)),
             membership,
-            shard_height: 500,
-            previous_shard_hash: [0x42; 32],
+            region_height: 500,
+            previous_region_hash: [0x42; 32],
             last_applied_timestamp_ns: 0,
         };
 
@@ -590,8 +558,8 @@ mod tests {
     fn test_applied_state_core_from_applied_state() {
         let mut state = AppliedState {
             last_applied: Some(LogId::new(CommittedLeaderId::new(2, 10), 50)),
-            shard_height: 42,
-            previous_shard_hash: [0xDE; 32],
+            region_height: 42,
+            previous_region_hash: [0xDE; 32],
             ..Default::default()
         };
         // Add some HashMap data to prove it's excluded from the core
@@ -601,11 +569,11 @@ mod tests {
             OrganizationMeta {
                 organization: OrganizationId::new(1),
                 slug: OrganizationSlug::new(0),
-                shard: ShardId::new(0),
+                region: Region::GLOBAL,
                 name: "test".to_string(),
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
-                pending_shard: None,
+                pending_region: None,
                 storage_bytes: 0,
             },
         );
@@ -613,8 +581,8 @@ mod tests {
         let core = AppliedStateCore::from(&state);
 
         assert_eq!(core.last_applied, state.last_applied);
-        assert_eq!(core.shard_height, state.shard_height);
-        assert_eq!(core.previous_shard_hash, state.previous_shard_hash);
+        assert_eq!(core.region_height, state.region_height);
+        assert_eq!(core.previous_region_hash, state.previous_region_hash);
         // Membership comparison via Debug format (StoredMembership may not impl PartialEq)
         assert_eq!(format!("{:?}", core.membership), format!("{:?}", state.membership));
     }
@@ -625,8 +593,8 @@ mod tests {
         let core = AppliedStateCore {
             last_applied: None,
             membership: StoredMembership::default(),
-            shard_height: 0,
-            previous_shard_hash: [0u8; 32],
+            region_height: 0,
+            previous_region_hash: [0u8; 32],
             last_applied_timestamp_ns: 0,
         };
 

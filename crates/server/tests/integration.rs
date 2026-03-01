@@ -17,7 +17,7 @@ mod externalized_state;
 mod get_node_info;
 mod isolation;
 mod leader_failover;
-mod multi_shard;
+mod multi_region;
 mod network_simulation;
 mod orphan_cleanup;
 mod replication;

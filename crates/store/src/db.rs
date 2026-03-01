@@ -699,6 +699,36 @@ impl<B: StorageBackend> Database<B> {
         Ok(Page::from_bytes(page_id, data))
     }
 
+    /// Re-wraps a batch of pages' crypto sidecar metadata to a target RMK version.
+    ///
+    /// Delegates to the backend's [`StorageBackend::rewrap_pages`]. Non-encrypted
+    /// backends return `(0, None)` immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an RMK version cannot be resolved or an unwrap/wrap fails.
+    pub fn rewrap_pages(
+        &self,
+        start_page_id: u64,
+        batch_size: usize,
+        target_version: Option<u32>,
+    ) -> Result<(usize, Option<u64>)> {
+        let backend = self.backend.read();
+        backend.rewrap_pages(start_page_id, batch_size, target_version)
+    }
+
+    /// Returns the total page count in the crypto sidecar.
+    ///
+    /// Non-encrypted backends return 0.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sidecar metadata cannot be read.
+    pub fn sidecar_page_count(&self) -> Result<u64> {
+        let backend = self.backend.read();
+        backend.sidecar_page_count()
+    }
+
     /// Returns the total number of pages allocated (including free pages).
     pub fn total_page_count(&self) -> PageId {
         self.allocator.lock().next_page_id()

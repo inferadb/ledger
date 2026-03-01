@@ -4,6 +4,7 @@
 //! - **Disk writability**: touch + delete a temp file in the data directory
 //! - **Peer reachability**: gRPC connectivity check to cluster peers
 //! - **Raft log lag**: ensures the node isn't too far behind the leader
+//! - **RMK provisioning**: reports loaded RMK versions per region
 //!
 //! Results are cached with a configurable TTL (default 5s) to prevent I/O
 //! storms from aggressive Kubernetes probe intervals.
@@ -15,7 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use inferadb_ledger_types::config::HealthCheckConfig;
+use inferadb_ledger_store::crypto::{RegionKeyManager, rmk_versions_for_health};
+use inferadb_ledger_types::{config::HealthCheckConfig, types::Region};
 use openraft::{BasicNode, Raft};
 use parking_lot::RwLock;
 use tonic::transport::Channel;
@@ -51,8 +53,9 @@ pub struct DependencyHealth {
 
 /// Validates external dependencies for health probes.
 ///
-/// Runs disk, peer, and Raft lag checks with per-check timeouts and
-/// caches results to avoid I/O storms from aggressive probe intervals.
+/// Runs disk, peer, Raft lag, and RMK provisioning checks with
+/// per-check timeouts and caches results to avoid I/O storms from
+/// aggressive Kubernetes probe intervals.
 #[derive(Clone)]
 pub struct DependencyHealthChecker {
     /// Raft instance for metrics access.
@@ -63,6 +66,10 @@ pub struct DependencyHealthChecker {
     config: HealthCheckConfig,
     /// Cached check results.
     cache: Arc<RwLock<Option<CachedResult>>>,
+    /// Key manager for RMK version reporting.
+    key_manager: Option<Arc<dyn RegionKeyManager>>,
+    /// Node's region for determining required RMK regions.
+    node_region: Option<Region>,
 }
 
 impl DependencyHealthChecker {
@@ -72,7 +79,25 @@ impl DependencyHealthChecker {
         data_dir: PathBuf,
         config: HealthCheckConfig,
     ) -> Self {
-        Self { raft, data_dir, config, cache: Arc::new(RwLock::new(None)) }
+        Self {
+            raft,
+            data_dir,
+            config,
+            cache: Arc::new(RwLock::new(None)),
+            key_manager: None,
+            node_region: None,
+        }
+    }
+
+    /// Sets the key manager and node region for RMK health reporting.
+    pub fn with_key_manager(
+        mut self,
+        key_manager: Arc<dyn RegionKeyManager>,
+        node_region: Region,
+    ) -> Self {
+        self.key_manager = Some(key_manager);
+        self.node_region = Some(node_region);
+        self
     }
 
     /// Runs all dependency checks, returning cached results if within TTL.
@@ -103,6 +128,12 @@ impl DependencyHealthChecker {
         results.insert("disk_writable".to_string(), disk_result);
         results.insert("raft_log_lag".to_string(), raft_lag_result);
         results.insert("peer_reachable".to_string(), peer_result);
+
+        // RMK provisioning check
+        if let (Some(km), Some(region)) = (&self.key_manager, self.node_region) {
+            let rmk_result = check_rmk_provisioning(km.as_ref(), region);
+            results.insert("rmk_provisioning".to_string(), rmk_result);
+        }
 
         let all_healthy = results.values().all(|r| r.healthy);
 
@@ -231,6 +262,38 @@ pub(crate) async fn check_peer_reachability(
     DependencyCheckResult {
         healthy: false,
         detail: format!("no peers reachable (tried: {})", peer_addrs.join(", ")),
+    }
+}
+
+/// Checks RMK provisioning for the node's required regions.
+///
+/// Reports how many versions are loaded per region. Healthy if all
+/// required regions have at least one active version.
+pub(crate) fn check_rmk_provisioning(
+    key_manager: &dyn RegionKeyManager,
+    node_region: Region,
+) -> DependencyCheckResult {
+    let versions_map = rmk_versions_for_health(key_manager, node_region);
+
+    let mut region_summaries = Vec::new();
+    let mut all_ok = true;
+
+    for (region, versions) in &versions_map {
+        let has_active =
+            versions.iter().any(|v| v.status == inferadb_ledger_types::config::RmkStatus::Active);
+        if !has_active {
+            all_ok = false;
+        }
+        let version_nums: Vec<String> =
+            versions.iter().map(|v| format!("v{}", v.version)).collect();
+        region_summaries.push(format!("{region}: [{}]", version_nums.join(", ")));
+    }
+
+    region_summaries.sort();
+
+    DependencyCheckResult {
+        healthy: all_ok,
+        detail: format!("rmk_versions: {{{}}}", region_summaries.join(", ")),
     }
 }
 
@@ -432,5 +495,58 @@ mod tests {
         std::fs::write(&file_path, b"data").expect("create file");
         let dir_exists = file_path.exists() && file_path.is_dir();
         assert!(!dir_exists);
+    }
+
+    // ─── RMK Provisioning Check Tests ─────────────────────────
+
+    #[test]
+    fn test_rmk_check_all_regions_provisioned() {
+        use inferadb_ledger_store::crypto::FileKeyManager;
+        use inferadb_ledger_types::types::Region;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let manager = FileKeyManager::new(dir.path().to_path_buf());
+
+        manager.rotate_rmk(Region::GLOBAL).expect("rotate GLOBAL");
+        manager.rotate_rmk(Region::US_EAST_VA).expect("rotate US_EAST_VA");
+        manager.rotate_rmk(Region::US_WEST_OR).expect("rotate US_WEST_OR");
+
+        let result = check_rmk_provisioning(&manager, Region::US_EAST_VA);
+        assert!(result.healthy);
+        assert!(result.detail.contains("rmk_versions"));
+    }
+
+    #[test]
+    fn test_rmk_check_missing_region_unhealthy() {
+        use inferadb_ledger_store::crypto::FileKeyManager;
+        use inferadb_ledger_types::types::Region;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let manager = FileKeyManager::new(dir.path().to_path_buf());
+
+        // Only provision GLOBAL
+        manager.rotate_rmk(Region::GLOBAL).expect("rotate GLOBAL");
+
+        let result = check_rmk_provisioning(&manager, Region::US_EAST_VA);
+        assert!(!result.healthy);
+    }
+
+    #[test]
+    fn test_rmk_check_version_numbers_in_detail() {
+        use inferadb_ledger_store::crypto::FileKeyManager;
+        use inferadb_ledger_types::types::Region;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let manager = FileKeyManager::new(dir.path().to_path_buf());
+
+        manager.rotate_rmk(Region::GLOBAL).expect("rotate GLOBAL v1");
+        manager.rotate_rmk(Region::GLOBAL).expect("rotate GLOBAL v2");
+        manager.rotate_rmk(Region::US_EAST_VA).expect("rotate US_EAST_VA");
+        manager.rotate_rmk(Region::US_WEST_OR).expect("rotate US_WEST_OR");
+
+        let result = check_rmk_provisioning(&manager, Region::US_EAST_VA);
+        assert!(result.healthy);
+        assert!(result.detail.contains("v1"));
+        assert!(result.detail.contains("v2"));
     }
 }

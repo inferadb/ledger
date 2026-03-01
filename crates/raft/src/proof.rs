@@ -29,7 +29,7 @@ pub enum ProofError {
     #[snafu(display("block archive not configured"))]
     ArchiveNotAvailable,
 
-    /// Failed to find shard height for the vault block.
+    /// Failed to find region height for the vault block.
     #[snafu(display(
         "block not found: organization={organization}, vault={vault}, height={vault_height}"
     ))]
@@ -43,17 +43,17 @@ pub enum ProofError {
     },
 
     /// Failed to query the block archive index.
-    #[snafu(display("failed to find shard height: {source}"))]
-    FindShardHeight {
+    #[snafu(display("failed to find region height: {source}"))]
+    FindRegionHeight {
         /// The underlying block archive error.
         source: inferadb_ledger_state::BlockArchiveError,
     },
 
     /// Failed to read block from archive.
-    #[snafu(display("failed to read block at shard height {shard_height}: {source}"))]
+    #[snafu(display("failed to read block at region height {region_height}: {source}"))]
     ReadBlock {
-        /// The shard height that failed to read.
-        shard_height: u64,
+        /// The region height that failed to read.
+        region_height: u64,
         /// The underlying block archive error.
         source: inferadb_ledger_state::BlockArchiveError,
     },
@@ -115,14 +115,14 @@ pub fn generate_write_proof(
     vault_height: u64,
     tx_index: usize,
 ) -> Result<WriteProof> {
-    // Find the shard height containing this vault block
-    let shard_height = archive
-        .find_shard_height(organization, vault, vault_height)
-        .context(FindShardHeightSnafu)?
+    // Find the region height containing this vault block
+    let region_height = archive
+        .find_region_height(organization, vault, vault_height)
+        .context(FindRegionHeightSnafu)?
         .ok_or(ProofError::BlockNotFound { organization, vault, vault_height })?;
 
     // Read the block
-    let block = archive.read_block(shard_height).context(ReadBlockSnafu { shard_height })?;
+    let block = archive.read_block(region_height).context(ReadBlockSnafu { region_height })?;
 
     // Find our vault entry in the block
     let entry = block

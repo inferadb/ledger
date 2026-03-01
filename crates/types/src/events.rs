@@ -247,6 +247,8 @@ pub enum EventAction {
     BackupRestored,
     /// Snapshot created.
     SnapshotCreated,
+    /// User data erased via crypto-shredding.
+    UserErased,
 
     // ── Organization scope ──────────────────────────────────
     /// Vault created.
@@ -295,7 +297,8 @@ impl EventAction {
             | EventAction::ConfigurationChanged
             | EventAction::BackupCreated
             | EventAction::BackupRestored
-            | EventAction::SnapshotCreated => EventScope::System,
+            | EventAction::SnapshotCreated
+            | EventAction::UserErased => EventScope::System,
 
             // Organization scope
             EventAction::VaultCreated
@@ -334,7 +337,7 @@ impl EventAction {
             EventAction::BackupCreated => "ledger.backup.created",
             EventAction::BackupRestored => "ledger.backup.restored",
             EventAction::SnapshotCreated => "ledger.snapshot.created",
-
+            EventAction::UserErased => "ledger.user.erased",
             // Organization scope
             EventAction::VaultCreated => "ledger.vault.created",
             EventAction::VaultDeleted => "ledger.vault.deleted",
@@ -371,6 +374,7 @@ impl EventAction {
             EventAction::BackupCreated => "backup_created",
             EventAction::BackupRestored => "backup_restored",
             EventAction::SnapshotCreated => "snapshot_created",
+            EventAction::UserErased => "user_erased",
             EventAction::VaultCreated => "vault_created",
             EventAction::VaultDeleted => "vault_deleted",
             EventAction::WriteCommitted => "write_committed",
@@ -402,6 +406,7 @@ impl EventAction {
         EventAction::BackupCreated,
         EventAction::BackupRestored,
         EventAction::SnapshotCreated,
+        EventAction::UserErased,
         EventAction::VaultCreated,
         EventAction::VaultDeleted,
         EventAction::WriteCommitted,
@@ -753,6 +758,7 @@ mod tests {
             EventAction::BackupCreated,
             EventAction::BackupRestored,
             EventAction::SnapshotCreated,
+            EventAction::UserErased,
         ];
         for action in system_actions {
             assert_eq!(action.scope(), EventScope::System, "{:?} should be System scope", action);
@@ -813,8 +819,8 @@ mod tests {
 
     #[test]
     fn event_action_all_count() {
-        // 15 system + 11 organization = 26 total
-        assert_eq!(EventAction::ALL.len(), 26);
+        // 16 system + 11 organization = 27 total
+        assert_eq!(EventAction::ALL.len(), 27);
     }
 
     // ── EventOutcome ────────────────────────────────────────

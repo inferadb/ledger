@@ -1,64 +1,64 @@
-//! Multi-Raft Manager for coordinating multiple independent shard groups.
+//! Multi-Raft Manager for coordinating multiple independent region groups.
 //!
-//! InferaDB uses a shard-per-Raft-group architecture where
-//! each shard is an independent Raft consensus group. The `_system` shard handles
-//! global coordination, while data shards handle organization workloads.
+//! InferaDB uses a region-per-Raft-group architecture where
+//! each region is an independent Raft consensus group. The `_system` region handles
+//! global coordination, while data regions handle organization workloads.
 //!
 //! ## Architecture
 //!
 //! ```text
 //! MultiRaftManager
-//! ├── _system shard (ShardGroup 0)
+//! ├── _system region (RegionGroup 0)
 //! │   ├── Raft instance
 //! │   ├── RaftLogStore + StateLayer
 //! │   ├── BlockArchive
 //! │   └── Background jobs
-//! ├── data shard 1 (ShardGroup 1)
+//! ├── data region 1 (RegionGroup 1)
 //! │   └── ... (same structure)
-//! └── data shard N (ShardGroup N)
+//! └── data region N (RegionGroup N)
 //!     └── ...
 //! ```
 //!
-//! ## Shard Isolation
+//! ## Region Isolation
 //!
-//! Each shard group is fully isolated:
+//! Each region group is fully isolated:
 //! - Separate Raft consensus (independent elections, log replication)
-//! - Separate storage files (state.db, blocks.db, raft.db per shard)
+//! - Separate storage files (state.db, blocks.db, raft.db per region)
 //! - Separate background jobs (GC, compaction, recovery)
 //!
 //! ## Usage
 //!
 //! ```no_run
 //! # use std::path::PathBuf;
-//! # use inferadb_ledger_raft::multi_raft::{MultiRaftConfig, MultiRaftManager, ShardConfig};
-//! # use inferadb_ledger_types::ShardId;
+//! # use inferadb_ledger_raft::multi_raft::{MultiRaftConfig, MultiRaftManager, RegionConfig};
+//! # use inferadb_ledger_types::Region;
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = MultiRaftConfig::builder()
 //!     .data_dir(PathBuf::from("/data"))
 //!     .node_id(1u64)
+//!     .local_region(Region::GLOBAL)
 //!     .build();
 //! let manager = MultiRaftManager::new(config);
 //!
-//! // Start the _system shard (always required)
-//! let system_config = ShardConfig::system(1u64, "127.0.0.1:50051".to_string());
-//! manager.start_system_shard(system_config).await?;
+//! // Start the _system region (always required)
+//! let system_config = RegionConfig::system(1u64, "127.0.0.1:50051".to_string());
+//! manager.start_system_region(system_config).await?;
 //!
-//! // Route requests to a shard
-//! let shard = manager.get_shard(ShardId::new(0))?;
+//! // Route requests to a region
+//! let region = manager.get_region_group(Region::GLOBAL)?;
 //! # Ok(())
 //! # }
 //! ```
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use inferadb_ledger_proto::proto::BlockAnnouncement;
-use inferadb_ledger_state::{BlockArchive, StateLayer, system::SystemOrganizationService};
-use inferadb_ledger_store::{Database, DatabaseConfig, FileBackend};
-use inferadb_ledger_types::{OrganizationId, ShardId};
+use inferadb_ledger_state::{
+    BlockArchive, StateLayer,
+    system::{MIN_NODES_PER_PROTECTED_REGION, SystemOrganizationService},
+};
+use inferadb_ledger_store::FileBackend;
+use inferadb_ledger_types::{OrganizationId, Region};
 use openraft::{BasicNode, Raft, storage::Adaptor};
 use parking_lot::RwLock;
 use snafu::Snafu;
@@ -69,10 +69,13 @@ use crate::{
     auto_recovery::AutoRecoveryJob,
     block_compaction::BlockCompactor,
     btree_compaction::BTreeCompactor,
+    dek_rewrap::{DekRewrapJob, RewrapProgress},
     integrity_scrubber::IntegrityScrubberJob,
     log_storage::{AppliedStateAccessor, RaftLogStore},
+    metrics::record_region_node_count,
     raft_network::GrpcRaftNetworkFactory,
-    shard_router::ShardRouter,
+    region_router::RegionRouter,
+    region_storage::RegionStorageManager,
     ttl_gc::TtlGarbageCollector,
     types::{LedgerNodeId, LedgerTypeConfig},
 };
@@ -84,33 +87,42 @@ use crate::{
 /// Errors that can occur during multi-raft operations.
 #[derive(Debug, Snafu)]
 pub enum MultiRaftError {
-    /// Shard already exists.
-    #[snafu(display("Shard {shard} already exists"))]
-    ShardExists { shard: ShardId },
+    /// Region already exists.
+    #[snafu(display("Region {region} already exists"))]
+    RegionExists { region: Region },
 
-    /// Shard not found.
-    #[snafu(display("Shard {shard} not found"))]
-    ShardNotFound { shard: ShardId },
+    /// Region not found.
+    #[snafu(display("Region {region} not found"))]
+    RegionNotFound { region: Region },
 
     /// Failed to open storage.
-    #[snafu(display("Storage error for shard {shard}: {message}"))]
-    Storage { shard: ShardId, message: String },
+    #[snafu(display("Storage error for region {region}: {message}"))]
+    Storage { region: Region, message: String },
 
     /// Failed to create Raft instance.
-    #[snafu(display("Raft error for shard {shard}: {message}"))]
-    Raft { shard: ShardId, message: String },
+    #[snafu(display("Raft error for region {region}: {message}"))]
+    Raft { region: Region, message: String },
 
-    /// System shard not initialized.
-    #[snafu(display("System shard (_system) must be started first"))]
-    SystemShardRequired,
+    /// System region not initialized.
+    #[snafu(display("System region (_system) must be started first"))]
+    SystemRegionRequired,
+
+    /// Insufficient initial members for a protected region.
+    ///
+    /// The caller is responsible for filtering to in-region nodes before
+    /// constructing `RegionConfig`; this check enforces the minimum count.
+    #[snafu(display(
+        "Protected region {region} requires at least {required} initial members, found {found}"
+    ))]
+    InsufficientNodes { region: Region, required: usize, found: usize },
 }
 
 /// Result type for multi-raft operations.
 pub type Result<T> = std::result::Result<T, MultiRaftError>;
 
-/// Storage components for a shard (state layer, block archive, raft log store, block
-/// announcements).
-type ShardStorage = (
+/// Storage components returned from region opening (state, block archive, raft log store,
+/// block announcements).
+type OpenedRegionStorage = (
     Arc<StateLayer<FileBackend>>,
     Arc<BlockArchive<FileBackend>>,
     RaftLogStore<FileBackend>,
@@ -124,10 +136,12 @@ type ShardStorage = (
 /// Configuration for the Multi-Raft Manager.
 #[derive(Debug, Clone, bon::Builder)]
 pub struct MultiRaftConfig {
-    /// Base data directory (shards stored in subdirectories).
+    /// Base data directory (regions stored in subdirectories).
     pub data_dir: PathBuf,
     /// This node's ID.
     pub node_id: LedgerNodeId,
+    /// This node's region tag (set at startup from node config).
+    pub local_region: Region,
     /// Raft heartbeat interval in milliseconds.
     #[builder(default = 150)]
     pub heartbeat_interval_ms: u64,
@@ -144,36 +158,28 @@ pub struct MultiRaftConfig {
 
 impl MultiRaftConfig {
     /// Creates a new configuration.
-    pub fn new(data_dir: PathBuf, node_id: LedgerNodeId) -> Self {
+    pub fn new(data_dir: PathBuf, node_id: LedgerNodeId, local_region: Region) -> Self {
         Self {
             data_dir,
             node_id,
+            local_region,
             heartbeat_interval_ms: 150,
             election_timeout_min_ms: 300,
             election_timeout_max_ms: 600,
             trace_raft_rpcs: true,
         }
     }
-
-    /// Returns the data directory for a specific shard.
-    pub fn shard_dir(&self, shard: ShardId) -> PathBuf {
-        if shard == ShardId::new(0) {
-            self.data_dir.join("shards").join("_system")
-        } else {
-            self.data_dir.join("shards").join(format!("shard_{:04}", shard.value()))
-        }
-    }
 }
 
-/// Configuration for a single shard.
+/// Configuration for a single region.
 #[derive(Debug, Clone, bon::Builder)]
-pub struct ShardConfig {
-    /// Shard identifier.
-    pub shard: ShardId,
+pub struct RegionConfig {
+    /// Region identifier.
+    pub region: Region,
     /// Initial cluster members (node_id -> address).
     #[builder(default)]
     pub initial_members: Vec<(LedgerNodeId, String)>,
-    /// Whether to bootstrap this shard as a new cluster.
+    /// Whether to bootstrap this region as a new cluster.
     #[builder(default = true)]
     pub bootstrap: bool,
     /// Whether to start background jobs (GC, compactor).
@@ -181,20 +187,20 @@ pub struct ShardConfig {
     pub enable_background_jobs: bool,
 }
 
-impl ShardConfig {
-    /// Creates configuration for the system shard.
+impl RegionConfig {
+    /// Creates configuration for the system region.
     pub fn system(node_id: LedgerNodeId, address: String) -> Self {
         Self {
-            shard: ShardId::new(0),
+            region: Region::GLOBAL,
             initial_members: vec![(node_id, address)],
             bootstrap: true,
             enable_background_jobs: true,
         }
     }
 
-    /// Creates configuration for a data shard.
-    pub fn data(shard: ShardId, initial_members: Vec<(LedgerNodeId, String)>) -> Self {
-        Self { shard, initial_members, bootstrap: true, enable_background_jobs: true }
+    /// Creates configuration for a data region.
+    pub fn data(region: Region, initial_members: Vec<(LedgerNodeId, String)>) -> Self {
+        Self { region, initial_members, bootstrap: true, enable_background_jobs: true }
     }
 
     /// Disables background jobs (useful for testing).
@@ -205,11 +211,11 @@ impl ShardConfig {
 }
 
 // ============================================================================
-// Shard Group
+// Region Group
 // ============================================================================
 
-/// Background job handles for a shard.
-pub struct ShardBackgroundJobs {
+/// Background job handles for a region.
+pub struct RegionBackgroundJobs {
     /// TTL garbage collector handle.
     gc_handle: Option<JoinHandle<()>>,
     /// Block compactor handle.
@@ -220,9 +226,13 @@ pub struct ShardBackgroundJobs {
     btree_compactor_handle: Option<JoinHandle<()>>,
     /// Integrity scrubber handle.
     integrity_scrubber_handle: Option<JoinHandle<()>>,
+    /// DEK re-wrapping job handle.
+    dek_rewrap_handle: Option<JoinHandle<()>>,
+    /// Shared re-wrapping progress (read by admin service).
+    rewrap_progress: Arc<RewrapProgress>,
 }
 
-impl ShardBackgroundJobs {
+impl RegionBackgroundJobs {
     /// Creates with no jobs (used when background_jobs disabled).
     fn none() -> Self {
         Self {
@@ -231,7 +241,14 @@ impl ShardBackgroundJobs {
             recovery_handle: None,
             btree_compactor_handle: None,
             integrity_scrubber_handle: None,
+            dek_rewrap_handle: None,
+            rewrap_progress: Arc::new(RewrapProgress::new()),
         }
+    }
+
+    /// Returns the shared re-wrapping progress tracker.
+    pub fn rewrap_progress(&self) -> Arc<RewrapProgress> {
+        Arc::clone(&self.rewrap_progress)
     }
 
     /// Aborts all running background jobs.
@@ -251,20 +268,23 @@ impl ShardBackgroundJobs {
         if let Some(handle) = self.integrity_scrubber_handle.take() {
             handle.abort();
         }
+        if let Some(handle) = self.dek_rewrap_handle.take() {
+            handle.abort();
+        }
     }
 }
 
-/// A single shard group with its own Raft instance and storage.
+/// A single region group with its own Raft instance and storage.
 ///
-/// Each ShardGroup is a complete, isolated Raft cluster member for one shard.
+/// Each RegionGroup is a complete, isolated Raft cluster member for one region.
 /// Uses FileBackend for production storage - this is intentional as Raft requires
 /// durable storage for safety.
-pub struct ShardGroup {
-    /// Shard identifier.
-    shard: ShardId,
+pub struct RegionGroup {
+    /// Region identifier.
+    region: Region,
     /// The Raft consensus instance.
     raft: Arc<Raft<LedgerTypeConfig>>,
-    /// Shared state layer for this shard.
+    /// Shared state layer for this region.
     state: Arc<StateLayer<FileBackend>>,
     /// Block archive for historical blocks.
     block_archive: Arc<BlockArchive<FileBackend>>,
@@ -273,13 +293,13 @@ pub struct ShardGroup {
     /// Block announcement broadcast channel for real-time block notifications.
     block_announcements: broadcast::Sender<BlockAnnouncement>,
     /// Background job handles (wrapped in Mutex for mutable access through Arc).
-    background_jobs: parking_lot::Mutex<ShardBackgroundJobs>,
+    background_jobs: parking_lot::Mutex<RegionBackgroundJobs>,
 }
 
-impl ShardGroup {
-    /// Returns the shard ID.
-    pub fn shard(&self) -> ShardId {
-        self.shard
+impl RegionGroup {
+    /// Returns the region ID.
+    pub fn region(&self) -> Region {
+        self.region
     }
 
     /// Returns the Raft instance.
@@ -312,7 +332,7 @@ impl ShardGroup {
         &self.block_announcements
     }
 
-    /// Checks if this node is the leader for this shard.
+    /// Checks if this node is the leader for this region.
     pub fn is_leader(&self, node_id: LedgerNodeId) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
         metrics.current_leader == Some(node_id)
@@ -328,23 +348,32 @@ impl ShardGroup {
 // Multi-Raft Manager
 // ============================================================================
 
-/// Manager for multiple Raft shard groups.
+/// Manager for multiple Raft region groups.
 ///
 /// Coordinates the lifecycle of multiple independent Raft consensus groups,
 /// each handling a subset of organizations. Uses FileBackend for production storage.
+/// Delegates per-region database lifecycle to [`RegionStorageManager`].
 pub struct MultiRaftManager {
     /// Configuration.
     config: MultiRaftConfig,
-    /// Active shard groups indexed by shard ID.
-    shards: RwLock<HashMap<ShardId, Arc<ShardGroup>>>,
-    /// Router for organization-to-shard resolution.
-    router: RwLock<Option<Arc<ShardRouter<FileBackend>>>>,
+    /// Per-region database storage manager.
+    storage_manager: RegionStorageManager,
+    /// Active region groups indexed by region ID.
+    regions: RwLock<HashMap<Region, Arc<RegionGroup>>>,
+    /// Router for organization-to-region resolution.
+    router: RwLock<Option<Arc<RegionRouter<FileBackend>>>>,
 }
 
 impl MultiRaftManager {
     /// Creates a new Multi-Raft Manager.
     pub fn new(config: MultiRaftConfig) -> Self {
-        Self { config, shards: RwLock::new(HashMap::new()), router: RwLock::new(None) }
+        let storage_manager = RegionStorageManager::new(config.data_dir.clone());
+        Self {
+            config,
+            storage_manager,
+            regions: RwLock::new(HashMap::new()),
+            router: RwLock::new(None),
+        }
     }
 
     /// Returns the configuration.
@@ -353,151 +382,176 @@ impl MultiRaftManager {
         &self.config
     }
 
-    /// Returns a shard group by ID.
+    /// Returns this node's configured region.
+    pub fn local_region(&self) -> Region {
+        self.config.local_region
+    }
+
+    /// Returns the region storage manager.
+    #[must_use]
+    pub fn storage_manager(&self) -> &RegionStorageManager {
+        &self.storage_manager
+    }
+
+    /// Returns a region group by ID.
     ///
     /// # Errors
     ///
-    /// Returns [`MultiRaftError::ShardNotFound`] if no shard with the given ID
+    /// Returns [`MultiRaftError::RegionNotFound`] if no region with the given ID
     /// is currently active.
-    pub fn get_shard(&self, shard: ShardId) -> Result<Arc<ShardGroup>> {
-        self.shards.read().get(&shard).cloned().ok_or(MultiRaftError::ShardNotFound { shard })
+    pub fn get_region_group(&self, region: Region) -> Result<Arc<RegionGroup>> {
+        self.regions.read().get(&region).cloned().ok_or(MultiRaftError::RegionNotFound { region })
     }
 
-    /// Returns the system shard (`_system`).
+    /// Returns the system region (`_system`).
     ///
     /// # Errors
     ///
-    /// Returns [`MultiRaftError::ShardNotFound`] if the system shard (ID 0)
+    /// Returns [`MultiRaftError::RegionNotFound`] if the system region (ID 0)
     /// has not been started.
-    pub fn system_shard(&self) -> Result<Arc<ShardGroup>> {
-        self.get_shard(ShardId::new(0))
+    pub fn system_region(&self) -> Result<Arc<RegionGroup>> {
+        self.get_region_group(Region::GLOBAL)
     }
 
-    /// Lists all active shard IDs.
-    pub fn list_shards(&self) -> Vec<ShardId> {
-        self.shards.read().keys().copied().collect()
+    /// Lists all active region IDs.
+    pub fn list_regions(&self) -> Vec<Region> {
+        self.regions.read().keys().copied().collect()
     }
 
-    /// Checks if a shard is active.
-    pub fn has_shard(&self, shard: ShardId) -> bool {
-        self.shards.read().contains_key(&shard)
+    /// Checks if a region is active.
+    pub fn has_region(&self, region: Region) -> bool {
+        self.regions.read().contains_key(&region)
     }
 
-    /// Returns the shard router (if initialized).
-    pub fn router(&self) -> Option<Arc<ShardRouter<FileBackend>>> {
+    /// Returns the region router (if initialized).
+    pub fn router(&self) -> Option<Arc<RegionRouter<FileBackend>>> {
         self.router.read().clone()
     }
 
-    /// Routes an organization to its shard group.
+    /// Routes an organization to its region group.
     ///
-    /// Uses the ShardRouter to look up the organization's shard assignment,
-    /// then returns the local ShardGroup if available.
+    /// Uses the RegionRouter to look up the organization's region assignment,
+    /// then returns the local RegionGroup if available.
     ///
     /// Returns `None` if:
-    /// - Router not initialized (system shard not started)
+    /// - Router not initialized (system region not started)
     /// - Organization not found in routing table
-    /// - Shard is on a different node (requires forwarding)
+    /// - Region is on a different node (requires forwarding)
     ///
     /// * `organization` - Internal organization identifier (`OrganizationId`).
-    pub fn route_organization(&self, organization: OrganizationId) -> Option<Arc<ShardGroup>> {
+    pub fn route_organization(&self, organization: OrganizationId) -> Option<Arc<RegionGroup>> {
         let router = self.router.read().clone()?;
 
-        // Look up shard assignment
+        // Look up region assignment
         let routing = router.get_routing(organization).ok()?;
 
-        // Get local shard group (if we host this shard)
-        self.shards.read().get(&routing.shard).cloned()
+        // Get local region group (if we host this region)
+        self.regions.read().get(&routing.region).cloned()
     }
 
-    /// Returns the shard ID for an organization.
+    /// Returns the region ID for an organization.
     ///
-    /// Looks up the organization's shard assignment without checking
-    /// if the shard is locally available.
+    /// Looks up the organization's region assignment without checking
+    /// if the region is locally available.
     ///
     /// * `organization` - Internal organization identifier (`OrganizationId`).
-    pub fn get_organization_shard(&self, organization: OrganizationId) -> Option<ShardId> {
+    pub fn get_organization_region(&self, organization: OrganizationId) -> Option<Region> {
         let router = self.router.read().clone()?;
-        router.get_routing(organization).ok().map(|r| r.shard)
+        router.get_routing(organization).ok().map(|r| r.region)
     }
 
-    /// Starts the system shard (`_system`).
+    /// Starts the system region (`_system`).
     ///
-    /// The system shard must be started before any data shards.
+    /// The system region must be started before any data regions.
     /// It stores the organization routing table and cluster metadata.
-    /// Also initializes the `ShardRouter` for organization-to-shard routing.
+    /// Also initializes the `RegionRouter` for organization-to-region routing.
     ///
     /// # Errors
     ///
-    /// Returns [`MultiRaftError::Raft`] if `shard` is not 0,
-    /// [`MultiRaftError::ShardExists`] if the shard is already running,
+    /// Returns [`MultiRaftError::Raft`] if `region` is not 0,
+    /// [`MultiRaftError::RegionExists`] if the region is already running,
     /// or a storage/Raft error if initialization fails.
-    pub async fn start_system_shard(&self, shard_config: ShardConfig) -> Result<Arc<ShardGroup>> {
-        if shard_config.shard != ShardId::new(0) {
+    pub async fn start_system_region(
+        &self,
+        region_config: RegionConfig,
+    ) -> Result<Arc<RegionGroup>> {
+        if region_config.region != Region::GLOBAL {
             return Err(MultiRaftError::Raft {
-                shard: shard_config.shard,
-                message: "System shard must have shard=0".to_string(),
+                region: region_config.region,
+                message: "System region must have region=0".to_string(),
             });
         }
 
-        let shard = self.start_shard(shard_config).await?;
+        let region = self.start_region(region_config).await?;
 
-        // Initialize the ShardRouter with access to _system's state
-        let system_service = Arc::new(SystemOrganizationService::new(shard.state.clone()));
-        let router = Arc::new(ShardRouter::new(system_service));
+        // Initialize the RegionRouter with access to _system's state
+        let system_service = Arc::new(SystemOrganizationService::new(region.state.clone()));
+        let router = Arc::new(RegionRouter::new(system_service, self.config.local_region));
         *self.router.write() = Some(router);
 
-        info!("ShardRouter initialized with _system organization");
+        info!("RegionRouter initialized with _system organization");
 
-        Ok(shard)
+        Ok(region)
     }
 
-    /// Starts a data shard.
+    /// Starts a data region.
     ///
-    /// Requires the system shard to be started first.
+    /// Requires the system region to be started first.
     ///
     /// # Errors
     ///
-    /// Returns [`MultiRaftError::SystemShardRequired`] if the system shard has
-    /// not been started, [`MultiRaftError::Raft`] if `shard` is 0,
-    /// [`MultiRaftError::ShardExists`] if the shard is already running,
+    /// Returns [`MultiRaftError::SystemRegionRequired`] if the system region has
+    /// not been started, [`MultiRaftError::Raft`] if `region` is 0,
+    /// [`MultiRaftError::RegionExists`] if the region is already running,
     /// or a storage/Raft error if initialization fails.
-    pub async fn start_data_shard(&self, shard_config: ShardConfig) -> Result<Arc<ShardGroup>> {
-        // Verify system shard is running
-        if !self.has_shard(ShardId::new(0)) {
-            return Err(MultiRaftError::SystemShardRequired);
+    pub async fn start_data_region(&self, region_config: RegionConfig) -> Result<Arc<RegionGroup>> {
+        // Verify system region is running
+        if !self.has_region(Region::GLOBAL) {
+            return Err(MultiRaftError::SystemRegionRequired);
         }
 
-        if shard_config.shard == ShardId::new(0) {
+        if region_config.region == Region::GLOBAL {
             return Err(MultiRaftError::Raft {
-                shard: ShardId::new(0),
-                message: "Use start_system_shard for shard=0".to_string(),
+                region: Region::GLOBAL,
+                message: "Use start_system_region for region=0".to_string(),
             });
         }
 
-        self.start_shard(shard_config).await
+        self.start_region(region_config).await
     }
 
-    /// Starts a shard group.
-    async fn start_shard(&self, shard_config: ShardConfig) -> Result<Arc<ShardGroup>> {
-        let shard = shard_config.shard;
+    /// Starts a region group.
+    async fn start_region(&self, region_config: RegionConfig) -> Result<Arc<RegionGroup>> {
+        let region = region_config.region;
 
-        // Check if shard already exists
-        if self.has_shard(shard) {
-            return Err(MultiRaftError::ShardExists { shard });
+        // Check if region already exists
+        if self.has_region(region) {
+            return Err(MultiRaftError::RegionExists { region });
         }
 
-        info!(shard = shard.value(), "Starting shard group");
+        let is_protected = region.requires_residency();
 
-        // Create shard directory
-        let shard_dir = self.config.shard_dir(shard);
-        std::fs::create_dir_all(&shard_dir).map_err(|e| MultiRaftError::Storage {
-            shard,
-            message: format!("Failed to create shard directory: {}", e),
-        })?;
+        // Protected regions enforce minimum in-region node count
+        if is_protected && region_config.initial_members.len() < MIN_NODES_PER_PROTECTED_REGION {
+            return Err(MultiRaftError::InsufficientNodes {
+                region,
+                required: MIN_NODES_PER_PROTECTED_REGION,
+                found: region_config.initial_members.len(),
+            });
+        }
 
-        // Open storage (includes block announcements channel wired to RaftLogStore)
+        // Emit region node count metric
+        record_region_node_count(
+            region.as_str(),
+            region_config.initial_members.len(),
+            is_protected,
+        );
+
+        info!(region = region.as_str(), "Starting region group");
+
+        // Open storage via RegionStorageManager (creates directory + databases + RaftLogStore)
         let (state, block_archive, log_store, block_announcements) =
-            self.open_shard_storage(shard, &shard_dir)?;
+            self.open_region_storage(region)?;
 
         // Get accessor before log_store is consumed
         let applied_state = log_store.accessor();
@@ -506,7 +560,7 @@ impl MultiRaftManager {
 
         // Build Raft config
         let raft_config = openraft::Config {
-            cluster_name: format!("ledger-shard-{}", shard.value()),
+            cluster_name: format!("ledger-region-{}", region.as_str()),
             heartbeat_interval: self.config.heartbeat_interval_ms,
             election_timeout_min: self.config.election_timeout_min_ms,
             election_timeout_max: self.config.election_timeout_max_ms,
@@ -526,33 +580,33 @@ impl MultiRaftManager {
         )
         .await
         .map_err(|e| MultiRaftError::Raft {
-            shard,
+            region,
             message: format!("Failed to create Raft instance: {}", e),
         })?;
 
         let raft = Arc::new(raft);
 
         // Bootstrap if configured
-        if shard_config.bootstrap && !shard_config.initial_members.is_empty() {
-            self.bootstrap_shard(&raft, &shard_config).await?;
+        if region_config.bootstrap && !region_config.initial_members.is_empty() {
+            self.bootstrap_region(&raft, &region_config).await?;
         }
 
         // Start background jobs if enabled
-        let background_jobs = if shard_config.enable_background_jobs {
+        let background_jobs = if region_config.enable_background_jobs {
             self.start_background_jobs(
-                shard,
+                region,
                 raft.clone(),
                 state.clone(),
                 block_archive.clone(),
                 applied_state.clone(),
             )
         } else {
-            ShardBackgroundJobs::none()
+            RegionBackgroundJobs::none()
         };
 
-        // Create shard group
-        let shard_group = Arc::new(ShardGroup {
-            shard,
+        // Create region group
+        let region_group = Arc::new(RegionGroup {
+            region,
             raft,
             state,
             block_archive,
@@ -561,27 +615,27 @@ impl MultiRaftManager {
             background_jobs: parking_lot::Mutex::new(background_jobs),
         });
 
-        // Register shard
+        // Register region
         {
-            let mut shards = self.shards.write();
-            shards.insert(shard, shard_group.clone());
+            let mut regions = self.regions.write();
+            regions.insert(region, region_group.clone());
         }
 
-        info!(shard = shard.value(), "Shard group started successfully");
+        info!(region = region.as_str(), "Region group started successfully");
 
-        Ok(shard_group)
+        Ok(region_group)
     }
 
-    /// Starts background jobs for a shard.
+    /// Starts background jobs for a region.
     fn start_background_jobs(
         &self,
-        shard: ShardId,
+        region: Region,
         raft: Arc<Raft<LedgerTypeConfig>>,
         state: Arc<StateLayer<FileBackend>>,
         block_archive: Arc<BlockArchive<FileBackend>>,
         applied_state: AppliedStateAccessor,
-    ) -> ShardBackgroundJobs {
-        info!(shard = shard.value(), "Starting background jobs for shard");
+    ) -> RegionBackgroundJobs {
+        info!(region = region.as_str(), "Starting background jobs for region");
 
         // TTL Garbage Collector
         let gc = TtlGarbageCollector::builder()
@@ -591,7 +645,7 @@ impl MultiRaftManager {
             .applied_state(applied_state.clone())
             .build();
         let gc_handle = gc.start();
-        info!(shard = shard.value(), "Started TTL garbage collector");
+        info!(region = region.as_str(), "Started TTL garbage collector");
 
         // Block Compactor
         let compactor = BlockCompactor::builder()
@@ -601,7 +655,7 @@ impl MultiRaftManager {
             .applied_state(applied_state.clone())
             .build();
         let compactor_handle = compactor.start();
-        info!(shard = shard.value(), "Started block compactor");
+        info!(region = region.as_str(), "Started block compactor");
 
         // Auto Recovery Job
         let recovery = AutoRecoveryJob::builder()
@@ -612,7 +666,7 @@ impl MultiRaftManager {
             .block_archive(Some(block_archive))
             .build();
         let recovery_handle = recovery.start();
-        info!(shard = shard.value(), "Started auto recovery job");
+        info!(region = region.as_str(), "Started auto recovery job");
 
         // B+ Tree Compactor
         let btree_compactor = BTreeCompactor::builder()
@@ -621,80 +675,74 @@ impl MultiRaftManager {
             .state(state.clone())
             .build();
         let btree_compactor_handle = btree_compactor.start();
-        info!(shard = shard.value(), "Started B+ tree compactor");
+        info!(region = region.as_str(), "Started B+ tree compactor");
 
         // Integrity Scrubber
-        let integrity_scrubber = IntegrityScrubberJob::builder().state(state).build();
+        let integrity_scrubber = IntegrityScrubberJob::builder().state(state.clone()).build();
         let integrity_scrubber_handle = integrity_scrubber.start();
-        info!(shard = shard.value(), "Started integrity scrubber");
+        info!(region = region.as_str(), "Started integrity scrubber");
 
-        ShardBackgroundJobs {
+        // DEK Re-Wrapping Job
+        let rewrap_progress = Arc::new(RewrapProgress::new());
+        let dek_rewrap = DekRewrapJob::builder()
+            .raft(raft)
+            .node_id(self.config.node_id)
+            .state(state)
+            .progress(rewrap_progress.clone())
+            .build();
+        let dek_rewrap_handle = dek_rewrap.start();
+        info!(region = region.as_str(), "Started DEK re-wrapping job");
+
+        RegionBackgroundJobs {
             gc_handle: Some(gc_handle),
             compactor_handle: Some(compactor_handle),
             recovery_handle: Some(recovery_handle),
             btree_compactor_handle: Some(btree_compactor_handle),
             integrity_scrubber_handle: Some(integrity_scrubber_handle),
+            dek_rewrap_handle: Some(dek_rewrap_handle),
+            rewrap_progress,
         }
     }
 
-    /// Opens storage for a shard.
-    fn open_shard_storage(&self, shard: ShardId, shard_dir: &Path) -> Result<ShardStorage> {
-        // Use larger pages for all databases to support larger batch sizes
-        // This matches RAFT_PAGE_SIZE in RaftLogStore
-        const SHARD_PAGE_SIZE: usize = 16 * 1024; // 16KB
+    /// Opens storage for a region.
+    ///
+    /// Delegates database opening to the [`RegionStorageManager`], then creates
+    /// higher-level wrappers (`StateLayer`, `BlockArchive`) and the `RaftLogStore`.
+    fn open_region_storage(&self, region: Region) -> Result<OpenedRegionStorage> {
+        // Open databases via storage manager (creates directory + state.db, blocks.db, events.db)
+        let storage = self
+            .storage_manager
+            .open_region(region)
+            .map_err(|e| MultiRaftError::Storage { region, message: format!("{e}") })?;
 
-        // Open or create state database using inferadb-ledger-store with 16KB pages
-        let state_db_path = shard_dir.join("state.db");
-        let state_db = if state_db_path.exists() {
-            Database::<FileBackend>::open(&state_db_path)
-        } else {
-            let config = DatabaseConfig { page_size: SHARD_PAGE_SIZE, ..Default::default() };
-            Database::<FileBackend>::create_with_config(&state_db_path, config)
-        }
-        .map_err(|e| MultiRaftError::Storage {
-            shard,
-            message: format!("Failed to open state db: {}", e),
-        })?;
-        let state = Arc::new(StateLayer::new(Arc::new(state_db)));
-
-        // Open or create block archive database using inferadb-ledger-store with 16KB pages
-        let blocks_db_path = shard_dir.join("blocks.db");
-        let blocks_db = if blocks_db_path.exists() {
-            Database::<FileBackend>::open(&blocks_db_path)
-        } else {
-            let config = DatabaseConfig { page_size: SHARD_PAGE_SIZE, ..Default::default() };
-            Database::<FileBackend>::create_with_config(&blocks_db_path, config)
-        }
-        .map_err(|e| MultiRaftError::Storage {
-            shard,
-            message: format!("Failed to open blocks db: {}", e),
-        })?;
-        let block_archive = Arc::new(BlockArchive::new(Arc::new(blocks_db)));
+        // Wrap raw databases in domain-specific types
+        let state = Arc::new(StateLayer::new(storage.state_db().clone()));
+        let block_archive = Arc::new(BlockArchive::new(storage.blocks_db().clone()));
 
         // Create block announcements broadcast channel for real-time notifications.
         // Buffer size of 1024 allows for burst handling during high commit rates.
         let (block_announcements, _) = broadcast::channel(1024);
 
         // Open Raft log store (uses inferadb-ledger-store storage - handles open/create internally)
-        let log_path = shard_dir.join("raft.db");
+        let log_path = self.storage_manager.raft_db_path(region);
         let log_store = RaftLogStore::<FileBackend>::open(&log_path)
             .map_err(|e| MultiRaftError::Storage {
-                shard,
-                message: format!("Failed to open log store: {}", e),
+                region,
+                message: format!("Failed to open log store: {e}"),
             })?
             .with_state_layer(state.clone())
             .with_block_archive(block_archive.clone())
-            .with_shard_config(shard, self.config.node_id.to_string())
+            .with_region_config(region, self.config.node_id.to_string())
             .with_block_announcements(block_announcements.clone());
 
         Ok((state, block_archive, log_store, block_announcements))
     }
 
-    /// Bootstraps a shard as a new cluster.
-    async fn bootstrap_shard(
+    /// Bootstraps a region as a new cluster.
+    async fn bootstrap_region(
         &self,
         raft: &Raft<LedgerTypeConfig>,
-        config: &ShardConfig,
+        config: &RegionConfig,
     ) -> Result<()> {
         use std::collections::BTreeMap;
 
@@ -704,66 +752,71 @@ impl MultiRaftManager {
         }
 
         raft.initialize(members).await.map_err(|e| MultiRaftError::Raft {
-            shard: config.shard,
+            region: config.region,
             message: format!("Failed to initialize: {}", e),
         })?;
 
         info!(
-            shard = config.shard.value(),
+            region = config.region.as_str(),
             members = config.initial_members.len(),
-            "Bootstrapped shard cluster"
+            "Bootstrapped region cluster"
         );
 
         Ok(())
     }
 
-    /// Stops a shard group.
+    /// Stops a region group.
     ///
-    /// This gracefully shuts down the shard, stopping background jobs
+    /// This gracefully shuts down the region, stopping background jobs
     /// and removing it from the manager.
     ///
     /// # Errors
     ///
-    /// Returns [`MultiRaftError::ShardNotFound`] if no shard with the given ID
+    /// Returns [`MultiRaftError::RegionNotFound`] if no region with the given ID
     /// is currently active.
-    pub async fn stop_shard(&self, shard: ShardId) -> Result<()> {
-        let shard_group = {
-            let mut shards = self.shards.write();
-            shards.remove(&shard).ok_or(MultiRaftError::ShardNotFound { shard })?
+    pub async fn stop_region(&self, region: Region) -> Result<()> {
+        let region_group = {
+            let mut regions = self.regions.write();
+            regions.remove(&region).ok_or(MultiRaftError::RegionNotFound { region })?
         };
 
         // Abort background jobs first
         {
-            let mut jobs = shard_group.background_jobs.lock();
+            let mut jobs = region_group.background_jobs.lock();
             jobs.abort();
-            debug!(shard = shard.value(), "Aborted background jobs");
+            debug!(region = region.as_str(), "Aborted background jobs");
         }
 
         // Trigger Raft shutdown
-        if let Err(e) = shard_group.raft.shutdown().await {
-            warn!(shard = shard.value(), error = ?e, "Error during Raft shutdown");
+        if let Err(e) = region_group.raft.shutdown().await {
+            warn!(region = region.as_str(), error = ?e, "Error during Raft shutdown");
         }
 
-        info!(shard = shard.value(), "Shard group stopped");
+        // Close region storage (removes from storage manager tracking)
+        if let Err(e) = self.storage_manager.close_region(region) {
+            warn!(region = region.as_str(), error = %e, "Error closing region storage");
+        }
+
+        info!(region = region.as_str(), "Region group stopped");
         Ok(())
     }
 
-    /// Stops all shard groups.
+    /// Stops all region groups.
     pub async fn shutdown(&self) {
-        let shards: Vec<ShardId> = self.list_shards();
+        let regions: Vec<Region> = self.list_regions();
 
-        for shard in shards {
-            if let Err(e) = self.stop_shard(shard).await {
-                warn!(shard = shard.value(), error = %e, "Error stopping shard during shutdown");
+        for region in regions {
+            if let Err(e) = self.stop_region(region).await {
+                warn!(region = region.as_str(), error = %e, "Error stopping region during shutdown");
             }
         }
 
         info!("Multi-Raft Manager shutdown complete");
     }
 
-    /// Gracefully shut down all shard groups with leadership handoff.
+    /// Gracefully shut down all region groups with leadership handoff.
     ///
-    /// For each shard where this node is the leader, triggers a final
+    /// For each region where this node is the leader, triggers a final
     /// snapshot before shutdown so the new leader has up-to-date state.
     /// Then performs the normal shutdown sequence.
     ///
@@ -771,23 +824,26 @@ impl MultiRaftManager {
     /// shutting down the leader triggers re-election among remaining nodes.
     pub async fn graceful_shutdown(&self) {
         let node_id = self.config.node_id;
-        let shards = self.list_shards();
+        let regions = self.list_regions();
 
-        // Trigger final snapshots for leader shards
-        for shard in &shards {
-            // Clone the shard Arc so we can drop the lock before awaiting
-            let shard_group = {
-                let shards = self.shards.read();
-                shards.get(shard).cloned()
+        // Trigger final snapshots for leader regions
+        for region in &regions {
+            // Clone the region Arc so we can drop the lock before awaiting
+            let region_group = {
+                let regions = self.regions.read();
+                regions.get(region).cloned()
             };
 
-            if let Some(shard_group) = shard_group
-                && shard_group.is_leader(node_id)
+            if let Some(region_group) = region_group
+                && region_group.is_leader(node_id)
             {
-                info!(shard = shard.value(), "Triggering final snapshot before leadership handoff");
-                if let Err(e) = shard_group.raft.trigger().snapshot().await {
+                info!(
+                    region = region.as_str(),
+                    "Triggering final snapshot before leadership handoff"
+                );
+                if let Err(e) = region_group.raft.trigger().snapshot().await {
                     warn!(
-                        shard = shard.value(),
+                        region = region.as_str(),
                         error = %e,
                         "Failed to trigger final snapshot"
                     );
@@ -801,18 +857,18 @@ impl MultiRaftManager {
 
     /// Returns statistics about the manager.
     pub fn stats(&self) -> MultiRaftStats {
-        let shards = self.shards.read();
+        let regions = self.regions.read();
         let mut leader_count = 0;
 
-        for shard in shards.values() {
-            if shard.is_leader(self.config.node_id) {
+        for region in regions.values() {
+            if region.is_leader(self.config.node_id) {
                 leader_count += 1;
             }
         }
 
         MultiRaftStats {
-            total_shards: shards.len(),
-            leader_shards: leader_count,
+            total_regions: regions.len(),
+            leader_regions: leader_count,
             node_id: self.config.node_id,
         }
     }
@@ -821,10 +877,10 @@ impl MultiRaftManager {
 /// Statistics about the Multi-Raft Manager.
 #[derive(Debug, Clone)]
 pub struct MultiRaftStats {
-    /// Total number of active shards.
-    pub total_shards: usize,
-    /// Number of shards where this node is leader.
-    pub leader_shards: usize,
+    /// Total number of active regions.
+    pub total_regions: usize,
+    /// Number of regions where this node is leader.
+    pub leader_regions: usize,
     /// This node's ID.
     pub node_id: LedgerNodeId,
 }
@@ -834,46 +890,47 @@ pub struct MultiRaftStats {
 // ============================================================================
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
     use inferadb_ledger_test_utils::TestDir;
 
     use super::*;
 
     fn create_test_config(temp_dir: &TestDir) -> MultiRaftConfig {
-        MultiRaftConfig::new(temp_dir.path().to_path_buf(), 1)
+        MultiRaftConfig::new(temp_dir.path().to_path_buf(), 1, Region::GLOBAL)
     }
 
     #[test]
-    fn test_config_shard_dir() {
+    fn test_storage_manager_region_dir() {
         let temp = TestDir::new();
-        let config = create_test_config(&temp);
+        let manager = RegionStorageManager::new(temp.path().to_path_buf());
 
-        // System shard directory
-        let system_dir = config.shard_dir(ShardId::new(0));
-        assert!(system_dir.ends_with("shards/_system"));
+        // Global region directory
+        let global_dir = manager.region_dir(Region::GLOBAL);
+        assert!(global_dir.ends_with("global"));
+        assert!(!global_dir.to_string_lossy().contains("regions"));
 
-        // Data shard directory
-        let data_dir = config.shard_dir(ShardId::new(1));
-        assert!(data_dir.ends_with("shards/shard_0001"));
+        // Data region directories
+        let data_dir = manager.region_dir(Region::US_EAST_VA);
+        assert!(data_dir.ends_with("regions/us-east-va"));
 
-        let data_dir = config.shard_dir(ShardId::new(42));
-        assert!(data_dir.ends_with("shards/shard_0042"));
+        let data_dir = manager.region_dir(Region::JP_EAST_TOKYO);
+        assert!(data_dir.ends_with("regions/jp-east-tokyo"));
     }
 
     #[test]
-    fn test_shard_config_system() {
-        let config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        assert_eq!(config.shard, ShardId::new(0));
+    fn test_region_config_system() {
+        let config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        assert_eq!(config.region, Region::GLOBAL);
         assert!(config.bootstrap);
         assert_eq!(config.initial_members.len(), 1);
     }
 
     #[test]
-    fn test_shard_config_data() {
+    fn test_region_config_data() {
         let members = vec![(1, "127.0.0.1:50051".to_string()), (2, "127.0.0.1:50052".to_string())];
-        let config = ShardConfig::data(ShardId::new(1), members);
-        assert_eq!(config.shard, ShardId::new(1));
+        let config = RegionConfig::data(Region::US_EAST_VA, members);
+        assert_eq!(config.region, Region::US_EAST_VA);
         assert!(config.bootstrap);
         assert_eq!(config.initial_members.len(), 2);
     }
@@ -881,8 +938,11 @@ mod tests {
     #[test]
     fn test_multi_raft_config_builder() {
         let temp = TestDir::new();
-        let config =
-            MultiRaftConfig::builder().data_dir(temp.path().to_path_buf()).node_id(42).build();
+        let config = MultiRaftConfig::builder()
+            .data_dir(temp.path().to_path_buf())
+            .node_id(42)
+            .local_region(Region::GLOBAL)
+            .build();
         assert_eq!(config.node_id, 42);
         assert_eq!(config.heartbeat_interval_ms, 150);
         assert_eq!(config.election_timeout_min_ms, 300);
@@ -895,6 +955,7 @@ mod tests {
         let config = MultiRaftConfig::builder()
             .data_dir(temp.path().to_path_buf())
             .node_id(1)
+            .local_region(Region::GLOBAL)
             .heartbeat_interval_ms(200)
             .election_timeout_min_ms(500)
             .election_timeout_max_ms(1000)
@@ -907,9 +968,12 @@ mod tests {
     #[test]
     fn test_multi_raft_config_builder_matches_new() {
         let temp = TestDir::new();
-        let from_builder =
-            MultiRaftConfig::builder().data_dir(temp.path().to_path_buf()).node_id(1).build();
-        let from_new = MultiRaftConfig::new(temp.path().to_path_buf(), 1);
+        let from_builder = MultiRaftConfig::builder()
+            .data_dir(temp.path().to_path_buf())
+            .node_id(1)
+            .local_region(Region::GLOBAL)
+            .build();
+        let from_new = MultiRaftConfig::new(temp.path().to_path_buf(), 1, Region::GLOBAL);
         assert_eq!(from_builder.node_id, from_new.node_id);
         assert_eq!(from_builder.heartbeat_interval_ms, from_new.heartbeat_interval_ms);
         assert_eq!(from_builder.election_timeout_min_ms, from_new.election_timeout_min_ms);
@@ -917,33 +981,33 @@ mod tests {
     }
 
     #[test]
-    fn test_shard_config_builder() {
-        let config = ShardConfig::builder().shard(ShardId::new(5)).build();
-        assert_eq!(config.shard, ShardId::new(5));
+    fn test_region_config_builder() {
+        let config = RegionConfig::builder().region(Region::IE_EAST_DUBLIN).build();
+        assert_eq!(config.region, Region::IE_EAST_DUBLIN);
         assert!(config.initial_members.is_empty());
         assert!(config.bootstrap);
         assert!(config.enable_background_jobs);
     }
 
     #[test]
-    fn test_shard_config_builder_with_all_fields() {
+    fn test_region_config_builder_with_all_fields() {
         let members = vec![(1, "127.0.0.1:50051".to_string())];
-        let config = ShardConfig::builder()
-            .shard(ShardId::new(3))
+        let config = RegionConfig::builder()
+            .region(Region::CA_CENTRAL_QC)
             .initial_members(members.clone())
             .bootstrap(false)
             .enable_background_jobs(false)
             .build();
-        assert_eq!(config.shard, ShardId::new(3));
+        assert_eq!(config.region, Region::CA_CENTRAL_QC);
         assert_eq!(config.initial_members, members);
         assert!(!config.bootstrap);
         assert!(!config.enable_background_jobs);
     }
 
     #[test]
-    fn test_shard_config_without_background_jobs_method() {
+    fn test_region_config_without_background_jobs_method() {
         let config =
-            ShardConfig::system(1, "127.0.0.1:50051".to_string()).without_background_jobs();
+            RegionConfig::system(1, "127.0.0.1:50051".to_string()).without_background_jobs();
         assert!(!config.enable_background_jobs);
     }
 
@@ -953,8 +1017,8 @@ mod tests {
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
-        assert_eq!(manager.list_shards().len(), 0);
-        assert!(!manager.has_shard(ShardId::new(0)));
+        assert_eq!(manager.list_regions().len(), 0);
+        assert!(!manager.has_region(Region::GLOBAL));
     }
 
     #[test]
@@ -964,206 +1028,312 @@ mod tests {
         let manager = MultiRaftManager::new(config);
 
         let stats = manager.stats();
-        assert_eq!(stats.total_shards, 0);
-        assert_eq!(stats.leader_shards, 0);
+        assert_eq!(stats.total_regions, 0);
+        assert_eq!(stats.leader_regions, 0);
         assert_eq!(stats.node_id, 1);
     }
 
-    #[tokio::test]
-    async fn test_system_shard_required() {
+    #[test]
+    fn test_manager_local_region() {
+        let temp = TestDir::new();
+        let config =
+            MultiRaftConfig::new(temp.path().to_path_buf(), 1, Region::DE_CENTRAL_FRANKFURT);
+        let manager = MultiRaftManager::new(config);
+        assert_eq!(manager.local_region(), Region::DE_CENTRAL_FRANKFURT);
+    }
+
+    #[test]
+    fn test_multi_raft_config_local_region_default_global() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
-
-        // Try to start data shard without system shard
-        let shard_config =
-            ShardConfig::data(ShardId::new(1), vec![(1, "127.0.0.1:50051".to_string())]);
-        let result = manager.start_data_shard(shard_config).await;
-
-        assert!(matches!(result, Err(MultiRaftError::SystemShardRequired)));
+        assert_eq!(config.local_region, Region::GLOBAL);
     }
 
     #[tokio::test]
-    async fn test_start_system_shard() {
+    async fn test_system_region_required() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
-        let shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        let result = manager.start_system_shard(shard_config).await;
+        // Try to start data region without system region
+        let region_config =
+            RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
+        let result = manager.start_data_region(region_config).await;
 
-        assert!(result.is_ok(), "start_system_shard failed: {:?}", result.err());
-
-        let shard = result.unwrap();
-        assert_eq!(shard.shard(), ShardId::new(0));
-        assert!(manager.has_shard(ShardId::new(0)));
-        assert_eq!(manager.list_shards(), vec![ShardId::new(0)]);
+        assert!(matches!(result, Err(MultiRaftError::SystemRegionRequired)));
     }
 
     #[tokio::test]
-    async fn test_start_multiple_shards() {
+    async fn test_start_system_region() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
-        // Start system shard
-        let system_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        manager.start_system_shard(system_config).await.expect("start system");
+        let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        let result = manager.start_system_region(region_config).await;
 
-        // Start data shard
+        assert!(result.is_ok(), "start_system_region failed: {:?}", result.err());
+
+        let region = result.unwrap();
+        assert_eq!(region.region(), Region::GLOBAL);
+        assert!(manager.has_region(Region::GLOBAL));
+        assert_eq!(manager.list_regions(), vec![Region::GLOBAL]);
+    }
+
+    #[tokio::test]
+    async fn test_start_multiple_regions() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = MultiRaftManager::new(config);
+
+        // Start system region
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        // Start data region
         let data_config =
-            ShardConfig::data(ShardId::new(1), vec![(1, "127.0.0.1:50051".to_string())]);
-        manager.start_data_shard(data_config).await.expect("start data shard");
+            RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
+        manager.start_data_region(data_config).await.expect("start data region");
 
-        assert_eq!(manager.list_shards().len(), 2);
-        assert!(manager.has_shard(ShardId::new(0)));
-        assert!(manager.has_shard(ShardId::new(1)));
+        assert_eq!(manager.list_regions().len(), 2);
+        assert!(manager.has_region(Region::GLOBAL));
+        assert!(manager.has_region(Region::US_EAST_VA));
     }
 
     #[tokio::test]
-    async fn test_duplicate_shard_error() {
+    async fn test_duplicate_region_error() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
-        // Start system shard
-        let shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        manager.start_system_shard(shard_config.clone()).await.expect("start system");
+        // Start system region
+        let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(region_config.clone()).await.expect("start system");
 
         // Try to start again
-        let result = manager.start_system_shard(shard_config).await;
+        let result = manager.start_system_region(region_config).await;
         assert!(
-            matches!(result, Err(MultiRaftError::ShardExists { shard }) if shard == ShardId::new(0))
+            matches!(result, Err(MultiRaftError::RegionExists { region }) if region == Region::GLOBAL)
         );
     }
 
     #[tokio::test]
-    async fn test_stop_shard() {
+    async fn test_stop_region() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
-        // Start system shard
-        let shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        manager.start_system_shard(shard_config).await.expect("start system");
+        // Start system region
+        let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(region_config).await.expect("start system");
 
-        assert!(manager.has_shard(ShardId::new(0)));
+        assert!(manager.has_region(Region::GLOBAL));
 
-        // Stop shard
-        manager.stop_shard(ShardId::new(0)).await.expect("stop shard");
+        // Stop region
+        manager.stop_region(Region::GLOBAL).await.expect("stop region");
 
-        assert!(!manager.has_shard(ShardId::new(0)));
+        assert!(!manager.has_region(Region::GLOBAL));
     }
 
     #[tokio::test]
-    async fn test_get_shard() {
+    async fn test_get_region_group() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
-        // Try to get non-existent shard
-        let result = manager.get_shard(ShardId::new(0));
+        // Try to get non-existent region
+        let result = manager.get_region_group(Region::GLOBAL);
         assert!(
-            matches!(result, Err(MultiRaftError::ShardNotFound { shard }) if shard == ShardId::new(0))
+            matches!(result, Err(MultiRaftError::RegionNotFound { region }) if region == Region::GLOBAL)
         );
 
         // Start and get
-        let shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        manager.start_system_shard(shard_config).await.expect("start system");
+        let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(region_config).await.expect("start system");
 
-        let shard = manager.get_shard(ShardId::new(0)).expect("get shard");
-        assert_eq!(shard.shard(), ShardId::new(0));
+        let region = manager.get_region_group(Region::GLOBAL).expect("get region");
+        assert_eq!(region.region(), Region::GLOBAL);
 
-        // system_shard() should work too
-        let system = manager.system_shard().expect("system shard");
-        assert_eq!(system.shard(), ShardId::new(0));
+        // system_region() should work too
+        let system = manager.system_region().expect("system region");
+        assert_eq!(system.region(), Region::GLOBAL);
     }
 
     #[test]
     fn test_background_jobs_none() {
-        let jobs = ShardBackgroundJobs::none();
+        let jobs = RegionBackgroundJobs::none();
         // All handles should be None
         assert!(jobs.gc_handle.is_none());
         assert!(jobs.compactor_handle.is_none());
         assert!(jobs.recovery_handle.is_none());
         assert!(jobs.btree_compactor_handle.is_none());
+        assert!(jobs.dek_rewrap_handle.is_none());
     }
 
     #[test]
     fn test_background_jobs_abort_empty() {
-        let mut jobs = ShardBackgroundJobs::none();
+        let mut jobs = RegionBackgroundJobs::none();
         // Aborting empty jobs shouldn't panic
         jobs.abort();
         assert!(jobs.gc_handle.is_none());
         assert!(jobs.compactor_handle.is_none());
         assert!(jobs.recovery_handle.is_none());
+        assert!(jobs.dek_rewrap_handle.is_none());
     }
 
     #[tokio::test]
-    async fn test_shard_with_background_jobs_disabled() {
+    async fn test_region_with_background_jobs_disabled() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
         // Create config with background jobs disabled
-        let mut shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        shard_config.enable_background_jobs = false;
+        let mut region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        region_config.enable_background_jobs = false;
 
-        manager.start_system_shard(shard_config).await.expect("start system");
+        manager.start_system_region(region_config).await.expect("start system");
 
-        let shard = manager.get_shard(ShardId::new(0)).expect("get shard");
+        let region = manager.get_region_group(Region::GLOBAL).expect("get region");
 
         // Background jobs should be None when disabled
-        let jobs = shard.background_jobs.lock();
+        let jobs = region.background_jobs.lock();
         assert!(jobs.gc_handle.is_none());
         assert!(jobs.compactor_handle.is_none());
         assert!(jobs.recovery_handle.is_none());
     }
 
     #[tokio::test]
-    async fn test_shard_with_background_jobs_enabled() {
+    async fn test_region_with_background_jobs_enabled() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
         // Create config with background jobs enabled (default)
-        let shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        assert!(shard_config.enable_background_jobs); // Verify default is true
+        let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        assert!(region_config.enable_background_jobs); // Verify default is true
 
-        manager.start_system_shard(shard_config).await.expect("start system");
+        manager.start_system_region(region_config).await.expect("start system");
 
-        let shard = manager.get_shard(ShardId::new(0)).expect("get shard");
+        let region = manager.get_region_group(Region::GLOBAL).expect("get region");
 
         // Background jobs should be Some when enabled
-        let jobs = shard.background_jobs.lock();
+        let jobs = region.background_jobs.lock();
         assert!(jobs.gc_handle.is_some(), "GC job should be started");
         assert!(jobs.compactor_handle.is_some(), "Compactor job should be started");
         assert!(jobs.recovery_handle.is_some(), "Recovery job should be started");
     }
 
     #[tokio::test]
-    async fn test_stop_shard_aborts_background_jobs() {
+    async fn test_stop_region_aborts_background_jobs() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = MultiRaftManager::new(config);
 
         // Start with background jobs enabled
-        let shard_config = ShardConfig::system(1, "127.0.0.1:50051".to_string());
-        manager.start_system_shard(shard_config).await.expect("start system");
+        let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(region_config).await.expect("start system");
 
         // Verify jobs are running before stop
         {
-            let shard = manager.get_shard(ShardId::new(0)).expect("get shard");
-            let jobs = shard.background_jobs.lock();
+            let region = manager.get_region_group(Region::GLOBAL).expect("get region");
+            let jobs = region.background_jobs.lock();
             assert!(jobs.gc_handle.is_some());
             assert!(jobs.compactor_handle.is_some());
             assert!(jobs.recovery_handle.is_some());
         }
 
-        // Stop shard - should abort jobs
-        manager.stop_shard(ShardId::new(0)).await.expect("stop shard");
+        // Stop region - should abort jobs
+        manager.stop_region(Region::GLOBAL).await.expect("stop region");
 
-        // Shard should be removed
-        assert!(!manager.has_shard(ShardId::new(0)));
+        // Region should be removed
+        assert!(!manager.has_region(Region::GLOBAL));
+    }
+
+    #[tokio::test]
+    async fn test_protected_region_rejects_insufficient_nodes() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = MultiRaftManager::new(config);
+
+        // Start system region first (required for data regions)
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        // IE_EAST_DUBLIN is protected (requires_residency = true)
+        // Only 2 members — should fail (minimum is 3)
+        let data_config = RegionConfig::data(
+            Region::IE_EAST_DUBLIN,
+            vec![(1, "127.0.0.1:50051".to_string()), (2, "127.0.0.1:50052".to_string())],
+        );
+        match manager.start_data_region(data_config).await {
+            Err(MultiRaftError::InsufficientNodes { region, required, found }) => {
+                assert_eq!(region, Region::IE_EAST_DUBLIN);
+                assert_eq!(required, 3);
+                assert_eq!(found, 2);
+            },
+            Err(other) => panic!("Expected InsufficientNodes, got: {other}"),
+            Ok(_) => panic!("Expected error, got Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_protected_region_accepts_sufficient_nodes() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = MultiRaftManager::new(config);
+
+        // Start system region first
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        // IE_EAST_DUBLIN with 3 members — should pass validation
+        let data_config = RegionConfig::data(
+            Region::IE_EAST_DUBLIN,
+            vec![
+                (1, "127.0.0.1:50051".to_string()),
+                (2, "127.0.0.1:50052".to_string()),
+                (3, "127.0.0.1:50053".to_string()),
+            ],
+        );
+        // Should pass membership validation (may fail later on Raft bootstrap, which is fine)
+        if let Err(MultiRaftError::InsufficientNodes { .. }) =
+            manager.start_data_region(data_config).await
+        {
+            panic!("Should not reject sufficient nodes with InsufficientNodes");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_non_protected_region_accepts_any_member_count() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = MultiRaftManager::new(config);
+
+        // Start system region first
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        // US_EAST_VA is non-protected (requires_residency = false)
+        // Only 1 member — should pass (no minimum for non-protected)
+        let data_config =
+            RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
+        if let Err(MultiRaftError::InsufficientNodes { .. }) =
+            manager.start_data_region(data_config).await
+        {
+            panic!("Non-protected region should accept any member count");
+        }
+    }
+
+    #[test]
+    fn test_protected_region_empty_members_rejected() {
+        // Verify requires_residency correctly identifies protected regions
+        assert!(Region::IE_EAST_DUBLIN.requires_residency());
+        assert!(Region::DE_CENTRAL_FRANKFURT.requires_residency());
+        assert!(Region::JP_EAST_TOKYO.requires_residency());
+
+        // Non-protected
+        assert!(!Region::GLOBAL.requires_residency());
+        assert!(!Region::US_EAST_VA.requires_residency());
+        assert!(!Region::US_WEST_OR.requires_residency());
     }
 }

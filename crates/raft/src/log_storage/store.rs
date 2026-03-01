@@ -8,7 +8,7 @@ use inferadb_ledger_store::{
     Database, DatabaseConfig, FileBackend, Key, StorageBackend, Value, WriteTransaction, tables,
 };
 use inferadb_ledger_types::{
-    EmailVerifyTokenId, OrganizationId, OrganizationSlug, ShardId, UserEmailId, UserId, UserSlug,
+    EmailVerifyTokenId, OrganizationId, OrganizationSlug, Region, UserEmailId, UserId, UserSlug,
     VaultId, VaultSlug, decode, encode,
 };
 use openraft::{Entry, LogId, StorageError, Vote};
@@ -17,7 +17,7 @@ use tokio::sync::broadcast;
 use tracing::warn;
 
 use super::{
-    KEY_APPLIED_STATE, KEY_LAST_PURGED, KEY_VOTE, ShardChainState,
+    KEY_APPLIED_STATE, KEY_LAST_PURGED, KEY_VOTE, RegionChainState,
     accessor::AppliedStateAccessor,
     raft_impl::{to_serde_error, to_storage_error},
     types::{
@@ -62,15 +62,15 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     pub(super) state_layer: Option<Arc<StateLayer<B>>>,
     /// Block archive for permanent block storage.
     pub(super) block_archive: Option<Arc<BlockArchive<B>>>,
-    /// Shard for this Raft group.
-    pub(super) shard: ShardId,
+    /// Region for this Raft group.
+    pub(super) region: Region,
     /// Node ID for block metadata.
     pub(super) node_id: String,
-    /// Shard chain state (height and previous hash).
+    /// Region chain state (height and previous hash).
     ///
     /// Consolidated into single lock to avoid lock ordering issues.
     /// See: apply_to_state_machine, restore_from_db
-    pub(super) shard_chain: RwLock<ShardChainState>,
+    pub(super) region_chain: RwLock<RegionChainState>,
     /// Block announcement broadcast channel for real-time block notifications.
     ///
     /// When set, announcements are broadcast after each successful block commit.
@@ -128,9 +128,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
             })),
             state_layer: None,
             block_archive: None,
-            shard: ShardId::new(0),
+            region: Region::GLOBAL,
             node_id: String::new(),
-            shard_chain: RwLock::new(ShardChainState {
+            region_chain: RwLock::new(RegionChainState {
                 height: 0,
                 previous_hash: inferadb_ledger_types::ZERO_HASH,
             }),
@@ -158,9 +158,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
         self
     }
 
-    /// Configures shard metadata.
-    pub fn with_shard_config(mut self, shard: ShardId, node_id: String) -> Self {
-        self.shard = shard;
+    /// Configures region metadata.
+    pub fn with_region_config(mut self, region: Region, node_id: String) -> Self {
+        self.region = region;
         self.node_id = node_id;
         self
     }
@@ -208,9 +208,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
         self.block_announcements.as_ref()
     }
 
-    /// Returns the current shard height.
-    pub fn current_shard_height(&self) -> u64 {
-        self.shard_chain.read().height
+    /// Returns the current region height.
+    pub fn current_region_height(&self) -> u64 {
+        self.region_chain.read().height
     }
 
     /// Returns a reference to the state layer (if configured).
@@ -271,9 +271,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
         drop(read_txn);
 
         let state = self.load_state_from_tables()?;
-        *self.shard_chain.write() = ShardChainState {
-            height: state.shard_height,
-            previous_hash: state.previous_shard_hash,
+        *self.region_chain.write() = RegionChainState {
+            height: state.region_height,
+            previous_hash: state.previous_region_hash,
         };
         *self.applied_state.write() = state;
 
@@ -556,8 +556,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
         let mut state = AppliedState {
             last_applied: core.last_applied,
             membership: core.membership,
-            shard_height: core.shard_height,
-            previous_shard_hash: core.previous_shard_hash,
+            region_height: core.region_height,
+            previous_region_hash: core.previous_region_hash,
             last_applied_timestamp_ns: core.last_applied_timestamp_ns,
             sequences: SequenceCounters::new(),
             ..Default::default()
@@ -959,7 +959,7 @@ mod tests {
     use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
     use inferadb_ledger_store::{FileBackend, tables};
     use inferadb_ledger_types::{
-        OrganizationId, OrganizationSlug, ShardId, UserEmailId, VaultId, VaultSlug, decode, encode,
+        OrganizationId, OrganizationSlug, Region, UserEmailId, VaultId, VaultSlug, decode, encode,
     };
     use openraft::{CommittedLeaderId, LogId};
     use tempfile::tempdir;
@@ -978,8 +978,8 @@ mod tests {
         let mut state = AppliedState {
             last_applied: Some(make_log_id(3, 42)),
             membership: openraft::StoredMembership::default(),
-            shard_height: 100,
-            previous_shard_hash: [0xAB; 32],
+            region_height: 100,
+            previous_region_hash: [0xAB; 32],
             sequences: SequenceCounters {
                 organization: OrganizationId::new(10),
                 vault: VaultId::new(20),
@@ -999,11 +999,11 @@ mod tests {
                 OrganizationMeta {
                     organization: org_id,
                     slug,
-                    shard: ShardId::new(0),
+                    region: Region::GLOBAL,
                     name: format!("org-{i}"),
                     status: OrganizationStatus::Active,
                     tier: OrganizationTier::Free,
-                    pending_shard: None,
+                    pending_region: None,
                     storage_bytes: i as u64 * 1024,
                 },
             );
@@ -1124,10 +1124,10 @@ mod tests {
     /// Compare two `AppliedState` instances field by field.
     fn assert_states_equal(left: &AppliedState, right: &AppliedState) {
         assert_eq!(left.last_applied, right.last_applied, "last_applied mismatch");
-        assert_eq!(left.shard_height, right.shard_height, "shard_height mismatch");
+        assert_eq!(left.region_height, right.region_height, "region_height mismatch");
         assert_eq!(
-            left.previous_shard_hash, right.previous_shard_hash,
-            "previous_shard_hash mismatch"
+            left.previous_region_hash, right.previous_region_hash,
+            "previous_region_hash mismatch"
         );
         assert_eq!(left.sequences, right.sequences, "sequences mismatch");
         assert_eq!(
@@ -1243,11 +1243,11 @@ mod tests {
                     &encode(&OrganizationMeta {
                         organization: OrganizationId::new(999),
                         slug: OrganizationSlug::new(9999),
-                        shard: ShardId::new(0),
+                        region: Region::GLOBAL,
                         name: "phantom".to_string(),
                         status: OrganizationStatus::Active,
                         tier: OrganizationTier::Free,
-                        pending_shard: None,
+                        pending_region: None,
                         storage_bytes: 0,
                     })
                     .unwrap(),
@@ -1472,8 +1472,8 @@ mod tests {
         let loaded = store.load_state_from_tables().unwrap();
 
         assert_eq!(loaded.last_applied, None);
-        assert_eq!(loaded.shard_height, 0);
-        assert_eq!(loaded.previous_shard_hash, [0u8; 32]);
+        assert_eq!(loaded.region_height, 0);
+        assert_eq!(loaded.previous_region_hash, [0u8; 32]);
         assert!(loaded.organizations.is_empty());
         assert!(loaded.vaults.is_empty());
         assert!(loaded.vault_heights.is_empty());
@@ -1511,11 +1511,11 @@ mod tests {
                 encode(&OrganizationMeta {
                     organization: OrganizationId::new(99),
                     slug: OrganizationSlug::new(9900),
-                    shard: ShardId::new(0),
+                    region: Region::GLOBAL,
                     name: "new-org".to_string(),
                     status: OrganizationStatus::Active,
                     tier: OrganizationTier::Free,
-                    pending_shard: None,
+                    pending_region: None,
                     storage_bytes: 0,
                 })
                 .unwrap(),
@@ -1560,11 +1560,11 @@ mod tests {
             encode(&OrganizationMeta {
                 organization: new_org_id,
                 slug: new_slug,
-                shard: ShardId::new(0),
+                region: Region::GLOBAL,
                 name: "org-3".to_string(),
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
-                pending_shard: None,
+                pending_region: None,
                 storage_bytes: 0,
             })
             .unwrap(),
@@ -1599,11 +1599,11 @@ mod tests {
             OrganizationMeta {
                 organization: new_org_id,
                 slug: new_slug,
-                shard: ShardId::new(0),
+                region: Region::GLOBAL,
                 name: "org-3".to_string(),
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
-                pending_shard: None,
+                pending_region: None,
                 storage_bytes: 0,
             },
         );
@@ -1669,8 +1669,8 @@ mod tests {
         // Remaining bytes should deserialize to AppliedStateCore
         let core: AppliedStateCore = decode(&raw[2..]).unwrap();
         assert_eq!(core.last_applied, state.last_applied);
-        assert_eq!(core.shard_height, state.shard_height);
-        assert_eq!(core.previous_shard_hash, state.previous_shard_hash);
+        assert_eq!(core.region_height, state.region_height);
+        assert_eq!(core.previous_region_hash, state.previous_region_hash);
     }
 
     // ========================================================================
@@ -1710,8 +1710,8 @@ mod tests {
 
         let mut state = AppliedState {
             last_applied: Some(make_log_id(5, 1000)),
-            shard_height: 500,
-            previous_shard_hash: [0xFF; 32],
+            region_height: 500,
+            previous_region_hash: [0xFF; 32],
             sequences: SequenceCounters {
                 organization: OrganizationId::new(1001),
                 vault: VaultId::new(5001),
@@ -1731,11 +1731,12 @@ mod tests {
                 OrganizationMeta {
                     organization: org_id,
                     slug,
-                    shard: ShardId::new((i % 10) as u32),
+                    region: inferadb_ledger_types::ALL_REGIONS
+                        [i as usize % inferadb_ledger_types::ALL_REGIONS.len()],
                     name: format!("org-{i}"),
                     status: OrganizationStatus::Active,
                     tier: OrganizationTier::Free,
-                    pending_shard: None,
+                    pending_region: None,
                     storage_bytes: i as u64 * 100,
                 },
             );
@@ -1810,8 +1811,8 @@ mod tests {
         // Second save with different state
         let mut state2 = AppliedState {
             last_applied: Some(make_log_id(10, 100)),
-            shard_height: 999,
-            previous_shard_hash: [0xCC; 32],
+            region_height: 999,
+            previous_region_hash: [0xCC; 32],
             sequences: SequenceCounters {
                 organization: OrganizationId::new(50),
                 vault: VaultId::new(60),
@@ -1828,11 +1829,11 @@ mod tests {
             OrganizationMeta {
                 organization: org_id,
                 slug,
-                shard: ShardId::new(0),
+                region: Region::GLOBAL,
                 name: "new-org".to_string(),
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
-                pending_shard: None,
+                pending_region: None,
                 storage_bytes: 5000,
             },
         );
@@ -1859,7 +1860,7 @@ mod tests {
         let loaded = store.load_state_from_tables().unwrap();
 
         assert_eq!(loaded.last_applied, Some(make_log_id(10, 100)));
-        assert_eq!(loaded.shard_height, 999);
+        assert_eq!(loaded.region_height, 999);
         assert_eq!(loaded.organizations.len(), 1);
         assert!(loaded.organizations.contains_key(&org_id));
     }

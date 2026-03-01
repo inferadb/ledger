@@ -33,10 +33,26 @@ arc-swap = { workspace = true }
 # Logging
 tracing = { workspace = true }
 
+# Encryption at rest (envelope encryption)
+aes-gcm = { workspace = true }
+aes-kw = { workspace = true }
+zeroize = { workspace = true }
+rand = { workspace = true }
+
+# DEK cache (bounded LRU with concurrent access)
+moka = { workspace = true }
+
+# Key management types and region definitions
+inferadb-ledger-types = { workspace = true }
+chrono = { workspace = true }
+
+# Serialization for versions.json sidecar
+serde = { workspace = true }
+serde_json = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
-rand = { workspace = true }
 inferadb-ledger-test-utils.workspace = true
 
 [features]

@@ -29,7 +29,7 @@
 
 use std::{sync::OnceLock, time::Duration};
 
-use inferadb_ledger_types::ShardId;
+use inferadb_ledger_types::Region;
 use opentelemetry::{
     Context, KeyValue, global,
     trace::{SpanKind, TraceContextExt, Tracer, TracerProvider as _},
@@ -244,7 +244,7 @@ pub struct SpanAttributes {
     pub node_id: Option<u64>,
     pub is_leader: Option<bool>,
     pub raft_term: Option<u64>,
-    pub shard: Option<ShardId>,
+    pub region: Option<Region>,
     pub is_vip: Option<bool>,
 
     // Operation fields (write)
@@ -326,7 +326,7 @@ impl SpanAttributes {
         push_attr!("node_id", self.node_id, |v| v as i64);
         push_attr!("is_leader", self.is_leader, |v| v);
         push_attr!("raft_term", self.raft_term, |v| v as i64);
-        push_attr!("shard", self.shard, |v| v.value() as i64);
+        push_attr!("region", self.region, |v| v.as_str().to_string());
         push_attr!("is_vip", self.is_vip, |v| v);
 
         // Operation fields (write)

@@ -34,7 +34,7 @@ async fn create_organization(
     let response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: name.to_string(),
-            shard: None,
+            region: 10, // REGION_US_EAST_VA
             tier: None,
         })
         .await?;
@@ -59,7 +59,7 @@ async fn create_vault(
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                 slug: organization.value(),
             }),
-            replication_factor: 0,  // Default, ignored for single-shard setup
+            replication_factor: 0,  // Default, ignored for single-region setup
             initial_nodes: vec![],  // Auto-assigned
             retention_policy: None, // Default: FULL
         })

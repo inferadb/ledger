@@ -13,16 +13,22 @@ mod saga;
 mod service;
 mod types;
 
-pub use cluster::{ClusterMembership, LearnerCacheConfig, MAX_VOTERS, SystemRole};
+pub use cluster::{
+    ClusterMembership, GroupMembership, LearnerCacheConfig, MAX_VOTERS,
+    MIN_NODES_PER_PROTECTED_REGION, SystemRole,
+};
 pub use keys::SystemKeys;
 pub use saga::{
     CreateOrgInput, CreateOrgSaga, CreateOrgSagaState, DeleteUserInput, DeleteUserSaga,
-    DeleteUserSagaState, MAX_RETRIES, SAGA_POLL_INTERVAL, Saga, SagaId, SagaType,
+    DeleteUserSagaState, MAX_RETRIES, MigrateOrgInput, MigrateOrgSaga, MigrateOrgSagaState,
+    MigrateUserInput, MigrateUserSaga, MigrateUserSagaState, SAGA_POLL_INTERVAL, Saga, SagaId,
+    SagaType,
 };
 pub use service::{
     SYSTEM_ORGANIZATION_ID, SYSTEM_VAULT_ID, SystemError, SystemOrganizationService,
 };
 pub use types::{
-    EmailVerificationToken, NodeInfo, NodeRole, OrganizationRegistry, OrganizationStatus,
-    OrganizationTier, User, UserEmail, UserRole, UserStatus,
+    EmailVerificationToken, ErasureAuditRecord, NodeInfo, NodeRole, OrganizationRegistry,
+    OrganizationStatus, OrganizationTier, SubjectKey, User, UserDirectoryEntry,
+    UserDirectoryStatus, UserEmail, UserRole, UserStatus,
 };

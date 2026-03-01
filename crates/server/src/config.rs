@@ -615,6 +615,20 @@ pub struct Config {
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
 
+    // === Region ===
+    /// Geographic region this node belongs to.
+    ///
+    /// Determines which Raft groups this node participates in:
+    /// - Non-protected regions (global, us-east-va, us-west-or): all nodes join.
+    /// - Protected regions: only nodes tagged with that region join.
+    ///
+    /// Use lowercase-hyphen format: `us-east-va`, `ie-east-dublin`, `global`.
+    /// Region is immutable after registration.
+    #[arg(long = "region", env = "INFERADB__LEDGER__REGION", default_value = "global")]
+    #[serde(default = "default_region")]
+    #[builder(default = default_region())]
+    pub region: inferadb_ledger_types::Region,
+
     // === Bootstrap Mode ===
     /// Run as a single-node cluster (no coordination needed).
     /// Mutually exclusive with --join and --cluster.
@@ -772,6 +786,10 @@ fn default_listen_addr() -> SocketAddr {
     DEFAULT_LISTEN_ADDR.parse().expect("valid default address")
 }
 
+fn default_region() -> inferadb_ledger_types::Region {
+    inferadb_ledger_types::Region::GLOBAL
+}
+
 fn default_cluster() -> Option<u32> {
     Some(3)
 }
@@ -798,6 +816,7 @@ impl Default for Config {
             metrics_addr: None,
             log_format: LogFormat::default(),
             data_dir: None,
+            region: default_region(),
             single: false,
             join: false,
             cluster: default_cluster(),
@@ -1721,5 +1740,32 @@ mod tests {
         assert!(defs.contains_key("RateLimitConfig"), "Missing RateLimitConfig definition");
         assert!(defs.contains_key("HotKeyConfig"), "Missing HotKeyConfig definition");
         assert!(defs.contains_key("ValidationConfig"), "Missing ValidationConfig definition");
+    }
+
+    #[test]
+    fn test_default_config_region_is_global() {
+        let config = Config::default();
+        assert_eq!(config.region, inferadb_ledger_types::Region::GLOBAL);
+    }
+
+    #[test]
+    fn test_config_builder_region() {
+        let config =
+            Config::builder().region(inferadb_ledger_types::Region::IE_EAST_DUBLIN).build();
+        assert_eq!(config.region, inferadb_ledger_types::Region::IE_EAST_DUBLIN);
+    }
+
+    #[test]
+    fn test_config_region_from_serde() {
+        let json = r#"{"listen_addr": "127.0.0.1:50051", "region": "ie-east-dublin"}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.region, inferadb_ledger_types::Region::IE_EAST_DUBLIN);
+    }
+
+    #[test]
+    fn test_config_region_serde_default_is_global() {
+        let json = r#"{"listen_addr": "127.0.0.1:50051"}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.region, inferadb_ledger_types::Region::GLOBAL);
     }
 }

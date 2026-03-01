@@ -20,7 +20,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use inferadb_ledger_state::{Snapshot, SnapshotError, SnapshotManager};
 use inferadb_ledger_store::{Database, StorageBackend, TableId};
-use inferadb_ledger_types::{Hash, ShardId, config::BackupConfig, hash::sha256};
+use inferadb_ledger_types::{Hash, Region, config::BackupConfig, hash::sha256};
 use openraft::Raft;
 use snafu::{ResultExt, Snafu};
 use tokio::time::interval;
@@ -93,6 +93,28 @@ pub enum BackupError {
         /// The underlying storage error.
         source: inferadb_ledger_store::Error,
     },
+
+    /// Cross-region restore rejected for protected region backup.
+    #[snafu(display(
+        "Cross-region restore rejected: backup region {backup_region} requires \
+         residency, but restoring node is in region {node_region}"
+    ))]
+    CrossRegionRestore {
+        /// Region the backup belongs to.
+        backup_region: Region,
+        /// Region of the restoring node.
+        node_region: Region,
+    },
+
+    /// Backup path overlaps with key directory.
+    #[snafu(display(
+        "Backup path {path} is inside the keys directory — key material must not be \
+         included in data backups"
+    ))]
+    KeyDirectoryExcluded {
+        /// The offending path.
+        path: String,
+    },
 }
 
 /// Result type for backup operations.
@@ -112,10 +134,10 @@ pub enum BackupType {
 pub struct BackupMetadata {
     /// Unique backup identifier (timestamp-based).
     pub backup_id: String,
-    /// Shard ID.
-    pub shard: ShardId,
-    /// Shard height at backup time.
-    pub shard_height: u64,
+    /// Region this backup belongs to.
+    pub region: Region,
+    /// Region height at backup time.
+    pub region_height: u64,
     /// Backup file path.
     pub backup_path: String,
     /// Size in bytes.
@@ -145,7 +167,44 @@ fn default_backup_type() -> BackupType {
     BackupType::Full
 }
 
-/// Manages backup operations for a shard.
+impl BackupMetadata {
+    /// Validates that this backup can be restored on a node in `node_region`.
+    ///
+    /// Protected regions restrict restore to in-region nodes only.
+    /// Non-protected regions allow restore on any node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError::CrossRegionRestore`] if the backup belongs to a
+    /// protected region and `node_region` differs.
+    pub fn validate_restore_region(&self, node_region: Region) -> Result<()> {
+        if self.region.requires_residency() && self.region != node_region {
+            return Err(BackupError::CrossRegionRestore {
+                backup_region: self.region,
+                node_region,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Validates that a path does not overlap with the keys directory.
+///
+/// Key material (`{data_dir}/keys/`) must be excluded from data backup
+/// operations. Including the RMK alongside the ciphertext it protects
+/// defeats envelope encryption's purpose.
+///
+/// # Errors
+///
+/// Returns [`BackupError::KeyDirectoryExcluded`] if `path` is inside `keys_dir`.
+pub fn validate_not_keys_directory(path: &Path, keys_dir: &Path) -> Result<()> {
+    if path.starts_with(keys_dir) {
+        return Err(BackupError::KeyDirectoryExcluded { path: path.display().to_string() });
+    }
+    Ok(())
+}
+
+/// Manages backup operations for a region.
 pub struct BackupManager {
     /// Backup destination directory.
     backup_dir: PathBuf,
@@ -180,7 +239,7 @@ impl BackupManager {
     pub fn create_backup(&self, snapshot: &Snapshot, tag: &str) -> Result<BackupMetadata> {
         let now = Utc::now();
         let backup_id =
-            format!("{}-{:09}", now.format("%Y%m%dT%H%M%SZ"), snapshot.header.shard_height);
+            format!("{}-{:09}", now.format("%Y%m%dT%H%M%SZ"), snapshot.header.region_height);
 
         let backup_filename = format!("{backup_id}{BACKUP_EXT}");
         let backup_path = self.backup_dir.join(&backup_filename);
@@ -193,8 +252,8 @@ impl BackupManager {
 
         let metadata = BackupMetadata {
             backup_id: backup_id.clone(),
-            shard: snapshot.header.shard,
-            shard_height: snapshot.header.shard_height,
+            region: snapshot.header.region,
+            region_height: snapshot.header.region_height,
             backup_path: backup_path.display().to_string(),
             size_bytes,
             created_at: now,
@@ -218,7 +277,7 @@ impl BackupManager {
 
         info!(
             backup_id = %metadata.backup_id,
-            shard_height = metadata.shard_height,
+            region_height = metadata.region_height,
             size_bytes = metadata.size_bytes,
             "Backup created"
         );
@@ -329,7 +388,7 @@ impl BackupManager {
 
             debug!(
                 backup_id = %backup.backup_id,
-                shard_height = backup.shard_height,
+                region_height = backup.region_height,
                 "Pruned old backup"
             );
         }
@@ -371,8 +430,8 @@ impl BackupManager {
         &self,
         db: &Database<B>,
         base_backup_id: &str,
-        shard: ShardId,
-        shard_height: u64,
+        region: Region,
+        region_height: u64,
         tag: &str,
     ) -> Result<BackupMetadata> {
         // Verify the base backup exists
@@ -397,11 +456,11 @@ impl BackupManager {
         let table_roots = db.table_root_pages();
 
         let now = Utc::now();
-        let backup_id = format!("{}-{shard_height:09}-inc", now.format("%Y%m%dT%H%M%SZ"));
+        let backup_id = format!("{}-{region_height:09}-inc", now.format("%Y%m%dT%H%M%SZ"));
         let backup_path = self.backup_dir.join(format!("{backup_id}{PAGE_BACKUP_EXT}"));
 
         let data = Self::encode_page_backup(
-            shard_height,
+            region_height,
             page_size as u32,
             &table_roots,
             &pages,
@@ -418,8 +477,8 @@ impl BackupManager {
 
         let metadata = BackupMetadata {
             backup_id: backup_id.clone(),
-            shard,
-            shard_height,
+            region,
+            region_height,
             backup_path: backup_path.display().to_string(),
             size_bytes,
             created_at: now,
@@ -455,7 +514,7 @@ impl BackupManager {
     /// ```text
     /// [4 bytes: magic "LPBK"]
     /// [4 bytes: version]
-    /// [8 bytes: shard_height]
+    /// [8 bytes: region_height]
     /// [4 bytes: page_size]
     /// [8 bytes: page_count]
     /// [TableId::COUNT * 8 bytes: table_roots]
@@ -466,7 +525,7 @@ impl BackupManager {
     /// --- (checksum appended externally) ---
     /// ```
     fn encode_page_backup(
-        shard_height: u64,
+        region_height: u64,
         page_size: u32,
         table_roots: &[u64; TableId::COUNT],
         pages: &[(u64, Vec<u8>)],
@@ -477,7 +536,7 @@ impl BackupManager {
         // Header
         buf.extend_from_slice(PAGE_BACKUP_MAGIC);
         buf.extend_from_slice(&PAGE_BACKUP_VERSION.to_le_bytes());
-        buf.extend_from_slice(&shard_height.to_le_bytes());
+        buf.extend_from_slice(&region_height.to_le_bytes());
         buf.extend_from_slice(&page_size.to_le_bytes());
         buf.extend_from_slice(&(pages.len() as u64).to_le_bytes());
 
@@ -570,11 +629,10 @@ impl BackupManager {
         }
         pos += 4;
 
-        // Shard height
-        let shard_height =
-            u64::from_le_bytes(data[pos..pos + 8].try_into().map_err(|_| {
-                BackupError::Invalid { message: "Truncated shard_height".to_string() }
-            })?);
+        // Region height
+        let region_height = u64::from_le_bytes(data[pos..pos + 8].try_into().map_err(|_| {
+            BackupError::Invalid { message: "Truncated region_height".to_string() }
+        })?);
         pos += 8;
 
         // Page size
@@ -635,7 +693,7 @@ impl BackupManager {
             pages.push((page_id, page_data));
         }
 
-        Ok(PageBackupData { shard_height, page_size, table_roots, base_backup_id, pages })
+        Ok(PageBackupData { region_height, page_size, table_roots, base_backup_id, pages })
     }
 
     /// Resolves the full backup chain for a given backup ID.
@@ -677,7 +735,7 @@ impl BackupManager {
     /// The full backup is restored via Raft snapshot, then incrementals are
     /// applied as page-level patches.
     ///
-    /// Returns the shard height from the last backup in the chain.
+    /// Returns the region height from the last backup in the chain.
     ///
     /// # Errors
     ///
@@ -713,12 +771,12 @@ impl BackupManager {
                 let page_refs: Vec<(u64, &[u8])> =
                     backup_data.pages.iter().map(|(id, data)| (*id, data.as_slice())).collect();
                 db.import_pages(&page_refs).context(StorageSnafu)?;
-                last_height = backup_data.shard_height;
+                last_height = backup_data.region_height;
 
                 info!(
                     backup_id = %backup_id,
                     pages = backup_data.pages.len(),
-                    shard_height = last_height,
+                    region_height = last_height,
                     "Applied full page backup"
                 );
             } else {
@@ -727,12 +785,12 @@ impl BackupManager {
                 let page_refs: Vec<(u64, &[u8])> =
                     backup_data.pages.iter().map(|(id, data)| (*id, data.as_slice())).collect();
                 db.import_pages(&page_refs).context(StorageSnafu)?;
-                last_height = backup_data.shard_height;
+                last_height = backup_data.region_height;
 
                 info!(
                     backup_id = %backup_id,
                     pages = backup_data.pages.len(),
-                    shard_height = last_height,
+                    region_height = last_height,
                     "Applied incremental page backup"
                 );
             }
@@ -754,8 +812,8 @@ impl BackupManager {
     pub fn create_full_page_backup<B: StorageBackend>(
         &self,
         db: &Database<B>,
-        shard: ShardId,
-        shard_height: u64,
+        region: Region,
+        region_height: u64,
         chain_commitment_hash: Hash,
         tag: &str,
     ) -> Result<BackupMetadata> {
@@ -766,11 +824,11 @@ impl BackupManager {
         let table_roots = db.table_root_pages();
 
         let now = Utc::now();
-        let backup_id = format!("{}-{shard_height:09}", now.format("%Y%m%dT%H%M%SZ"));
+        let backup_id = format!("{}-{region_height:09}", now.format("%Y%m%dT%H%M%SZ"));
         let backup_path = self.backup_dir.join(format!("{backup_id}{PAGE_BACKUP_EXT}"));
 
         let data =
-            Self::encode_page_backup(shard_height, page_size as u32, &table_roots, &pages, None);
+            Self::encode_page_backup(region_height, page_size as u32, &table_roots, &pages, None);
 
         let checksum = sha256(&data);
         let mut file = fs::File::create(&backup_path).context(IoSnafu)?;
@@ -782,8 +840,8 @@ impl BackupManager {
 
         let metadata = BackupMetadata {
             backup_id: backup_id.clone(),
-            shard,
-            shard_height,
+            region,
+            region_height,
             backup_path: backup_path.display().to_string(),
             size_bytes,
             created_at: now,
@@ -807,7 +865,7 @@ impl BackupManager {
 
         info!(
             backup_id = %metadata.backup_id,
-            shard_height = metadata.shard_height,
+            region_height = metadata.region_height,
             pages = pages.len(),
             size_bytes = metadata.size_bytes,
             "Full page backup created"
@@ -820,8 +878,8 @@ impl BackupManager {
 /// Decoded page-level backup data.
 #[derive(Debug)]
 pub struct PageBackupData {
-    /// Shard height at backup time.
-    pub shard_height: u64,
+    /// Region height at backup time.
+    pub region_height: u64,
     /// Page size in bytes.
     pub page_size: u32,
     /// Table root page IDs.
@@ -833,15 +891,24 @@ pub struct PageBackupData {
 }
 
 /// Metric recording for backup operations.
-pub fn record_backup_created(shard_height: u64, size_bytes: u64) {
+pub fn record_backup_created(region_height: u64, size_bytes: u64) {
     metrics::counter!("ledger_backups_created_total").increment(1);
-    metrics::gauge!("ledger_backup_last_height").set(shard_height as f64);
+    metrics::gauge!("ledger_backup_last_height").set(region_height as f64);
     metrics::gauge!("ledger_backup_last_size_bytes").set(size_bytes as f64);
 }
 
 /// Records a backup failure.
 pub fn record_backup_failed() {
     metrics::counter!("ledger_backup_failures_total").increment(1);
+}
+
+/// Records the count of backups created before the most recent erasure event.
+///
+/// Operators should monitor this gauge and retire pre-erasure backups within
+/// the configured `max_backup_retention_days` window.
+pub fn record_pre_erasure_backup_count(region: &str, count: u64) {
+    metrics::gauge!("ledger_backup_pre_erasure_count", "region" => region.to_string())
+        .set(count as f64);
 }
 
 /// Automated backup background job.
@@ -903,13 +970,13 @@ impl BackupJob {
                         match self.backup_manager.create_backup(&snapshot, "auto") {
                             Ok(meta) => {
                                 let duration = cycle_start.elapsed().as_secs_f64();
-                                record_backup_created(meta.shard_height, meta.size_bytes);
+                                record_backup_created(meta.region_height, meta.size_bytes);
                                 crate::metrics::record_background_job_duration("backup", duration);
                                 crate::metrics::record_background_job_run("backup", "success");
                                 crate::metrics::record_background_job_items("backup", 1);
                                 info!(
                                     backup_id = %meta.backup_id,
-                                    shard_height = meta.shard_height,
+                                    region_height = meta.region_height,
                                     size_bytes = meta.size_bytes,
                                     duration_secs = duration,
                                     "Automated backup completed"
@@ -963,10 +1030,10 @@ mod tests {
             .expect("valid config")
     }
 
-    fn create_test_snapshot(shard_height: u64) -> Snapshot {
+    fn create_test_snapshot(region_height: u64) -> Snapshot {
         let vault_states = vec![VaultSnapshotMeta::new(
             VaultId::new(1),
-            shard_height / 2,
+            region_height / 2,
             [42u8; 32],
             [EMPTY_HASH; 256],
             5,
@@ -992,11 +1059,12 @@ mod tests {
                 accumulated_header_hash: [3u8; 32],
                 state_root_accumulator: [4u8; 32],
                 from_height: 0,
-                to_height: shard_height,
+                to_height: region_height,
             },
+            erased_users: Default::default(),
         };
 
-        Snapshot::new(ShardId::new(1), shard_height, vault_states, state, chain_params)
+        Snapshot::new(Region::GLOBAL, region_height, vault_states, state, chain_params)
             .expect("create snapshot")
     }
 
@@ -1009,7 +1077,7 @@ mod tests {
         let snapshot = create_test_snapshot(1000);
         let meta = manager.create_backup(&snapshot, "test").expect("create backup");
 
-        assert_eq!(meta.shard_height, 1000);
+        assert_eq!(meta.region_height, 1000);
         assert_eq!(meta.tag, "test");
         assert!(meta.size_bytes > 0);
         assert!(meta.backup_id.contains("000001000"));
@@ -1029,8 +1097,8 @@ mod tests {
         let meta = manager.create_backup(&snapshot, "").expect("create backup");
 
         let loaded = manager.load_backup(&meta.backup_id).expect("load backup");
-        assert_eq!(loaded.header.shard_height, 2000);
-        assert_eq!(loaded.header.shard, ShardId::new(1));
+        assert_eq!(loaded.header.region_height, 2000);
+        assert_eq!(loaded.header.region, Region::GLOBAL);
     }
 
     #[test]
@@ -1053,7 +1121,7 @@ mod tests {
         let meta = manager.create_backup(&snapshot, "tagged").expect("create backup");
 
         let loaded_meta = manager.get_metadata(&meta.backup_id).expect("get metadata");
-        assert_eq!(loaded_meta.shard_height, 3000);
+        assert_eq!(loaded_meta.region_height, 3000);
         assert_eq!(loaded_meta.tag, "tagged");
         assert_eq!(loaded_meta.checksum, meta.checksum);
     }
@@ -1086,9 +1154,9 @@ mod tests {
         assert_eq!(backups.len(), 3, "Should retain only 3 backups");
 
         // Newest should be first (height 500, 400, 300)
-        assert_eq!(backups[0].shard_height, 500);
-        assert_eq!(backups[1].shard_height, 400);
-        assert_eq!(backups[2].shard_height, 300);
+        assert_eq!(backups[0].region_height, 500);
+        assert_eq!(backups[1].region_height, 400);
+        assert_eq!(backups[2].region_height, 300);
     }
 
     #[test]
@@ -1227,11 +1295,11 @@ mod tests {
         let db = create_test_db_with_data();
 
         let meta = manager
-            .create_full_page_backup(&db, ShardId::new(1), 100, [5u8; 32], "full-test")
+            .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "full-test")
             .expect("create full page backup");
 
         assert_eq!(meta.backup_type, BackupType::Full);
-        assert_eq!(meta.shard_height, 100);
+        assert_eq!(meta.region_height, 100);
         assert_eq!(meta.tag, "full-test");
         assert!(meta.page_count.is_some());
         assert!(meta.page_count.expect("page_count") > 0);
@@ -1240,7 +1308,7 @@ mod tests {
 
         // Load and verify
         let loaded = manager.load_page_backup(&meta.backup_id).expect("load page backup");
-        assert_eq!(loaded.shard_height, 100);
+        assert_eq!(loaded.region_height, 100);
         assert!(loaded.base_backup_id.is_none());
         assert!(!loaded.pages.is_empty());
     }
@@ -1258,7 +1326,7 @@ mod tests {
 
         // Create full page backup and clear dirty bitmap
         let full_meta = manager
-            .create_full_page_backup(&db, ShardId::new(1), 100, [5u8; 32], "base")
+            .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "base")
             .expect("create full page backup");
         db.clear_dirty_bitmap();
 
@@ -1276,11 +1344,11 @@ mod tests {
         assert!(db.dirty_page_count() > 0, "Should have dirty pages after write");
 
         let inc_meta = manager
-            .create_incremental_backup(&db, &full_meta.backup_id, ShardId::new(1), 200, "incr")
+            .create_incremental_backup(&db, &full_meta.backup_id, Region::GLOBAL, 200, "incr")
             .expect("create incremental backup");
 
         assert_eq!(inc_meta.backup_type, BackupType::Incremental);
-        assert_eq!(inc_meta.shard_height, 200);
+        assert_eq!(inc_meta.region_height, 200);
         assert_eq!(inc_meta.base_backup_id.as_deref(), Some(full_meta.backup_id.as_str()));
         assert!(inc_meta.page_count.is_some());
 
@@ -1306,7 +1374,7 @@ mod tests {
 
         // Create full → incremental chain
         let full_meta = manager
-            .create_full_page_backup(&db, ShardId::new(1), 100, [5u8; 32], "base")
+            .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "base")
             .expect("create full");
         db.clear_dirty_bitmap();
 
@@ -1321,7 +1389,7 @@ mod tests {
         }
 
         let inc_meta = manager
-            .create_incremental_backup(&db, &full_meta.backup_id, ShardId::new(1), 200, "incr1")
+            .create_incremental_backup(&db, &full_meta.backup_id, Region::GLOBAL, 200, "incr1")
             .expect("create incremental");
         db.clear_dirty_bitmap();
 
@@ -1339,7 +1407,7 @@ mod tests {
         let result = manager.create_incremental_backup(
             &db,
             &inc_meta.backup_id,
-            ShardId::new(1),
+            Region::GLOBAL,
             300,
             "incr2",
         );
@@ -1357,13 +1425,13 @@ mod tests {
         let db = create_test_db_with_data();
 
         let full_meta = manager
-            .create_full_page_backup(&db, ShardId::new(1), 100, [5u8; 32], "")
+            .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "")
             .expect("create full");
         db.clear_dirty_bitmap();
 
         // No writes → no dirty pages → should error
         let result =
-            manager.create_incremental_backup(&db, &full_meta.backup_id, ShardId::new(1), 200, "");
+            manager.create_incremental_backup(&db, &full_meta.backup_id, Region::GLOBAL, 200, "");
         assert!(
             matches!(result, Err(BackupError::Invalid { .. })),
             "Should reject when no dirty pages"
@@ -1382,7 +1450,7 @@ mod tests {
         let db = create_test_db_with_data();
 
         let full_meta = manager
-            .create_full_page_backup(&db, ShardId::new(1), 100, [5u8; 32], "")
+            .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "")
             .expect("create full");
         db.clear_dirty_bitmap();
 
@@ -1398,7 +1466,7 @@ mod tests {
         }
 
         let inc_meta = manager
-            .create_incremental_backup(&db, &full_meta.backup_id, ShardId::new(1), 200, "")
+            .create_incremental_backup(&db, &full_meta.backup_id, Region::GLOBAL, 200, "")
             .expect("create incremental");
 
         // Resolve chain from incremental → should be [full, incremental]
@@ -1422,7 +1490,7 @@ mod tests {
         let db = create_test_db_with_data();
 
         let full_meta = manager
-            .create_full_page_backup(&db, ShardId::new(1), 100, [5u8; 32], "")
+            .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "")
             .expect("create full");
 
         // Create a fresh database and restore into it
@@ -1448,7 +1516,7 @@ mod tests {
         let db = create_test_db_with_data();
 
         let full_meta = manager
-            .create_full_page_backup(&db, ShardId::new(1), 100, [5u8; 32], "")
+            .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "")
             .expect("create full");
         db.clear_dirty_bitmap();
 
@@ -1464,7 +1532,7 @@ mod tests {
         }
 
         let inc_meta = manager
-            .create_incremental_backup(&db, &full_meta.backup_id, ShardId::new(1), 200, "")
+            .create_incremental_backup(&db, &full_meta.backup_id, Region::GLOBAL, 200, "")
             .expect("create incremental");
 
         // Restore the full chain into a fresh database
@@ -1485,7 +1553,7 @@ mod tests {
         let db = create_test_db_with_data();
 
         let meta = manager
-            .create_full_page_backup(&db, ShardId::new(1), 100, [5u8; 32], "")
+            .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "")
             .expect("create full page backup");
 
         // Corrupt the page backup file
@@ -1512,7 +1580,7 @@ mod tests {
             BackupManager::encode_page_backup(1000, 128, &table_roots, &pages, Some("base-123"));
         let decoded = BackupManager::decode_page_backup(&encoded).expect("decode");
 
-        assert_eq!(decoded.shard_height, 1000);
+        assert_eq!(decoded.region_height, 1000);
         assert_eq!(decoded.page_size, 128);
         assert_eq!(decoded.table_roots, table_roots);
         assert_eq!(decoded.base_backup_id.as_deref(), Some("base-123"));
@@ -1531,7 +1599,7 @@ mod tests {
         let encoded = BackupManager::encode_page_backup(500, 64, &table_roots, &pages, None);
         let decoded = BackupManager::decode_page_backup(&encoded).expect("decode");
 
-        assert_eq!(decoded.shard_height, 500);
+        assert_eq!(decoded.region_height, 500);
         assert_eq!(decoded.page_size, 64);
         assert!(decoded.base_backup_id.is_none());
         assert_eq!(decoded.pages.len(), 1);
@@ -1554,7 +1622,7 @@ mod tests {
 
         // Create full page backup
         let page_meta = manager
-            .create_full_page_backup(&db, ShardId::new(1), 200, [5u8; 32], "page-full")
+            .create_full_page_backup(&db, Region::GLOBAL, 200, [5u8; 32], "page-full")
             .expect("page backup");
         db.clear_dirty_bitmap();
 
@@ -1570,7 +1638,7 @@ mod tests {
         }
 
         let _inc_meta = manager
-            .create_incremental_backup(&db, &page_meta.backup_id, ShardId::new(1), 300, "incr")
+            .create_incremental_backup(&db, &page_meta.backup_id, Region::GLOBAL, 300, "incr")
             .expect("incremental backup");
 
         let backups = manager.list_backups(0).expect("list all");
@@ -1588,5 +1656,71 @@ mod tests {
         let incremental = backups.iter().find(|b| b.backup_type == BackupType::Incremental);
         assert!(incremental.is_some());
         assert!(incremental.expect("found").base_backup_id.is_some());
+    }
+
+    fn test_backup_metadata_for_region(region: Region) -> BackupMetadata {
+        BackupMetadata {
+            backup_id: format!("test-{}", region.as_str()),
+            region,
+            region_height: 100,
+            backup_path: format!("/backups/test-{}.backup", region.as_str()),
+            size_bytes: 1024,
+            created_at: Utc::now(),
+            checksum: [0u8; 32],
+            chain_commitment_hash: EMPTY_HASH,
+            schema_version: 2,
+            tag: String::new(),
+            backup_type: BackupType::Full,
+            base_backup_id: None,
+            page_count: None,
+        }
+    }
+
+    #[test]
+    fn test_backup_validate_restore_region_protected_same_ok() {
+        let meta = test_backup_metadata_for_region(Region::CA_CENTRAL_QC);
+        assert!(meta.validate_restore_region(Region::CA_CENTRAL_QC).is_ok());
+    }
+
+    #[test]
+    fn test_backup_validate_restore_region_protected_different_rejected() {
+        let meta = test_backup_metadata_for_region(Region::IE_EAST_DUBLIN);
+        let err = meta.validate_restore_region(Region::US_EAST_VA).unwrap_err();
+        assert!(matches!(err, BackupError::CrossRegionRestore { .. }));
+    }
+
+    #[test]
+    fn test_backup_validate_restore_region_non_protected_ok() {
+        let meta = test_backup_metadata_for_region(Region::US_EAST_VA);
+        assert!(meta.validate_restore_region(Region::CA_CENTRAL_QC).is_ok());
+    }
+
+    #[test]
+    fn test_backup_validate_restore_region_global_ok() {
+        let meta = test_backup_metadata_for_region(Region::GLOBAL);
+        assert!(meta.validate_restore_region(Region::IE_EAST_DUBLIN).is_ok());
+    }
+
+    #[test]
+    fn test_validate_not_keys_directory_ok() {
+        let keys_dir = Path::new("/data/keys");
+        let backup_path = Path::new("/data/backups/snapshot-001.backup");
+        assert!(validate_not_keys_directory(backup_path, keys_dir).is_ok());
+    }
+
+    #[test]
+    fn test_validate_not_keys_directory_rejected() {
+        let keys_dir = Path::new("/data/keys");
+        let backup_path = Path::new("/data/keys/v1.key");
+        let err = validate_not_keys_directory(backup_path, keys_dir).unwrap_err();
+        assert!(matches!(err, BackupError::KeyDirectoryExcluded { .. }));
+    }
+
+    #[test]
+    fn test_validate_not_keys_directory_subdirectory_rejected() {
+        let keys_dir = Path::new("/data/keys");
+        let backup_path = Path::new("/data/keys/region/ca-central/v2.key");
+        let err = validate_not_keys_directory(backup_path, keys_dir).unwrap_err();
+        assert!(matches!(err, BackupError::KeyDirectoryExcluded { .. }));
     }
 }

@@ -1,11 +1,11 @@
-//! Multi-shard integration tests.
+//! Multi-region integration tests.
 //!
-//! Tests write forwarding, read consistency, batch writes, and cross-shard
-//! operations using the `MultiShardTestCluster` infrastructure.
+//! Tests write forwarding, read consistency, batch writes, and cross-region
+//! operations using the `MultiRegionTestCluster` infrastructure.
 //!
-//! These tests exercise the full gRPC path through `MultiShardWriteServiceImpl`
-//! and `MultiShardReadServiceImpl`, validating that organization→shard routing,
-//! idempotency, and error handling work correctly across shard boundaries.
+//! These tests exercise the full gRPC path through `MultiRegionWriteServiceImpl`
+//! and `MultiRegionReadServiceImpl`, validating that organization→region routing,
+//! idempotency, and error handling work correctly across region boundaries.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
@@ -14,14 +14,14 @@ use std::time::Duration;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
 use crate::common::{
-    MultiShardTestCluster, create_admin_client, create_read_client, create_write_client,
+    MultiRegionTestCluster, create_admin_client, create_read_client, create_write_client,
 };
 
 // ============================================================================
 // Test Helpers
 // ============================================================================
 
-/// Creates an organization on a multi-shard cluster and returns its slug.
+/// Creates an organization on a multi-region cluster and returns its slug.
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
@@ -30,7 +30,7 @@ async fn create_organization(
     let response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: name.to_string(),
-            shard: None,
+            region: 10, // REGION_US_EAST_VA
             tier: None,
         })
         .await?;
@@ -85,7 +85,7 @@ async fn write_entity(
         }),
         vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         client_id: Some(inferadb_ledger_proto::proto::ClientId {
-            id: "multi-shard-test".to_string(),
+            id: "multi-region-test".to_string(),
         }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -136,23 +136,23 @@ async fn read_entity(
 }
 
 // ============================================================================
-// Multi-Shard Integration Tests
+// Multi-Region Integration Tests
 // ============================================================================
 
-/// Tests that writes to an organization are routed to the correct shard and readable.
+/// Tests that writes to an organization are routed to the correct region and readable.
 ///
 /// Exercises the full write→route→Raft→apply→read path through gRPC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_multi_shard_write_and_read() {
-    let cluster = MultiShardTestCluster::new(1, 2).await;
+async fn test_multi_region_write_and_read() {
+    let cluster = MultiRegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
-        "all shards should elect leaders"
+        "all regions should elect leaders"
     );
 
     let node = cluster.any_node();
 
-    // Create organization (gets assigned to a data shard)
+    // Create organization (gets assigned to a data region)
     let ns_id = create_organization(node.addr, "ms-write-read").await.expect("create organization");
     let vault = create_vault(node.addr, ns_id).await.expect("create vault");
 
@@ -166,21 +166,21 @@ async fn test_multi_shard_write_and_read() {
     assert_eq!(value, Some(b"value1".to_vec()), "should read back written value");
 }
 
-/// Tests that multiple organizations on different shards are isolated.
+/// Tests that multiple organizations in different regions are isolated.
 ///
 /// Writes to organization A should not be visible in organization B, even if both
 /// are served by the same node.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_multi_shard_organization_isolation() {
-    let cluster = MultiShardTestCluster::new(1, 2).await;
+async fn test_multi_region_organization_isolation() {
+    let cluster = MultiRegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
-        "all shards should elect leaders"
+        "all regions should elect leaders"
     );
 
     let node = cluster.any_node();
 
-    // Create two organizations (may land on different shards)
+    // Create two organizations (may land in different regions)
     let ns_a = create_organization(node.addr, "isolated-a").await.expect("create ns A");
     let ns_b = create_organization(node.addr, "isolated-b").await.expect("create ns B");
 
@@ -201,15 +201,15 @@ async fn test_multi_shard_organization_isolation() {
     assert_eq!(val_b, Some(b"value-b".to_vec()), "ns B should have its own value");
 }
 
-/// Tests batch writes through the multi-shard service.
+/// Tests batch writes through the multi-region service.
 ///
 /// Verifies that BatchWrite routes correctly and applies atomically.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_multi_shard_batch_write() {
-    let cluster = MultiShardTestCluster::new(1, 2).await;
+async fn test_multi_region_batch_write() {
+    let cluster = MultiRegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
-        "all shards should elect leaders"
+        "all regions should elect leaders"
     );
 
     let node = cluster.any_node();
@@ -272,15 +272,15 @@ async fn test_multi_shard_batch_write() {
     assert_eq!(val2, Some(b"batch-val-2".to_vec()), "second batch key should be readable");
 }
 
-/// Tests idempotency across multi-shard writes.
+/// Tests idempotency across multi-region writes.
 ///
 /// Same client_id + idempotency_key should return cached result on retry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_multi_shard_write_idempotency() {
-    let cluster = MultiShardTestCluster::new(1, 2).await;
+async fn test_multi_region_write_idempotency() {
+    let cluster = MultiRegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
-        "all shards should elect leaders"
+        "all regions should elect leaders"
     );
 
     let node = cluster.any_node();
@@ -333,14 +333,14 @@ async fn test_multi_shard_write_idempotency() {
 
 /// Tests that writes to a non-existent organization return an appropriate error.
 ///
-/// The multi-shard service should reject writes for organizations that haven't
+/// The multi-region service should reject writes for organizations that haven't
 /// been created, rather than silently dropping them or panicking.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_multi_shard_write_nonexistent_organization() {
-    let cluster = MultiShardTestCluster::new(1, 2).await;
+async fn test_multi_region_write_nonexistent_organization() {
+    let cluster = MultiRegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
-        "all shards should elect leaders"
+        "all regions should elect leaders"
     );
 
     let node = cluster.any_node();
@@ -399,16 +399,16 @@ async fn test_multi_shard_write_nonexistent_organization() {
     }
 }
 
-/// Tests concurrent writes to multiple organizations across shards.
+/// Tests concurrent writes to multiple organizations across regions.
 ///
 /// Verifies that writes to different organizations can proceed in parallel
 /// without interfering with each other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_multi_shard_concurrent_writes() {
-    let cluster = MultiShardTestCluster::new(1, 2).await;
+async fn test_multi_region_concurrent_writes() {
+    let cluster = MultiRegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
-        "all shards should elect leaders"
+        "all regions should elect leaders"
     );
 
     let node = cluster.any_node();
@@ -467,20 +467,20 @@ async fn test_multi_shard_concurrent_writes() {
 // Write Forwarding Integration Tests
 // ============================================================================
 
-/// Tests that writes to a local-shard follower node succeed.
+/// Tests that writes to a local-region follower node succeed.
 ///
-/// In a 3-node cluster where all nodes host all shards, writing to any node
+/// In a 3-node cluster where all nodes host all regions, writing to any node
 /// should succeed — the `resolve_with_forward()` returns `Local` and the
 /// Raft layer handles leader election internally. This verifies the new
 /// forwarding code path is a transparent no-op for local organizations.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_write_forwarding_local_shard_all_nodes() {
-    // Single-node cluster with 2 data shards still uses MultiShardResolver
+async fn test_write_forwarding_local_region_all_nodes() {
+    // Single-node cluster with 2 data regions still uses MultiRegionResolver
     // (supports_forwarding=true) so the forwarding code path is exercised.
-    let cluster = MultiShardTestCluster::new(1, 2).await;
+    let cluster = MultiRegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(15)).await,
-        "all shards should elect leaders"
+        "all regions should elect leaders"
     );
 
     let node = cluster.any_node();
@@ -488,7 +488,7 @@ async fn test_write_forwarding_local_shard_all_nodes() {
     let vault = create_vault(node.addr, ns_id).await.expect("create vault");
 
     // Write through the forwarding-enabled resolver — resolve_with_forward
-    // returns Local because the single node hosts every shard.
+    // returns Local because the single node hosts every region.
     let height = write_entity(node.addr, ns_id, vault, "fwd-key-0", b"fwd-val-0")
         .await
         .expect("write should succeed through forwarding path");
@@ -500,16 +500,16 @@ async fn test_write_forwarding_local_shard_all_nodes() {
     assert_eq!(value, Some(b"fwd-val-0".to_vec()));
 }
 
-/// Tests batch write through the forwarding-enabled `MultiShardWriteService`.
+/// Tests batch write through the forwarding-enabled `MultiRegionWriteService`.
 ///
-/// Verifies that `batch_write()` through `MultiShardWriteService` with the
-/// forwarding-enabled `MultiShardResolver` works correctly for local shards.
+/// Verifies that `batch_write()` through `MultiRegionWriteService` with the
+/// forwarding-enabled `MultiRegionResolver` works correctly for local regions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_batch_write_forwarding_local_shard() {
-    let cluster = MultiShardTestCluster::new(1, 2).await;
+async fn test_batch_write_forwarding_local_region() {
+    let cluster = MultiRegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(15)).await,
-        "all shards should elect leaders"
+        "all regions should elect leaders"
     );
 
     let node = cluster.any_node();

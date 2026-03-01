@@ -1,8 +1,8 @@
-//! Multi-shard write service implementation.
+//! Multi-region write service implementation.
 //!
-//! Routes write requests to the appropriate shard based on organization.
-//! Each organization is assigned to a shard, and requests are routed to the
-//! Raft instance for that shard.
+//! Routes write requests to the appropriate region based on organization.
+//! Each organization is assigned to a region, and requests are routed to the
+//! Raft instance for that region.
 
 use std::{
     sync::Arc,
@@ -28,7 +28,7 @@ use crate::{
     services::{
         ForwardClient,
         metadata::{response_with_correlation, status_with_correlation},
-        shard_resolver::{RemoteShardInfo, ResolveResult, ShardResolver},
+        region_resolver::{RegionResolver, RemoteRegionInfo, ResolveResult},
         slug_resolver::SlugResolver,
     },
     trace_context,
@@ -37,14 +37,14 @@ use crate::{
 
 // Note: SetCondition conversion is internal to convert_set_condition
 
-/// Routes write requests to the correct shard via Raft consensus based on organization ID.
+/// Routes write requests to the correct region via Raft consensus based on organization ID.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
-pub struct MultiShardWriteService {
-    /// Shard resolver for routing requests.
-    resolver: Arc<dyn ShardResolver>,
+pub struct MultiRegionWriteService {
+    /// Region resolver for routing requests.
+    resolver: Arc<dyn RegionResolver>,
     /// Multi-raft manager for creating forward clients when needed.
-    /// Optional to support standalone single-shard deployments.
+    /// Optional to support standalone single-region deployments.
     #[builder(default)]
     manager: Option<Arc<MultiRaftManager>>,
     /// Idempotency cache for duplicate detection.
@@ -75,7 +75,7 @@ pub struct MultiShardWriteService {
 }
 
 #[allow(clippy::result_large_err)]
-impl MultiShardWriteService {
+impl MultiRegionWriteService {
     /// Checks all rate limit tiers (backpressure, organization, client).
     fn check_rate_limit(
         &self,
@@ -92,26 +92,26 @@ impl MultiShardWriteService {
         }
     }
 
-    /// Returns a forward client for a remote shard.
+    /// Returns a forward client for a remote region.
     ///
-    /// Creates a gRPC connection to the remote shard's leader (or any member if leader unknown).
-    async fn get_forward_client(&self, remote: &RemoteShardInfo) -> Result<ForwardClient, Status> {
+    /// Creates a gRPC connection to the remote region's leader (or any member if leader unknown).
+    async fn get_forward_client(&self, remote: &RemoteRegionInfo) -> Result<ForwardClient, Status> {
         let manager = self.manager.as_ref().ok_or_else(|| {
             Status::unavailable("Request forwarding not configured for this service")
         })?;
 
         let router =
-            manager.router().ok_or_else(|| Status::unavailable("Shard router not initialized"))?;
+            manager.router().ok_or_else(|| Status::unavailable("Region router not initialized"))?;
 
         let connection = router
             .get_connection(
-                remote.shard,
+                remote.region,
                 &remote.routing.member_nodes,
                 remote.routing.leader_hint.as_deref(),
             )
             .await
             .map_err(|e| {
-                Status::unavailable(format!("Failed to connect to remote shard: {}", e))
+                Status::unavailable(format!("Failed to connect to remote region: {}", e))
             })?;
 
         Ok(ForwardClient::new(connection))
@@ -226,7 +226,7 @@ impl MultiShardWriteService {
 }
 
 #[tonic::async_trait]
-impl WriteService for MultiShardWriteService {
+impl WriteService for MultiRegionWriteService {
     #[instrument(skip(self, request), fields(client_id, organization_id, vault))]
     async fn write(
         &self,
@@ -245,11 +245,35 @@ impl WriteService for MultiShardWriteService {
 
         // Extract identifiers
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-        let system = self.resolver.system_shard()?;
-        let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+        let system = self.resolver.system_region()?;
+        let organization_id = SlugResolver::new(system.applied_state.clone())
+            .extract_and_resolve(&req.organization)?;
 
-        // Check for remote forwarding — if the organization is on a remote shard,
+        // Reject writes to organizations undergoing migration
+        if let Some(org_meta) = system.applied_state.get_organization(organization_id)
+            && org_meta.status == inferadb_ledger_state::system::OrganizationStatus::Migrating
+        {
+            let mut context = std::collections::HashMap::new();
+            context.insert("organization".to_string(), organization_id.value().to_string());
+            if let Some(pending) = org_meta.pending_region {
+                context.insert("target_region".to_string(), pending.as_str().to_string());
+            }
+            let details = super::error_details::build_error_details(
+                inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.as_u16(),
+                true,
+                Some(30_000),
+                context,
+                Some(inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.suggested_action()),
+            );
+            let encoded = prost::Message::encode_to_vec(&details);
+            return Err(Status::with_details(
+                tonic::Code::FailedPrecondition,
+                "Organization is being migrated to another region; writes are temporarily blocked",
+                encoded.into(),
+            ));
+        }
+
+        // Check for remote forwarding — if the organization is on a remote region,
         // run pre-flight checks and forward the raw request (no vault resolution).
         if self.resolver.supports_forwarding()
             && let ResolveResult::Remote(remote) =
@@ -293,18 +317,29 @@ impl WriteService for MultiShardWriteService {
                 return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
             }
 
-            // Forward to remote shard — destination resolves vault slug
+            // Forward to remote region — destination resolves vault slug
+            let source_region =
+                self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
             debug!(
                 organization_id = organization_id.value(),
-                shard = remote.shard.value(),
-                "Forwarding write to remote shard"
+                target_region = remote.region.as_str(),
+                source_region,
+                "Forwarding write to remote region"
             );
+            let forward_start = Instant::now();
             let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
             let mut client = self.get_forward_client(&remote).await?;
-            return client.forward_write(req, Some(&trace_ctx), grpc_deadline).await;
+            let result = client.forward_write(req, Some(&trace_ctx), grpc_deadline).await;
+            metrics::record_cross_region_forward(
+                "write",
+                source_region,
+                remote.region.as_str(),
+                forward_start.elapsed().as_secs_f64(),
+            );
+            return result;
         }
 
-        // Local processing path (single-shard or forwarding-enabled with local org)
+        // Local processing path (single-region or forwarding-enabled with local org)
         let ctx = self.resolver.resolve(organization_id)?;
         let vault_id =
             SlugResolver::new(ctx.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
@@ -425,7 +460,7 @@ impl WriteService for MultiShardWriteService {
         let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
         let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
-        // Submit to the resolved shard's Raft
+        // Submit to the resolved region's Raft
         metrics::record_raft_proposal();
         let result = match tokio::time::timeout(
             timeout,
@@ -544,11 +579,35 @@ impl WriteService for MultiShardWriteService {
 
         // Extract identifiers
         let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-        let system = self.resolver.system_shard()?;
-        let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+        let system = self.resolver.system_region()?;
+        let organization_id = SlugResolver::new(system.applied_state.clone())
+            .extract_and_resolve(&req.organization)?;
 
-        // Check for remote forwarding — if the organization is on a remote shard,
+        // Reject writes to organizations undergoing migration
+        if let Some(org_meta) = system.applied_state.get_organization(organization_id)
+            && org_meta.status == inferadb_ledger_state::system::OrganizationStatus::Migrating
+        {
+            let mut context = std::collections::HashMap::new();
+            context.insert("organization".to_string(), organization_id.value().to_string());
+            if let Some(pending) = org_meta.pending_region {
+                context.insert("target_region".to_string(), pending.as_str().to_string());
+            }
+            let details = super::error_details::build_error_details(
+                inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.as_u16(),
+                true,
+                Some(30_000),
+                context,
+                Some(inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.suggested_action()),
+            );
+            let encoded = prost::Message::encode_to_vec(&details);
+            return Err(Status::with_details(
+                tonic::Code::FailedPrecondition,
+                "Organization is being migrated to another region; writes are temporarily blocked",
+                encoded.into(),
+            ));
+        }
+
+        // Check for remote forwarding — if the organization is on a remote region,
         // run pre-flight checks and forward the raw request (no vault resolution).
         if self.resolver.supports_forwarding()
             && let ResolveResult::Remote(remote) =
@@ -597,18 +656,29 @@ impl WriteService for MultiShardWriteService {
                 return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
             }
 
-            // Forward to remote shard — destination resolves vault slug
+            // Forward to remote region — destination resolves vault slug
+            let source_region =
+                self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
             debug!(
                 organization_id = organization_id.value(),
-                shard = remote.shard.value(),
-                "Forwarding batch_write to remote shard"
+                target_region = remote.region.as_str(),
+                source_region,
+                "Forwarding batch_write to remote region"
             );
+            let forward_start = Instant::now();
             let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
             let mut client = self.get_forward_client(&remote).await?;
-            return client.forward_batch_write(req, Some(&trace_ctx), grpc_deadline).await;
+            let result = client.forward_batch_write(req, Some(&trace_ctx), grpc_deadline).await;
+            metrics::record_cross_region_forward(
+                "batch_write",
+                source_region,
+                remote.region.as_str(),
+                forward_start.elapsed().as_secs_f64(),
+            );
+            return result;
         }
 
-        // Local processing path (single-shard or forwarding-enabled with local org)
+        // Local processing path (single-region or forwarding-enabled with local org)
         let ctx = self.resolver.resolve(organization_id)?;
         let vault_id =
             SlugResolver::new(ctx.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
@@ -853,31 +923,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_multi_shard_write_service_creation() {
+    fn test_multi_region_write_service_creation() {
         // Basic struct test - full testing requires Raft setup
     }
 
     #[test]
-    fn test_single_shard_resolver_does_not_support_forwarding() {
-        // Verify SingleShardResolver returns supports_forwarding() = false,
+    fn test_single_region_resolver_does_not_support_forwarding() {
+        // Verify SingleRegionResolver returns supports_forwarding() = false,
         // which ensures the write forwarding code path is never entered
-        // for single-shard deployments.
-        fn assert_no_forwarding(resolver: &dyn ShardResolver) {
+        // for single-region deployments.
+        fn assert_no_forwarding(resolver: &dyn RegionResolver) {
             assert!(!resolver.supports_forwarding());
         }
-        // SingleShardResolver::new requires Raft and state instances.
+        // SingleRegionResolver::new requires Raft and state instances.
         // Instead, verify the trait default returns false.
         struct StubResolver;
-        impl ShardResolver for StubResolver {
+        impl RegionResolver for StubResolver {
             fn resolve(
                 &self,
                 _: inferadb_ledger_types::OrganizationId,
-            ) -> Result<crate::services::shard_resolver::ShardContext, tonic::Status> {
+            ) -> Result<crate::services::region_resolver::RegionContext, tonic::Status>
+            {
                 Err(tonic::Status::unimplemented("stub"))
             }
-            fn system_shard(
+            fn system_region(
                 &self,
-            ) -> Result<crate::services::shard_resolver::ShardContext, tonic::Status> {
+            ) -> Result<crate::services::region_resolver::RegionContext, tonic::Status>
+            {
                 Err(tonic::Status::unimplemented("stub"))
             }
         }
@@ -887,13 +959,13 @@ mod tests {
 
     #[test]
     fn test_manager_field_defaults_to_none() {
-        // Verify that MultiShardWriteService can be built without a manager
-        // (the default for single-shard deployments). The builder should not
+        // Verify that MultiRegionWriteService can be built without a manager
+        // (the default for single-region deployments). The builder should not
         // require the manager field.
         //
         // Cannot fully construct without a resolver and idempotency cache,
         // but we verify the struct definition accepts Option<_> for manager.
-        fn _check_field_type(service: &MultiShardWriteService) {
+        fn _check_field_type(service: &MultiRegionWriteService) {
             let _: &Option<Arc<MultiRaftManager>> = &service.manager;
         }
     }

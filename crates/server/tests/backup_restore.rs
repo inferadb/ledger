@@ -26,7 +26,7 @@ async fn create_organization(
     let response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: name.to_string(),
-            shard: None,
+            region: 10, // REGION_US_EAST_VA
             tier: None,
         })
         .await?;
@@ -146,7 +146,7 @@ async fn list_backups(
 /// Tests full backup → list → verify metadata correctness.
 ///
 /// Creates data, takes a backup, lists backups, and verifies that the
-/// backup metadata (shard_height, size, checksum, tag) is accurate.
+/// backup metadata (region_height, size, checksum, tag) is accurate.
 #[tokio::test]
 async fn test_backup_create_and_list_metadata() {
     let cluster = TestCluster::new(1).await;
@@ -175,7 +175,7 @@ async fn test_backup_create_and_list_metadata() {
         create_backup(leader.addr, Some("test-snapshot"), None).await.expect("create backup");
 
     assert!(!backup.backup_id.is_empty(), "backup should have an ID");
-    assert!(backup.shard_height > 0, "backup should have a shard height");
+    assert!(backup.region_height > 0, "backup should have a region height");
     assert!(backup.size_bytes > 0, "backup should have non-zero size");
     assert!(!backup.backup_path.is_empty(), "backup should have a path");
 
@@ -189,7 +189,7 @@ async fn test_backup_create_and_list_metadata() {
     assert!(our_backup.is_some(), "our backup should appear in list");
 
     let info = our_backup.unwrap();
-    assert_eq!(info.shard_height, backup.shard_height, "heights should match");
+    assert_eq!(info.region_height, backup.region_height, "heights should match");
     assert_eq!(info.tag, "test-snapshot", "tag should match");
     assert!(info.created_at.is_some(), "should have creation timestamp");
 }
@@ -234,7 +234,7 @@ async fn test_backup_during_active_writes() {
     write_handle.await.expect("concurrent writes should complete");
 
     // Backup should have captured at least the initial data
-    assert!(backup.shard_height > 0, "backup should capture state");
+    assert!(backup.region_height > 0, "backup should capture state");
     assert!(backup.size_bytes > 0, "backup should have content");
 }
 

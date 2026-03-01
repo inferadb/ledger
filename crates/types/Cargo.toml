@@ -21,6 +21,7 @@ sha2.workspace = true
 seahash.workspace = true
 rs_merkle.workspace = true
 subtle.workspace = true
+hmac.workspace = true
 
 # Serialization
 serde.workspace = true

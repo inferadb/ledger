@@ -114,8 +114,8 @@ For a vault with 10M keys and 100 updates per block:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         Shard Group (Raft)                          │
-│                    Nodes A, B, C sharing consensus                  │
+│                      Region Group (Raft)                             │
+│           Nodes A, B, C sharing consensus for us-east-va            │
 ├─────────────────────────────┬───────────────────────────────────────┤
 │   Organization: org_acme    │      Organization: org_startup        │
 │  ┌─────────┐  ┌─────────┐   │       ┌─────────┐                     │
@@ -127,11 +127,11 @@ For a vault with 10M keys and 100 updates per block:
 └─────────────────────────────┴───────────────────────────────────────┘
 ```
 
-| Level     | Isolation                       | Shared                 |
-| --------- | ------------------------------- | ---------------------- |
-| Organization | Entities, vaults, keys          | Shard (Raft consensus)    |
-| Vault        | Cryptographic chain, state_root | Organization storage      |
-| Shard     | Physical nodes                  | Cluster                |
+| Level        | Isolation                       | Shared                  |
+| ------------ | ------------------------------- | ----------------------- |
+| Organization | Entities, vaults, keys          | Region (Raft consensus) |
+| Vault        | Cryptographic chain, state_root | Organization storage    |
+| Region       | Physical nodes, encryption key  | Cluster                 |
 
 Each vault maintains its own blockchain. A corruption in Vault A cannot affect Vault B's chain integrity.
 
@@ -141,14 +141,14 @@ Each vault maintains its own blockchain. A corruption in Vault A cannot affect V
 
 ### Terminology
 
-| Term                    | Definition                                                                                                              |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| **Organization**        | Storage unit per customer/org. Contains entities and vaults. Isolated with separate storage.                                |
-| **Vault**               | Relationship store within an organization. Maintains its own cryptographic chain (state_root, previous_hash, block height). |
-| **Entity**              | Key-value data stored in an organization (users, teams, clients, sessions). Supports TTL, versioning, conditional writes.   |
-| **Relationship**        | Authorization tuple: `(resource, relation, subject)`. Used by Engine for permission checks.                             |
-| **Shard**                  | Operational grouping for consensus. Contains one or more organizations sharing a Raft group.                               |
-| **`_system` organization** | Special organization for global data: user accounts and organization routing. Replicated to all nodes.                     |
+| Term                       | Definition                                                                                                                                                                               |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Organization**           | Storage unit per customer/org. Contains entities and vaults. Isolated with separate storage.                                                                                             |
+| **Vault**                  | Relationship store within an organization. Maintains its own cryptographic chain (state_root, previous_hash, block height).                                                              |
+| **Entity**                 | Key-value data stored in an organization (users, teams, clients, sessions). Supports TTL, versioning, conditional writes.                                                                |
+| **Relationship**           | Authorization tuple: `(resource, relation, subject)`. Used by Engine for permission checks.                                                                                              |
+| **Region**                 | Geographic zone mapped 1:1 to a Raft consensus group. Organizations declare a region at creation for data residency. See [Scaling Architecture: Regions](#scaling-architecture-regions). |
+| **`_system` organization** | Global control plane replicated to all nodes: org registry, sequences, node discovery. See [Discovery & Coordination](#system-organization-_system--global-control-plane).               |
 
 ### Block Structure
 
@@ -349,16 +349,17 @@ Storage keys encode vault isolation and bucket assignment:
 
 Ledger uses **leader-assigned sequential IDs** for deterministic replay:
 
-| ID Type       | Rust Type              | Size     | Generated By  | Strategy                               |
-| ------------- | ---------------------- | -------- | ------------- | -------------------------------------- |
-| `OrganizationSlug` | newtype(`u64`)    | uint64   | Client (Snowflake) | External identifier               |
-| `VaultId`     | newtype(`i64`)         | int64    | Ledger Leader | Sequential (internal only)             |
-| `VaultSlug`   | newtype(`u64`)         | uint64   | Snowflake     | External identifier for vaults         |
-| `UserId`      | newtype(`i64`)         | int64    | Ledger Leader | Sequential                             |
-| `TxId`        | type alias(`[u8; 16]`) | 16 bytes | Ledger Leader | UUID assigned in response construction |
-| `NodeId`      | type alias(`String`)   | string   | Admin         | Configuration                          |
-| `ShardId`     | newtype(`u32`)         | uint32   | Admin         | Sequential at shard creation           |
-| `ClientId`    | type alias(`String`)   | string   | Client        | Client-provided                        |
+| ID Type            | Rust Type              | Size     | Generated By       | Strategy                               |
+| ------------------ | ---------------------- | -------- | ------------------ | -------------------------------------- |
+| `OrganizationSlug` | newtype(`u64`)         | uint64   | Client (Snowflake) | External identifier                    |
+| `VaultId`          | newtype(`i64`)         | int64    | Ledger Leader      | Sequential (internal only)             |
+| `VaultSlug`        | newtype(`u64`)         | uint64   | Snowflake          | External identifier for vaults         |
+| `UserId`           | newtype(`i64`)         | int64    | Ledger Leader      | Sequential                             |
+| `TxId`             | type alias(`[u8; 16]`) | 16 bytes | Ledger Leader      | UUID assigned in response construction |
+| `NodeId`           | type alias(`String`)   | string   | Admin              | Configuration                          |
+| `ClientId`         | type alias(`String`)   | string   | Client             | Client-provided                        |
+
+> **Region**: `Region` is a compile-time enum (25 variants: `GLOBAL` + 24 geographic), not a sequential ID. Organizations declare a `Region` for data residency. Each `Region` maps 1:1 to a Raft consensus group.
 
 Newtypes are generated by the `define_id!` macro with `Display` formatting (e.g., `org:42`, `vault:7`), `Serialize`/`Deserialize` with `#[serde(transparent)]`, and `From`/`Into` conversions. Type aliases (`TxId`, `NodeId`, `ClientId`) remain unwrapped for compatibility with their usage patterns.
 
@@ -448,56 +449,73 @@ When failures occur, Ledger degrades gracefully rather than failing completely:
 
 ---
 
-## Scaling Architecture: Shard Groups
+## Scaling Architecture: Regions
 
-As vaults grow, organizations can be distributed across **shard groups**—independent Raft clusters.
+Each Raft consensus group maps 1:1 to a geographic **region**. Organizations declare a region for data residency. The `Region` enum is exhaustive — adding a region is a code change, not a runtime operation.
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                              Cluster                                    │
-├─────────────────────────────────────────────────────────────────────────┤
-│  Shard 0              │  Shard 1              │  Shard 2                │
-│  ┌─────────────────┐  │  ┌─────────────────┐  │  ┌─────────────────┐    │
-│  │ Nodes A, B, C   │  │  │ Nodes D, E, F   │  │  │ Nodes G, H, I   │    │
-│  │ Raft Group      │  │  │ Raft Group      │  │  │ Raft Group      │    │
-│  └─────────────────┘  │  └─────────────────┘  │  └─────────────────┘    │
-│  Organizations: 1-100 │  Organizations: 101-200│  Organizations: 201-300 │
-└─────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                               Cluster                                     │
+├──────────────────────────────────────────────────────────────────────────┤
+│  GLOBAL               │  us-east-va           │  ie-east-dublin           │
+│  ┌─────────────────┐  │  ┌─────────────────┐  │  ┌─────────────────┐     │
+│  │ ALL Nodes       │  │  │ ALL Nodes       │  │  │ Nodes D, E, F   │     │
+│  │ Raft Group      │  │  │ Raft Group      │  │  │ (IE only)       │     │
+│  │ (_system ctrl)  │  │  │ (org data)      │  │  │ Raft Group      │     │
+│  └─────────────────┘  │  └─────────────────┘  │  └─────────────────┘     │
+│  Org registry,        │  Orgs assigned to     │  Orgs assigned to        │
+│  sequences, discovery │  us-east-va           │  ie-east-dublin (GDPR)   │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Shard assignment**: Organization-to-shard mapping stored in `_system` organization. Assignment strategies:
+**Region types**:
 
-- Hash-based (automatic distribution)
-- Explicit (for performance isolation)
-- Dedicated shard (for high-volume vaults)
+- **`GLOBAL`**: Control plane. All nodes join. Stores non-PII metadata (org registry, sequences, node discovery). No organization data.
+- **Non-protected** (`requires_residency() == false`): `US_EAST_VA`, `US_WEST_OR`. All nodes join regardless of their own region tag — maximizes redundancy for jurisdictions without data residency laws.
+- **Protected** (`requires_residency() == true`): `IE_EAST_DUBLIN`, `DE_CENTRAL_FRANKFURT`, `CN_NORTH_BEIJING`, etc. Only nodes tagged with that exact region join. Data replicated exclusively to in-region nodes.
 
-**Cross-shard consistency**: No cross-shard transactions. Application-level coordination required for multi-organization operations.
+**Region assignment**: Organization-to-region mapping stored in `_system` organization. Region is an explicit admin/user decision (not load-balanced). Every organization must declare a region at creation.
+
+**Cross-region consistency**: No cross-region transactions. Application-level saga pattern required for multi-organization operations. Cross-region request forwarding routes writes to the correct region's Raft leader.
 
 ---
 
 ## Discovery & Coordination
 
-### System Organization (`_system`)
+### System Organization (`_system`) — Global Control Plane
 
-The `_system` organization (OrganizationId = 0) stores cluster-wide metadata:
+The `_system` organization (OrganizationId = 0) is the **global control plane**, replicated to all nodes via the `GLOBAL` Raft group. It stores non-PII metadata only:
 
 ```
-_system organization
-├── Users (global accounts)
-├── Organization routing table (organization → shard mapping)
+_system organization (GLOBAL Raft group — all nodes)
+├── Organization registry (organization → region mapping)
+├── Node discovery (node_id, addresses, region tag)
+├── Sequence counters (organization ID, vault ID generation)
+├── Saga state (cross-region orchestration)
 └── Cluster configuration
 ```
 
-Replicated to all nodes via dedicated Raft group. All nodes can route requests without cross-shard queries.
+User PII lives in **regional user stores**, not `_system`:
+
+```
+Regional user store (per-region Raft group — membership per region type)
+├── User profiles (user:{user_id})
+├── Email mappings (user_email:{blinded_email_hash})
+├── Email verification tokens (email_verify:{token_hash})
+├── Organization entities and relationships
+└── Vault data
+```
 
 ### Client Discovery Flow
 
 ```
 [1] Client connects to any node
 [2] Sends request with organization_slug
-[3] Node looks up organization → shard mapping in local _system replica
-[4] If local shard: process directly
-    If remote shard: redirect client to shard leader
+[3] Node looks up organization → region mapping in local _system replica
+[4] If this node participates in the target region:
+      Forward to that region's Raft leader
+[5] If this node does NOT participate (protected region):
+      Return redirect with region leader address
 ```
 
 ### Node Join
@@ -552,6 +570,7 @@ During `Draining`, all mutating RPCs (write, batch_write, create/delete org/vaul
 **Best-effort**: Transfer failure (timeout, no eligible target, connection error) logs a warning and falls back to standard shutdown. The cluster recovers via election timeout.
 
 **RPCs**:
+
 - `AdminService/TransferLeadership` — client-facing, accepts `target_node_id` (0 = auto) and `timeout_ms` (default 10s, max 60s)
 - `RaftService/TriggerElection` — internal, called by leader on the target node
 
@@ -587,23 +606,40 @@ During `Draining`, all mutating RPCs (write, batch_write, create/delete org/vaul
 
 ### Directory Layout
 
+Each region's Raft group gets isolated database files. This eliminates write lock contention between concurrent Raft group applies, enables per-region encryption, and simplifies migration, snapshots, and disk accounting.
+
 ```
 {data_dir}/
-├── state.db              # Single-file ACID B-tree: entities, relationships, indexes,
-│                         # blocks, vault metadata, organization metadata, sequences
-├── raft.db               # Raft log entries, hard state, vote, snapshots
-└── snapshots/
-    ├── 000001000.snap    # Periodic state snapshots (numbered by height)
-    └── backups/          # Operator-initiated backups (when configured)
+├── node_id                          # Node identity file
+├── global/                          # GLOBAL Raft group (_system control plane)
+│   ├── state.db                     # Org registry, sequences, sagas, node info (no PII)
+│   ├── blocks.db                    # Global blockchain
+│   ├── raft.db                      # Raft log for GLOBAL group
+│   └── events.db                    # Audit events for GLOBAL group
+├── regions/                         # Per-region data (orgs + user PII)
+│   ├── us_east_va/
+│   │   ├── state.db                 # Entities, relationships, indexes + user PII tables
+│   │   ├── blocks.db
+│   │   ├── raft.db
+│   │   └── events.db
+│   └── .../                         # One directory per region the node participates in
+├── snapshots/                       # Per-region snapshot directories
+│   ├── global/
+│   ├── us_east_va/
+│   └── .../
+└── keys/                            # Per-region RMK storage (file-based key source)
+    ├── global/
+    ├── us_east_va/
+    └── .../
 ```
 
-The storage uses embedded single-file ACID databases with copy-on-write B-trees, not separate directories per data type. All 15 compile-time tables reside within a single `state.db` file.
+Each region's databases use embedded single-file ACID B-trees with copy-on-write pages. A node only has directories for regions it participates in: all non-protected regions plus its own protected region (if any). User PII shares `state.db` with organization data within each region, isolated by B-tree key prefixes.
 
 ### Storage Backend
 
 `inferadb-ledger-store` provides:
 
-- B+ tree engine with page-level management (15 compile-time tables)
+- B+ tree engine with page-level management (18 compile-time tables)
 - ACID transactions with copy-on-write pages
 - Configurable backends (file-based, memory for testing)
 - Streaming `TableIterator` with resume-key pattern for memory-efficient traversal
@@ -837,9 +873,9 @@ O(k) updates independent of database size. Larger proof size acceptable for audi
 
 ### Single Leader vs. Multi-Leader
 
-**Decision**: Single Raft leader per shard handles all writes.
+**Decision**: Single Raft leader per region handles all writes.
 
-Single leader is a bottleneck but simplifies consistency. Horizontal scaling via sharding.
+Single leader is a bottleneck but simplifies consistency. Horizontal scaling via regions (each region is an independent Raft group).
 
 ### SHA-256 vs. Alternative Hash Functions
 
@@ -894,17 +930,126 @@ Ledger assumes a **trusted operator model**: the organization running the cluste
 
 ---
 
+## Data Residency
+
+### Jurisdictional Guarantees
+
+Each organization declares a `Region` at creation. This region determines:
+
+1. **Which Raft group** stores the organization's data (1:1 region-to-Raft-group mapping)
+2. **Which nodes** replicate the data (protected regions restrict to in-region nodes only)
+3. **Which encryption key** (Region Master Key) protects the data at rest
+
+Data residency is enforced at multiple layers:
+
+| Layer           | Enforcement                                                             |
+| --------------- | ----------------------------------------------------------------------- |
+| Raft membership | Protected regions only admit nodes tagged with that region              |
+| Storage         | Per-region database files in isolated directories                       |
+| Encryption      | Per-region RMK — data unreadable if storage media crosses jurisdictions |
+| Routing         | `RegionRouter` forwards writes to the correct region's Raft leader      |
+| Snapshots       | Per-region snapshot files, encrypted with region's RMK                  |
+
+Region membership rules are defined in [Scaling Architecture: Regions](#scaling-architecture-regions). The key asymmetry: a node in `IE_EAST_DUBLIN` holds replicas of `US_EAST_VA` data (non-protected), but a node in `US_EAST_VA` does NOT hold replicas of `IE_EAST_DUBLIN` data (protected/GDPR).
+
+### Organization Region Migration
+
+Organizations can migrate between regions. Migration uses `OrganizationStatus::Migrating` and a cross-region saga:
+
+1. Mark organization as `Migrating` in `_system` (rejects new writes)
+2. Transfer data from source region to target region
+3. Update organization-to-region mapping in `_system`
+4. Mark organization as `Active`
+
+Rollback: if transfer fails, revert status to `Active` in source region. No data loss.
+
+---
+
+## Encryption at Rest
+
+### Architecture
+
+All on-disk data is encrypted. Each region manages its own **Region Master Key (RMK)**. Key material never leaves its region and is never stored in Raft.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    Key Hierarchy                          │
+├──────────────────────────────────────────────────────────┤
+│  External secrets manager / environment variables         │
+│  (Vault, AWS KMS, GCP KMS, env vars at startup)          │
+│      │                                                    │
+│      ├── RMK (us-east-va)  → encrypts us_east_va/*.db    │
+│      ├── RMK (ie-east-dublin) → encrypts ie_east_dublin/ │
+│      ├── RMK (global) → encrypts global/*.db             │
+│      └── Email blinding key → HMAC for email uniqueness  │
+│                                                           │
+│  Per-subject keys (crypto-shredding)                      │
+│      └── Derived from RMK + subject_id                    │
+│          Used to encrypt user PII fields                  │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Infrastructure keys** (RMKs, email blinding key) exist outside Ledger's storage — loaded from an external secrets manager or environment variables at startup, never stored in Raft.
+
+### Node Startup Key Verification
+
+Nodes verify all required RMKs before joining any Raft group:
+
+1. Compute `required_regions(node.region)` — all regions needing RMKs
+2. Load and verify each RMK (decrypt test block, check version)
+3. Load and verify email blinding key
+4. Any failure: fatal startup error with key type, region name, version, remediation
+
+A node that joins Raft before verifying RMKs would deadlock during encrypted snapshot installation.
+
+### Encrypted Storage Backend
+
+Each region's database files use an `EncryptedBackend` wrapping the standard `FileBackend`. The RMK encrypts page-level data. Different regions use different RMKs — a compromised RMK for `us-east-va` cannot decrypt `ie-east-dublin` data.
+
+---
+
+## Right to Erasure (Crypto-Shredding)
+
+### GDPR Article 17 Compliance
+
+Ledger satisfies right-to-erasure obligations via **crypto-shredding**: destroying a per-subject encryption key renders all encrypted PII unreadable without rewriting the Raft log or re-snapshotting.
+
+### Mechanism
+
+1. Each user's PII is encrypted with a **per-subject key** derived from the region's RMK and the user's `subject_id`
+2. Non-PII data (authorization tuples, org metadata) is not per-subject encrypted
+3. To erase a user: destroy their per-subject key
+4. The encrypted PII remains in storage but is cryptographically unreadable
+5. No Raft log rewrite required — the blockchain remains intact
+
+### What Constitutes PII
+
+| Data                         | Classification | Storage Location    |
+| ---------------------------- | -------------- | ------------------- |
+| User profile                 | PII            | Regional `state.db` |
+| Email address (blinded hash) | PII            | Regional `state.db` |
+| Email verification tokens    | PII            | Regional `state.db` |
+| Organization metadata        | Non-PII        | Regional `state.db` |
+| Authorization relationships  | Non-PII        | Regional `state.db` |
+| Org registry, sequences      | Non-PII        | Global `state.db`   |
+
+### Bounded Erasure Time
+
+Key destruction is a single Raft-committed operation. Once the per-subject key is deleted, all encrypted PII for that subject becomes unreadable within one Raft round-trip.
+
+---
+
 ## Limitations
 
 ### Known Limits
 
-| Dimension        | Recommended Max | Hard Limit | Bottleneck                    |
-| ---------------- | --------------- | ---------- | ----------------------------- |
-| Vaults per shard | 1,000           | 10,000     | Shard block size, memory      |
-| Shard groups     | 10,000          | ~100,000   | Cluster coordination overhead |
-| Total vaults     | 10M             | ~100M      | `_system` registry size       |
-| Keys per vault   | 10M             | ~100M      | State tree memory             |
-| Transactions/sec | 5,000 per shard | ~50,000    | Raft throughput               |
+| Dimension         | Recommended Max  | Hard Limit | Bottleneck                 |
+| ----------------- | ---------------- | ---------- | -------------------------- |
+| Vaults per region | 1,000            | 10,000     | Region block size, memory  |
+| Regions           | 25 (enum)        | 25         | Compile-time enum variants |
+| Total vaults      | 10M              | ~100M      | `_system` registry size    |
+| Keys per vault    | 10M              | ~100M      | State tree memory          |
+| Transactions/sec  | 5,000 per region | ~50,000    | Raft throughput            |
 
 ### Not Supported
 
@@ -921,15 +1066,15 @@ Ledger assumes a **trusted operator model**: the organization running the cluste
 
 ### Resolved Design Decisions
 
-1. **Hot key contention mitigation**: Resolved — Ledger includes a built-in `HotKeyDetector` using Count-Min Sketch for probabilistic frequency estimation with rotating time windows, top-k tracking via min-heap, and Prometheus metrics emission. Integrated into both `WriteService` and `MultiShardWriteService`.
+1. **Hot key contention mitigation**: Resolved — Ledger includes a built-in `HotKeyDetector` using Count-Min Sketch for probabilistic frequency estimation with rotating time windows, top-k tracking via min-heap, and Prometheus metrics emission. Integrated into both `WriteService` and `MultiRegionWriteService`.
 
 2. **Tiered storage**: Resolved — `tiered_storage.rs` implements three tiers (Hot/Warm/Cold) using the `object_store` crate for cloud provider abstraction (S3, GCS, Azure). Used for snapshot lifecycle management.
 
 ### Unresolved Design Decisions
 
-1. **Automatic shard rebalancing**: Currently manual. What triggers and safety checks for automatic rebalancing?
+1. **Region migration workflow**: Organizations can migrate between regions (e.g., regulatory change). The `OrganizationStatus::Migrating` variant exists. Open: exact saga steps, data transfer protocol, and rollback semantics for cross-region migration. See PRD Task 14.
 
-2. **Cross-shard read coordination**: For dashboards aggregating multiple organizations, what consistency model?
+2. **Cross-region read coordination**: For dashboards aggregating multiple organizations across regions, what consistency model? Eventual consistency is likely acceptable; the routing layer can fan out reads to multiple region leaders.
 
 3. **Proof aggregation for bulk verification**: How to efficiently verify thousands of keys without individual proofs?
 
@@ -1107,7 +1252,7 @@ leaf_contribution = (
 
 ### B. Snapshot Format
 
-Snapshots are per-shard (not per-vault), containing state for all vaults in the shard. The header is written uncompressed; state data is zstd-compressed.
+Snapshots are per-region (not per-vault), containing state for all vaults in the region. The header is written uncompressed; state data is zstd-compressed. Snapshots stored under `{data_dir}/snapshots/{region}/`.
 
 ```rust
 struct Snapshot {
@@ -1118,8 +1263,8 @@ struct Snapshot {
 struct SnapshotHeader {
     magic: [u8; 4],
     version: u32,                                    // Schema version (currently 2)
-    shard_id: ShardId,
-    shard_height: u64,                               // Raft log index at snapshot time
+    region: Region,
+    region_height: u64,                              // Raft log index at snapshot time
     vault_states: Vec<VaultSnapshotMeta>,             // Per-vault metadata
     checksum: Hash,
 
@@ -1187,19 +1332,19 @@ struct SnapshotStateData {
 
 Deliberate deviations from earlier versions of this specification, with rationale:
 
-| Area              | Original Spec                     | Implementation                                         | Rationale                                                                                        |
-| ----------------- | --------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
-| Table count       | 13 tables                         | 18 tables                                              | Added slug indexes, vault-scoped state tables; removed `TimeTravelConfig` and `TimeTravelIndex` (superseded by audit events) |
-| Batch timeout     | 5ms                               | 5ms (env var default), 2ms (runtime `BatchWriter`)      | Runtime batch writer uses tighter timing for lower latency; env vars allow operator override     |
-| `TxId` generation | "At block creation"               | In response path after Raft commit                     | Avoids assigning IDs to proposals that may not commit; UUID generation is cheap                  |
-| Identifier types  | Type aliases                      | Newtypes via `define_id!` macro                        | Type safety prevents `OrganizationId`/`VaultId` confusion at compile time                           |
-| `VaultBlock`      | Flat struct                       | `BlockHeader` + `transactions` split                   | Header alone needed for most operations (hashing, forwarding); avoids copying transaction data   |
-| `StateLayer`      | Fields for indexes and state_root | Indexes in `Database`; root in `VaultCommitment`       | Decouples state storage from commitment tracking; enables per-vault isolation                    |
-| `TableIterator`   | Pre-loads all entries             | Streaming with `VecDeque` buffer + resume-key          | Memory-efficient for large tables (millions of entries)                                          |
-| Directory layout  | Nested subdirectories             | Single-file ACID B-tree databases                      | Operational simplicity; atomic transactions across all tables                                    |
-| Snapshot format   | Per-vault                         | Per-shard with multi-vault metadata                    | Aligns with Raft snapshot semantics (one snapshot per Raft group)                                |
-| Health checks     | 3 simple checks                   | Kubernetes three-probe pattern + dependency validation | Required for production Kubernetes deployments                                                   |
-| Write path        | 9 steps                           | 13 steps                                               | Added input validation, rate limiting, hot key detection, deadline checking                      |
+| Area              | Original Spec                     | Implementation                                           | Rationale                                                                                                                    |
+| ----------------- | --------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Table count       | 13 tables                         | 18 tables                                                | Added slug indexes, vault-scoped state tables; removed `TimeTravelConfig` and `TimeTravelIndex` (superseded by audit events) |
+| Batch timeout     | 5ms                               | 5ms (env var default), 2ms (runtime `BatchWriter`)       | Runtime batch writer uses tighter timing for lower latency; env vars allow operator override                                 |
+| `TxId` generation | "At block creation"               | In response path after Raft commit                       | Avoids assigning IDs to proposals that may not commit; UUID generation is cheap                                              |
+| Identifier types  | Type aliases                      | Newtypes via `define_id!` macro                          | Type safety prevents `OrganizationId`/`VaultId` confusion at compile time                                                    |
+| `VaultBlock`      | Flat struct                       | `BlockHeader` + `transactions` split                     | Header alone needed for most operations (hashing, forwarding); avoids copying transaction data                               |
+| `StateLayer`      | Fields for indexes and state_root | Indexes in `Database`; root in `VaultCommitment`         | Decouples state storage from commitment tracking; enables per-vault isolation                                                |
+| `TableIterator`   | Pre-loads all entries             | Streaming with `VecDeque` buffer + resume-key            | Memory-efficient for large tables (millions of entries)                                                                      |
+| Directory layout  | Nested subdirectories             | Per-region directory trees with single-file ACID B-trees | Per-region isolation, independent encryption keys, no cross-region write lock contention                                     |
+| Snapshot format   | Per-vault                         | Per-region with multi-vault metadata                     | Aligns with Raft snapshot semantics (one snapshot per Raft group / region)                                                   |
+| Health checks     | 3 simple checks                   | Kubernetes three-probe pattern + dependency validation   | Required for production Kubernetes deployments                                                                               |
+| Write path        | 9 steps                           | 13 steps                                                 | Added input validation, rate limiting, hot key detection, deadline checking                                                  |
 
 **Source file cross-references:**
 
@@ -1210,7 +1355,9 @@ Deliberate deviations from earlier versions of this specification, with rational
 | Read Path         | `crates/raft/src/services/read.rs`                                           |
 | State Layer       | `crates/state/src/state.rs`                                                  |
 | Storage Backend   | `crates/store/src/db.rs`, `crates/store/src/tables.rs`                       |
-| Raft Consensus    | `crates/raft/src/raft.rs`                                                    |
+| Region Router     | `crates/raft/src/region_router.rs`                                           |
+| Region Resolver   | `crates/raft/src/services/region_resolver.rs`                                |
+| Raft Consensus    | `crates/raft/src/multi_raft.rs`, `crates/raft/src/raft_network.rs`           |
 | ID Generation     | `crates/types/src/types.rs` (`define_id!` macro)                             |
 | Key Encoding      | `crates/state/src/keys.rs`                                                   |
 | Batching          | `crates/raft/src/batching.rs`                                                |

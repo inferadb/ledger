@@ -667,6 +667,33 @@ impl<B: StorageBackend> StateLayer<B> {
         Ok(stats)
     }
 
+    /// Re-wraps a batch of pages' crypto sidecar metadata to a target RMK version.
+    ///
+    /// Delegates to [`Database::rewrap_pages`]. Non-encrypted backends are a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the rewrap operation fails.
+    pub fn rewrap_pages(
+        &self,
+        start_page_id: u64,
+        batch_size: usize,
+        target_version: Option<u32>,
+    ) -> Result<(usize, Option<u64>)> {
+        self.db.rewrap_pages(start_page_id, batch_size, target_version).context(StoreSnafu)
+    }
+
+    /// Returns the total page count in the crypto sidecar.
+    ///
+    /// Non-encrypted backends return 0.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the sidecar metadata cannot be read.
+    pub fn sidecar_page_count(&self) -> Result<u64> {
+        self.db.sidecar_page_count().context(StoreSnafu)
+    }
+
     /// Lists subjects for a given resource and relation.
     ///
     /// * `vault` - Internal vault identifier (`VaultId`).

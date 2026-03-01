@@ -161,7 +161,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
                 term: id.leader_id.term,
                 index: id.index,
             }),
-            shard: None, // Default to system shard (0)
+            region: None, // Default to GLOBAL region
         };
 
         let response = client
@@ -213,7 +213,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
                 term: id.leader_id.term,
                 index: id.index,
             }),
-            shard: None, // Default to system shard (0)
+            region: None, // Default to GLOBAL region
         };
 
         let response = client
@@ -277,7 +277,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             offset: rpc.offset,
             data: rpc.data.clone(),
             done: rpc.done,
-            shard: None, // Default to system shard (0)
+            region: None, // Default to GLOBAL region
         };
 
         let response = client

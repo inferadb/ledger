@@ -1,7 +1,8 @@
 //! Key patterns for the `_system` organization.
 
 use inferadb_ledger_types::{
-    EmailVerifyTokenId, NodeId, OrganizationId, OrganizationSlug, UserEmailId, UserId, VaultSlug,
+    EmailVerifyTokenId, NodeId, OrganizationId, OrganizationSlug, Region, UserEmailId, UserId,
+    UserSlug, VaultSlug,
 };
 
 /// Key pattern generators for `_system` organization entities.
@@ -68,6 +69,36 @@ impl SystemKeys {
     /// Pattern: `email_verify:{id}`
     pub fn email_verify_key(token_id: EmailVerifyTokenId) -> String {
         format!("email_verify:{}", token_id.value())
+    }
+
+    // ========================================================================
+    // User Directory Keys (GLOBAL control plane)
+    // ========================================================================
+
+    /// Primary key for a user directory entry in the GLOBAL control plane.
+    ///
+    /// Pattern: `_sys:user:{id}` → postcard-serialized `UserDirectoryEntry`
+    ///
+    /// Directory entries contain no PII — only opaque identifiers, region,
+    /// status, and timestamp. Enables cross-region user resolution from any node.
+    pub fn user_directory_key(user_id: UserId) -> String {
+        format!("_sys:user:{}", user_id.value())
+    }
+
+    /// Parses a user ID from a user directory key.
+    ///
+    /// Returns `None` if the key doesn't match `_sys:user:{id}`.
+    pub fn parse_user_directory_key(key: &str) -> Option<UserId> {
+        key.strip_prefix(Self::USER_DIRECTORY_PREFIX).and_then(|id| id.parse().ok())
+    }
+
+    /// Index key for user slug → user ID lookup in the GLOBAL control plane.
+    ///
+    /// Pattern: `_idx:user:slug:{slug}` → UserId (as string bytes)
+    ///
+    /// Enables external API slug resolution without knowing the user's region.
+    pub fn user_slug_index_key(slug: UserSlug) -> String {
+        format!("_idx:user:slug:{}", slug.value())
     }
 
     // ========================================================================
@@ -163,6 +194,99 @@ impl SystemKeys {
     }
 
     // ========================================================================
+    // Email Hash Index Keys (GLOBAL control plane)
+    // ========================================================================
+
+    /// Index key for global email uniqueness via HMAC hash.
+    ///
+    /// Pattern: `_idx:email_hash:{hmac_hex}` → `UserId` (as string bytes)
+    ///
+    /// The HMAC is computed as `HMAC-SHA256(blinding_key, normalize(email))`.
+    /// Only the keyed hash is stored globally — plaintext emails remain in
+    /// regional stores.
+    pub fn email_hash_index_key(hmac_hex: &str) -> String {
+        format!("_idx:email_hash:{hmac_hex}")
+    }
+
+    /// Parses an HMAC hex string from an email hash index key.
+    ///
+    /// Returns `None` if the key doesn't match `_idx:email_hash:{hmac}`.
+    pub fn parse_email_hash_index_key(key: &str) -> Option<&str> {
+        key.strip_prefix(Self::EMAIL_HASH_INDEX_PREFIX)
+    }
+
+    // ========================================================================
+    // Blinding Key Metadata Keys (GLOBAL control plane)
+    // ========================================================================
+
+    /// Key for the active email blinding key version.
+    ///
+    /// Pattern: `_meta:email_blinding_key_version` → version number (u32 as string bytes)
+    pub const BLINDING_KEY_VERSION_KEY: &'static str = "_meta:email_blinding_key_version";
+
+    /// Key for blinding key rehash progress per region.
+    ///
+    /// Pattern: `_meta:blinding_key_rehash_progress:{region}` → entries rehashed (u64 as string
+    /// bytes)
+    ///
+    /// Presence of any such key indicates a rotation is in progress.
+    /// Removed once rehash completes for that region.
+    pub fn rehash_progress_key(region: Region) -> String {
+        format!("_meta:blinding_key_rehash_progress:{}", region.as_str())
+    }
+
+    /// Parses a region from a rehash progress key.
+    ///
+    /// Returns `None` if the key doesn't match the expected pattern.
+    pub fn parse_rehash_progress_key(key: &str) -> Option<Region> {
+        key.strip_prefix(Self::REHASH_PROGRESS_PREFIX).and_then(|r| r.parse().ok())
+    }
+
+    // ========================================================================
+    // Subject Key Keys (regional store, per-user encryption)
+    // ========================================================================
+
+    /// Primary key for a user's per-subject encryption key.
+    ///
+    /// Pattern: `_key:user:{user_id}` → postcard-serialized `SubjectKey`
+    ///
+    /// Stored in the regional store where the user's PII resides.
+    /// Encrypted at rest by the region's RMK (via `EncryptedBackend`).
+    /// Destroying this key makes the user's PII cryptographically unrecoverable.
+    pub fn subject_key(user_id: UserId) -> String {
+        format!("_key:user:{}", user_id.value())
+    }
+
+    /// Parses a user ID from a subject key.
+    ///
+    /// Returns `None` if the key doesn't match `_key:user:{id}`.
+    pub fn parse_subject_key(key: &str) -> Option<UserId> {
+        key.strip_prefix(Self::SUBJECT_KEY_PREFIX).and_then(|id| id.parse().ok())
+    }
+
+    // ========================================================================
+    // Erasure Audit Keys (GLOBAL control plane)
+    // ========================================================================
+
+    /// Key for an erasure audit record.
+    ///
+    /// Pattern: `_audit:erasure:{user_id}` → postcard-serialized `ErasureAuditRecord`
+    ///
+    /// Stored in the GLOBAL control plane. Uses insert-if-absent (CAS) for
+    /// idempotent crash-resume: re-executing the erasure sequence after a
+    /// crash will not create a duplicate audit record.
+    pub fn erasure_audit_key(user_id: UserId) -> String {
+        format!("_audit:erasure:{}", user_id.value())
+    }
+
+    /// Parses a user ID from an erasure audit key.
+    ///
+    /// Returns `None` if the key doesn't match `_audit:erasure:{id}`.
+    pub fn parse_erasure_audit_key(key: &str) -> Option<UserId> {
+        key.strip_prefix(Self::ERASURE_AUDIT_PREFIX).and_then(|id| id.parse().ok())
+    }
+
+    // ========================================================================
     // Key Prefixes (for scanning)
     // ========================================================================
 
@@ -181,11 +305,32 @@ impl SystemKeys {
     /// Prefix for all saga keys.
     pub const SAGA_PREFIX: &'static str = "saga:";
 
+    /// Prefix for all user directory entries in the GLOBAL control plane.
+    pub const USER_DIRECTORY_PREFIX: &'static str = "_sys:user:";
+
+    /// Prefix for all directory entries (`_sys:` namespace).
+    pub const SYS_PREFIX: &'static str = "_sys:";
+
+    /// Prefix for user slug index entries.
+    pub const USER_SLUG_INDEX_PREFIX: &'static str = "_idx:user:slug:";
+
     /// Prefix for all index keys.
     pub const INDEX_PREFIX: &'static str = "_idx:";
 
     /// Prefix for all metadata keys.
     pub const META_PREFIX: &'static str = "_meta:";
+
+    /// Prefix for email hash index entries.
+    pub const EMAIL_HASH_INDEX_PREFIX: &'static str = "_idx:email_hash:";
+
+    /// Prefix for blinding key rehash progress entries.
+    pub const REHASH_PROGRESS_PREFIX: &'static str = "_meta:blinding_key_rehash_progress:";
+
+    /// Prefix for per-subject encryption keys.
+    pub const SUBJECT_KEY_PREFIX: &'static str = "_key:user:";
+
+    /// Prefix for erasure audit records.
+    pub const ERASURE_AUDIT_PREFIX: &'static str = "_audit:erasure:";
 }
 
 #[cfg(test)]
@@ -253,5 +398,88 @@ mod tests {
                 .starts_with(SystemKeys::ORG_PREFIX)
         );
         assert!(SystemKeys::node_key(&"n".to_string()).starts_with(SystemKeys::NODE_PREFIX));
+    }
+
+    #[test]
+    fn test_user_directory_key() {
+        assert_eq!(SystemKeys::user_directory_key(UserId::new(42)), "_sys:user:42");
+        assert_eq!(SystemKeys::parse_user_directory_key("_sys:user:42"), Some(UserId::new(42)));
+        assert_eq!(SystemKeys::parse_user_directory_key("user:42"), None);
+        assert_eq!(SystemKeys::parse_user_directory_key("_sys:user:abc"), None);
+    }
+
+    #[test]
+    fn test_user_slug_index_key() {
+        assert_eq!(SystemKeys::user_slug_index_key(UserSlug::new(99999)), "_idx:user:slug:99999");
+    }
+
+    #[test]
+    fn test_user_directory_prefixes() {
+        assert!(
+            SystemKeys::user_directory_key(UserId::new(1))
+                .starts_with(SystemKeys::USER_DIRECTORY_PREFIX)
+        );
+        assert!(SystemKeys::user_directory_key(UserId::new(1)).starts_with(SystemKeys::SYS_PREFIX));
+        assert!(
+            SystemKeys::user_slug_index_key(UserSlug::new(1))
+                .starts_with(SystemKeys::USER_SLUG_INDEX_PREFIX)
+        );
+        assert!(
+            SystemKeys::user_slug_index_key(UserSlug::new(1)).starts_with(SystemKeys::INDEX_PREFIX)
+        );
+    }
+
+    #[test]
+    fn test_user_directory_key_does_not_collide_with_user_key() {
+        // _sys:user:42 (directory) vs user:42 (regional record) are distinct
+        let directory_key = SystemKeys::user_directory_key(UserId::new(42));
+        let user_key = SystemKeys::user_key(UserId::new(42));
+        assert_ne!(directory_key, user_key);
+        assert!(directory_key.starts_with("_sys:"));
+        assert!(!user_key.starts_with("_sys:"));
+    }
+
+    #[test]
+    fn test_email_hash_index_key() {
+        let hmac = "a1b2c3d4e5f6".repeat(5);
+        let key = SystemKeys::email_hash_index_key(&hmac);
+        assert!(key.starts_with(SystemKeys::EMAIL_HASH_INDEX_PREFIX));
+        assert!(key.starts_with(SystemKeys::INDEX_PREFIX));
+        assert_eq!(SystemKeys::parse_email_hash_index_key(&key), Some(hmac.as_str()));
+    }
+
+    #[test]
+    fn test_email_hash_index_key_parse_invalid() {
+        assert_eq!(SystemKeys::parse_email_hash_index_key("_idx:email:foo"), None);
+        assert_eq!(SystemKeys::parse_email_hash_index_key("random:key"), None);
+    }
+
+    #[test]
+    fn test_blinding_key_version_key() {
+        assert!(SystemKeys::BLINDING_KEY_VERSION_KEY.starts_with(SystemKeys::META_PREFIX));
+    }
+
+    #[test]
+    fn test_rehash_progress_key() {
+        let key = SystemKeys::rehash_progress_key(Region::US_EAST_VA);
+        assert!(key.starts_with(SystemKeys::REHASH_PROGRESS_PREFIX));
+        assert!(key.starts_with(SystemKeys::META_PREFIX));
+        assert!(key.contains("us-east-va"));
+        assert_eq!(SystemKeys::parse_rehash_progress_key(&key), Some(Region::US_EAST_VA));
+    }
+
+    #[test]
+    fn test_rehash_progress_key_parse_invalid() {
+        assert_eq!(SystemKeys::parse_rehash_progress_key("_meta:other:key"), None);
+    }
+
+    #[test]
+    fn test_email_hash_index_does_not_collide_with_email_index() {
+        // _idx:email_hash:{hmac} (global) vs _idx:email:{email} (regional) are distinct
+        let hash_key = SystemKeys::email_hash_index_key("abc123");
+        let email_key = SystemKeys::email_index_key("alice@example.com");
+        assert_ne!(hash_key, email_key);
+        assert!(hash_key.starts_with("_idx:email_hash:"));
+        assert!(email_key.starts_with("_idx:email:"));
     }
 }

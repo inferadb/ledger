@@ -213,46 +213,53 @@ impl RaftService for RaftServiceImpl {
 }
 
 // ============================================================================
-// Multi-Shard Raft Service
+// Multi-Region Raft Service
 // ============================================================================
 
 use crate::multi_raft::MultiRaftManager;
 
-/// Multi-shard Raft service that routes RPCs to the correct shard.
+/// Multi-region Raft service that routes RPCs to the correct region's Raft group.
 ///
-/// Extracts `shard` from incoming requests and forwards to the corresponding
-/// shard's Raft instance. Defaults to shard 0 (system shard) for backward
-/// compatibility with clients that don't specify a shard.
-pub struct MultiShardRaftService {
-    /// Multi-raft manager for shard resolution.
+/// Extracts `region` from incoming requests and forwards to the corresponding
+/// Raft instance. Defaults to the system Raft group when no region is specified.
+pub struct MultiRegionRaftService {
+    /// Multi-raft manager for region resolution.
     manager: Arc<MultiRaftManager>,
 }
 
-impl MultiShardRaftService {
-    /// Creates a new multi-shard Raft service.
+impl MultiRegionRaftService {
+    /// Creates a new multi-region Raft service.
     pub fn new(manager: Arc<MultiRaftManager>) -> Self {
         Self { manager }
     }
 
-    /// Resolves shard to a Raft instance.
-    fn resolve_shard(&self, shard: Option<u64>) -> Result<Arc<Raft<LedgerTypeConfig>>, Status> {
-        let shard = inferadb_ledger_types::ShardId::new(shard.unwrap_or(0) as u32);
+    /// Resolves a proto Region to a Raft instance.
+    fn resolve_region(&self, region: Option<i32>) -> Result<Arc<Raft<LedgerTypeConfig>>, Status> {
+        // Validate that the region value is a known variant (reject garbage values).
+        if let Some(value) = region
+            && inferadb_ledger_proto::proto::Region::try_from(value).is_err()
+        {
+            return Err(Status::invalid_argument(format!("unknown region value: {value}")));
+        }
+        // All regions currently route to region 0 (system region).
+        // Full region→Raft group routing is implemented in Tasks 5-7.
+        let region = inferadb_ledger_types::Region::GLOBAL;
         self.manager
-            .get_shard(shard)
+            .get_region_group(region)
             .map(|s| s.raft().clone())
-            .map_err(|_| Status::not_found(format!("shard {} not found", shard)))
+            .map_err(|_| Status::not_found("region Raft group not found"))
     }
 }
 
 #[tonic::async_trait]
-impl RaftService for MultiShardRaftService {
+impl RaftService for MultiRegionRaftService {
     async fn vote(
         &self,
         request: Request<RaftVoteRequest>,
     ) -> Result<Response<RaftVoteResponse>, Status> {
         let req = request.into_inner();
 
-        let raft = self.resolve_shard(req.shard)?;
+        let raft = self.resolve_region(req.region)?;
 
         let vote =
             req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
@@ -284,7 +291,7 @@ impl RaftService for MultiShardRaftService {
     ) -> Result<Response<RaftAppendEntriesResponse>, Status> {
         let req = request.into_inner();
 
-        let raft = self.resolve_shard(req.shard)?;
+        let raft = self.resolve_region(req.region)?;
 
         let vote =
             req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
@@ -331,7 +338,7 @@ impl RaftService for MultiShardRaftService {
     ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
         let req = request.into_inner();
 
-        let raft = self.resolve_shard(req.shard)?;
+        let raft = self.resolve_region(req.region)?;
 
         let vote =
             req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
@@ -395,8 +402,8 @@ impl RaftService for MultiShardRaftService {
     ) -> Result<Response<TriggerElectionResponse>, Status> {
         let req = request.into_inner();
 
-        // TriggerElection is a cluster-wide operation, always routes to system shard (0).
-        let raft = self.resolve_shard(Some(0))?;
+        // TriggerElection is a cluster-wide operation, always routes to GLOBAL.
+        let raft = self.resolve_region(None)?;
 
         let current_term = {
             let metrics = raft.metrics().borrow().clone();
@@ -439,28 +446,28 @@ mod tests {
         raft_service_server::RaftService,
     };
     use inferadb_ledger_test_utils::TestDir;
-    use inferadb_ledger_types::ShardId;
+    use inferadb_ledger_types::Region;
     use tonic::Request;
 
     use crate::{
-        MultiRaftConfig, MultiRaftManager, ShardConfig,
-        services::raft::{MultiShardRaftService, RaftServiceImpl},
+        MultiRaftConfig, MultiRaftManager, RegionConfig,
+        services::raft::{MultiRegionRaftService, RaftServiceImpl},
     };
 
     /// Creates a RaftServiceImpl backed by a real single-node Raft instance.
     ///
-    /// Uses MultiRaftManager to bootstrap a single system shard. The Raft
+    /// Uses MultiRaftManager to bootstrap a single system region. The Raft
     /// instance runs a full consensus engine in-process with no networking.
     async fn create_test_service() -> (RaftServiceImpl, Arc<MultiRaftManager>, u64, TestDir) {
         let temp = TestDir::new();
         let node_id = 1u64;
-        let config = MultiRaftConfig::new(temp.path().to_path_buf(), node_id);
+        let config = MultiRaftConfig::new(temp.path().to_path_buf(), node_id, Region::GLOBAL);
         let manager = Arc::new(MultiRaftManager::new(config));
 
-        let shard_config =
-            ShardConfig::system(node_id, "127.0.0.1:50099".to_string()).without_background_jobs();
-        let shard = manager.start_system_shard(shard_config).await.expect("start system shard");
-        let raft = shard.raft().clone();
+        let region_config =
+            RegionConfig::system(node_id, "127.0.0.1:50099".to_string()).without_background_jobs();
+        let region = manager.start_system_region(region_config).await.expect("start system region");
+        let raft = region.raft().clone();
 
         // Wait for the single-node to become leader
         let start = tokio::time::Instant::now();
@@ -478,32 +485,32 @@ mod tests {
         (service, manager, node_id, temp)
     }
 
-    /// Creates a MultiShardRaftService with system + 1 data shard.
-    async fn create_multi_shard_service()
-    -> (MultiShardRaftService, Arc<MultiRaftManager>, u64, TestDir) {
+    /// Creates a MultiRegionRaftService with system + 1 data region.
+    async fn create_multi_region_service()
+    -> (MultiRegionRaftService, Arc<MultiRaftManager>, u64, TestDir) {
         let temp = TestDir::new();
         let node_id = 1u64;
-        let config = MultiRaftConfig::new(temp.path().to_path_buf(), node_id);
+        let config = MultiRaftConfig::new(temp.path().to_path_buf(), node_id, Region::GLOBAL);
         let manager = Arc::new(MultiRaftManager::new(config));
 
-        let shard_config =
-            ShardConfig::system(node_id, "127.0.0.1:50098".to_string()).without_background_jobs();
-        manager.start_system_shard(shard_config).await.expect("start system shard");
+        let region_config =
+            RegionConfig::system(node_id, "127.0.0.1:50098".to_string()).without_background_jobs();
+        manager.start_system_region(region_config).await.expect("start system region");
 
         let data_config =
-            ShardConfig::data(ShardId::new(1), vec![(node_id, "127.0.0.1:50098".to_string())])
+            RegionConfig::data(Region::US_EAST_VA, vec![(node_id, "127.0.0.1:50098".to_string())])
                 .without_background_jobs();
-        manager.start_data_shard(data_config).await.expect("start data shard");
+        manager.start_data_region(data_config).await.expect("start data region");
 
-        // Wait for leaders on both shards
+        // Wait for leaders on both regions
         let start = tokio::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(5) {
             let sys_ok = manager
-                .get_shard(ShardId::new(0))
+                .get_region_group(Region::GLOBAL)
                 .map(|s| s.raft().metrics().borrow().current_leader == Some(node_id))
                 .unwrap_or(false);
             let data_ok = manager
-                .get_shard(ShardId::new(1))
+                .get_region_group(Region::US_EAST_VA)
                 .map(|s| s.raft().metrics().borrow().current_leader == Some(node_id))
                 .unwrap_or(false);
             if sys_ok && data_ok {
@@ -512,7 +519,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
-        let service = MultiShardRaftService::new(manager.clone());
+        let service = MultiRegionRaftService::new(manager.clone());
         (service, manager, node_id, temp)
     }
 
@@ -543,15 +550,21 @@ mod tests {
     }
 
     /// Returns the current term from the Raft instance via the manager.
-    fn get_term(manager: &MultiRaftManager, shard: ShardId) -> u64 {
-        manager.get_shard(shard).expect("shard exists").raft().metrics().borrow().current_term
+    fn get_term(manager: &MultiRaftManager, region: Region) -> u64 {
+        manager
+            .get_region_group(region)
+            .expect("region exists")
+            .raft()
+            .metrics()
+            .borrow()
+            .current_term
     }
 
     /// Returns the last applied index from the Raft instance.
-    fn get_applied(manager: &MultiRaftManager, shard: ShardId) -> u64 {
+    fn get_applied(manager: &MultiRaftManager, region: Region) -> u64 {
         manager
-            .get_shard(shard)
-            .expect("shard exists")
+            .get_region_group(region)
+            .expect("region exists")
             .raft()
             .metrics()
             .borrow()
@@ -568,7 +581,7 @@ mod tests {
     async fn test_byzantine_vote_missing_vote_field() {
         let (service, _mgr, _id, _dir) = create_test_service().await;
 
-        let request = Request::new(RaftVoteRequest { vote: None, last_log_id: None, shard: None });
+        let request = Request::new(RaftVoteRequest { vote: None, last_log_id: None, region: None });
         let result = service.vote(request).await;
 
         assert!(result.is_err());
@@ -585,7 +598,7 @@ mod tests {
             prev_log_id: None,
             entries: vec![],
             leader_commit: None,
-            shard: None,
+            region: None,
         });
         let result = service.append_entries(request).await;
 
@@ -604,7 +617,7 @@ mod tests {
             offset: 0,
             data: vec![],
             done: true,
-            shard: None,
+            region: None,
         });
         let result = service.install_snapshot(request).await;
 
@@ -627,7 +640,7 @@ mod tests {
             offset: 0,
             data: vec![],
             done: true,
-            shard: None,
+            region: None,
         });
         let result = service.install_snapshot(request).await;
 
@@ -649,7 +662,7 @@ mod tests {
             prev_log_id: None,
             entries: vec![],
             leader_commit: None,
-            shard: None,
+            region: None,
         });
         let result = service.append_entries(request).await;
 
@@ -666,8 +679,8 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_garbage_log_entries() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, ShardId::new(0));
-        let applied_before = get_applied(&mgr, ShardId::new(0));
+        let current_term = get_term(&mgr, Region::GLOBAL);
+        let applied_before = get_applied(&mgr, Region::GLOBAL);
 
         let garbage_entries = vec![
             vec![0xFF, 0xFE, 0xFD],
@@ -681,11 +694,11 @@ mod tests {
             prev_log_id: None,
             entries: garbage_entries,
             leader_commit: None,
-            shard: None,
+            region: None,
         });
         let _result = service.append_entries(request).await;
 
-        let applied_after = get_applied(&mgr, ShardId::new(0));
+        let applied_after = get_applied(&mgr, Region::GLOBAL);
         assert!(
             applied_after >= applied_before,
             "Applied index must not regress: before={}, after={}",
@@ -698,14 +711,14 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_conflicting_prev_log_id() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, ShardId::new(0));
+        let current_term = get_term(&mgr, Region::GLOBAL);
 
         let request = Request::new(RaftAppendEntriesRequest {
             vote: Some(make_vote(current_term, node_id)),
             prev_log_id: Some(make_log_id(current_term, 999_999)),
             entries: vec![],
             leader_commit: None,
-            shard: None,
+            region: None,
         });
         let result = service.append_entries(request).await;
 
@@ -730,7 +743,7 @@ mod tests {
         let request = Request::new(RaftVoteRequest {
             vote: Some(make_vote(999, 12345)),
             last_log_id: Some(make_log_id(999, 100)),
-            shard: None,
+            region: None,
         });
         let result = service.vote(request).await;
 
@@ -754,7 +767,7 @@ mod tests {
         // Wait for re-election in the single-node cluster
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         let metrics =
-            mgr.get_shard(ShardId::new(0)).expect("shard").raft().metrics().borrow().clone();
+            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
         assert!(metrics.id > 0, "Node should still be responsive");
     }
 
@@ -762,12 +775,12 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_competing_vote_same_term() {
         let (service, mgr, _id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, ShardId::new(0));
+        let current_term = get_term(&mgr, Region::GLOBAL);
 
         let request = Request::new(RaftVoteRequest {
             vote: Some(make_vote(current_term, 99999)),
             last_log_id: None,
-            shard: None,
+            region: None,
         });
         let result = service.vote(request).await;
 
@@ -784,8 +797,8 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_corrupted_snapshot_data() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, ShardId::new(0));
-        let applied_before = get_applied(&mgr, ShardId::new(0));
+        let current_term = get_term(&mgr, Region::GLOBAL);
+        let applied_before = get_applied(&mgr, Region::GLOBAL);
 
         let meta = make_snapshot_meta(
             current_term,
@@ -800,13 +813,13 @@ mod tests {
             offset: 0,
             data: vec![0xFF; 4096],
             done: true,
-            shard: None,
+            region: None,
         });
         let _result = service.install_snapshot(request).await;
 
         // Wait for potential recovery
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let applied_after = get_applied(&mgr, ShardId::new(0));
+        let applied_after = get_applied(&mgr, Region::GLOBAL);
         assert!(
             applied_after >= applied_before,
             "State must not regress: before={}, after={}",
@@ -819,7 +832,7 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_forged_membership_in_snapshot() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, ShardId::new(0));
+        let current_term = get_term(&mgr, Region::GLOBAL);
 
         let meta = make_snapshot_meta(
             current_term,
@@ -838,14 +851,14 @@ mod tests {
             offset: 0,
             data: vec![0x00; 64],
             done: true,
-            shard: None,
+            region: None,
         });
         let _result = service.install_snapshot(request).await;
 
         // Node should still be responsive
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let metrics =
-            mgr.get_shard(ShardId::new(0)).expect("shard").raft().metrics().borrow().clone();
+            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
         assert!(metrics.id > 0, "Node should still be responsive");
     }
 
@@ -853,7 +866,7 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_snapshot_future_log_index() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, ShardId::new(0));
+        let current_term = get_term(&mgr, Region::GLOBAL);
 
         let meta = make_snapshot_meta(
             current_term,
@@ -868,14 +881,14 @@ mod tests {
             offset: 0,
             data: vec![0x00; 64],
             done: true,
-            shard: None,
+            region: None,
         });
         let _result = service.install_snapshot(request).await;
 
         // Node should still be responsive
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let metrics =
-            mgr.get_shard(ShardId::new(0)).expect("shard").raft().metrics().borrow().clone();
+            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
         assert!(metrics.id > 0, "Node should still be responsive");
     }
 
@@ -887,8 +900,8 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_replay_old_term_entries() {
         let (service, mgr, _id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, ShardId::new(0));
-        let applied_before = get_applied(&mgr, ShardId::new(0));
+        let current_term = get_term(&mgr, Region::GLOBAL);
+        let applied_before = get_applied(&mgr, Region::GLOBAL);
         let old_term = current_term.saturating_sub(1);
 
         let request = Request::new(RaftAppendEntriesRequest {
@@ -896,7 +909,7 @@ mod tests {
             prev_log_id: Some(make_log_id(old_term, 1)),
             entries: vec![vec![0xDE, 0xAD, 0xBE, 0xEF]],
             leader_commit: Some(make_log_id(old_term, 1)),
-            shard: None,
+            region: None,
         });
         let result = service.append_entries(request).await;
 
@@ -909,7 +922,7 @@ mod tests {
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let applied_after = get_applied(&mgr, ShardId::new(0));
+        let applied_after = get_applied(&mgr, Region::GLOBAL);
         assert!(
             applied_after >= applied_before,
             "Applied must not regress: before={}, after={}",
@@ -922,20 +935,20 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_replay_committed_index() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, ShardId::new(0));
+        let current_term = get_term(&mgr, Region::GLOBAL);
 
         let request = Request::new(RaftAppendEntriesRequest {
             vote: Some(make_vote(current_term, node_id)),
             prev_log_id: None,
             entries: vec![vec![0xBA, 0xD0, 0x00]],
             leader_commit: Some(make_log_id(current_term, 1)),
-            shard: None,
+            region: None,
         });
         let _result = service.append_entries(request).await;
 
         // Node should remain operational
         let metrics =
-            mgr.get_shard(ShardId::new(0)).expect("shard").raft().metrics().borrow().clone();
+            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
         assert!(metrics.id > 0, "Node should be responsive");
     }
 
@@ -951,14 +964,14 @@ mod tests {
         let request = Request::new(RaftVoteRequest {
             vote: Some(make_vote(u64::MAX, 77777)),
             last_log_id: Some(make_log_id(u64::MAX, u64::MAX)),
-            shard: None,
+            region: None,
         });
         let _result = service.vote(request).await;
 
         // Wait for potential re-election
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         let metrics =
-            mgr.get_shard(ShardId::new(0)).expect("shard").raft().metrics().borrow().clone();
+            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
         assert!(metrics.id > 0, "Node should still be responsive after max-term vote");
     }
 
@@ -966,8 +979,8 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_empty_snapshot_marked_done() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, ShardId::new(0));
-        let applied_before = get_applied(&mgr, ShardId::new(0));
+        let current_term = get_term(&mgr, Region::GLOBAL);
+        let applied_before = get_applied(&mgr, Region::GLOBAL);
 
         let meta = make_snapshot_meta(
             current_term,
@@ -982,12 +995,12 @@ mod tests {
             offset: 0,
             data: vec![],
             done: true,
-            shard: None,
+            region: None,
         });
         let _result = service.install_snapshot(request).await;
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let applied_after = get_applied(&mgr, ShardId::new(0));
+        let applied_after = get_applied(&mgr, Region::GLOBAL);
         assert!(
             applied_after >= applied_before,
             "State must not regress: before={}, after={}",
@@ -1000,7 +1013,7 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_out_of_order_snapshot_chunks() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, ShardId::new(0));
+        let current_term = get_term(&mgr, Region::GLOBAL);
 
         let meta = make_snapshot_meta(
             current_term,
@@ -1016,12 +1029,12 @@ mod tests {
             offset: 1000,
             data: vec![0xCC; 128],
             done: false,
-            shard: None,
+            region: None,
         });
         let _result = service.install_snapshot(request).await;
 
         let metrics =
-            mgr.get_shard(ShardId::new(0)).expect("shard").raft().metrics().borrow().clone();
+            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
         assert!(metrics.id > 0, "Node should remain responsive");
     }
 
@@ -1029,7 +1042,7 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_oversized_snapshot_chunk() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, ShardId::new(0));
+        let current_term = get_term(&mgr, Region::GLOBAL);
 
         let meta = make_snapshot_meta(
             current_term,
@@ -1044,65 +1057,65 @@ mod tests {
             offset: 0,
             data: vec![0xAB; 1024 * 1024], // 1MB
             done: true,
-            shard: None,
+            region: None,
         });
         let _result = service.install_snapshot(request).await;
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let metrics =
-            mgr.get_shard(ShardId::new(0)).expect("shard").raft().metrics().borrow().clone();
+            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
         assert!(metrics.id > 0, "Node should survive oversized snapshot");
     }
 
     // ====================================================================
-    // Test: MultiShardRaftService routing
+    // Test: MultiRegionRaftService routing
     // ====================================================================
 
-    /// Non-existent shard → NOT_FOUND error.
+    /// Unknown region value → INVALID_ARGUMENT error.
     #[tokio::test]
-    async fn test_byzantine_multi_shard_invalid_shard() {
-        let (service, _mgr, _id, _dir) = create_multi_shard_service().await;
+    async fn test_byzantine_multi_region_invalid_region() {
+        let (service, _mgr, _id, _dir) = create_multi_region_service().await;
 
         let request = Request::new(RaftAppendEntriesRequest {
             vote: Some(make_vote(1, 999)),
             prev_log_id: None,
             entries: vec![],
             leader_commit: None,
-            shard: Some(99999), // Non-existent shard
+            region: Some(99999), // Unknown region value
         });
         let result = service.append_entries(request).await;
 
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
     }
 
-    /// Missing shard defaults to shard 0 (system shard).
+    /// Missing region defaults to GLOBAL (system).
     #[tokio::test]
-    async fn test_byzantine_multi_shard_default_routing() {
-        let (service, _mgr, _id, _dir) = create_multi_shard_service().await;
+    async fn test_byzantine_multi_region_default_routing() {
+        let (service, _mgr, _id, _dir) = create_multi_region_service().await;
 
-        // Request without shard and missing vote → should route to shard 0
+        // Request without region and missing vote → should route to GLOBAL
         // and return InvalidArgument (not NotFound)
-        let request = Request::new(RaftVoteRequest { vote: None, last_log_id: None, shard: None });
+        let request = Request::new(RaftVoteRequest { vote: None, last_log_id: None, region: None });
         let result = service.vote(request).await;
 
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().code(),
             tonic::Code::InvalidArgument,
-            "Should route to shard 0 and fail on missing vote, not on shard lookup"
+            "Should route to GLOBAL region and fail on missing vote, not on region lookup"
         );
     }
 
-    /// Malformed messages to a specific data shard → still rejected properly.
+    /// Malformed messages to a specific data region → still rejected properly.
     #[tokio::test]
-    async fn test_byzantine_multi_shard_malformed_to_data_shard() {
-        let (service, _mgr, _id, _dir) = create_multi_shard_service().await;
+    async fn test_byzantine_multi_region_malformed_to_global_region() {
+        let (service, _mgr, _id, _dir) = create_multi_region_service().await;
 
         let request = Request::new(RaftVoteRequest {
             vote: None,
             last_log_id: None,
-            shard: Some(1), // Route to data shard
+            region: Some(inferadb_ledger_proto::proto::Region::Global.into()),
         });
         let result = service.vote(request).await;
 
@@ -1118,8 +1131,8 @@ mod tests {
     #[tokio::test]
     async fn test_byzantine_cluster_integrity_after_attacks() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, ShardId::new(0));
-        let initial_applied = get_applied(&mgr, ShardId::new(0));
+        let current_term = get_term(&mgr, Region::GLOBAL);
+        let initial_applied = get_applied(&mgr, Region::GLOBAL);
 
         // Attack 1: Stale term
         let _ = service
@@ -1128,7 +1141,7 @@ mod tests {
                 prev_log_id: None,
                 entries: vec![vec![0xFF; 32]],
                 leader_commit: None,
-                shard: None,
+                region: None,
             }))
             .await;
 
@@ -1139,13 +1152,13 @@ mod tests {
                 prev_log_id: None,
                 entries: vec![vec![0xDE; 1024], vec![0xAD; 512]],
                 leader_commit: None,
-                shard: None,
+                region: None,
             }))
             .await;
 
         // Attack 3: Missing-field vote
         let _ = service
-            .vote(Request::new(RaftVoteRequest { vote: None, last_log_id: None, shard: None }))
+            .vote(Request::new(RaftVoteRequest { vote: None, last_log_id: None, region: None }))
             .await;
 
         // Attack 4: Corrupt snapshot
@@ -1162,7 +1175,7 @@ mod tests {
                 offset: 0,
                 data: vec![0xDE, 0xAD],
                 done: true,
-                shard: None,
+                region: None,
             }))
             .await;
 
@@ -1173,7 +1186,7 @@ mod tests {
                 prev_log_id: Some(make_log_id(current_term, 999_999)),
                 entries: vec![],
                 leader_commit: None,
-                shard: None,
+                region: None,
             }))
             .await;
 
@@ -1182,10 +1195,10 @@ mod tests {
 
         // Verify integrity
         let metrics =
-            mgr.get_shard(ShardId::new(0)).expect("shard").raft().metrics().borrow().clone();
+            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
         assert!(metrics.id > 0, "Node should be responsive after attacks");
 
-        let final_applied = get_applied(&mgr, ShardId::new(0));
+        let final_applied = get_applied(&mgr, Region::GLOBAL);
         assert!(
             final_applied >= initial_applied,
             "Applied index regressed: {} -> {}",

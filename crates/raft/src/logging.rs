@@ -22,7 +22,7 @@
 //! | Identity | `request_id`, `service`, `method` | Request routing |
 //! | Client | `client_id`, `sequence`, `actor`, `sdk_version`, `source_ip` | Client metadata |
 //! | Target | `organization`, `vault` | Scope of the operation |
-//! | System | `node_id`, `is_leader`, `raft_term`, `shard` | Cluster state |
+//! | System | `node_id`, `is_leader`, `raft_term`, `region` | Cluster state |
 //! | Write | `operations_count`, `operation_types`, `bytes_written`, `raft_round_trips` | Write metrics |
 //! | Read | `key`, `keys_count`, `found_count`, `bytes_read` | Read metrics |
 //! | Outcome | `outcome`, `error_code`, `error_message`, `block_height` | Result |
@@ -64,7 +64,7 @@
 
 use std::{cell::RefCell, time::Instant};
 
-use inferadb_ledger_types::ShardId;
+use inferadb_ledger_types::Region;
 use serde::Serialize;
 use tracing::info;
 use uuid::Uuid;
@@ -511,7 +511,7 @@ pub struct RequestContext {
     node_id: Option<u64>,
     is_leader: Option<bool>,
     raft_term: Option<u64>,
-    shard: Option<ShardId>,
+    region: Option<Region>,
 
     // VIP status (for canonical log line field)
     is_vip: Option<bool>,
@@ -596,7 +596,7 @@ impl RequestContext {
             node_id: None,
             is_leader: None,
             raft_term: None,
-            shard: None,
+            region: None,
             is_vip: None,
             operations_count: None,
             operation_types: None,
@@ -714,12 +714,12 @@ impl RequestContext {
         node_id: u64,
         is_leader: bool,
         raft_term: u64,
-        shard: Option<ShardId>,
+        region: Option<Region>,
     ) {
         self.node_id = Some(node_id);
         self.is_leader = Some(is_leader);
         self.raft_term = Some(raft_term);
-        self.shard = shard;
+        self.region = region;
     }
 
     /// Sets the node ID.
@@ -737,9 +737,9 @@ impl RequestContext {
         self.raft_term = Some(raft_term);
     }
 
-    /// Sets the shard ID.
-    pub fn set_shard(&mut self, shard: ShardId) {
-        self.shard = Some(shard);
+    /// Sets the region ID.
+    pub fn set_region(&mut self, region: Region) {
+        self.region = Some(region);
     }
 
     /// Sets the VIP status for this request's organization.
@@ -1168,7 +1168,7 @@ impl RequestContext {
             node_id = self.node_id,
             is_leader = self.is_leader,
             raft_term = self.raft_term,
-            shard = self.shard.map(|s| s.value()),
+            region = self.region.map(|r| r.as_str()),
             is_vip = self.is_vip,
             operations_count = self.operations_count,
             operation_types = ?self.operation_types,
@@ -1226,7 +1226,7 @@ impl RequestContext {
                 node_id: self.node_id,
                 is_leader: self.is_leader,
                 raft_term: self.raft_term,
-                shard: self.shard,
+                region: self.region,
                 is_vip: self.is_vip,
                 operations_count: self.operations_count,
                 idempotency_hit: self.idempotency_hit,
@@ -1383,11 +1383,11 @@ mod tests {
     #[test]
     fn test_set_system_context() {
         let mut ctx = RequestContext::new("WriteService", "write");
-        ctx.set_system_context(100, true, 5, Some(ShardId::new(3)));
+        ctx.set_system_context(100, true, 5, Some(Region::CA_CENTRAL_QC));
         assert_eq!(ctx.node_id, Some(100));
         assert_eq!(ctx.is_leader, Some(true));
         assert_eq!(ctx.raft_term, Some(5));
-        assert_eq!(ctx.shard, Some(ShardId::new(3)));
+        assert_eq!(ctx.region, Some(Region::CA_CENTRAL_QC));
         ctx.suppress_emission();
     }
 
@@ -2764,7 +2764,7 @@ mod tests {
             ctx.set_node_id(100);
             ctx.set_is_leader(true);
             ctx.set_raft_term(5);
-            ctx.set_shard(ShardId::new(3));
+            ctx.set_region(Region::CA_CENTRAL_QC);
 
             // Write metrics
             ctx.set_operations_count(10);
@@ -2803,7 +2803,7 @@ mod tests {
         assert!(event.contains("\"node_id\":100"), "missing node_id");
         assert!(event.contains("\"is_leader\":true"), "missing is_leader");
         assert!(event.contains("\"raft_term\":5"), "missing raft_term");
-        assert!(event.contains("\"shard\":3"), "missing shard");
+        assert!(event.contains("\"region\":\"ca-central-qc\""), "missing region");
 
         // Write metrics
         assert!(event.contains("\"operations_count\":10"), "missing operations_count");

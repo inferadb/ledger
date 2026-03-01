@@ -271,8 +271,8 @@ mod tests {
         use crate::{
             codec::{decode, encode},
             types::{
-                BlockHeader, ChainCommitment, Entity, Operation, Relationship, SetCondition,
-                ShardBlock, Transaction, VaultBlock, VaultEntry,
+                BlockHeader, ChainCommitment, Entity, Operation, RegionBlock, Relationship,
+                SetCondition, Transaction, VaultBlock, VaultEntry,
             },
         };
 
@@ -481,29 +481,29 @@ mod tests {
                 prop_assert_eq!(entry, decoded);
             }
 
-            /// Any `ShardBlock` must survive postcard roundtrip.
+            /// Any `RegionBlock` must survive postcard roundtrip.
             #[test]
-            fn prop_shard_block_roundtrip(
-                shard in (1u32..1_000).prop_map(crate::types::ShardId::new),
-                shard_height in any::<u64>(),
-                previous_shard_hash in arb_hash(),
+            fn prop_region_block_roundtrip(
+                region in (0usize..crate::types::ALL_REGIONS.len()).prop_map(|i| crate::types::ALL_REGIONS[i]),
+                region_height in any::<u64>(),
+                previous_region_hash in arb_hash(),
                 timestamp in arb_timestamp(),
                 leader_id in "[a-z]{3,10}",
                 term in any::<u64>(),
                 committed_index in any::<u64>(),
             ) {
-                let block = ShardBlock {
-                    shard,
-                    shard_height,
-                    previous_shard_hash,
+                let block = RegionBlock {
+                    region,
+                    region_height,
+                    previous_region_hash,
                     vault_entries: vec![],
                     timestamp,
                     leader_id,
                     term,
                     committed_index,
                 };
-                let bytes = encode(&block).expect("encode shard block");
-                let decoded: ShardBlock = decode(&bytes).expect("decode shard block");
+                let bytes = encode(&block).expect("encode region block");
+                let decoded: RegionBlock = decode(&bytes).expect("decode region block");
                 prop_assert_eq!(block, decoded);
             }
 

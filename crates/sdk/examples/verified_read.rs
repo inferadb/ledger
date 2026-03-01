@@ -12,7 +12,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::disallowed_methods)]
 
 use inferadb_ledger_sdk::{
-    ClientConfig, LedgerClient, Operation, Result, ServerSource, VerifyOpts,
+    ClientConfig, LedgerClient, Operation, Region, Result, ServerSource, VerifyOpts,
 };
 
 #[tokio::main]
@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     // 2. Create a organization and vault with some data
     // -------------------------------------------------------------------------
-    let org = client.create_organization("verified_example").await?;
+    let org = client.create_organization("verified_example", Region::US_EAST_VA).await?;
     let organization = org.slug;
     let vault_info = client.create_vault(organization).await?;
     let vault = vault_info.vault;

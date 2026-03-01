@@ -4,11 +4,15 @@
 //! - Each vault maintains independent cryptographic chain
 //! - State root divergence in one vault doesn't cascade to others
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use inferadb_ledger_store::{Database, StorageBackend};
 use inferadb_ledger_types::{
-    EMPTY_HASH, Hash, OrganizationId, ShardBlock, ShardId, VaultHealth, VaultId, ZERO_HASH,
+    EMPTY_HASH, Hash, OrganizationId, Region, RegionBlock, UserId, VaultHealth, VaultId, ZERO_HASH,
     compute_chain_commitment, encode,
 };
 use parking_lot::RwLock;
@@ -47,7 +51,7 @@ pub enum ShardError {
     #[snafu(display("Entity store error: {source}"))]
     Entity { source: crate::entity::EntityError },
 
-    /// Requested vault does not exist in this shard.
+    /// Requested vault does not exist in this region.
     #[snafu(display("Vault {vault} not found"))]
     VaultNotFound { vault: VaultId },
 
@@ -92,8 +96,8 @@ pub struct VaultMeta {
 /// - Snapshot creation and restoration
 /// - Vault health tracking
 pub struct ShardManager<B: StorageBackend> {
-    /// Shard identifier.
-    shard: ShardId,
+    /// Region this region manager belongs to.
+    region: Region,
     /// Shared database.
     db: Arc<Database<B>>,
     /// State layer for K/V operations.
@@ -104,41 +108,67 @@ pub struct ShardManager<B: StorageBackend> {
     snapshots: SnapshotManager,
     /// Per-vault metadata.
     vault_meta: RwLock<HashMap<VaultId, VaultMeta>>,
-    /// Current shard height.
-    shard_height: RwLock<u64>,
+    /// Current region height.
+    region_height: RwLock<u64>,
     /// Genesis block hash (computed from first block, cached for efficiency).
     genesis_hash: RwLock<Option<Hash>>,
+    /// User IDs whose subject keys have been destroyed via crypto-shredding.
+    /// Included in every snapshot for erasure guarantee survival.
+    erased_users: RwLock<HashSet<UserId>>,
 }
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> ShardManager<B> {
     /// Creates a new shard manager.
     pub fn new(
-        shard: ShardId,
+        region: Region,
         db: Arc<Database<B>>,
         snapshot_dir: PathBuf,
         max_snapshots: usize,
     ) -> Self {
         Self {
-            shard,
+            region,
             db: Arc::clone(&db),
             state: StateLayer::new(Arc::clone(&db)),
             blocks: BlockArchive::new(Arc::clone(&db)),
             snapshots: SnapshotManager::new(snapshot_dir, max_snapshots),
             vault_meta: RwLock::new(HashMap::new()),
-            shard_height: RwLock::new(0),
+            region_height: RwLock::new(0),
             genesis_hash: RwLock::new(None),
+            erased_users: RwLock::new(HashSet::new()),
         }
     }
 
-    /// Returns the shard identifier.
-    pub fn shard(&self) -> ShardId {
-        self.shard
+    /// Returns the region this region manager belongs to.
+    pub fn region(&self) -> Region {
+        self.region
     }
 
-    /// Returns the current shard height.
-    pub fn shard_height(&self) -> u64 {
-        *self.shard_height.read()
+    /// Returns the current region height.
+    pub fn region_height(&self) -> u64 {
+        *self.region_height.read()
+    }
+
+    /// Records a user as erased via crypto-shredding.
+    ///
+    /// The user ID is added to the erasure tombstone set, which is included in
+    /// every subsequent snapshot. This ensures erasure survives snapshot restore
+    /// even if the Raft log has been compacted past the erasure's log index.
+    pub fn add_erased_user(&self, user_id: UserId) {
+        self.erased_users.write().insert(user_id);
+    }
+
+    /// Returns a snapshot of the current erasure tombstone set.
+    pub fn erased_users(&self) -> HashSet<UserId> {
+        self.erased_users.read().clone()
+    }
+
+    /// Replaces the in-memory erased users set.
+    ///
+    /// Call after state restoration to populate the tombstone set from
+    /// persisted erasure audit records.
+    pub fn set_erased_users(&self, erased: HashSet<UserId>) {
+        *self.erased_users.write() = erased;
     }
 
     /// Returns vault metadata.
@@ -148,7 +178,7 @@ impl<B: StorageBackend> ShardManager<B> {
         self.vault_meta.read().get(&vault).cloned()
     }
 
-    /// Lists all vaults in this shard.
+    /// Lists all vaults in this region.
     pub fn list_vaults(&self) -> Vec<VaultId> {
         self.vault_meta.read().keys().copied().collect()
     }
@@ -170,7 +200,7 @@ impl<B: StorageBackend> ShardManager<B> {
         &self.blocks
     }
 
-    /// Registers a new vault in this shard.
+    /// Registers a new vault in this region.
     ///
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     /// * `vault` - Internal vault identifier (`VaultId`).
@@ -188,7 +218,7 @@ impl<B: StorageBackend> ShardManager<B> {
         );
     }
 
-    /// Applies a shard block.
+    /// Applies a region block.
     ///
     /// This:
     /// 1. Applies operations to state
@@ -202,7 +232,7 @@ impl<B: StorageBackend> ShardManager<B> {
     /// Returns `ShardError::StateRootMismatch` if the computed state root differs from the
     /// block's expected root.
     /// Returns `ShardError::BlockArchive` if archiving the block fails.
-    pub fn apply_block(&self, block: &ShardBlock) -> Result<()> {
+    pub fn apply_block(&self, block: &RegionBlock) -> Result<()> {
         let mut vault_meta = self.vault_meta.write();
 
         for entry in &block.vault_entries {
@@ -284,8 +314,8 @@ impl<B: StorageBackend> ShardManager<B> {
         // Archive the block
         self.blocks.append_block(block).context(BlockArchiveSnafu)?;
 
-        // Update shard height
-        *self.shard_height.write() = block.shard_height;
+        // Update region height
+        *self.region_height.write() = block.region_height;
 
         Ok(())
     }
@@ -299,7 +329,7 @@ impl<B: StorageBackend> ShardManager<B> {
     /// Returns `ShardError::Snapshot` if snapshot creation or saving fails.
     /// Returns `ShardError::BlockArchive` if computing chain parameters fails.
     pub fn create_snapshot(&self) -> Result<PathBuf> {
-        let shard_height = self.shard_height();
+        let region_height = self.region_height();
         let vault_meta = self.vault_meta.read();
 
         // Collect vault states
@@ -330,10 +360,10 @@ impl<B: StorageBackend> ShardManager<B> {
         let state_data = SnapshotStateData { vault_entities };
 
         // Compute chain commitment for snapshot verification
-        let chain_params = self.compute_chain_params(shard_height)?;
+        let chain_params = self.compute_chain_params(region_height)?;
 
         let snapshot =
-            Snapshot::new(self.shard, shard_height, vault_states, state_data, chain_params)
+            Snapshot::new(self.region, region_height, vault_states, state_data, chain_params)
                 .context(SnapshotSnafu)?;
 
         self.snapshots.save(&snapshot).context(SnapshotSnafu)
@@ -343,7 +373,7 @@ impl<B: StorageBackend> ShardManager<B> {
     ///
     /// This computes the ChainCommitment covering all blocks since the previous
     /// snapshot, linking the new snapshot into the verification chain.
-    fn compute_chain_params(&self, shard_height: u64) -> Result<SnapshotChainParams> {
+    fn compute_chain_params(&self, region_height: u64) -> Result<SnapshotChainParams> {
         // Get genesis hash (cached for efficiency)
         let genesis_hash = self.get_or_compute_genesis_hash()?;
 
@@ -360,24 +390,25 @@ impl<B: StorageBackend> ShardManager<B> {
                 (None, None, 1)
             };
 
-        // Load block headers from (from_height..=shard_height)
+        // Load block headers from (from_height..=region_height)
         let blocks =
-            self.blocks.read_range(from_height, shard_height).context(BlockArchiveSnafu)?;
+            self.blocks.read_range(from_height, region_height).context(BlockArchiveSnafu)?;
 
-        let headers: Vec<_> = blocks.iter().map(|b| b.to_shard_header()).collect();
+        let headers: Vec<_> = blocks.iter().map(|b| b.to_region_header()).collect();
 
         // Compute chain commitment
-        let chain_commitment = compute_chain_commitment(&headers, from_height, shard_height);
+        let chain_commitment = compute_chain_commitment(&headers, from_height, region_height);
 
         Ok(SnapshotChainParams {
             genesis_hash,
             previous_snapshot_height,
             previous_snapshot_hash,
             chain_commitment,
+            erased_users: self.erased_users.read().clone(),
         })
     }
 
-    /// Returns or computes the genesis hash for this shard.
+    /// Returns or computes the genesis hash for this region.
     ///
     /// The genesis hash is the block hash of the first block (height 1).
     /// It's cached after first computation for efficiency.
@@ -390,7 +421,7 @@ impl<B: StorageBackend> ShardManager<B> {
         // Compute from first block
         let genesis = match self.blocks.read_block(1) {
             Ok(block) => {
-                let header = block.to_shard_header();
+                let header = block.to_region_header();
                 inferadb_ledger_types::hash::block_hash(&header)
             },
             Err(_) => {
@@ -444,8 +475,8 @@ impl<B: StorageBackend> ShardManager<B> {
 
         txn.commit().context(StoreSnafu)?;
 
-        // Update shard height
-        *self.shard_height.write() = snapshot.header.shard_height;
+        // Update region height
+        *self.region_height.write() = snapshot.header.region_height;
 
         Ok(())
     }
@@ -464,7 +495,7 @@ impl<B: StorageBackend> ShardManager<B> {
             self.restore_from_snapshot(&snapshot)?;
 
             // Replay blocks after snapshot
-            let start_height = snapshot.shard_height() + 1;
+            let start_height = snapshot.region_height() + 1;
             if let Some((_, latest)) = self.blocks.height_range().context(BlockArchiveSnafu)? {
                 for height in start_height..=latest {
                     let block = self.blocks.read_block(height).context(BlockArchiveSnafu)?;
@@ -491,7 +522,7 @@ mod tests {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let temp = TestDir::new();
 
-        let manager = ShardManager::new(ShardId::new(1), engine.db(), temp.join("snapshots"), 3);
+        let manager = ShardManager::new(Region::GLOBAL, engine.db(), temp.join("snapshots"), 3);
 
         (manager, temp)
     }
@@ -537,13 +568,13 @@ mod tests {
         // Reset state and apply via block
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let temp = TestDir::new();
-        let manager = ShardManager::new(ShardId::new(1), engine.db(), temp.join("snapshots"), 3);
+        let manager = ShardManager::new(Region::GLOBAL, engine.db(), temp.join("snapshots"), 3);
         manager.register_vault(OrganizationId::new(1), VaultId::new(1));
 
-        let block = ShardBlock {
-            shard: ShardId::new(1),
-            shard_height: 1,
-            previous_shard_hash: inferadb_ledger_types::ZERO_HASH,
+        let block = RegionBlock {
+            region: Region::GLOBAL,
+            region_height: 1,
+            previous_region_hash: inferadb_ledger_types::ZERO_HASH,
             vault_entries: vec![VaultEntry {
                 organization: OrganizationId::new(1),
                 vault: VaultId::new(1),
@@ -587,10 +618,10 @@ mod tests {
         };
 
         // Block with wrong state root
-        let block = ShardBlock {
-            shard: ShardId::new(1),
-            shard_height: 1,
-            previous_shard_hash: inferadb_ledger_types::ZERO_HASH,
+        let block = RegionBlock {
+            region: Region::GLOBAL,
+            region_height: 1,
+            previous_region_hash: inferadb_ledger_types::ZERO_HASH,
             vault_entries: vec![VaultEntry {
                 organization: OrganizationId::new(1),
                 vault: VaultId::new(1),
@@ -618,7 +649,7 @@ mod tests {
     fn test_snapshot_and_restore() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
         let temp = TestDir::new();
-        let manager = ShardManager::new(ShardId::new(1), engine.db(), temp.join("snapshots"), 3);
+        let manager = ShardManager::new(Region::GLOBAL, engine.db(), temp.join("snapshots"), 3);
 
         manager.register_vault(OrganizationId::new(1), VaultId::new(1));
 
@@ -647,7 +678,7 @@ mod tests {
         // Create new manager and restore
         let engine2 = InMemoryStorageEngine::open().expect("open engine");
         let manager2 =
-            ShardManager::new(ShardId::new(1), engine2.db(), temp.path().join("snapshots"), 3);
+            ShardManager::new(Region::GLOBAL, engine2.db(), temp.path().join("snapshots"), 3);
 
         let snapshot = Snapshot::read_from_file(&snapshot_path).expect("read snapshot");
         manager2.restore_from_snapshot(&snapshot).expect("restore");

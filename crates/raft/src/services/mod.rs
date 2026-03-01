@@ -3,15 +3,15 @@
 //! All services run behind WireGuard VPN. Authentication and authorization
 //! are handled by Engine/Control services upstream. Ledger trusts all requests.
 //!
-//! ## Multi-Shard Support
+//! ## Multi-Region Support
 //!
-//! For multi-shard deployments, use [`MultiShardReadService`] and
-//! [`MultiShardWriteService`] with a [`ShardResolver`] to route requests
-//! to the correct shard.
+//! For multi-region deployments, use [`MultiRegionReadService`] and
+//! [`MultiRegionWriteService`] with a [`RegionResolver`] to route requests
+//! to the correct region.
 //!
 //! ## Request Forwarding
 //!
-//! When a organization is on a remote shard, the `ForwardClient` can be used to
+//! When an organization is on a remote region, the `ForwardClient` can be used to
 //! proxy requests to the correct node via gRPC.
 
 mod admin;
@@ -22,11 +22,11 @@ mod forward_client;
 mod health;
 pub(crate) mod helpers;
 pub(crate) mod metadata;
-mod multi_shard_read;
-mod multi_shard_write;
+mod multi_region_read;
+mod multi_region_write;
 mod raft;
 mod read;
-pub mod shard_resolver;
+pub mod region_resolver;
 pub mod slug_resolver;
 mod write;
 
@@ -35,10 +35,10 @@ pub use discovery::DiscoveryServiceImpl;
 pub use events::EventsServiceImpl;
 pub use forward_client::ForwardClient;
 pub use health::HealthServiceImpl;
-pub use multi_shard_read::MultiShardReadService;
-pub use multi_shard_write::MultiShardWriteService;
-pub use raft::{MultiShardRaftService, RaftServiceImpl};
+pub use multi_region_read::MultiRegionReadService;
+pub use multi_region_write::MultiRegionWriteService;
+pub use raft::{MultiRegionRaftService, RaftServiceImpl};
 pub use read::ReadServiceImpl;
-pub use shard_resolver::{MultiShardResolver, ShardResolver};
+pub use region_resolver::{MultiRegionResolver, RegionResolver};
 pub use slug_resolver::SlugResolver;
 pub use write::WriteServiceImpl;

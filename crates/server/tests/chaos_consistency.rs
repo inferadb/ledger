@@ -268,7 +268,7 @@ fn test_minority_cannot_elect_leader() {
             .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
             .expect("connect to node3");
 
-        let vote_req = RaftVoteRequest { vote: None, last_log_id: None, shard: None };
+        let vote_req = RaftVoteRequest { vote: None, last_log_id: None, region: None };
         client3.vote(vote_req).await.expect("majority should still be operational");
 
         // Repair partition
@@ -420,7 +420,7 @@ fn test_write_fails_in_minority_partition() {
                 prev_log_id: None,
                 entries: vec![],
                 leader_commit: None,
-                shard: None,
+                region: None,
             };
             let resp = client.append_entries(req).await.expect("should succeed");
             assert!(resp.into_inner().success, "write before partition should succeed");
@@ -441,7 +441,7 @@ fn test_write_fails_in_minority_partition() {
                 prev_log_id: None,
                 entries: vec![],
                 leader_commit: None,
-                shard: None,
+                region: None,
             };
             let resp = client.append_entries(req).await.expect("rpc should complete");
             assert!(!resp.into_inner().success, "write during partition should fail");
@@ -462,7 +462,7 @@ fn test_write_fails_in_minority_partition() {
                 prev_log_id: None,
                 entries: vec![],
                 leader_commit: None,
-                shard: None,
+                region: None,
             };
             let resp = client.append_entries(req).await.expect("should succeed");
             assert!(resp.into_inner().success, "write after heal should succeed");
@@ -595,7 +595,7 @@ fn test_consistency_after_partition_heals() {
                 prev_log_id: None,
                 entries: vec![],
                 leader_commit: None,
-                shard: None,
+                region: None,
             };
             client.append_entries(req).await.expect("initial write");
         }
@@ -616,7 +616,7 @@ fn test_consistency_after_partition_heals() {
                 prev_log_id: None,
                 entries: vec![],
                 leader_commit: None,
-                shard: None,
+                region: None,
             };
             client.append_entries(req).await.expect("write during partition");
         }
@@ -640,7 +640,7 @@ fn test_consistency_after_partition_heals() {
                 prev_log_id: None,
                 entries: vec![],
                 leader_commit: None,
-                shard: None,
+                region: None,
             };
             client
                 .append_entries(req)
@@ -774,7 +774,7 @@ fn test_network_delay_request_completion() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect to fast node");
 
-            let req = RaftVoteRequest { vote: None, last_log_id: None, shard: None };
+            let req = RaftVoteRequest { vote: None, last_log_id: None, region: None };
             client.vote(req).await.expect("fast node should respond");
         }
 
@@ -785,7 +785,7 @@ fn test_network_delay_request_completion() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect to slow node");
 
-            let req = RaftVoteRequest { vote: None, last_log_id: None, shard: None };
+            let req = RaftVoteRequest { vote: None, last_log_id: None, region: None };
             client.vote(req).await.expect("slow node should eventually respond");
         }
 

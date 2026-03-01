@@ -7,7 +7,7 @@
 //!
 //! # Health Probes
 //!
-//! - **Startup**: Passes once the node has completed initialization (Raft recovery, shard setup).
+//! - **Startup**: Passes once the node has completed initialization (Raft recovery, region setup).
 //!   Failing startup probe tells Kubernetes to keep waiting.
 //! - **Liveness**: Passes when the event loop is responsive AND all background jobs are
 //!   heartbeating within their expected intervals. Failing liveness probe triggers pod restart.
@@ -55,7 +55,7 @@ use crate::types::LedgerTypeConfig;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum NodePhase {
-    /// Node is initializing (Raft recovery, shard setup).
+    /// Node is initializing (Raft recovery, region setup).
     Starting = 0,
     /// Node is fully operational and serving traffic.
     Ready = 1,
@@ -413,7 +413,7 @@ impl GracefulShutdown {
     ///
     /// The `pre_shutdown` callback is invoked after connection drain, before
     /// the server is signaled to stop. Use it to trigger Raft snapshots and
-    /// shut down shard groups.
+    /// shut down region groups.
     pub async fn execute<F, Fut>(self, pre_shutdown: F)
     where
         F: FnOnce() -> Fut,

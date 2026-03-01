@@ -57,6 +57,8 @@ pub mod cardinality;
 #[doc(hidden)]
 pub mod deadline;
 #[doc(hidden)]
+pub mod dek_rewrap;
+#[doc(hidden)]
 pub mod dependency_health;
 #[doc(hidden)]
 pub mod error;
@@ -79,7 +81,7 @@ pub mod logging;
 #[doc(hidden)]
 pub mod multi_raft;
 #[doc(hidden)]
-pub mod multi_shard_server;
+pub mod multi_region_server;
 #[doc(hidden)]
 pub mod otel;
 #[doc(hidden)]
@@ -120,11 +122,13 @@ pub mod raft_network;
 #[doc(hidden)]
 pub mod rate_limit;
 #[doc(hidden)]
+pub mod region_router;
+#[doc(hidden)]
+pub mod region_storage;
+#[doc(hidden)]
 pub mod saga_orchestrator;
 #[doc(hidden)]
 pub mod server;
-#[doc(hidden)]
-pub mod shard_router;
 #[doc(hidden)]
 pub mod snapshot;
 #[doc(hidden)]
@@ -166,15 +170,17 @@ pub use learner_refresh::LearnerRefreshJob;
 #[doc(hidden)]
 pub use log_storage::RaftLogStore;
 #[doc(hidden)]
-pub use multi_raft::{MultiRaftConfig, MultiRaftManager, ShardConfig, ShardGroup};
+pub use multi_raft::{MultiRaftConfig, MultiRaftManager, RegionConfig, RegionGroup};
 #[doc(hidden)]
-pub use multi_shard_server::MultiShardLedgerServer;
+pub use multi_region_server::MultiRegionLedgerServer;
 #[doc(hidden)]
 pub use orphan_cleanup::OrphanCleanupJob;
 #[doc(hidden)]
 pub use raft_network::GrpcRaftNetworkFactory;
 #[doc(hidden)]
 pub use rate_limit::RateLimiter;
+#[doc(hidden)]
+pub use region_storage::{RegionStorage, RegionStorageManager};
 #[doc(hidden)]
 pub use resource_metrics::ResourceMetricsCollector;
 #[doc(hidden)]

@@ -1,8 +1,8 @@
 //! Core types, errors, and cryptographic primitives for InferaDB Ledger.
 //!
 //! Provides the foundational types used throughout the ledger:
-//! - Newtype identifiers (`OrganizationId`, `OrganizationSlug`, `VaultId`, `UserId`, `UserEmailId`,
-//!   `ShardId`)
+//! - Newtype identifiers (`OrganizationId`, `OrganizationSlug`, `VaultId`, `UserId`, `UserEmailId`)
+//!   and geographic region enum (`Region`)
 //! - Data structures for blocks, transactions, and operations
 //! - Configuration types with validated builders
 //! - Cryptographic hashing functions (SHA-256, seahash)
@@ -16,6 +16,8 @@
 pub mod codec;
 /// Configuration types with validated builders.
 pub mod config;
+/// Email blinding key and HMAC-based email hashing for global uniqueness.
+pub mod email_hash;
 /// Error types using snafu with structured error codes.
 pub mod error;
 /// Event logging domain types for organization-scoped audit trails.
@@ -32,12 +34,17 @@ pub mod types;
 pub mod validation;
 
 pub use codec::{CodecError, decode, encode};
+pub use email_hash::{
+    EmailBlindingKey, EmailBlindingKeyParseError, compute_email_hmac, normalize_email,
+};
 pub use error::{ErrorCode, LedgerError, Result};
 pub use hash::{
     BucketHasher, EMPTY_HASH, Hash, ZERO_HASH, bucket_id, compute_chain_commitment,
     compute_tx_merkle_root, hash_eq, sha256, sha256_concat, tx_hash, vault_entry_hash,
 };
 pub use types::{
+    // Constants
+    ALL_REGIONS,
     // Structs
     BlockHeader,
     BlockRetentionMode,
@@ -57,10 +64,12 @@ pub use types::{
     OrganizationSlug,
     // Resource accounting
     OrganizationUsage,
+    // Region types
+    Region,
+    RegionBlock,
+    RegionParseError,
     Relationship,
     SetCondition,
-    ShardBlock,
-    ShardId,
     Transaction,
     TransactionValidationError,
     TxId,

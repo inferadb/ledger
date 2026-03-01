@@ -3,16 +3,18 @@
 //! - Snapshots serialize state for fast recovery
 //! - Uses zstd compression (3-5x ratio typical)
 //! - Format: header + compressed state data
-//! - Naming: {shard_height:09}.snap
+//! - Naming: {region_height:09}.snap
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
 };
 
-use inferadb_ledger_types::{ChainCommitment, Entity, Hash, ShardId, VaultId, decode, encode};
+use inferadb_ledger_types::{
+    ChainCommitment, Entity, Hash, Region, UserId, VaultId, decode, encode,
+};
 use snafu::{ResultExt, Snafu};
 use zstd::stream::{Decoder, Encoder};
 
@@ -67,6 +69,39 @@ pub enum SnapshotError {
     NotFound {
         /// The path that was not found.
         path: String,
+    },
+
+    /// Protected region snapshot transferred to a node outside the region.
+    #[snafu(display(
+        "Cross-region snapshot transfer rejected: snapshot region {snapshot_region} \
+         requires residency, but target node is in region {node_region}"
+    ))]
+    CrossRegionTransfer {
+        /// Region the snapshot belongs to.
+        snapshot_region: Region,
+        /// Region of the target node.
+        node_region: Region,
+    },
+
+    /// Protected region snapshot restore attempted on a node outside the region.
+    #[snafu(display(
+        "Cross-region snapshot restore rejected: snapshot region {snapshot_region} \
+         requires residency, but node is in region {node_region}"
+    ))]
+    CrossRegionRestore {
+        /// Region the snapshot belongs to.
+        snapshot_region: Region,
+        /// Region of the restoring node.
+        node_region: Region,
+    },
+
+    /// Snapshot references RMK versions not available in the local key cache.
+    #[snafu(display("Missing RMK versions for region {region}: {missing_versions:?}"))]
+    MissingRmkVersions {
+        /// Region the snapshot belongs to.
+        region: Region,
+        /// RMK versions referenced by the snapshot but not found locally.
+        missing_versions: Vec<u32>,
     },
 }
 
@@ -128,18 +163,18 @@ pub struct SnapshotHeader {
     pub magic: [u8; 4],
     /// Format version.
     pub version: u32,
-    /// Shard identifier.
-    pub shard: ShardId,
-    /// Shard height at snapshot time.
-    pub shard_height: u64,
+    /// Region this snapshot belongs to.
+    pub region: Region,
+    /// Region height at snapshot time.
+    pub region_height: u64,
     /// Per-vault metadata.
     pub vault_states: Vec<VaultSnapshotMeta>,
     /// SHA-256 checksum of compressed state data.
     pub checksum: Hash,
 
     // Chain verification linkage
-    /// Hash of the genesis block for this shard.
-    /// Links the snapshot back to the shard's origin.
+    /// Hash of the genesis block for this region.
+    /// Links the snapshot back to the region's origin.
     pub genesis_hash: Hash,
     /// Height of the previous snapshot in the chain.
     /// None for the first snapshot.
@@ -150,6 +185,22 @@ pub struct SnapshotHeader {
     /// Accumulated cryptographic commitment for blocks since previous snapshot.
     /// Proves state evolution without requiring full block replay.
     pub chain_commitment: ChainCommitment,
+
+    /// Set of user IDs whose subject keys have been destroyed via crypto-shredding.
+    ///
+    /// On `install_snapshot()`, the restore procedure skips subject key restoration
+    /// for erased users. Tombstones are permanent — never removed from snapshot
+    /// metadata. Storage cost is negligible (~8 bytes per erased user ID).
+    #[serde(default)]
+    pub erased_users: HashSet<UserId>,
+
+    /// RMK versions referenced by encrypted artifacts in this snapshot.
+    ///
+    /// Enables pre-validation before snapshot installation: the receiving node
+    /// verifies all listed versions exist in its `RmkCache` before attempting
+    /// decryption. An empty vec indicates an unencrypted snapshot.
+    #[serde(default)]
+    pub rmk_versions: Vec<u32>,
 }
 
 /// Snapshot state data (serialized and compressed).
@@ -171,7 +222,7 @@ pub struct Snapshot {
 /// Parameters for creating a snapshot with chain verification.
 #[derive(Debug, Clone)]
 pub struct SnapshotChainParams {
-    /// Hash of the genesis block for this shard.
+    /// Hash of the genesis block for this region.
     pub genesis_hash: Hash,
     /// Height of the previous snapshot (if any).
     pub previous_snapshot_height: Option<u64>,
@@ -179,6 +230,8 @@ pub struct SnapshotChainParams {
     pub previous_snapshot_hash: Option<Hash>,
     /// Chain commitment covering blocks since previous snapshot.
     pub chain_commitment: ChainCommitment,
+    /// User IDs whose subject keys have been destroyed (erasure tombstones).
+    pub erased_users: HashSet<UserId>,
 }
 
 impl Default for SnapshotChainParams {
@@ -188,6 +241,7 @@ impl Default for SnapshotChainParams {
             previous_snapshot_height: None,
             previous_snapshot_hash: None,
             chain_commitment: ChainCommitment::default(),
+            erased_users: HashSet::new(),
         }
     }
 }
@@ -202,11 +256,38 @@ impl Snapshot {
     ///
     /// Returns [`SnapshotError::Codec`] if serialization of the state data fails.
     pub fn new(
-        shard: ShardId,
-        shard_height: u64,
+        region: Region,
+        region_height: u64,
         vault_states: Vec<VaultSnapshotMeta>,
         state: SnapshotStateData,
         chain_params: SnapshotChainParams,
+    ) -> Result<Self> {
+        Self::new_with_rmk_versions(
+            region,
+            region_height,
+            vault_states,
+            state,
+            chain_params,
+            Vec::new(),
+        )
+    }
+
+    /// Creates a new snapshot with chain verification linkage and RMK version tracking.
+    ///
+    /// `rmk_versions` lists all Region Master Key versions referenced by encrypted
+    /// artifacts in this snapshot. Receiving nodes pre-validate these versions exist
+    /// in their key cache before attempting snapshot installation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::Codec`] if serialization of the state data fails.
+    pub fn new_with_rmk_versions(
+        region: Region,
+        region_height: u64,
+        vault_states: Vec<VaultSnapshotMeta>,
+        state: SnapshotStateData,
+        chain_params: SnapshotChainParams,
+        rmk_versions: Vec<u32>,
     ) -> Result<Self> {
         // Compute checksum of state data
         let state_bytes = encode(&state).context(CodecSnafu)?;
@@ -215,14 +296,16 @@ impl Snapshot {
         let header = SnapshotHeader {
             magic: SNAPSHOT_MAGIC,
             version: SNAPSHOT_VERSION,
-            shard,
-            shard_height,
+            region,
+            region_height,
             vault_states,
             checksum,
             genesis_hash: chain_params.genesis_hash,
             previous_snapshot_height: chain_params.previous_snapshot_height,
             previous_snapshot_hash: chain_params.previous_snapshot_hash,
             chain_commitment: chain_params.chain_commitment,
+            erased_users: chain_params.erased_users,
+            rmk_versions,
         };
 
         Ok(Self { header, state })
@@ -233,17 +316,85 @@ impl Snapshot {
     /// In production, prefer `new()` with proper chain parameters.
     #[cfg(test)]
     pub fn new_simple(
-        shard: ShardId,
-        shard_height: u64,
+        region: Region,
+        region_height: u64,
         vault_states: Vec<VaultSnapshotMeta>,
         state: SnapshotStateData,
     ) -> Result<Self> {
-        Self::new(shard, shard_height, vault_states, state, SnapshotChainParams::default())
+        Self::new(region, region_height, vault_states, state, SnapshotChainParams::default())
     }
 
-    /// Returns the shard height of this snapshot.
-    pub fn shard_height(&self) -> u64 {
-        self.header.shard_height
+    /// Validates that this snapshot can be transferred to a node in `target_region`.
+    ///
+    /// Protected regions restrict snapshot transfer to in-region nodes only.
+    /// Non-protected regions allow transfer to any node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::CrossRegionTransfer`] if the snapshot belongs to a
+    /// protected region and `target_region` differs.
+    pub fn validate_transfer(&self, target_region: Region) -> Result<()> {
+        let snapshot_region = self.header.region;
+        if snapshot_region.requires_residency() && snapshot_region != target_region {
+            return Err(SnapshotError::CrossRegionTransfer {
+                snapshot_region,
+                node_region: target_region,
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates that this snapshot can be restored on a node in `node_region`.
+    ///
+    /// Protected regions restrict snapshot restore to in-region nodes only.
+    /// Non-protected regions allow restore on any node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::CrossRegionRestore`] if the snapshot belongs to a
+    /// protected region and `node_region` differs.
+    pub fn validate_restore(&self, node_region: Region) -> Result<()> {
+        let snapshot_region = self.header.region;
+        if snapshot_region.requires_residency() && snapshot_region != node_region {
+            return Err(SnapshotError::CrossRegionRestore { snapshot_region, node_region });
+        }
+        Ok(())
+    }
+
+    /// Validates that all RMK versions referenced by this snapshot are available.
+    ///
+    /// Pre-validates before installation to produce a clear error instead of
+    /// failing mid-install with a cryptic decryption error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::MissingRmkVersions`] if any referenced version
+    /// is not found in `available_versions`.
+    pub fn validate_rmk_versions(&self, available_versions: &[u32]) -> Result<()> {
+        if self.header.rmk_versions.is_empty() {
+            return Ok(());
+        }
+
+        let missing: Vec<u32> = self
+            .header
+            .rmk_versions
+            .iter()
+            .filter(|v| !available_versions.contains(v))
+            .copied()
+            .collect();
+
+        if !missing.is_empty() {
+            return Err(SnapshotError::MissingRmkVersions {
+                region: self.header.region,
+                missing_versions: missing,
+            });
+        }
+        Ok(())
+    }
+
+    /// Returns the region height of this snapshot.
+    pub fn region_height(&self) -> u64 {
+        self.header.region_height
     }
 
     /// Returns vault metadata by vault.
@@ -358,16 +509,16 @@ impl Snapshot {
 }
 
 /// Snapshot file naming utilities.
-pub fn snapshot_filename(shard_height: u64) -> String {
-    format!("{:09}.snap", shard_height)
+pub fn snapshot_filename(region_height: u64) -> String {
+    format!("{:09}.snap", region_height)
 }
 
-/// Parses shard height from snapshot filename.
+/// Parses region height from snapshot filename.
 pub fn parse_snapshot_filename(filename: &str) -> Option<u64> {
     filename.strip_suffix(".snap").and_then(|s| s.parse().ok())
 }
 
-/// Snapshot manager for a shard.
+/// Snapshot manager for a region.
 pub struct SnapshotManager {
     /// Directory containing snapshots.
     snapshot_dir: PathBuf,
@@ -405,7 +556,7 @@ impl SnapshotManager {
     pub fn save(&self, snapshot: &Snapshot) -> Result<PathBuf> {
         self.init()?;
 
-        let filename = snapshot_filename(snapshot.shard_height());
+        let filename = snapshot_filename(snapshot.region_height());
         let path = self.snapshot_dir.join(&filename);
 
         snapshot.write_to_file(&path)?;
@@ -442,8 +593,8 @@ impl SnapshotManager {
     /// # Errors
     ///
     /// Returns any [`SnapshotError`] variant from [`Snapshot::read_from_file`].
-    pub fn load(&self, shard_height: u64) -> Result<Snapshot> {
-        let path = self.snapshot_dir.join(snapshot_filename(shard_height));
+    pub fn load(&self, region_height: u64) -> Result<Snapshot> {
+        let path = self.snapshot_dir.join(snapshot_filename(region_height));
         Snapshot::read_from_file(&path)
     }
 
@@ -503,7 +654,7 @@ impl SnapshotManager {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use inferadb_ledger_types::EMPTY_HASH;
     use tempfile::TempDir;
@@ -540,7 +691,7 @@ mod tests {
 
         let state = SnapshotStateData { vault_entities };
 
-        Snapshot::new_simple(ShardId::new(1), 1000, vault_states, state).expect("create snapshot")
+        Snapshot::new_simple(Region::GLOBAL, 1000, vault_states, state).expect("create snapshot")
     }
 
     #[test]
@@ -553,8 +704,8 @@ mod tests {
 
         let loaded = Snapshot::read_from_file(&path).expect("read snapshot");
 
-        assert_eq!(loaded.header.shard, snapshot.header.shard);
-        assert_eq!(loaded.header.shard_height, snapshot.header.shard_height);
+        assert_eq!(loaded.header.region, snapshot.header.region);
+        assert_eq!(loaded.header.region_height, snapshot.header.region_height);
         assert_eq!(loaded.header.vault_states.len(), snapshot.header.vault_states.len());
 
         let entities = loaded.get_vault_entities(VaultId::new(1)).expect("vault 1 entities");
@@ -577,7 +728,7 @@ mod tests {
             }];
 
             let snapshot = Snapshot::new_simple(
-                ShardId::new(1),
+                Region::GLOBAL,
                 height,
                 vault_states,
                 SnapshotStateData { vault_entities: HashMap::new() },
@@ -594,7 +745,7 @@ mod tests {
 
         // Load latest
         let latest = manager.load_latest().expect("load latest").expect("exists");
-        assert_eq!(latest.shard_height(), 500);
+        assert_eq!(latest.region_height(), 500);
 
         // Find snapshot at or before
         let at_350 = manager.find_snapshot_at_or_before(350).expect("find");
@@ -661,9 +812,10 @@ mod tests {
                 from_height: 501,
                 to_height: 1000,
             },
+            erased_users: HashSet::new(),
         };
 
-        let snapshot = Snapshot::new(ShardId::new(1), 1000, vault_states, state, chain_params)
+        let snapshot = Snapshot::new(Region::GLOBAL, 1000, vault_states, state, chain_params)
             .expect("create snapshot");
 
         // Verify chain fields before write
@@ -717,16 +869,12 @@ mod tests {
                 from_height: 1,
                 to_height: 500,
             },
+            erased_users: HashSet::new(),
         };
 
-        let snap1 = Snapshot::new(
-            ShardId::new(1),
-            500,
-            vault_states.clone(),
-            state.clone(),
-            chain_params_1,
-        )
-        .expect("create snapshot 1");
+        let snap1 =
+            Snapshot::new(Region::GLOBAL, 500, vault_states.clone(), state.clone(), chain_params_1)
+                .expect("create snapshot 1");
 
         let path1 = manager.save(&snap1).expect("save snapshot 1");
         let snap1_loaded = Snapshot::read_from_file(&path1).expect("load snapshot 1");
@@ -742,9 +890,10 @@ mod tests {
                 from_height: 501,
                 to_height: 1000,
             },
+            erased_users: HashSet::new(),
         };
 
-        let snap2 = Snapshot::new(ShardId::new(1), 1000, vault_states, state, chain_params_2)
+        let snap2 = Snapshot::new(Region::GLOBAL, 1000, vault_states, state, chain_params_2)
             .expect("create snapshot 2");
 
         let path2 = manager.save(&snap2).expect("save snapshot 2");
@@ -776,7 +925,7 @@ mod tests {
     ///
     /// Each vault maintains an independent state root in the snapshot, which
     /// must survive serialization. Verifiers use these roots to validate
-    /// individual vault states without processing the entire shard.
+    /// individual vault states without processing the entire region.
     #[test]
     fn test_snapshot_preserves_multiple_vault_state_roots() {
         let temp = TempDir::new().expect("create temp dir");
@@ -808,7 +957,7 @@ mod tests {
 
         let state = SnapshotStateData { vault_entities: HashMap::new() };
 
-        let snapshot = Snapshot::new_simple(ShardId::new(1), 5000, vault_states, state)
+        let snapshot = Snapshot::new_simple(Region::GLOBAL, 5000, vault_states, state)
             .expect("create snapshot");
 
         snapshot.write_to_file(&path).expect("write");
@@ -832,5 +981,220 @@ mod tests {
         assert_eq!(v3.state_root, [0x33; 32], "vault 3 state root");
         assert_eq!(v3.vault_height, 300);
         assert_eq!(v3.key_count, 30);
+    }
+
+    #[test]
+    fn test_snapshot_erased_users_roundtrip() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("erasure.snap");
+
+        let vault_states = vec![VaultSnapshotMeta {
+            vault: VaultId::new(1),
+            vault_height: 100,
+            state_root: [0xAAu8; 32],
+            bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
+            key_count: 5,
+        }];
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+
+        // Create snapshot with erased users
+        let mut erased = HashSet::new();
+        erased.insert(UserId::new(42));
+        erased.insert(UserId::new(99));
+
+        let chain_params = SnapshotChainParams {
+            genesis_hash: [0xBB; 32],
+            previous_snapshot_height: None,
+            previous_snapshot_hash: None,
+            chain_commitment: ChainCommitment {
+                accumulated_header_hash: [0xCC; 32],
+                state_root_accumulator: [0xDD; 32],
+                from_height: 1,
+                to_height: 100,
+            },
+            erased_users: erased.clone(),
+        };
+
+        let snapshot = Snapshot::new(Region::GLOBAL, 100, vault_states, state, chain_params)
+            .expect("create snapshot");
+        snapshot.write_to_file(&path).expect("write snapshot");
+
+        // Read back and verify erased_users survives roundtrip
+        let loaded = Snapshot::read_from_file(&path).expect("read snapshot");
+        assert_eq!(loaded.header.erased_users, erased);
+        assert!(loaded.header.erased_users.contains(&UserId::new(42)));
+        assert!(loaded.header.erased_users.contains(&UserId::new(99)));
+        assert!(!loaded.header.erased_users.contains(&UserId::new(1)));
+    }
+
+    #[test]
+    fn test_snapshot_backward_compat_no_erased_users() {
+        // Verify that a snapshot created with default (empty) erased_users
+        // deserializes correctly — serde(default) backwards compatibility
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("no_erasure.snap");
+
+        let vault_states = vec![VaultSnapshotMeta {
+            vault: VaultId::new(1),
+            vault_height: 50,
+            state_root: [0x11u8; 32],
+            bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
+            key_count: 1,
+        }];
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+
+        let snapshot =
+            Snapshot::new_simple(Region::GLOBAL, 50, vault_states, state).expect("create snapshot");
+        assert!(snapshot.header.erased_users.is_empty());
+
+        snapshot.write_to_file(&path).expect("write snapshot");
+        let loaded = Snapshot::read_from_file(&path).expect("read snapshot");
+        assert!(loaded.header.erased_users.is_empty());
+    }
+
+    #[test]
+    fn test_snapshot_rmk_versions_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("rmk_versions.snap");
+
+        let vault_states = vec![VaultSnapshotMeta {
+            vault: VaultId::new(1),
+            vault_height: 10,
+            state_root: [0xAAu8; 32],
+            bucket_roots: [EMPTY_HASH; NUM_BUCKETS].to_vec(),
+            key_count: 3,
+        }];
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+        let rmk_versions = vec![1, 3, 5];
+
+        let snapshot = Snapshot::new_with_rmk_versions(
+            Region::CA_CENTRAL_QC,
+            10,
+            vault_states,
+            state,
+            SnapshotChainParams::default(),
+            rmk_versions.clone(),
+        )
+        .expect("create snapshot");
+
+        assert_eq!(snapshot.header.rmk_versions, rmk_versions);
+
+        snapshot.write_to_file(&path).expect("write snapshot");
+        let loaded = Snapshot::read_from_file(&path).expect("read snapshot");
+        assert_eq!(loaded.header.rmk_versions, rmk_versions);
+    }
+
+    #[test]
+    fn test_snapshot_rmk_versions_default_empty() {
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+        let snapshot = Snapshot::new_simple(Region::GLOBAL, 1, vec![], state).expect("create");
+        assert!(snapshot.header.rmk_versions.is_empty());
+    }
+
+    #[test]
+    fn test_validate_transfer_protected_same_region_ok() {
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+        let snapshot =
+            Snapshot::new_simple(Region::CA_CENTRAL_QC, 1, vec![], state).expect("create");
+        // Same protected region → allowed
+        assert!(snapshot.validate_transfer(Region::CA_CENTRAL_QC).is_ok());
+    }
+
+    #[test]
+    fn test_validate_transfer_protected_different_region_rejected() {
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+        let snapshot =
+            Snapshot::new_simple(Region::CA_CENTRAL_QC, 1, vec![], state).expect("create");
+        // Different region → rejected for protected region
+        let err = snapshot.validate_transfer(Region::US_EAST_VA).unwrap_err();
+        assert!(matches!(err, SnapshotError::CrossRegionTransfer { .. }));
+    }
+
+    #[test]
+    fn test_validate_transfer_non_protected_any_region_ok() {
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+        // GLOBAL is non-protected
+        let snapshot = Snapshot::new_simple(Region::GLOBAL, 1, vec![], state).expect("create");
+        assert!(snapshot.validate_transfer(Region::CA_CENTRAL_QC).is_ok());
+    }
+
+    #[test]
+    fn test_validate_transfer_us_east_non_protected() {
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+        // US_EAST_VA is non-protected
+        let snapshot = Snapshot::new_simple(Region::US_EAST_VA, 1, vec![], state).expect("create");
+        assert!(snapshot.validate_transfer(Region::IE_EAST_DUBLIN).is_ok());
+    }
+
+    #[test]
+    fn test_validate_restore_protected_same_region_ok() {
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+        let snapshot =
+            Snapshot::new_simple(Region::IE_EAST_DUBLIN, 1, vec![], state).expect("create");
+        assert!(snapshot.validate_restore(Region::IE_EAST_DUBLIN).is_ok());
+    }
+
+    #[test]
+    fn test_validate_restore_protected_different_region_rejected() {
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+        let snapshot =
+            Snapshot::new_simple(Region::IE_EAST_DUBLIN, 1, vec![], state).expect("create");
+        let err = snapshot.validate_restore(Region::US_EAST_VA).unwrap_err();
+        assert!(matches!(err, SnapshotError::CrossRegionRestore { .. }));
+    }
+
+    #[test]
+    fn test_validate_restore_non_protected_any_region_ok() {
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+        let snapshot = Snapshot::new_simple(Region::US_WEST_OR, 1, vec![], state).expect("create");
+        assert!(snapshot.validate_restore(Region::CA_CENTRAL_QC).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rmk_versions_all_available() {
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+        let snapshot = Snapshot::new_with_rmk_versions(
+            Region::GLOBAL,
+            1,
+            vec![],
+            state,
+            SnapshotChainParams::default(),
+            vec![1, 2, 3],
+        )
+        .expect("create");
+
+        assert!(snapshot.validate_rmk_versions(&[1, 2, 3, 4]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rmk_versions_missing() {
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+        let snapshot = Snapshot::new_with_rmk_versions(
+            Region::CA_CENTRAL_QC,
+            1,
+            vec![],
+            state,
+            SnapshotChainParams::default(),
+            vec![1, 2, 5],
+        )
+        .expect("create");
+
+        let err = snapshot.validate_rmk_versions(&[1, 3]).unwrap_err();
+        match err {
+            SnapshotError::MissingRmkVersions { region, missing_versions } => {
+                assert_eq!(region, Region::CA_CENTRAL_QC);
+                assert_eq!(missing_versions, vec![2, 5]);
+            },
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_rmk_versions_empty_always_ok() {
+        let state = SnapshotStateData { vault_entities: HashMap::new() };
+        let snapshot = Snapshot::new_simple(Region::GLOBAL, 1, vec![], state).expect("create");
+        // Empty rmk_versions means unencrypted → always valid
+        assert!(snapshot.validate_rmk_versions(&[]).is_ok());
+        assert!(snapshot.validate_rmk_versions(&[1, 2]).is_ok());
     }
 }
