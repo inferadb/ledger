@@ -11,15 +11,15 @@ Error codes are transmitted as strings in gRPC error detail metadata
 
 ## Code Ranges
 
-| Range     | Domain    | Description                           |
-| --------- | --------- | ------------------------------------- |
-| 1000-1099 | Storage   | Database open, transactions, tables   |
-| 1100-1199 | Storage   | Corruption, snapshots, key encoding   |
-| 2000-2099 | Consensus | Leadership, proposals                 |
-| 2100-2199 | Consensus | Log storage, state machine, network   |
-| 3000-3099 | App       | Storage/consensus wrappers, hashing   |
-| 3100-3199 | App       | Not-found, preconditions, idempotency |
-| 3200-3299 | App       | Serialization, config, I/O, internal  |
+| Range     | Domain    | Description                                                     |
+| --------- | --------- | --------------------------------------------------------------- |
+| 1000-1099 | Storage   | Database open, transactions, tables                             |
+| 1100-1199 | Storage   | Corruption, snapshots, key encoding                             |
+| 2000-2099 | Consensus | Leadership, proposals                                           |
+| 2100-2199 | Consensus | Log storage, state machine, network                             |
+| 3000-3099 | App       | Storage/consensus wrappers, hashing                             |
+| 3100-3199 | App       | Not-found, preconditions, idempotency                           |
+| 3200-3299 | App       | Serialization, config, I/O, internal, quotas, region assignment |
 
 ## Storage Errors (1000-1199)
 
@@ -45,24 +45,29 @@ Error codes are transmitted as strings in gRPC error detail metadata
 
 ## Application Errors (3000-3299)
 
-| Code | Name                    | Retryable | Cause                                             | Recovery Action                                                                 |
-| ---- | ----------------------- | --------- | ------------------------------------------------- | ------------------------------------------------------------------------------- |
-| 3000 | `AppStorage`            | No\*      | Storage-layer error surfaced at application level | Check disk space, filesystem permissions. \*May be retryable for transient I/O. |
-| 3001 | `AppConsensus`          | Yes       | Consensus-layer error at application level        | Retry with exponential backoff. Leader election may be in progress.             |
-| 3002 | `AppHashMismatch`       | No        | Cryptographic hash verification failed            | Trigger integrity check. Indicates data corruption or hash computation bug.     |
-| 3003 | `AppVaultDiverged`      | No        | Vault state diverged from commitment              | Automatic recovery in progress. Wait for vault health to return to Healthy.     |
-| 3004 | `AppVaultUnavailable`   | Yes       | Vault temporarily unavailable                     | Retry after short delay. Vault may be recovering or migrating.                  |
-| 3100 | `AppOrganizationNotFound`  | No        | Organization does not exist                          | Verify via `AdminService::get_organization` or create it.                          |
-| 3101 | `AppVaultNotFound`      | No        | Vault does not exist in organization                 | Verify via `AdminService::get_vault` or create it.                              |
-| 3102 | `AppEntityNotFound`     | No        | Entity key not found                              | Expected for first reads. Create with `SetEntity` operation.                    |
-| 3103 | `AppPreconditionFailed` | No        | Conditional write CAS conflict                    | Re-read current state and retry with updated condition.                         |
-| 3104 | `AppAlreadyCommitted`   | No        | Duplicate transaction (idempotent success)        | Not an error. Original write succeeded. Treat as success.                       |
-| 3105 | `AppSequenceViolation`  | No        | Client sequence number out of order               | Reset sequence counter from server's last committed sequence.                   |
-| 3200 | `AppSerialization`      | No        | Codec serialization/deserialization failure       | Codec bug or data corruption. Report as issue.                                  |
-| 3201 | `AppConfig`             | No        | Invalid configuration value                       | Fix the configuration value and restart.                                        |
-| 3202 | `AppIo`                 | Yes       | Filesystem or network I/O error                   | Check disk space, permissions, mount health. May be retryable.                  |
-| 3203 | `AppInvalidArgument`    | No        | Malformed request parameter                       | Fix request parameters and resubmit.                                            |
-| 3204 | `AppInternal`           | No        | Unexpected state or invariant violation           | Collect context and report as issue.                                            |
+| Code | Name                         | Retryable | Cause                                                                | Recovery Action                                                                 |
+| ---- | ---------------------------- | --------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| 3000 | `AppStorage`                 | No\*      | Storage-layer error surfaced at application level                    | Check disk space, filesystem permissions. \*May be retryable for transient I/O. |
+| 3001 | `AppConsensus`               | Yes       | Consensus-layer error at application level                           | Retry with exponential backoff. Leader election may be in progress.             |
+| 3002 | `AppHashMismatch`            | No        | Cryptographic hash verification failed                               | Trigger integrity check. Indicates data corruption or hash computation bug.     |
+| 3003 | `AppVaultDiverged`           | No        | Vault state diverged from commitment                                 | Automatic recovery in progress. Wait for vault health to return to Healthy.     |
+| 3004 | `AppVaultUnavailable`        | Yes       | Vault temporarily unavailable                                        | Retry after short delay. Vault may be recovering or migrating.                  |
+| 3100 | `AppOrganizationNotFound`    | No        | Organization does not exist                                          | Verify via `AdminService::get_organization` or create it.                       |
+| 3101 | `AppVaultNotFound`           | No        | Vault does not exist in organization                                 | Verify via `AdminService::get_vault` or create it.                              |
+| 3102 | `AppEntityNotFound`          | No        | Entity key not found                                                 | Expected for first reads. Create with `SetEntity` operation.                    |
+| 3103 | `AppPreconditionFailed`      | No        | Conditional write CAS conflict                                       | Re-read current state and retry with updated condition.                         |
+| 3104 | `AppAlreadyCommitted`        | No        | Duplicate transaction (idempotent success)                           | Not an error. Original write succeeded. Treat as success.                       |
+| 3105 | `AppSequenceViolation`       | No        | Client sequence number out of order                                  | Reset sequence counter from server's last committed sequence.                   |
+| 3106 | `AppOrganizationMigrating`   | Yes       | Organization is currently migrating between regions                  | Retry after the migration completes.                                            |
+| 3107 | `AppUserMigrating`           | Yes       | User is currently migrating between regions                          | Retry after the migration completes.                                            |
+| 3200 | `AppSerialization`           | No        | Codec serialization/deserialization failure                          | Codec bug or data corruption. Report as issue.                                  |
+| 3201 | `AppConfig`                  | No        | Invalid configuration value                                          | Fix the configuration value and restart.                                        |
+| 3202 | `AppIo`                      | Yes       | Filesystem or network I/O error                                      | Check disk space, permissions, mount health. May be retryable.                  |
+| 3203 | `AppInvalidArgument`         | No        | Malformed request parameter                                          | Fix request parameters and resubmit.                                            |
+| 3204 | `AppInternal`                | No        | Unexpected state or invariant violation                              | Collect context and report as issue.                                            |
+| 3205 | `AppQuotaExceeded`           | Yes       | Organization resource quota exceeded (storage, vault count, or rate) | Reduce usage or request a quota increase.                                       |
+| 3206 | `AppInsufficientRegionNodes` | No        | Insufficient in-region nodes for protected region quorum             | Add more nodes tagged with the target region to meet quorum (minimum 3).        |
+| 3207 | `AppInvalidRegionAssignment` | No        | Organization cannot be assigned to the GLOBAL control plane region   | Choose a data residency region. GLOBAL is reserved for the control plane.       |
 
 ## SDK Usage
 

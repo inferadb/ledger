@@ -29,11 +29,11 @@ Sent by candidates to request votes during leader election. Followers grant vote
 
 **Request:**
 
-| Field         | Type      | Description                           |
-| ------------- | --------- | ------------------------------------- |
-| `vote`        | RaftVote  | Candidate's term, node ID, commitment |
-| `last_log_id` | RaftLogId | (Optional) Candidate's last log entry |
-| `shard_id`    | uint64    | (Optional) Target shard (default: 0)  |
+| Field         | Type      | Description                                |
+| ------------- | --------- | ------------------------------------------ |
+| `vote`        | RaftVote  | Candidate's term, node ID, commitment      |
+| `last_log_id` | RaftLogId | (Optional) Candidate's last log entry      |
+| `region`      | Region    | (Optional) Target region (default: GLOBAL) |
 
 **Response:**
 
@@ -49,13 +49,13 @@ Sent by leaders to replicate log entries and maintain heartbeats. Empty `entries
 
 **Request:**
 
-| Field           | Type      | Description                            |
-| --------------- | --------- | -------------------------------------- |
-| `vote`          | RaftVote  | Leader's term and node ID              |
-| `prev_log_id`   | RaftLogId | (Optional) Entry immediately preceding |
-| `entries`       | bytes[]   | Serialized log entries to append       |
-| `leader_commit` | RaftLogId | (Optional) Leader's commit index       |
-| `shard_id`      | uint64    | (Optional) Target shard (default: 0)   |
+| Field           | Type      | Description                                |
+| --------------- | --------- | ------------------------------------------ |
+| `vote`          | RaftVote  | Leader's term and node ID                  |
+| `prev_log_id`   | RaftLogId | (Optional) Entry immediately preceding     |
+| `entries`       | bytes[]   | Serialized log entries to append           |
+| `leader_commit` | RaftLogId | (Optional) Leader's commit index           |
+| `region`        | Region    | (Optional) Target region (default: GLOBAL) |
 
 **Response:**
 
@@ -73,14 +73,14 @@ The snapshot is a binary file containing: LSNP magic, version header, `AppliedSt
 
 **Request:**
 
-| Field      | Type             | Description                          |
-| ---------- | ---------------- | ------------------------------------ |
-| `vote`     | RaftVote         | Leader's term and node ID            |
-| `meta`     | RaftSnapshotMeta | Snapshot metadata                    |
-| `offset`   | uint64           | Byte offset in snapshot data         |
-| `data`     | bytes            | Chunk of compressed snapshot data    |
-| `done`     | bool             | True if this is the final chunk      |
-| `shard_id` | uint64           | (Optional) Target shard (default: 0) |
+| Field    | Type             | Description                                |
+| -------- | ---------------- | ------------------------------------------ |
+| `vote`   | RaftVote         | Leader's term and node ID                  |
+| `meta`   | RaftSnapshotMeta | Snapshot metadata                          |
+| `offset` | uint64           | Byte offset in snapshot data               |
+| `data`   | bytes            | Chunk of compressed snapshot data          |
+| `done`   | bool             | True if this is the final chunk            |
+| `region` | Region           | (Optional) Target region (default: GLOBAL) |
 
 **Response:**
 
@@ -145,16 +145,16 @@ Single membership configuration.
 | --------- | ------------------- | ------------------------------- |
 | `members` | map<uint64, string> | Node ID to gRPC address mapping |
 
-## Multi-Shard Routing
+## Multi-Region Routing
 
-The optional `shard_id` field enables a single cluster to run multiple independent Raft groups. Each shard maintains its own:
+The optional `region` field enables a single cluster to run multiple independent Raft groups. Each region maintains its own:
 
 - Leader election
 - Log sequence
 - Committed index
 - Membership
 
-Nodes receiving a request for a shard they don't host return `NOT_FOUND`.
+Nodes receiving a request for a region they don't host return `NOT_FOUND`.
 
 ## Typical Message Flow
 

@@ -1,6 +1,6 @@
 # Background Job Observability
 
-InferaDB Ledger runs five background jobs that maintain data integrity, manage storage, and ensure high availability. Each job emits three standardized metrics for unified monitoring.
+InferaDB Ledger runs several background jobs that maintain data integrity, manage storage, handle key rotation, and ensure high availability. Most jobs emit three standardized metrics for unified monitoring.
 
 ## Metrics
 
@@ -12,19 +12,22 @@ InferaDB Ledger runs five background jobs that maintain data integrity, manage s
 
 ### Label Values
 
-**`job`**: `gc`, `compaction`, `integrity_scrub`, `auto_recovery`, `backup`
+**`job`**: `gc`, `compaction`, `integrity_scrub`, `auto_recovery`, `backup`, `dek_rewrap`, `orphan_cleanup`, `saga_orchestrator`
 
 **`result`**: `success`, `failure`
 
 ### Items Processed per Job
 
-| Job               | Item Meaning                          |
-| ----------------- | ------------------------------------- |
-| `gc`              | Blocks compacted (TTL expiration)     |
-| `compaction`      | B-tree pages merged                   |
-| `integrity_scrub` | Pages checked (checksum + structural) |
-| `auto_recovery`   | Vaults successfully recovered         |
-| `backup`          | Backups created                       |
+| Job                 | Item Meaning                          |
+| ------------------- | ------------------------------------- |
+| `gc`                | Blocks compacted (retention mode)     |
+| `compaction`        | B-tree pages merged                   |
+| `integrity_scrub`   | Pages checked (checksum + structural) |
+| `auto_recovery`     | Vaults successfully recovered         |
+| `backup`            | Backups created                       |
+| `dek_rewrap`        | Pages re-wrapped with new RMK         |
+| `orphan_cleanup`    | Orphaned membership records removed   |
+| `saga_orchestrator` | Sagas processed per cycle             |
 
 ## Jobs
 
@@ -78,6 +81,30 @@ Creates periodic full-snapshot backups with metadata and optional pruning.
 - **Default interval**: Configurable via `BackupConfig`
 - **Leader only**: Yes
 - **Config**: `BackupConfig` (interval_secs, retention_count, backup_dir)
+
+### DEK Re-wrap
+
+Re-wraps page-level data encryption keys (DEKs) after RMK (Root Master Key) rotation. Iterates all pages in the crypto sidecar, unwrapping each DEK with the old RMK and re-wrapping with the new RMK. Only sidecar metadata changes — encrypted page bodies are never touched. The job is resumable and idempotent: pages already at the target version are skipped.
+
+- **Default interval**: 5 minutes (300 seconds)
+- **Leader only**: Yes
+- **Config**: `RewrapConfig` (enabled, batch_size, interval_secs, target_rmk_version)
+- **Status**: Query progress via `AdminService/GetRewrapStatus`
+
+### Orphan Cleanup
+
+Removes orphaned membership records left behind when users are deleted from the system organization. Scans each organization's vaults for memberships referencing deleted users and removes them through Raft consensus. Yields between organization scans to avoid I/O bursts.
+
+- **Default interval**: 1 hour
+- **Leader only**: Yes
+- **Actor**: `system:orphan_cleanup` (audit trail)
+
+### Saga Orchestrator
+
+Drives multi-step distributed workflows (sagas) to completion. Each cycle scans for in-progress sagas, advances them through their next step, and handles compensation on failure. Sagas cover operations like user deletion (which spans system and organization vaults).
+
+- **Default interval**: Configurable
+- **Leader only**: Yes
 
 ## Alerting
 

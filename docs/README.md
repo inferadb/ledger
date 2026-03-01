@@ -31,7 +31,7 @@ Blockchain database for cryptographically verifiable authorization.
 - [Configuration](operations/configuration.md) - Environment variables reference
 - [Security](operations/security.md) - Trust model and network security
 - [Multi-Region](operations/multi-region.md) - Geographic distribution
-- [Shard Management](operations/shard-management.md) - Organization-to-shard routing
+- [Region Management](operations/region-management.md) - Organization-to-region routing
 
 ### Monitoring
 

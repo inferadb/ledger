@@ -2,7 +2,7 @@
 
 ## Context
 
-InferaDB Ledger operates in multi-tenant environments where a single hot key (frequently written entity or relationship) can saturate a shard's Raft proposal pipeline, degrading latency for all tenants. Detecting hot keys at the write path requires tracking access frequency across potentially millions of unique keys.
+InferaDB Ledger operates in multi-tenant environments where a single hot key (frequently written entity or relationship) can saturate a region's Raft proposal pipeline, degrading latency for all tenants. Detecting hot keys at the write path requires tracking access frequency across potentially millions of unique keys.
 
 ### The Problem
 

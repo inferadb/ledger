@@ -38,27 +38,27 @@ service AdminService {
 
 ### CreateOrganization
 
-Creates a new organization and assigns it to a shard.
+Creates a new organization in a region.
 
 ```bash
 grpcurl -plaintext \
-  -d '{"name": "acme_corp"}' \
+  -d '{"name": "acme_corp", "region": 10}' \
   localhost:50051 ledger.v1.AdminService/CreateOrganization
 ```
 
 **Request:**
 
-| Field      | Type    | Description                                       |
-| ---------- | ------- | ------------------------------------------------- |
-| `name`     | string  | Human-readable organization name                     |
-| `shard_id` | ShardId | (Optional) Target shard; auto-assigned if omitted |
+| Field    | Type   | Description                                     |
+| -------- | ------ | ----------------------------------------------- |
+| `name`   | string | Human-readable organization name                |
+| `region` | Region | (Required) Geographic region for data residency |
 
 **Response:**
 
-| Field          | Type        | Description                   |
-| -------------- | ----------- | ----------------------------- |
+| Field               | Type             | Description                      |
+| ------------------- | ---------------- | -------------------------------- |
 | `organization_slug` | OrganizationSlug | Assigned organization identifier |
-| `shard_id`     | ShardId     | Assigned shard                |
+| `region`            | Region           | Assigned region                  |
 
 ### DeleteOrganization
 
@@ -88,25 +88,25 @@ grpcurl -plaintext \
 
 **Response fields:**
 
-| Field            | Type            | Description            |
-| ---------------- | --------------- | ---------------------- |
-| `organization_slug`   | OrganizationSlug     | Organization identifier   |
-| `name`           | string          | Organization name         |
-| `shard_id`       | ShardId         | Hosting shard          |
-| `member_nodes`   | NodeId[]        | Nodes in the shard     |
-| `status`         | OrganizationStatus | Lifecycle state        |
-| `config_version` | uint64          | For cache invalidation |
-| `created_at`     | Timestamp       | Creation time          |
+| Field               | Type               | Description             |
+| ------------------- | ------------------ | ----------------------- |
+| `organization_slug` | OrganizationSlug   | Organization identifier |
+| `name`              | string             | Organization name       |
+| `region`            | Region             | Data residency region   |
+| `member_nodes`      | NodeId[]           | Nodes in the region     |
+| `status`            | OrganizationStatus | Lifecycle state         |
+| `config_version`    | uint64             | For cache invalidation  |
+| `created_at`        | Timestamp          | Creation time           |
 
 **OrganizationStatus values:**
 
-| Value       | Description                     |
-| ----------- | ------------------------------- |
-| `ACTIVE`    | Accepting requests              |
-| `MIGRATING` | Being migrated to another shard |
-| `SUSPENDED` | Billing or policy suspension    |
-| `DELETING`  | Deletion in progress            |
-| `DELETED`   | Tombstone                       |
+| Value       | Description                      |
+| ----------- | -------------------------------- |
+| `ACTIVE`    | Accepting requests               |
+| `MIGRATING` | Being migrated to another region |
+| `SUSPENDED` | Billing or policy suspension     |
+| `DELETING`  | Deletion in progress             |
+| `DELETED`   | Tombstone                        |
 
 ### ListOrganizations
 
@@ -141,7 +141,7 @@ grpcurl -plaintext \
 
 | Field                | Type                 | Description                             |
 | -------------------- | -------------------- | --------------------------------------- |
-| `organization_slug`       | OrganizationSlug          | Parent organization                        |
+| `organization_slug`  | OrganizationSlug     | Parent organization                     |
 | `replication_factor` | uint32               | (Optional) Number of replicas           |
 | `initial_nodes`      | NodeId[]             | (Optional) Specific nodes to host vault |
 | `retention_policy`   | BlockRetentionPolicy | (Optional) Block retention mode         |
@@ -155,10 +155,10 @@ grpcurl -plaintext \
 
 **Response:**
 
-| Field      | Type        | Description                                  |
-| ---------- | ----------- | -------------------------------------------- |
-| `vault`    | VaultSlug   | Assigned vault slug (Snowflake identifier)   |
-| `genesis`  | BlockHeader | Genesis block header with initial state root |
+| Field     | Type        | Description                                  |
+| --------- | ----------- | -------------------------------------------- |
+| `vault`   | VaultSlug   | Assigned vault slug (Snowflake identifier)   |
+| `genesis` | BlockHeader | Genesis block header with initial state root |
 
 ### DeleteVault
 
@@ -182,16 +182,16 @@ grpcurl -plaintext \
 
 **Response:**
 
-| Field              | Type                 | Description              |
-| ------------------ | -------------------- | ------------------------ |
-| `organization_slug`     | OrganizationSlug          | Parent organization         |
-| `vault`            | VaultSlug            | Vault slug               |
-| `height`           | uint64               | Current block height     |
-| `state_root`       | Hash                 | Current state root       |
-| `nodes`            | NodeId[]             | Hosting nodes            |
-| `leader`           | NodeId               | Current leader           |
-| `status`           | VaultStatus          | Lifecycle state          |
-| `retention_policy` | BlockRetentionPolicy | Block retention settings |
+| Field               | Type                 | Description              |
+| ------------------- | -------------------- | ------------------------ |
+| `organization_slug` | OrganizationSlug     | Parent organization      |
+| `vault`             | VaultSlug            | Vault slug               |
+| `height`            | uint64               | Current block height     |
+| `state_root`        | Hash                 | Current state root       |
+| `nodes`             | NodeId[]             | Hosting nodes            |
+| `leader`            | NodeId               | Current leader           |
+| `status`            | VaultStatus          | Lifecycle state          |
+| `retention_policy`  | BlockRetentionPolicy | Block retention settings |
 
 **VaultStatus values:**
 
@@ -347,13 +347,13 @@ grpcurl -plaintext \
 
 **Request:**
 
-| Field                 | Type        | Description                          |
-| --------------------- | ----------- | ------------------------------------ |
-| `organization_slug`        | OrganizationSlug | Target organization                     |
-| `vault`               | VaultSlug   | Target vault                         |
-| `expected_state_root` | Hash        | Fake expected state root             |
-| `computed_state_root` | Hash        | Fake computed state root (different) |
-| `at_height`           | uint64      | Height where "divergence" occurred   |
+| Field                 | Type             | Description                          |
+| --------------------- | ---------------- | ------------------------------------ |
+| `organization_slug`   | OrganizationSlug | Target organization                  |
+| `vault`               | VaultSlug        | Target vault                         |
+| `expected_state_root` | Hash             | Fake expected state root             |
+| `computed_state_root` | Hash             | Fake computed state root (different) |
+| `at_height`           | uint64           | Height where "divergence" occurred   |
 
 **Response:**
 

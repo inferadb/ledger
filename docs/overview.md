@@ -12,13 +12,13 @@ Ledger is InferaDB's storage layer—a blockchain database for cryptographically
 
 ## Terminology
 
-| Term             | Definition                                                                                                                           |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| **Organization**    | Storage unit per organization. Contains entities, vaults, relationships. Isolated with separate Raft consensus per shard.            |
+| Term             | Definition                                                                                                                               |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| **Organization** | Storage unit per organization. Contains entities, vaults, relationships. Isolated with separate Raft consensus per region.               |
 | **Vault**        | Relationship store within an organization. Maintains its own cryptographic chain (separate `state_root`, `previous_hash`, block height). |
 | **Entity**       | Key-value data in an organization (users, teams, clients, sessions). Supports TTL, versioning, conditional writes.                       |
-| **Relationship** | Authorization tuple: `(resource, relation, subject)`. Used by Engine for permission checks.                                          |
-| **`_system`**    | Special organization for global data: user accounts and organization routing. Replicated to all nodes.                                     |
+| **Relationship** | Authorization tuple: `(resource, relation, subject)`. Used by Engine for permission checks.                                              |
+| **`_system`**    | Special organization for global data: user accounts and organization routing. Replicated to all nodes.                                   |
 
 ## Hierarchy
 
@@ -37,19 +37,19 @@ org (per-organization)
 
 ## Isolation Model
 
-| Level     | Isolated                          | Shared                 |
-| --------- | --------------------------------- | ---------------------- |
-| Organization | Entities, vaults, keys            | Shard (Raft consensus) |
-| Vault     | Cryptographic chain, `state_root` | Organization storage      |
-| Shard     | Physical nodes                    | Cluster                |
+| Level        | Isolated                          | Shared                  |
+| ------------ | --------------------------------- | ----------------------- |
+| Organization | Entities, vaults, keys            | Region (Raft consensus) |
+| Vault        | Cryptographic chain, `state_root` | Organization storage    |
+| Region       | Physical nodes                    | Cluster                 |
 
-Organizations share physical nodes and Raft groups but maintain independent data. Vaults within an organization share storage but maintain separate cryptographic chains.
+Organizations within a region share physical nodes and a Raft group but maintain independent data. Vaults within an organization share storage but maintain separate cryptographic chains.
 
-## Shard Groups
+## Region Groups
 
-A naive 1:1 organization-to-Raft mapping doesn't scale. Multiple organizations share a single Raft group (shard). Within each organization, vaults maintain independent cryptographic chains.
+A naive 1:1 organization-to-Raft mapping doesn't scale. Multiple organizations in the same geographic region share a single Raft group. Within each organization, vaults maintain independent cryptographic chains.
 
-**What's shared (per shard group):**
+**What's shared (per region):**
 
 - Raft consensus (single leader election, heartbeat, log)
 - Physical replication
@@ -63,28 +63,27 @@ A naive 1:1 organization-to-Raft mapping doesn't scale. Multiple organizations s
 
 ### Scaling
 
-| Organizations | Vaults (avg 3/ns) | Vaults/Shard | Shard Groups | Raft Machines | Heartbeats |
-| ---------- | ----------------- | ------------ | ------------ | ------------- | ---------- |
-| 1,000      | 3,000             | 100          | 30           | 90            | ~600/sec   |
-| 10,000     | 30,000            | 100          | 300          | 900           | ~6K/sec    |
-| 100,000    | 300,000           | 1,000        | 300          | 900           | ~6K/sec    |
+| Organizations | Vaults (avg 3/org) | Vaults/Region | Region Groups | Raft Machines | Heartbeats |
+| ------------- | ------------------ | ------------- | ------------- | ------------- | ---------- |
+| 1,000         | 3,000              | 100           | 30            | 90            | ~600/sec   |
+| 10,000        | 30,000             | 100           | 300           | 900           | ~6K/sec    |
+| 100,000       | 300,000            | 1,000         | 300           | 900           | ~6K/sec    |
 
-### Shard Assignment
+### Region Assignment
 
-- New organizations assigned to shard with lowest load
-- All vaults within an organization reside on the same shard (locality)
-- Organizations can migrate between shards (coordinated via `_system`)
-- High-traffic organizations can be promoted to dedicated shards
+- Organizations are assigned to a region at creation time
+- All vaults within an organization reside in the same region (data residency)
+- Organizations can migrate between regions (coordinated via `_system`)
 
 ## Block Structure
 
-Blocks are packed into `ShardBlock` entries for Raft efficiency:
+Blocks are packed into `RegionBlock` entries for Raft efficiency:
 
 ```rust
-struct ShardBlock {
-    shard_id: ShardId,
-    shard_height: u64,
-    previous_shard_hash: Hash,
+struct RegionBlock {
+    region: Region,
+    region_height: u64,
+    previous_region_hash: Hash,
     vault_entries: Vec<VaultEntry>,
     timestamp: DateTime<Utc>,
     leader_id: NodeId,
@@ -105,24 +104,23 @@ struct VaultEntry {
 
 Each `VaultEntry` computes `tx_merkle_root` from its own transactions only. Clients verify transaction inclusion without accessing other organizations' data.
 
-**Physical storage**: ShardBlocks only (single write path). VaultBlocks extracted on-demand via O(1) offset lookup.
+**Physical storage**: RegionBlocks only (single write path). VaultBlocks extracted on-demand via O(1) offset lookup.
 
 ## ID Generation
 
 Ledger uses **leader-assigned sequential IDs**. The leader assigns IDs during block construction; followers replay the same IDs from the Raft log.
 
-| ID Type       | Size     | Generated By  | Strategy                                             |
-| ------------- | -------- | ------------- | ---------------------------------------------------- |
+| ID Type            | Size     | Generated By  | Strategy                                                 |
+| ------------------ | -------- | ------------- | -------------------------------------------------------- |
 | `OrganizationId`   | int64    | Ledger Leader | Sequential from `_meta:seq:organization` (internal only) |
-| `OrganizationSlug` | uint64   | Snowflake     | External identifier for organizations in gRPC APIs   |
-| `VaultId`     | int64    | Ledger Leader | Sequential from `_meta:seq:vault` (internal only)    |
-| `VaultSlug`   | uint64   | Snowflake     | External identifier for vaults in gRPC APIs          |
-| `UserId`      | int64    | Ledger Leader | Sequential from `_meta:seq:user`                     |
-| `UserEmailId` | int64    | Ledger Leader | Sequential from `_meta:seq:user_email`               |
-| `ClientId`    | string   | Control       | Opaque API key identifier                            |
-| `TxId`        | 16 bytes | Ledger Leader | UUID assigned during block creation                  |
-| `NodeId`      | string   | Admin         | Configuration (hostname or UUID)                     |
-| `ShardId`     | uint32   | Admin         | Sequential at shard creation                         |
+| `OrganizationSlug` | uint64   | Snowflake     | External identifier for organizations in gRPC APIs       |
+| `VaultId`          | int64    | Ledger Leader | Sequential from `_meta:seq:vault` (internal only)        |
+| `VaultSlug`        | uint64   | Snowflake     | External identifier for vaults in gRPC APIs              |
+| `UserId`           | int64    | Ledger Leader | Sequential from `_meta:seq:user`                         |
+| `UserEmailId`      | int64    | Ledger Leader | Sequential from `_meta:seq:user_email`                   |
+| `ClientId`         | string   | Control       | Opaque API key identifier                                |
+| `TxId`             | 16 bytes | Ledger Leader | UUID assigned during block creation                      |
+| `NodeId`           | string   | Admin         | Configuration (hostname or UUID)                         |
 
 **Sequence counters** stored in `_system` organization:
 
@@ -147,15 +145,15 @@ _meta:seq:email_verify → next TokenId
 
 ### In `_system` (organization_slug = 0)
 
-| Entity Type       | Key Pattern                  | Example                        |
-| ----------------- | ---------------------------- | ------------------------------ |
-| User              | `user:{id}`                  | `user:1`                       |
-| User email        | `user_email:{id}`            | `user_email:1`                 |
-| Email index       | `_idx:email:{email}`         | `_idx:email:alice@example.com` |
-| User emails index | `_idx:user_emails:{user_id}` | `_idx:user_emails:1`           |
-| Organization routing | `ns:{organization_slug}`          | `ns:1`                         |
-| Node info         | `node:{id}`                  | `node:A`                       |
-| Sequence counter  | `_meta:seq:{entity_type}`    | `_meta:seq:user`               |
+| Entity Type          | Key Pattern                  | Example                        |
+| -------------------- | ---------------------------- | ------------------------------ |
+| User                 | `user:{id}`                  | `user:1`                       |
+| User email           | `user_email:{id}`            | `user_email:1`                 |
+| Email index          | `_idx:email:{email}`         | `_idx:email:alice@example.com` |
+| User emails index    | `_idx:user_emails:{user_id}` | `_idx:user_emails:1`           |
+| Organization routing | `ns:{organization_slug}`     | `ns:1`                         |
+| Node info            | `node:{id}`                  | `node:A`                       |
+| Sequence counter     | `_meta:seq:{entity_type}`    | `_meta:seq:user`               |
 
 ### In an Organization
 
@@ -186,10 +184,10 @@ _meta:seq:email_verify → next TokenId
 
 Ledger offers two read consistency levels:
 
-| Read Type             | Guarantee                      | Latency Impact |
-| --------------------- | ------------------------------ | -------------- |
-| Eventually consistent | May return stale data (by ms)  | Fastest        |
-| Linearizable          | Reads own writes, total order  | +1 RTT         |
+| Read Type             | Guarantee                     | Latency Impact |
+| --------------------- | ----------------------------- | -------------- |
+| Eventually consistent | May return stale data (by ms) | Fastest        |
+| Linearizable          | Reads own writes, total order | +1 RTT         |
 
 **Eventually consistent** (default): Any node can serve the read immediately. During Raft replication (typically milliseconds), reads may return slightly stale data. Use for high-throughput scenarios where millisecond staleness is acceptable.
 
@@ -258,13 +256,13 @@ Client Request
 
 ## Limitations
 
-| Dimension        | Recommended Max | Hard Limit        | Bottleneck                    |
-| ---------------- | --------------- | ----------------- | ----------------------------- |
-| Vaults per shard | 1,000           | 10,000            | Shard block size, memory      |
-| Shard groups     | 10,000          | ~100,000          | Cluster coordination overhead |
-| Total vaults     | 10M             | ~100M             | `_system` registry size       |
-| Keys per vault   | 10M             | ~100M             | State tree memory             |
-| Transactions/sec | 5,000 per shard | ~50,000 per shard | Raft throughput               |
+| Dimension         | Recommended Max  | Hard Limit         | Bottleneck                    |
+| ----------------- | ---------------- | ------------------ | ----------------------------- |
+| Vaults per region | 1,000            | 10,000             | Region block size, memory     |
+| Region groups     | 10,000           | ~100,000           | Cluster coordination overhead |
+| Total vaults      | 10M              | ~100M              | `_system` registry size       |
+| Keys per vault    | 10M              | ~100M              | State tree memory             |
+| Transactions/sec  | 5,000 per region | ~50,000 per region | Raft throughput               |
 
 ### Not Supported
 

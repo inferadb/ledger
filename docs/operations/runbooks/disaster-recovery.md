@@ -218,7 +218,7 @@ grpcurl -plaintext healthy-node:50051 \
 
 ### Table-Level Inconsistency
 
-If the integrity scrubber detects corruption in specific externalized tables (e.g., `VaultHeights`, `ClientSequences`) while the core `AppliedStateCore` is intact, the affected shard can be recovered by installing a snapshot from a healthy replica. The snapshot will overwrite all 9 externalized tables atomically via a single `WriteTransaction`.
+If the integrity scrubber detects corruption in specific externalized tables (e.g., `VaultHeights`, `ClientSequences`) while the core `AppliedStateCore` is intact, the affected region can be recovered by installing a snapshot from a healthy replica. The snapshot will overwrite all 9 externalized tables atomically via a single `WriteTransaction`.
 
 ## Regional Failover
 

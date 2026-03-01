@@ -4,15 +4,15 @@ Per-organization resource accounting for capacity planning and tenant billing.
 
 ## Metrics
 
-| Metric                              | Type      | Labels                      | Description                        |
-| ----------------------------------- | --------- | --------------------------- | ---------------------------------- |
-| `ledger_organization_storage_bytes`    | Gauge     | `organization_slug`              | Cumulative estimated storage bytes |
-| `ledger_organization_operations_total` | Counter   | `organization_slug`, `operation` | Operations by type                 |
-| `ledger_organization_latency_seconds`  | Histogram | `organization_slug`, `operation` | Request latency by type            |
+| Metric                                 | Type      | Labels                         | Description                        |
+| -------------------------------------- | --------- | ------------------------------ | ---------------------------------- |
+| `ledger_organization_storage_bytes`    | Gauge     | `organization_id`              | Cumulative estimated storage bytes |
+| `ledger_organization_operations_total` | Counter   | `organization_id`, `operation` | Operations by type                 |
+| `ledger_organization_latency_seconds`  | Histogram | `organization_id`, `operation` | Request latency by type            |
 
 **Labels:**
 
-- `organization_slug`: Numeric organization identifier
+- `organization_id`: Internal organization identifier
 - `operation`: `write`, `read`, or `admin`
 
 ## Storage Accounting
@@ -42,22 +42,22 @@ topk(10, ledger_organization_storage_bytes)
 ### Write rate per organization (5m window)
 
 ```promql
-sum by (organization_slug) (rate(ledger_organization_operations_total{operation="write"}[5m]))
+sum by (organization_id) (rate(ledger_organization_operations_total{operation="write"}[5m]))
 ```
 
 ### Read/write ratio per organization
 
 ```promql
-sum by (organization_slug) (rate(ledger_organization_operations_total{operation="read"}[5m]))
+sum by (organization_id) (rate(ledger_organization_operations_total{operation="read"}[5m]))
 /
-sum by (organization_slug) (rate(ledger_organization_operations_total{operation="write"}[5m]))
+sum by (organization_id) (rate(ledger_organization_operations_total{operation="write"}[5m]))
 ```
 
 ### p99 write latency per organization
 
 ```promql
 histogram_quantile(0.99,
-  sum by (organization_slug, le) (
+  sum by (organization_id, le) (
     rate(ledger_organization_latency_seconds_bucket{operation="write"}[5m])
   )
 )
@@ -78,12 +78,12 @@ groups:
   - name: organization-capacity
     rules:
       - alert: OrganizationHighWriteRate
-        expr: sum by (organization_slug) (rate(ledger_organization_operations_total{operation="write"}[5m])) > 1000
+        expr: sum by (organization_id) (rate(ledger_organization_operations_total{operation="write"}[5m])) > 1000
         for: 10m
         labels:
           severity: info
         annotations:
-          summary: "Organization {{ $labels.organization_slug }} sustained >1k writes/s"
+          summary: "Organization {{ $labels.organization_id }} sustained >1k writes/s"
 ```
 
 ## Cardinality

@@ -10,7 +10,7 @@ A vault can become **diverged** when a replica's computed state root doesn't mat
 2. **Corruption**: Storage corruption on this replica
 3. **Version mismatch**: Different code versions running on leader vs follower
 
-Importantly, a diverged vault is **isolated** from other vaults in the same shard. Other vaults continue operating normally.
+Importantly, a diverged vault is **isolated** from other vaults in the same region. Other vaults continue operating normally.
 
 ## Vault Health States
 
@@ -40,7 +40,7 @@ When a follower applies a block, it:
 If they don't match:
 
 ```
-CRITICAL: state_root_divergence{vault_id=123, shard_id=1, height=45678}  # internal vault_id in metrics
+CRITICAL: state_root_divergence{vault_id=123, region="us-east", height=45678}  # internal vault_id in metrics
   expected: 0x7a3f...
   computed: 0x8b2e...
 ```
@@ -234,7 +234,7 @@ runbook: See "Manual Recovery" section above
 
 ### Q: Does a diverged vault affect other vaults?
 
-No. Vault divergence is isolated. Other vaults in the same shard continue operating normally. This is by design—see DESIGN.md §8.5 "Multi-Vault Failure Isolation".
+No. Vault divergence is isolated. Other vaults in the same region continue operating normally. This is by design—see DESIGN.md §8.5 "Multi-Vault Failure Isolation".
 
 ### Q: Can writes still replicate to a diverged vault?
 

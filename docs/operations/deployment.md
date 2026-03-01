@@ -6,10 +6,10 @@ This guide covers cluster deployment, scaling, backup, and recovery for InferaDB
 
 Ledger uses explicit bootstrap modes:
 
-| Flag        | Behavior                                              |
-| ----------- | ----------------------------------------------------- |
-| `--single`  | Bootstrap immediately as single-node cluster          |
-| `--join`    | Wait to be added to existing cluster via AdminService |
+| Flag          | Behavior                                                                            |
+| ------------- | ----------------------------------------------------------------------------------- |
+| `--single`    | Bootstrap immediately as single-node cluster                                        |
+| `--join`      | Wait to be added to existing cluster via AdminService                               |
 | `--cluster N` | Coordinated bootstrap: wait for N peers, lowest-ID node bootstraps all (default: 3) |
 
 ### Single-Node Cluster
@@ -219,7 +219,7 @@ cp "$LATEST" /backup/
 Snapshots include:
 
 - State data (zstd compressed)
-- Shard height
+- Region height
 - Vault state roots
 - SHA-256 checksum
 
@@ -290,32 +290,33 @@ Configuration can be set via CLI arguments or environment variables. CLI argumen
 
 ### Core Options
 
-| CLI           | Environment Variable              | Default           | Description                               |
-| ------------- | --------------------------------- | ----------------- | ----------------------------------------- |
-| `--listen`    | `INFERADB__LEDGER__LISTEN`   | `127.0.0.1:50051` | Host and port to accept connections       |
-| `--data`      | `INFERADB__LEDGER__DATA`      | (ephemeral)       | Where to store data ([layout](../internals/storage.md)) |
-| `--metrics`   | `INFERADB__LEDGER__METRICS`  | (disabled)        | Expose Prometheus metrics at this address |
+| CLI         | Environment Variable        | Default           | Description                                             |
+| ----------- | --------------------------- | ----------------- | ------------------------------------------------------- |
+| `--listen`  | `INFERADB__LEDGER__LISTEN`  | `127.0.0.1:50051` | Host and port to accept connections                     |
+| `--data`    | `INFERADB__LEDGER__DATA`    | (ephemeral)       | Where to store data ([layout](../internals/storage.md)) |
+| `--metrics` | `INFERADB__LEDGER__METRICS` | (disabled)        | Expose Prometheus metrics at this address               |
 
 ### Bootstrap Mode
 
 These flags are mutually exclusive. If none is specified, `--cluster 3` is the default.
 
-| CLI           | Environment Variable              | Description                               |
-| ------------- | --------------------------------- | ----------------------------------------- |
-| `--single`    | —                                 | Bootstrap immediately as single-node cluster |
-| `--join`      | —                                 | Wait to be added to existing cluster via AdminService |
-| `--cluster N` | `INFERADB__LEDGER__CLUSTER`       | Coordinated bootstrap with N nodes (default: 3) |
+| CLI           | Environment Variable        | Description                                           |
+| ------------- | --------------------------- | ----------------------------------------------------- |
+| `--single`    | —                           | Bootstrap immediately as single-node cluster          |
+| `--join`      | —                           | Wait to be added to existing cluster via AdminService |
+| `--cluster N` | `INFERADB__LEDGER__CLUSTER` | Coordinated bootstrap with N nodes (default: 3)       |
 
 ### Discovery Options
 
 How nodes find each other. See [discovery internals](../internals/discovery.md) for details.
 
-| CLI          | Environment Variable              | Default     | Description                                            |
-| ------------ | --------------------------------- | ----------- | ------------------------------------------------------ |
-| `--peers`    | `INFERADB__LEDGER__PEERS`         | (disabled)  | DNS domain or file path (auto-detected)                |
-| `--peers-ttl`| `INFERADB__LEDGER__PEERS_TTL`| `3600`      | How long cached node list stays valid                  |
+| CLI           | Environment Variable          | Default    | Description                             |
+| ------------- | ----------------------------- | ---------- | --------------------------------------- |
+| `--peers`     | `INFERADB__LEDGER__PEERS`     | (disabled) | DNS domain or file path (auto-detected) |
+| `--peers-ttl` | `INFERADB__LEDGER__PEERS_TTL` | `3600`     | How long cached node list stays valid   |
 
 The `--peers` value is auto-detected:
+
 - **DNS domain** (no `/` or `\`, not `.json`): Performs A record lookup (e.g., `ledger.default.svc.cluster.local`)
 - **File path** (contains `/` or `\`, or ends with `.json`): Loads from JSON file (e.g., `/var/lib/ledger/peers.json`)
 
@@ -323,12 +324,12 @@ The `--peers` value is auto-detected:
 
 These defaults work well for most deployments. See [consensus internals](../internals/consensus.md) for batching details.
 
-| CLI                  | Environment Variable                        | Default | Description                             |
-| -------------------- | ------------------------------------------- | ------- | --------------------------------------- |
-| `--peers-timeout`| `INFERADB__LEDGER__PEERS_TIMEOUT`  | `60`    | How long to wait for other nodes (secs) |
-| `--peers-poll`             | `INFERADB__LEDGER__PEERS_POLL`     | `2`     | How often to check for other nodes      |
-| `--concurrent`       | `INFERADB__LEDGER__MAX_CONCURRENT` | `100`   | Simultaneous requests allowed           |
-| `--timeout`          | `INFERADB__LEDGER__TIMEOUT`   | `30`    | Max time for a request to complete      |
+| CLI               | Environment Variable               | Default | Description                             |
+| ----------------- | ---------------------------------- | ------- | --------------------------------------- |
+| `--peers-timeout` | `INFERADB__LEDGER__PEERS_TIMEOUT`  | `60`    | How long to wait for other nodes (secs) |
+| `--peers-poll`    | `INFERADB__LEDGER__PEERS_POLL`     | `2`     | How often to check for other nodes      |
+| `--concurrent`    | `INFERADB__LEDGER__MAX_CONCURRENT` | `100`   | Simultaneous requests allowed           |
+| `--timeout`       | `INFERADB__LEDGER__TIMEOUT`        | `30`    | Max time for a request to complete      |
 
 ### Notes
 

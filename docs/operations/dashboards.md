@@ -29,8 +29,8 @@ Covers the gRPC request lifecycle from ingestion through response.
 | Error Class Breakdown       | `ledger_grpc_requests_total` by `error_class`     | Root cause triage            |
 | Rate Limit Rejections       | `ledger_rate_limit_rejected_total`                | Backpressure visibility      |
 | Batch Write Performance     | `ledger_batch_flush_latency_seconds`              | SLO: p99 < 100ms             |
-| Organization Operations        | `ledger_organization_operations_total`               | Per-tenant traffic           |
-| Organization Latency           | `ledger_organization_latency_seconds`                | Per-tenant latency           |
+| Organization Operations     | `ledger_organization_operations_total`            | Per-tenant traffic           |
+| Organization Latency        | `ledger_organization_latency_seconds`             | Per-tenant latency           |
 
 **Variables:** `$datasource`, `$node_id`, `$organization_slug`, `$service`, `$method`
 
@@ -54,28 +54,28 @@ Monitors consensus stability, leader elections, and proposal pipeline.
 | Idempotency Cache        | `ledger_idempotency_cache_{hits,misses,size}_total`       | Deduplication effectiveness |
 | State Root Computation   | `inferadb_ledger_state_root_latency_seconds`              | Merkle computation overhead |
 
-**Variables:** `$datasource`, `$node_id`, `$shard_id`
+**Variables:** `$datasource`, `$node_id`, `$region`
 
 ### Storage Engine (`storage-engine.json`)
 
 Tracks disk usage, page cache efficiency, B-tree structure, and compaction progress.
 
-| Panel               | Metric(s)                                       | Purpose                       |
-| ------------------- | ----------------------------------------------- | ----------------------------- |
-| Disk Usage          | `ledger_disk_bytes_{total,used,free}`           | Capacity planning             |
-| Snapshot Disk Usage | `ledger_snapshot_disk_bytes`                    | Backup storage overhead       |
-| Page Cache Hit Rate | `ledger_page_cache_{hits,misses}_total`         | Target: > 95%                 |
-| Page Cache Size     | `ledger_page_cache_size`                        | Memory utilization            |
-| B-tree Depth        | `ledger_btree_depth`                            | Query performance proxy       |
-| B-tree Page Splits  | `ledger_btree_page_splits_total`                | Write amplification indicator |
-| Compaction Progress | `ledger_btree_compaction_pages_{merged,freed}`  | Maintenance throughput        |
-| Compaction Lag      | `ledger_compaction_lag_blocks`                  | Compaction backlog            |
-| Storage I/O         | `ledger_storage_bytes_{written,read}_total`     | I/O bandwidth                 |
-| Storage Operations  | `ledger_storage_operations_total`               | IOPS                          |
-| Organization Storage   | `ledger_organization_storage_bytes`                | Per-tenant disk usage         |
-| Integrity Scrubber  | `ledger_integrity_{pages_checked,errors}_total` | Corruption detection          |
+| Panel                | Metric(s)                                       | Purpose                       |
+| -------------------- | ----------------------------------------------- | ----------------------------- |
+| Disk Usage           | `ledger_disk_bytes_{total,used,free}`           | Capacity planning             |
+| Snapshot Disk Usage  | `ledger_snapshot_disk_bytes`                    | Backup storage overhead       |
+| Page Cache Hit Rate  | `ledger_page_cache_{hits,misses}_total`         | Target: > 95%                 |
+| Page Cache Size      | `ledger_page_cache_size`                        | Memory utilization            |
+| B-tree Depth         | `ledger_btree_depth`                            | Query performance proxy       |
+| B-tree Page Splits   | `ledger_btree_page_splits_total`                | Write amplification indicator |
+| Compaction Progress  | `ledger_btree_compaction_pages_{merged,freed}`  | Maintenance throughput        |
+| Compaction Lag       | `ledger_compaction_lag_blocks`                  | Compaction backlog            |
+| Storage I/O          | `ledger_storage_bytes_{written,read}_total`     | I/O bandwidth                 |
+| Storage Operations   | `ledger_storage_operations_total`               | IOPS                          |
+| Organization Storage | `ledger_organization_storage_bytes`             | Per-tenant disk usage         |
+| Integrity Scrubber   | `ledger_integrity_{pages_checked,errors}_total` | Corruption detection          |
 
-**Variables:** `$datasource`, `$node_id`, `$organization_slug`, `$shard_id`
+**Variables:** `$datasource`, `$node_id`, `$organization_slug`, `$region`
 
 ### Resource Saturation (`resource-saturation.json`)
 
@@ -97,7 +97,7 @@ Leading indicators for capacity planning: queue depths, connection counts, and b
 | Hot Key Detections        | `ledger_hot_key_detected_total`               | Access pattern anomalies        |
 | Audit Events              | `ledger_audit_events_total`                   | Audit trail activity            |
 
-**Variables:** `$datasource`, `$node_id`, `$shard_id`
+**Variables:** `$datasource`, `$node_id`, `$region`
 
 ## Alert Rule Templates
 

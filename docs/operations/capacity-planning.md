@@ -82,27 +82,27 @@ Memory = base (200 MB) +
 
 Each `WriteTransaction` accumulates COW (copy-on-write) pages in memory before committing. Peak memory during a write transaction:
 
-| Scenario                   | Approximate Peak Memory |
-| -------------------------- | ----------------------- |
-| Single entity write        | ~64 KB (1–2 pages)     |
-| Batch of 100 entities      | ~1–5 MB                |
-| Snapshot installation       | Proportional to state size (all pages rewritten) |
-| B-tree compaction merge    | ~128 KB per merge       |
+| Scenario                | Approximate Peak Memory                          |
+| ----------------------- | ------------------------------------------------ |
+| Single entity write     | ~64 KB (1–2 pages)                               |
+| Batch of 100 entities   | ~1–5 MB                                          |
+| Snapshot installation   | Proportional to state size (all pages rewritten) |
+| B-tree compaction merge | ~128 KB per merge                                |
 
 Monitor `inferadb_ledger_resource_write_txn_dirty_pages` for actual COW page counts.
 
-### Per-Shard Sizing
+### Per-Region Sizing
 
-Recommended per-shard limits for stable performance:
+Recommended per-region limits for stable performance:
 
-| Metric              | Recommended Limit | Hard Limit     |
-| ------------------- | ----------------- | -------------- |
-| State database size | <10 GB            | ~50 GB         |
-| Total entities      | <50M              | ~100M          |
-| Vaults per shard    | <500              | Unlimited      |
-| Organizations       | <100              | Unlimited      |
+| Metric              | Recommended Limit | Hard Limit |
+| ------------------- | ----------------- | ---------- |
+| State database size | <10 GB            | ~50 GB     |
+| Total entities      | <50M              | ~100M      |
+| Vaults per region   | <500              | Unlimited  |
+| Organizations       | <100              | Unlimited  |
 
-Beyond these limits, add a new shard and assign new organizations to it. See [Shard Management](shard-management.md).
+Beyond these limits, assign new organizations to a less loaded region. See [Region Management](region-management.md).
 
 ### CPU
 
@@ -148,15 +148,15 @@ When to scale up a node:
 
 ### Horizontal Scaling
 
-When to add shards:
+When to add regions:
 
-| Symptom            | Metric                       | Action          |
-| ------------------ | ---------------------------- | --------------- |
-| CPU saturation     | All cores at 100%            | Add shard       |
-| Organization growth   | Many organizations on one shard | Rebalance       |
-| Geographic latency | Cross-region writes slow     | Regional shards |
+| Symptom             | Metric                           | Action            |
+| ------------------- | -------------------------------- | ----------------- |
+| CPU saturation      | All cores at 100%                | Add region        |
+| Organization growth | Many organizations in one region | Rebalance         |
+| Geographic latency  | Cross-region writes slow         | Regional clusters |
 
-### Vault Sharding
+### Vault Parallelism
 
 Within an organization, use multiple vaults to parallelize:
 
@@ -181,11 +181,11 @@ Vaults are independent; operations on different vaults don't block each other.
 
 ### Throughput Targets
 
-| Configuration       | Writes/sec     | Reads/sec       |
-| ------------------- | -------------- | --------------- |
-| Single vault        | 5,000-10,000   | 50,000-100,000  |
-| 4 vaults            | 20,000-40,000  | 200,000-400,000 |
-| 4 shards × 4 vaults | 80,000-160,000 | 800,000+        |
+| Configuration        | Writes/sec     | Reads/sec       |
+| -------------------- | -------------- | --------------- |
+| Single vault         | 5,000-10,000   | 50,000-100,000  |
+| 4 vaults             | 20,000-40,000  | 200,000-400,000 |
+| 4 regions × 4 vaults | 80,000-160,000 | 800,000+        |
 
 ## Monitoring for Capacity
 
@@ -256,14 +256,14 @@ Plan capacity additions when runway < 90 days.
 
 ### Medium (Growing)
 
-- 5 nodes, 2 shards
+- 5 nodes, 2 regions
 - 8 cores, 16 GB RAM, 500 GB NVMe each
 - 10-50 organizations, 10-100 vaults
 - Expected: 10,000-50,000 writes/sec
 
 ### Large (Enterprise)
 
-- 7+ nodes per shard, 4+ shards
+- 7+ nodes per region, 4+ regions
 - 16 cores, 32 GB RAM, 1 TB NVMe each
 - 100+ organizations, 1000+ vaults
 - Expected: 100,000+ writes/sec

@@ -4,9 +4,9 @@ Guidance for deploying Ledger across multiple geographic regions.
 
 ## Architecture Options
 
-### Option 1: Regional Shards (Recommended)
+### Option 1: Regional Clusters (Recommended)
 
-Each region operates an independent Ledger cluster. Organizations are assigned to regional shards based on data locality requirements.
+Each region operates an independent Ledger cluster. Organizations are assigned to regions based on data locality requirements.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -18,7 +18,7 @@ Each region operates an independent Ledger cluster. Organizations are assigned t
         ▼                   ▼                   ▼
 ┌───────────────┐   ┌───────────────┐   ┌───────────────┐
 │  US-East      │   │  EU-West      │   │  AP-South     │
-│  Shard 1      │   │  Shard 2      │   │  Shard 3      │
+│  Region 1     │   │  Region 2     │   │  Region 3     │
 │               │   │               │   │               │
 │  ┌─────────┐  │   │  ┌─────────┐  │   │  ┌─────────┐  │
 │  │ 3-node  │  │   │  │ 3-node  │  │   │  │ 3-node  │  │
@@ -59,7 +59,7 @@ Single Raft cluster spanning multiple regions.
 
 Ledger does not optimize for this configuration.
 
-## Regional Shard Deployment
+## Regional Deployment
 
 ### 1. Deploy per-Region Clusters
 
@@ -87,15 +87,15 @@ spec:
 
 ### 2. Configure Organization Routing
 
-Control maintains the organization-to-shard mapping:
+Control maintains the organization-to-region mapping:
 
 ```sql
 -- Example routing table (managed by Control)
-organization_slug | name      | shard_id | region
--------------+-----------+----------+---------
-1            | acme_us   | 1        | us-east
-2            | acme_eu   | 2        | eu-west
-3            | globex    | 1        | us-east
+organization_slug | name      | region
+-------------+-----------+---------
+1            | acme_us   | us-east
+2            | acme_eu   | eu-west
+3            | globex    | us-east
 ```
 
 ### 3. Engine Routing
@@ -116,11 +116,11 @@ async fn route_request(&self, organization_slug: OrganizationSlug) -> LedgerClie
 
 Assign organizations to regions based on compliance requirements:
 
-| Requirement       | Strategy                                    |
-| ----------------- | ------------------------------------------- |
-| GDPR (EU data)    | EU-only shard                               |
-| CCPA (California) | US shard with appropriate controls          |
-| Data sovereignty  | Region-locked shard, no replication outside |
+| Requirement       | Strategy                                      |
+| ----------------- | --------------------------------------------- |
+| GDPR (EU data)    | EU-only region                                |
+| CCPA (California) | US region with appropriate controls           |
+| Data sovereignty  | Region-locked cluster, no replication outside |
 
 ### Disaster Recovery
 

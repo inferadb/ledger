@@ -15,12 +15,12 @@ tokio = { version = "1", features = ["full"] }
 ## Quick Start
 
 ```rust
-use inferadb_ledger_sdk::{LedgerClient, ClientConfig, Operation};
+use inferadb_ledger_sdk::{LedgerClient, ClientConfig, ServerSource, Operation};
 
 #[tokio::main]
 async fn main() -> inferadb_ledger_sdk::Result<()> {
     let config = ClientConfig::builder()
-        .endpoints(vec!["http://localhost:50051".into()])
+        .servers(ServerSource::from_static(["http://localhost:50051"]))
         .client_id("my-app")
         .build()?;
 
@@ -44,15 +44,15 @@ async fn main() -> inferadb_ledger_sdk::Result<()> {
 ### Basic Configuration
 
 ```rust
-use inferadb_ledger_sdk::{ClientConfig, RetryPolicy};
+use inferadb_ledger_sdk::{ClientConfig, RetryPolicy, ServerSource};
 use std::time::Duration;
 
 let config = ClientConfig::builder()
-    .endpoints(vec![
-        "http://node1:50051".into(),
-        "http://node2:50051".into(),
-        "http://node3:50051".into(),
-    ])
+    .servers(ServerSource::from_static([
+        "http://node1:50051",
+        "http://node2:50051",
+        "http://node3:50051",
+    ]))
     .client_id("my-service-instance-1")
     .timeout(Duration::from_secs(30))           // Request timeout
     .connect_timeout(Duration::from_secs(5))    // Connection timeout
@@ -63,16 +63,20 @@ let config = ClientConfig::builder()
 
 ### Configuration Options
 
-| Option            | Default | Description                                    |
-| ----------------- | ------- | ---------------------------------------------- |
-| `endpoints`       | -       | Server URLs (required, at least one)           |
-| `client_id`       | -       | Unique identifier for idempotency (required)   |
-| `timeout`         | 30s     | Request timeout                                |
-| `connect_timeout` | 5s      | Connection establishment timeout               |
-| `compression`     | false   | Enable gzip compression                        |
-| `retry_policy`    | default | Retry configuration for transient failures     |
-| `tls`             | None    | TLS configuration for secure connections       |
-| `trace`           | off     | Distributed tracing configuration              |
+| Option             | Default | Description                                     |
+| ------------------ | ------- | ----------------------------------------------- |
+| `servers`          | -       | `ServerSource` for cluster discovery (required) |
+| `client_id`        | -       | Unique identifier for idempotency (required)    |
+| `timeout`          | 30s     | Request timeout                                 |
+| `connect_timeout`  | 5s      | Connection establishment timeout                |
+| `compression`      | false   | Enable gzip compression                         |
+| `retry_policy`     | default | Retry configuration for transient failures      |
+| `tls`              | None    | TLS configuration for secure connections        |
+| `trace`            | off     | Distributed tracing configuration               |
+| `validation`       | default | Client-side input validation configuration      |
+| `circuit_breaker`  | None    | Per-endpoint circuit breaker configuration      |
+| `metrics`          | noop    | SDK-side metrics collector                      |
+| `preferred_region` | None    | Preferred region for latency optimization       |
 
 ### Retry Policy
 
@@ -85,21 +89,21 @@ use std::time::Duration;
 let retry = RetryPolicy::builder()
     .max_attempts(5)                              // Maximum retry attempts
     .initial_backoff(Duration::from_millis(100))  // First retry delay
-    .max_backoff(Duration::from_secs(5))          // Maximum backoff cap
+    .max_backoff(Duration::from_secs(10))         // Maximum backoff cap
     .multiplier(2.0)                              // Exponential multiplier
-    .jitter(0.1)                                  // Random jitter factor
+    .jitter(0.25)                                 // Random jitter factor
     .build();
 ```
 
 **Default retry policy:**
 
-| Parameter         | Default | Description                            |
-| ----------------- | ------- | -------------------------------------- |
-| `max_attempts`    | 3       | Total attempts including first try     |
-| `initial_backoff` | 100ms   | Delay before first retry               |
-| `max_backoff`     | 5s      | Maximum delay between retries          |
-| `multiplier`      | 2.0     | Backoff multiplier (exponential)       |
-| `jitter`          | 0.1     | Random variance (10% by default)       |
+| Parameter         | Default | Description                        |
+| ----------------- | ------- | ---------------------------------- |
+| `max_attempts`    | 3       | Total attempts including first try |
+| `initial_backoff` | 100ms   | Delay before first retry           |
+| `max_backoff`     | 10s     | Maximum delay between retries      |
+| `multiplier`      | 2.0     | Backoff multiplier (exponential)   |
+| `jitter`          | 0.25    | Random variance (25% by default)   |
 
 Retryable errors: `UNAVAILABLE`, `INTERNAL`, `RESOURCE_EXHAUSTED`.
 
@@ -108,25 +112,29 @@ Retryable errors: `UNAVAILABLE`, `INTERNAL`, `RESOURCE_EXHAUSTED`.
 For secure connections to production clusters:
 
 ```rust
-use inferadb_ledger_sdk::{ClientConfig, TlsConfig};
+use inferadb_ledger_sdk::{ClientConfig, TlsConfig, CertificateData, ServerSource};
 
 // Option 1: Use system CA certificates
 let tls = TlsConfig::with_native_roots()?;
 
-// Option 2: Custom CA certificate
+// Option 2: Custom CA certificate (PEM bytes)
+let ca_pem = std::fs::read("/path/to/ca.crt")?;
 let tls = TlsConfig::builder()
-    .ca_cert_path("/path/to/ca.crt")
+    .ca_cert(CertificateData::Pem(ca_pem))
     .build()?;
 
 // Option 3: Mutual TLS (client certificates)
+let ca_pem = std::fs::read("/path/to/ca.crt")?;
+let client_pem = std::fs::read("/path/to/client.crt")?;
+let client_key = std::fs::read("/path/to/client.key")?;
 let tls = TlsConfig::builder()
-    .ca_cert_path("/path/to/ca.crt")
-    .client_cert_path("/path/to/client.crt")
-    .client_key_path("/path/to/client.key")
+    .ca_cert(CertificateData::Pem(ca_pem))
+    .client_cert(CertificateData::Pem(client_pem))
+    .client_key(client_key)
     .build()?;
 
 let config = ClientConfig::builder()
-    .endpoints(vec!["https://ledger.example.com:50051".into()])
+    .servers(ServerSource::from_static(["https://ledger.example.com:50051"]))
     .client_id("secure-client")
     .tls(tls)
     .build()?;
@@ -137,10 +145,10 @@ let config = ClientConfig::builder()
 Enable W3C Trace Context propagation for end-to-end distributed tracing:
 
 ```rust
-use inferadb_ledger_sdk::{ClientConfig, TraceConfig};
+use inferadb_ledger_sdk::{ClientConfig, TraceConfig, ServerSource};
 
 let config = ClientConfig::builder()
-    .endpoints(vec!["http://localhost:50051".into()])
+    .servers(ServerSource::from_static(["http://localhost:50051"]))
     .client_id("traced-service")
     .trace(TraceConfig::enabled())
     .build()?;
@@ -196,8 +204,8 @@ my-service::process_request
 // Async initialization (connects to cluster)
 let client = LedgerClient::new(config).await?;
 
-// Or use connect() for explicit connection
-let client = LedgerClient::connect(config).await?;
+// Or use connect() for single-endpoint convenience
+let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
 ```
 
 ### Graceful Shutdown
@@ -213,6 +221,7 @@ if client.is_shutdown() {
 ```
 
 After shutdown:
+
 - Pending requests receive `SdkError::Shutdown`
 - New requests immediately fail
 - Sequence tracker state is persisted (if using file storage)
@@ -441,6 +450,7 @@ while let Some(result) = stream.next().await {
 **Automatic reconnection:**
 
 The SDK handles stream reconnection automatically:
+
 - Tracks last received block height
 - Reconnects on network errors
 - Resumes from last height + 1
@@ -463,8 +473,10 @@ let stream = client.watch_blocks(
 ### Organization Management
 
 ```rust
-// Create organization
-let ns = client.create_organization("my_app").await?;
+use inferadb_ledger_types::Region;
+
+// Create organization (requires a region for data residency)
+let ns = client.create_organization("my_app", Region::US_EAST_VA).await?;
 println!("Organization ID: {}", ns.id);
 
 // Get organization info
@@ -519,14 +531,24 @@ async fn handle_errors(client: &LedgerClient) -> Result<()> {
     match client.read(1, None, "key").await {
         Ok(value) => println!("Got: {:?}", value),
 
-        // Network/transport errors
-        Err(SdkError::Transport { message, .. }) => {
-            eprintln!("Network error: {}", message);
+        // Connection errors (retryable)
+        Err(SdkError::Connection { message }) => {
+            eprintln!("Connection error: {}", message);
         }
 
-        // Server returned an error
-        Err(SdkError::Server { code, message, .. }) => {
-            eprintln!("Server error {}: {}", code, message);
+        // Transport-level errors (HTTP/2, TLS)
+        Err(SdkError::Transport { source }) => {
+            eprintln!("Transport error: {}", source);
+        }
+
+        // gRPC RPC errors with correlation IDs
+        Err(SdkError::Rpc { code, message, request_id, trace_id, .. }) => {
+            eprintln!("RPC error {:?}: {}", code, message);
+        }
+
+        // Rate limited with retry-after hint
+        Err(SdkError::RateLimited { message, retry_after, .. }) => {
+            eprintln!("Rate limited: {}, retry after {:?}", message, retry_after);
         }
 
         // Client shutdown
@@ -535,7 +557,7 @@ async fn handle_errors(client: &LedgerClient) -> Result<()> {
         }
 
         // Configuration error
-        Err(SdkError::Config { message, .. }) => {
+        Err(SdkError::Config { message }) => {
             eprintln!("Config error: {}", message);
         }
 
@@ -550,26 +572,31 @@ async fn handle_errors(client: &LedgerClient) -> Result<()> {
 
 ```rust
 use inferadb_ledger_sdk::SdkError;
+use tonic::Code;
 
 match client.write(ns, vault, ops).await {
     Ok(result) => {
         println!("Committed: {}", result.tx_id);
     }
 
-    // Conditional write failed
-    Err(SdkError::ConditionFailed { key, code, .. }) => {
-        match code.as_str() {
-            "KEY_EXISTS" => println!("{} already exists", key),
-            "KEY_NOT_FOUND" => println!("{} doesn't exist", key),
-            "VERSION_MISMATCH" => println!("{} was modified", key),
-            _ => println!("Condition failed: {}", code),
-        }
+    // Idempotency conflict (key reused with different payload)
+    Err(SdkError::Idempotency { message, conflict_key, original_tx_id }) => {
+        eprintln!("Idempotency error: {}", message);
     }
 
-    // Sequence gap (client state out of sync)
-    Err(SdkError::SequenceGap { expected, got, .. }) => {
-        eprintln!("Sequence gap: expected {}, got {}", expected, got);
-        // SDK handles this automatically on retry
+    // Already committed (idempotent retry detected -- not an error)
+    Err(SdkError::AlreadyCommitted { tx_id, block_height }) => {
+        println!("Already committed: tx {} at block {}", tx_id, block_height);
+    }
+
+    // Conditional write failures come back as Rpc with FailedPrecondition
+    Err(SdkError::Rpc { code: Code::FailedPrecondition, message, .. }) => {
+        eprintln!("Condition failed: {}", message);
+    }
+
+    // Retries exhausted
+    Err(SdkError::RetryExhausted { attempts, last_error, .. }) => {
+        eprintln!("Failed after {} attempts: {}", attempts, last_error);
     }
 
     Err(e) => return Err(e),
@@ -604,13 +631,13 @@ The SDK provides automatic client-side idempotency tracking.
 For crash recovery, persist sequence state:
 
 ```rust
-use inferadb_ledger_sdk::{LedgerClient, ClientConfig, FileSequenceStorage};
+use inferadb_ledger_sdk::{LedgerClient, ClientConfig, ServerSource, FileSequenceStorage};
 
 // Use file-based sequence storage
 let storage = FileSequenceStorage::new("/var/lib/myapp/sequences")?;
 
 let config = ClientConfig::builder()
-    .endpoints(vec!["http://localhost:50051".into()])
+    .servers(ServerSource::from_static(["http://localhost:50051"]))
     .client_id("my-app")
     .build()?;
 
@@ -675,17 +702,25 @@ async fn handle_request() {
 Distinguish transient vs permanent failures:
 
 ```rust
+use tonic::Code;
+
 match result {
     // Transient: SDK will retry automatically
+    Err(SdkError::Connection { .. }) => { /* wait and retry */ }
     Err(SdkError::Transport { .. }) => { /* wait and retry */ }
-    Err(SdkError::Server { code: "UNAVAILABLE", .. }) => { /* wait */ }
+    Err(SdkError::Rpc { code: Code::Unavailable, .. }) => { /* wait */ }
+    Err(SdkError::RateLimited { retry_after, .. }) => { /* wait retry_after */ }
+    Err(SdkError::Unavailable { .. }) => { /* wait */ }
 
     // Permanent: don't retry
-    Err(SdkError::Server { code: "NOT_FOUND", .. }) => { /* handle */ }
-    Err(SdkError::ConditionFailed { .. }) => { /* handle */ }
+    Err(SdkError::Rpc { code: Code::NotFound, .. }) => { /* handle */ }
+    Err(SdkError::Rpc { code: Code::FailedPrecondition, .. }) => { /* handle */ }
+    Err(SdkError::Validation { .. }) => { /* fix request */ }
 
     // Logic error: fix the code
-    Err(SdkError::Config { .. }) => { /* bug */ }
+    Err(SdkError::Config { .. }) => { /* fix configuration */ }
+
+    _ => {}
 }
 ```
 

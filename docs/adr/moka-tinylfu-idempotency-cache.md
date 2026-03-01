@@ -36,8 +36,8 @@ InferaDB Ledger uses server-assigned sequences for write operations. Clients gen
 
 ```rust
 pub struct IdempotencyKey {
-    pub organization_slug: i64,
-    pub vault_id: i64,
+    pub organization: OrganizationId,
+    pub vault: VaultId,
     pub client_id: String,
     pub idempotency_key: [u8; 16], // UUID v4
 }
@@ -78,7 +78,7 @@ Moka implements TinyLFU with a modified Count-Min Sketch for frequency estimatio
 The moka cache is the **fast-path** (Tier 1) in a two-tier idempotency system:
 
 1. **Tier 1 — Moka TinyLFU cache** (in-memory, sub-microsecond): Holds full `WriteSuccess` results for the hottest entries. This is the primary deduplication path during normal operation.
-2. **Tier 2 — `ClientSequences` B+ tree table** (replicated, persistent): Stores `ClientSequenceEntry` records (sequence number, last seen timestamp, last idempotency key hash, last request hash) in the replicated state. Survives leader failover within the TTL window (default 24 hours).
+2. **Tier 2 — `ClientSequences` B+ tree table** (replicated, persistent): Stores `ClientSequenceEntry` records (sequence number, last seen timestamp, last idempotency key, last request hash) in the replicated state. Survives leader failover within the TTL window (default 24 hours).
 
 **Lookup order:**
 
@@ -102,7 +102,7 @@ Raft log replay does not repopulate the moka cache — the persistent table prov
 
 ```
 Per entry:
-  IdempotencyKey:  ~56 bytes (organization_slug + vault_id + client_id String + UUID)
+  IdempotencyKey:  ~56 bytes (organization + vault + client_id String + UUID)
   CachedResult:    ~64 bytes (request_hash + WriteSuccess fields)
   Moka overhead:   ~28 bytes (LRU pointers, hash table entry, TinyLFU sketch)
   Total:           ~148 bytes

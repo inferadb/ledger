@@ -23,11 +23,11 @@ Operational documentation for running InferaDB Ledger in production.
 
 ## Architecture & Security
 
-| Document                                | Description                              |
-| --------------------------------------- | ---------------------------------------- |
-| [Security](security.md)                 | Trust model, network security, hardening |
-| [Multi-Region](multi-region.md)         | Geographic distribution patterns         |
-| [Shard Management](shard-management.md) | Organization-to-shard routing               |
+| Document                                  | Description                              |
+| ----------------------------------------- | ---------------------------------------- |
+| [Security](security.md)                   | Trust model, network security, hardening |
+| [Multi-Region](multi-region.md)           | Geographic distribution patterns         |
+| [Region Management](region-management.md) | Organization-to-region routing           |
 
 ## Maintenance & Recovery
 

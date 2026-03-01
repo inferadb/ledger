@@ -2,7 +2,7 @@
 
 ## Context
 
-InferaDB Ledger runs multi-tenant shards where multiple organizations share a single Raft group. Without rate limiting, a single misconfigured client or a traffic spike in one organization can saturate the Raft proposal pipeline, degrading write latency for all tenants on the shard.
+InferaDB Ledger runs multi-tenant regions where multiple organizations share a single Raft group. Without rate limiting, a single misconfigured client or a traffic spike in one organization can saturate the Raft proposal pipeline, degrading write latency for all tenants on the region.
 
 ### The Problem
 
@@ -16,12 +16,12 @@ A single-tier limit addresses only one of these. Two tiers leave one mode unprot
 
 ### Options Evaluated
 
-| Option                 | Cluster Protection | Organization Isolation | Client Fairness |
-| ---------------------- | ------------------ | ------------------- | --------------- |
-| Global limit only      | Yes                | No                  | No              |
-| Global + per-client    | Yes                | No                  | Yes             |
-| Global + per-organization | Yes                | Yes                 | No              |
-| Three-tier (chosen)    | Yes                | Yes                 | Yes             |
+| Option                    | Cluster Protection | Organization Isolation | Client Fairness |
+| ------------------------- | ------------------ | ---------------------- | --------------- |
+| Global limit only         | Yes                | No                     | No              |
+| Global + per-client       | Yes                | No                     | Yes             |
+| Global + per-organization | Yes                | Yes                    | No              |
+| Three-tier (chosen)       | Yes                | Yes                    | Yes             |
 
 ## Decision
 
@@ -33,7 +33,7 @@ A single-tier limit addresses only one of these. Two tiers leave one mode unprot
 - **Default threshold:** 100 pending proposals
 - **Cost:** Single `AtomicU64` load — cheapest check, evaluated first
 - **Rejection:** Returns `retry_after_ms = min((pending - threshold) × 10, 5000)`
-- **Purpose:** Circuit-breaker for the entire shard when Raft is saturated. Prevents requests from queueing behind an already-deep proposal pipeline.
+- **Purpose:** Circuit-breaker for the entire region when Raft is saturated. Prevents requests from queueing behind an already-deep proposal pipeline.
 
 ### Tier 2: Per-Client Token Bucket
 
@@ -65,7 +65,7 @@ Request → Backpressure check → Per-client check → Per-organization check �
 
 **Without per-organization limits (global + per-client only):**
 
-An organization spawns 1,000 unique `client_id` values, each staying under its 50 req/sec limit. Combined: 50,000 req/sec — far exceeding the organization's fair share of the shard. Other organizations on the same shard are starved.
+An organization spawns 1,000 unique `client_id` values, each staying under its 50 req/sec limit. Combined: 50,000 req/sec — far exceeding the organization's fair share of the region. Other organizations on the same region are starved.
 
 **Without per-client limits (global + per-organization only):**
 

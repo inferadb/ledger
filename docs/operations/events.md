@@ -60,10 +60,10 @@ These fields are updatable via the `UpdateConfig` RPC without restart:
 | `ledger.user.created`           | `user_created`           | Apply-phase | CreateUser RPC              | `user_id`, `name`, `email`, `is_admin` |
 | `ledger.user.deleted`           | `user_deleted`           | Handler     | DeleteUserSaga completion   | `memberships_removed`                  |
 | `ledger.migration.started`      | `migration_started`      | Apply-phase | StartMigration RPC          |                                        |
-| `ledger.migration.completed`    | `migration_completed`    | Apply-phase | CompleteMigration RPC       | `shard_id`                             |
+| `ledger.migration.completed`    | `migration_completed`    | Apply-phase | CompleteMigration RPC       | `region`                               |
 | `ledger.node.joined`            | `node_joined_cluster`    | Apply-phase | AddNode Raft command        | `node_id`, `address`                   |
 | `ledger.node.left`              | `node_left_cluster`      | Apply-phase | RemoveNode Raft command     | `node_id`                              |
-| `ledger.routing.updated`        | `routing_updated`        | Apply-phase | RoutingUpdated Raft command | `shard_id`                             |
+| `ledger.routing.updated`        | `routing_updated`        | Apply-phase | RoutingUpdated Raft command | `region`                               |
 | `ledger.config.changed`         | `configuration_changed`  | Handler     | UpdateConfig RPC            | `changed_fields`, `dry_run`            |
 | `ledger.backup.created`         | `backup_created`         | Handler     | CreateBackup RPC            | `backup_id`                            |
 | `ledger.backup.restored`        | `backup_restored`        | Handler     | RestoreBackup RPC           | `backup_id`                            |

@@ -6,7 +6,7 @@ This document covers Raft integration, write/read paths, batching, and state det
 
 ## Raft Integration
 
-Ledger uses [Openraft](https://github.com/datafuselabs/openraft) for consensus. Each shard has one Raft group; multiple organizations share a shard.
+Ledger uses [Openraft](https://github.com/datafuselabs/openraft) for consensus. Each region has one Raft group; multiple organizations in the same region share consensus.
 
 ### Raft Properties
 
@@ -34,18 +34,18 @@ Leader → Client: WriteResponse (block_height, tx_proof)
 
 ### Forwarded Write (Client → Any Node)
 
-Automatic write forwarding allows clients to send writes to any node. The receiving node resolves the target shard and forwards to the leader transparently:
+Automatic write forwarding allows clients to send writes to any node. The receiving node resolves the target region and forwards to the leader transparently:
 
 ```
 Client → Node A: WriteRequest
-Node A: Resolve shard → Shard S, Leader = Node B
+Node A: Resolve region → Region R, Leader = Node B
 Node A → Node B: Forward WriteRequest (with trace context + gRPC deadline)
 Node B: Raft proposal + apply (normal write path)
 Node B → Node A: WriteResponse
 Node A → Client: WriteResponse
 ```
 
-Pre-flight checks (validation, rate limiting, quota) execute on the originating node before forwarding. Vault slug resolution and idempotency deduplication happen on the destination leader. The `MultiShardWriteService` uses `resolve_with_forward()` to determine whether to handle locally or forward.
+Pre-flight checks (validation, rate limiting, quota) execute on the originating node before forwarding. Vault slug resolution and idempotency deduplication happen on the destination leader. The `MultiRegionWriteService` uses `resolve_with_forward()` to determine whether to handle locally or forward.
 
 ### Write Stages
 
@@ -184,14 +184,14 @@ All state machine operations must be deterministic. Identical transactions on id
 
 ## Multi-Vault Failure Isolation
 
-Multiple vaults share a Raft group (shard). A `state_root` divergence in one vault must not cascade to others.
+Multiple vaults share a Raft group (region). A `state_root` divergence in one vault must not cascade to others.
 
 ### Isolation Boundaries
 
 | Component                       | Shared | Independent |
 | ------------------------------- | ------ | ----------- |
 | Raft log (ordering, durability) | Yes    |             |
-| ShardBlock delivery             | Yes    |             |
+| RegionBlock delivery            | Yes    |             |
 | VaultEntry application          |        | Yes         |
 | State commitment (state_root)   |        | Yes         |
 | Failure handling (vault health) |        | Yes         |
@@ -219,7 +219,7 @@ When a follower computes a different `state_root` than the block header:
 
 1. Rollback uncommitted state for that vault only
 2. Mark vault `Diverged`
-3. Emit `state_root_divergence{vault_id, shard_id}` alert
+3. Emit `state_root_divergence{vault_id, region}` alert
 4. Continue processing remaining vaults in the block
 5. Return `VAULT_UNAVAILABLE` for reads to diverged vault
 6. Continue replicating Raft log; store but don't apply diverged vault's entries

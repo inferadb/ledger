@@ -27,12 +27,12 @@ Ledger operates within a trusted network where all nodes are honest. Byzantine f
 A vault is an isolated authorization store within an organization. Each vault has its own blockchain (genesis block, transaction history, state root). Vaults enable:
 
 - Tenant isolation within an organization
-- Independent scaling and sharding
+- Independent scaling per region
 - Separate retention policies
 
 ### What is an organization?
 
-An organization is an organizational boundary (typically one per customer/org). Organizations are assigned to shards for scaling. Multiple vaults can exist within an organization.
+An organization is an organizational boundary (typically one per customer/org). Organizations are assigned to a geographic region for data residency and scaling. Multiple vaults can exist within an organization.
 
 ## Operations
 
@@ -195,17 +195,17 @@ Throughput can be increased by:
 
 - Increasing `batch_size`
 - Using multiple vaults for parallel workloads
-- Adding shards for organization isolation
+- Distributing organizations across regions
 
 ### Does Ledger support horizontal scaling?
 
-Yes, through sharding:
+Yes, through geographic regions:
 
-- Each shard is an independent Raft group
-- Organizations are assigned to shards
-- Shards can be added without downtime
+- Each region is an independent Raft group
+- Organizations are assigned to regions based on data residency requirements
+- New regions can be activated without downtime
 
-Cross-shard operations are not supported; design your organization/vault layout accordingly.
+Cross-region operations are not supported; design your organization placement accordingly.
 
 ## Debugging
 

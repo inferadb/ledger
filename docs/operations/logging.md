@@ -29,26 +29,26 @@ Fields are categorized by requirement level:
 
 ### Request Metadata
 
-| Field          | Level       | Type   | Condition                | Description                                   | Example                                  |
-| -------------- | ----------- | ------ | ------------------------ | --------------------------------------------- | ---------------------------------------- |
-| `request_id`   | Required    | UUID   | -                        | Unique identifier for correlation             | `"550e8400-e29b-41d4-a716-446655440000"` |
-| `service`      | Required    | String | -                        | gRPC service name                             | `"WriteService"`                         |
-| `method`       | Required    | String | -                        | gRPC method name                              | `"write"`                                |
-| `client_id`    | Conditional | String | When provided            | Idempotency client identifier (max 128 chars) | `"api_acme_corp"`                        |
-| `sequence`     | Conditional | u64    | When provided            | Per-client sequence number                    | `42`                                     |
-| `organization_slug` | Conditional | i64    | When targeting organization | Target organization                              | `1001`                                   |
-| `vault_slug`   | Conditional | u64    | When targeting vault     | Target vault (0 for organization-level ops)      | `7180591718400`                           |
-| `actor`        | Conditional | String | When authenticated       | Identity performing operation                 | `"user:123"`                             |
+| Field               | Level       | Type   | Condition                   | Description                                   | Example                                  |
+| ------------------- | ----------- | ------ | --------------------------- | --------------------------------------------- | ---------------------------------------- |
+| `request_id`        | Required    | UUID   | -                           | Unique identifier for correlation             | `"550e8400-e29b-41d4-a716-446655440000"` |
+| `service`           | Required    | String | -                           | gRPC service name                             | `"WriteService"`                         |
+| `method`            | Required    | String | -                           | gRPC method name                              | `"write"`                                |
+| `client_id`         | Conditional | String | When provided               | Idempotency client identifier (max 128 chars) | `"api_acme_corp"`                        |
+| `sequence`          | Conditional | u64    | When provided               | Per-client sequence number                    | `42`                                     |
+| `organization_slug` | Conditional | i64    | When targeting organization | Target organization                           | `1001`                                   |
+| `vault_slug`        | Conditional | u64    | When targeting vault        | Target vault (0 for organization-level ops)   | `7180591718400`                          |
+| `actor`             | Conditional | String | When authenticated          | Identity performing operation                 | `"user:123"`                             |
 
 ### System Context
 
-| Field       | Level    | Type | Condition | Description                            | Example |
-| ----------- | -------- | ---- | --------- | -------------------------------------- | ------- |
-| `node_id`   | Required | u64  | -         | Server node identifier                 | `1`     |
-| `is_leader` | Required | bool | -         | Raft leadership status at request time | `true`  |
-| `raft_term` | Required | u64  | -         | Current Raft term                      | `15`    |
-| `shard_id`  | Required | u32  | -         | Shard routing identifier               | `0`     |
-| `is_vip`    | Required | bool | -         | VIP organization indicator                | `false` |
+| Field       | Level    | Type   | Condition | Description                            | Example      |
+| ----------- | -------- | ------ | --------- | -------------------------------------- | ------------ |
+| `node_id`   | Required | u64    | -         | Server node identifier                 | `1`          |
+| `is_leader` | Required | bool   | -         | Raft leadership status at request time | `true`       |
+| `raft_term` | Required | u64    | -         | Current Raft term                      | `15`         |
+| `region`    | Required | string | -         | Data residency region                  | `US_EAST_VA` |
+| `is_vip`    | Required | bool   | -         | VIP organization indicator             | `false`      |
 
 ### Write Operation Fields
 
@@ -78,12 +78,12 @@ Fields are categorized by requirement level:
 
 ### Admin Operation Fields
 
-| Field                   | Level       | Type   | Condition      | Description                           | Example              |
-| ----------------------- | ----------- | ------ | -------------- | ------------------------------------- | -------------------- |
-| `admin_action`          | Conditional | String | Admin ops      | Administrative action name            | `"create_organization"` |
-| `target_organization_name` | Conditional | String | Organization ops  | Target organization name (max 128 chars) | `"acme_production"`  |
-| `retention_mode`        | Conditional | String | Vault creation | Vault retention mode                  | `"compliance"`       |
-| `recovery_force`        | Conditional | bool   | Recovery ops   | Whether force mode was used           | `false`              |
+| Field                      | Level       | Type   | Condition        | Description                              | Example                 |
+| -------------------------- | ----------- | ------ | ---------------- | ---------------------------------------- | ----------------------- |
+| `admin_action`             | Conditional | String | Admin ops        | Administrative action name               | `"create_organization"` |
+| `target_organization_name` | Conditional | String | Organization ops | Target organization name (max 128 chars) | `"acme_production"`     |
+| `retention_mode`           | Conditional | String | Vault creation   | Vault retention mode                     | `"compliance"`          |
+| `recovery_force`           | Conditional | bool   | Recovery ops     | Whether force mode was used              | `false`                 |
 
 ### Outcome Fields
 

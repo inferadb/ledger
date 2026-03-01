@@ -66,7 +66,7 @@ Expected output:
 
 ```bash
 grpcurl -plaintext \
-  -d '{"name": "my_app"}' \
+  -d '{"name": "my_app", "region": 10}' \
   localhost:50051 ledger.v1.AdminService/CreateOrganization
 ```
 
@@ -74,8 +74,8 @@ Response:
 
 ```json
 {
-  "organizationId": { "id": "1" },
-  "shardId": { "id": 1 }
+  "slug": { "slug": "7180591718400" },
+  "region": "REGION_US_EAST_VA"
 }
 ```
 
@@ -172,20 +172,20 @@ tokio = { version = "1", features = ["full"] }
 Basic usage:
 
 ```rust
-use inferadb_ledger_sdk::{LedgerClient, ClientConfig, Operation};
+use inferadb_ledger_sdk::{LedgerClient, ClientConfig, Operation, ServerSource, Region};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Connect to Ledger
     let config = ClientConfig::builder()
-        .endpoints(vec!["http://localhost:50051".into()])
+        .servers(ServerSource::from_static(["http://localhost:50051"]))
         .client_id("quickstart")
         .build()?;
 
     let client = LedgerClient::new(config).await?;
 
     // Create organization
-    let ns = client.create_organization("my_app").await?;
+    let ns = client.create_organization("my_app", Region::US_EAST_VA).await?;
     println!("Created organization: {}", ns.slug);
 
     // Create vault (returns a Snowflake vault slug)

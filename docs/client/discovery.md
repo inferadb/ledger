@@ -118,11 +118,11 @@ grpcurl -plaintext \
 
 **Response:**
 
-| Field        | Type                | Description                  |
-| ------------ | ------------------- | ---------------------------- |
-| `version`    | uint64              | Current system state version |
-| `nodes`      | NodeInfo[]          | All cluster nodes            |
-| `organizations` | OrganizationRegistry[] | Organization → shard routing    |
+| Field           | Type                   | Description                   |
+| --------------- | ---------------------- | ----------------------------- |
+| `version`       | uint64                 | Current system state version  |
+| `nodes`         | NodeInfo[]             | All cluster nodes             |
+| `organizations` | OrganizationRegistry[] | Organization → region routing |
 
 **NodeInfo fields:**
 
@@ -144,15 +144,15 @@ grpcurl -plaintext \
 
 **OrganizationRegistry fields:**
 
-| Field            | Type            | Description            |
-| ---------------- | --------------- | ---------------------- |
-| `organization_slug`   | OrganizationSlug     | Organization identifier   |
-| `name`           | string          | Human-readable name    |
-| `shard_id`       | ShardId         | Hosting Raft group     |
-| `members`        | NodeId[]        | Nodes in the shard     |
-| `status`         | OrganizationStatus | Lifecycle state        |
-| `config_version` | uint64          | For cache invalidation |
-| `created_at`     | Timestamp       | Creation time          |
+| Field               | Type               | Description             |
+| ------------------- | ------------------ | ----------------------- |
+| `organization_slug` | OrganizationSlug   | Organization identifier |
+| `name`              | string             | Human-readable name     |
+| `region`            | Region             | Hosting Raft group      |
+| `members`           | NodeId[]           | Nodes in the region     |
+| `status`            | OrganizationStatus | Lifecycle state         |
+| `config_version`    | uint64             | For cache invalidation  |
+| `created_at`        | Timestamp          | Creation time           |
 
 ## Bootstrap Sequence
 

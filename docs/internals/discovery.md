@@ -23,7 +23,7 @@ The `_system` organization stores individual entities (not a unified struct):
 struct OrganizationRegistry {
     organization_slug: OrganizationSlug,
     name: String,
-    shard_id: ShardId,
+    region: Region,
     member_nodes: Vec<NodeId>,
     status: OrganizationStatus,
     config_version: u64,
@@ -151,9 +151,9 @@ New Node Startup:
 
 Organization Assignment:
   1. Control creates organization via CreateOrganization(name) → returns leader-assigned OrganizationSlug
-  2. _system assigns organization to shard with lowest load
-  3. Shard leader initializes organization state
-  4. Shard leader updates _system with OrganizationRegistry
+  2. _system assigns organization to specified region
+  3. Region leader initializes organization state
+  4. Region leader updates _system with OrganizationRegistry
 ```
 
 ## Node Leave
@@ -164,9 +164,9 @@ Organization Assignment:
 1. Node announces intention to leave via LeaveCluster RPC
 2. _system leader proposes RemoveNode to Raft
 3. Node is removed from _system membership
-4. Shard Raft groups handle the departure:
-   - If node was shard member, Raft reconfigures
-   - If node was shard leader, triggers election
+4. Region Raft groups handle the departure:
+   - If node was region member, Raft reconfigures
+   - If node was region leader, triggers election
 5. Other nodes update cached peer lists
 ```
 
@@ -176,7 +176,7 @@ Organization Assignment:
 1. _system leader detects missing heartbeats (default: 30s timeout)
 2. Leader proposes RemoveNode after timeout
 3. Node marked as unavailable in _system state
-4. Vault Raft groups detect member failure, continue with remaining quorum
+4. Region Raft groups detect member failure, continue with remaining quorum
 5. If departed node returns, it must rejoin as new member
 ```
 
@@ -199,13 +199,13 @@ Single-step membership changes can create disjoint majorities during leader fail
 
 ### Safety Constraints
 
-| Constraint                                 | Enforcement                            |
-| ------------------------------------------ | -------------------------------------- |
-| No concurrent membership changes per shard | Shard-level mutex                      |
-| Learner must sync before promotion         | `wait_for_log_sync()` check            |
-| No-op after leader election                | Openraft built-in                      |
-| Joint consensus required                   | Openraft-only mode                     |
-| Minimum quorum maintained                  | Reject changes that would break quorum |
+| Constraint                                  | Enforcement                            |
+| ------------------------------------------- | -------------------------------------- |
+| No concurrent membership changes per region | Region-level mutex                     |
+| Learner must sync before promotion          | `wait_for_log_sync()` check            |
+| No-op after leader election                 | Openraft built-in                      |
+| Joint consensus required                    | Openraft-only mode                     |
+| Minimum quorum maintained                   | Reject changes that would break quorum |
 
 ### Quorum Protection
 
@@ -230,13 +230,13 @@ fn validate_membership_change(current: &[NodeId], proposed: &[NodeId]) -> Result
 
 ## Organization Routing
 
-Clients route requests to the correct shard by looking up organization → shard mappings in `_system`.
+Clients route requests to the correct region by looking up organization → region mappings in `_system`.
 
 ```
 Control request for organization_slug=1
        │
        ▼
-Local cache? ─── Hit ──→ Fresh? ─── Yes ──→ Connect to shard leader
+Local cache? ─── Hit ──→ Fresh? ─── Yes ──→ Connect to region leader
        │                    │
        └─ Miss              └─ No
             │                    │
@@ -244,7 +244,7 @@ Local cache? ─── Hit ──→ Fresh? ─── Yes ──→ Connect to s
     Query _system: ns:1 ────────┘
             │
             ▼
-    Connect to shard leader
+    Connect to region leader
             │
             ▼
     Success? ─── Yes ──→ Proceed with request
@@ -291,13 +291,13 @@ Fully decentralized:
 
 ## Failure Modes
 
-| Scenario                    | Behavior                                                 |
-| --------------------------- | -------------------------------------------------------- |
-| All bootstrap nodes down    | Control uses cached peer list from previous session      |
-| Organization shard unknown     | Query any node's `_system` state for routing             |
-| Network partition           | Majority partition continues; minority becomes read-only |
-| Node crashes                | Removed from `_system` after 30s heartbeat timeout       |
-| Node gracefully leaves      | Immediately removed from `_system`, Raft reconfigures    |
-| `_system` leader fails      | Raft elects new leader automatically (<500ms)            |
-| Majority of nodes fail      | Cluster halts until quorum restored                      |
-| Organization shard unavailable | Requests for that organization fail; others unaffected      |
+| Scenario                        | Behavior                                                 |
+| ------------------------------- | -------------------------------------------------------- |
+| All bootstrap nodes down        | Control uses cached peer list from previous session      |
+| Organization region unknown     | Query any node's `_system` state for routing             |
+| Network partition               | Majority partition continues; minority becomes read-only |
+| Node crashes                    | Removed from `_system` after 30s heartbeat timeout       |
+| Node gracefully leaves          | Immediately removed from `_system`, Raft reconfigures    |
+| `_system` leader fails          | Raft elects new leader automatically (<500ms)            |
+| Majority of nodes fail          | Cluster halts until quorum restored                      |
+| Organization region unavailable | Requests for that organization fail; others unaffected   |

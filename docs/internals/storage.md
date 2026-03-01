@@ -7,30 +7,40 @@ This document covers directory layout, database schemas, snapshots, and crash re
 ## Directory Layout
 
 ```
-/var/lib/ledger/
-├── node_id                      # Persisted node identity (snowflake ID)
-├── state.db                     # Entity/relationship state and indexes
-├── raft.db                      # Raft log entries and persistent state
-├── blocks.db                    # Block archive storage
-└── snapshots/
-    ├── 000001000.snap           # Snapshot at height 1000
-    └── 000002000.snap
+{data_dir}/
+├── node_id                          # Persisted node identity (snowflake ID)
+├── global/                          # GLOBAL Raft group (system control plane)
+│   ├── state.db                     # Org registry, sequences, sagas, node info (no PII)
+│   ├── blocks.db                    # Global blockchain
+│   ├── raft.db                      # Raft log for GLOBAL group
+│   └── events.db                    # Audit events for GLOBAL group
+├── regions/                         # Per-region data (orgs + user PII)
+│   ├── us_east_va/
+│   │   ├── state.db
+│   │   ├── blocks.db
+│   │   ├── raft.db
+│   │   └── events.db
+│   └── .../
+├── snapshots/                       # Per-region snapshot directories
+│   ├── global/
+│   └── .../
+└── keys/                            # Per-region RMK storage
 ```
 
-The current implementation uses a unified database approach rather than per-shard directories. All data is stored in B+ tree tables within these databases.
+Each region's Raft group gets isolated database files under a dedicated directory. This eliminates write lock contention between concurrent Raft group applies, enables per-region encryption, and simplifies migration, snapshots, and disk accounting. All data is stored in B+ tree tables within these databases.
 
 ### Design Decisions
 
-| Decision               | Rationale                                          |
-| ---------------------- | -------------------------------------------------- |
-| Unified database files | Custom B+ tree engine with MVCC                    |
-| Table-based storage    | 20 tables for different data types (see tables.rs) |
-| Dual-slot commit       | Atomic commits using header slot flipping          |
-| Snapshots by height    | Predictable naming; simple retention policy        |
+| Decision                  | Rationale                                           |
+| ------------------------- | --------------------------------------------------- |
+| Per-region database files | Isolates write locks, enables per-region encryption |
+| Table-based storage       | 20 tables for different data types (see tables.rs)  |
+| Dual-slot commit          | Atomic commits using header slot flipping           |
+| Snapshots by height       | Predictable naming; simple retention policy         |
 
 ## Database Backend
 
-Ledger uses a custom B+ tree storage engine providing ACID transactions with MVCC. Each shard uses two databases.
+Ledger uses a custom B+ tree storage engine providing ACID transactions with MVCC. Each region has four databases (state.db, blocks.db, raft.db, events.db).
 
 ### Raft Log Storage (log.db)
 
@@ -50,25 +60,25 @@ Key operations:
 
 The database uses 20 tables (see `crates/store/src/tables.rs`):
 
-| Table              | Key Format                              | Purpose                              |
-| ------------------ | --------------------------------------- | ------------------------------------ |
-| Relationships      | `{vault_id:8BE}{bucket_id:1}{key}`      | Relationship tuples                  |
-| Entities           | `{vault_id:8BE}{bucket_id:1}{key}`      | Key-value entities                   |
-| ObjIndex           | `{vault_id:8BE}{resource}#{relation}`   | Resource→subject lookup              |
-| SubjIndex          | `{vault_id:8BE}{subject}#{relation}`    | Subject→resource lookup              |
-| VaultMeta          | `{organization_slug:8BE}{vault_id:8BE}` | Vault metadata                       |
-| Blocks             | `{shard_height:8BE}`                    | Block storage                        |
-| VaultBlockIndex    | `{org_slug:8BE}{vault_id:8BE}{h:8}`    | Vault height→block mapping           |
-| RaftLog            | `{log_id:8BE}`                          | Raft log entries                     |
-| RaftState          | `{key}`                                 | Raft persistent state                |
-| OrganizationMeta   | `{org_id:8BE}`                          | Organization metadata                |
-| Sequences          | `{counter_name}`                        | Sequence counters                    |
-| OrganizationSlugIndex | `{slug:8BE}`                         | Slug→org_id lookup                   |
-| VaultSlugIndex     | `{slug:8BE}`                            | Slug→vault_id lookup                 |
-| ClientSequences    | `{org_id:8BE}{vault_id:8BE}{client_id}` | Client sequence entries (composite)  |
-| VaultHeights       | `{org_id:8BE}{vault_id:8BE}`            | Per-vault blockchain heights         |
-| VaultHashes        | `{org_id:8BE}{vault_id:8BE}`            | Per-vault previous block hashes      |
-| VaultHealth        | `{org_id:8BE}{vault_id:8BE}`            | Per-vault health status              |
+| Table                 | Key Format                              | Purpose                             |
+| --------------------- | --------------------------------------- | ----------------------------------- |
+| Relationships         | `{vault_id:8BE}{bucket_id:1}{key}`      | Relationship tuples                 |
+| Entities              | `{vault_id:8BE}{bucket_id:1}{key}`      | Key-value entities                  |
+| ObjIndex              | `{vault_id:8BE}{resource}#{relation}`   | Resource→subject lookup             |
+| SubjIndex             | `{vault_id:8BE}{subject}#{relation}`    | Subject→resource lookup             |
+| VaultMeta             | `{organization_slug:8BE}{vault_id:8BE}` | Vault metadata                      |
+| Blocks                | `{region_height:8BE}`                   | Block storage                       |
+| VaultBlockIndex       | `{org_slug:8BE}{vault_id:8BE}{h:8}`     | Vault height→block mapping          |
+| RaftLog               | `{log_id:8BE}`                          | Raft log entries                    |
+| RaftState             | `{key}`                                 | Raft persistent state               |
+| OrganizationMeta      | `{org_id:8BE}`                          | Organization metadata               |
+| Sequences             | `{counter_name}`                        | Sequence counters                   |
+| OrganizationSlugIndex | `{slug:8BE}`                            | Slug→org_id lookup                  |
+| VaultSlugIndex        | `{slug:8BE}`                            | Slug→vault_id lookup                |
+| ClientSequences       | `{org_id:8BE}{vault_id:8BE}{client_id}` | Client sequence entries (composite) |
+| VaultHeights          | `{org_id:8BE}{vault_id:8BE}`            | Per-vault blockchain heights        |
+| VaultHashes           | `{org_id:8BE}{vault_id:8BE}`            | Per-vault previous block hashes     |
+| VaultHealth           | `{org_id:8BE}{vault_id:8BE}`            | Per-vault health status             |
 
 **Key format**: `vault_id (8 bytes BE) + bucket_id (1 byte) + local_key`
 
@@ -78,7 +88,7 @@ The bucket_id (0-255) enables incremental state root computation.
 
 The Raft state machine uses a two-tier persistence model:
 
-1. **`AppliedStateCore`** — A compact struct (<512 bytes) containing `last_applied`, `membership`, `shard_height`, and `previous_shard_hash`. Stored in the `RaftState` table with a 2-byte version sentinel prefix (`[0x00, 0x01]`).
+1. **`AppliedStateCore`** — A compact struct (<512 bytes) containing `last_applied`, `membership`, `region_height`, and `previous_region_hash`. Stored in the `RaftState` table with a 2-byte version sentinel prefix (`[0x00, 0x01]`).
 
 2. **Externalized tables** — Nine dedicated B+ tree tables (`OrganizationMeta`, `VaultMeta`, `VaultHeights`, `VaultHashes`, `VaultHealth`, `Sequences`, `ClientSequences`, `OrganizationSlugIndex`, `VaultSlugIndex`) store per-entity state that previously lived in a single serialized `AppliedState` blob.
 
@@ -91,8 +101,8 @@ On startup, `load_state_from_tables()` reconstructs the full `AppliedState` from
 Blocks are stored in the `Blocks` table within the database:
 
 ```
-Key: shard_height (u64 BE)
-Value: postcard-serialized ShardBlock
+Key: region_height (u64 BE)
+Value: postcard-serialized RegionBlock
 ```
 
 A secondary `VaultBlockIndex` table provides fast vault-specific lookups by vault height.
@@ -123,7 +133,7 @@ Snapshots use a file-based streaming format with zstd compression and SHA-256 in
 
 All sections (header through events) are zstd-compressed (level 3) as a single stream. The SHA-256 checksum covers the compressed bytes, enabling two-pass verification: checksum first (over compressed data), then decompress.
 
-**Naming**: `{shard_height:09}.snap` (e.g., `000001000.snap`)
+**Naming**: `{region_height:09}.snap` (e.g., `000001000.snap`)
 
 ### Snapshot Data Type
 
@@ -195,36 +205,41 @@ async fn recover(&mut self) -> Result<()> {
     // 1. Load node identity
     let node_id = self.load_or_create_node_id()?;
 
-    // 2. Discover shards from directory structure
-    for shard_dir in self.data_dir.join("shards").read_dir()? {
-        let shard_id = parse_shard_id(&shard_dir.file_name())?;
+    // 2. Detect legacy flat layout (state.db in data_dir root)
+    let storage_manager = RegionStorageManager::new(data_dir);
+    storage_manager.detect_legacy_layout()?;
 
-        // 3. Recover Raft state
-        let raft_storage = RaftLogStore::open(shard_dir.join("raft/log.db"))?;
-        let vote = raft_storage.read_vote().await?;
-        let log_state = raft_storage.get_log_state().await?;
+    // 3. Open GLOBAL region databases (global/{state,blocks,raft,events}.db)
+    let global_storage = storage_manager.open_region(Region::GLOBAL)?;
+    let raft_path = storage_manager.raft_db_path(Region::GLOBAL);
+    let log_store = RaftLogStore::open(&raft_path)?;
 
-        // 4. Find latest valid snapshot
-        let snapshot = self.find_latest_snapshot(&shard_dir)?;
+    // 4. Discover existing regional databases from regions/ directory
+    for region in storage_manager.discover_existing_regions() {
+        let region_storage = storage_manager.open_region(region)?;
 
-        // 5. Load state from snapshot
+        // 5. Find latest valid snapshot
+        let snapshot_dir = storage_manager.snapshot_dir(region);
+        let snapshot = self.find_latest_snapshot(&snapshot_dir)?;
+
+        // 6. Load state from snapshot
         let mut state = match snapshot {
             Some(snap) => StateTree::from_snapshot(&snap)?,
             None => StateTree::empty(),
         };
 
-        // 6. Replay committed log entries after snapshot
-        let start_index = snapshot.map(|s| s.shard_height + 1).unwrap_or(0);
+        // 7. Replay committed log entries after snapshot
+        let start_index = snapshot.map(|s| s.region_height + 1).unwrap_or(0);
         for entry in raft_storage.read_range(start_index..)? {
             state.apply(&entry.payload)?;
         }
 
-        // 7. Verify state root matches last committed block
+        // 8. Verify state root matches last committed block
         // ... verification code ...
-
-        // 8. Initialize Raft and join cluster
-        self.start_raft(shard_id, raft_storage, state).await?;
     }
+
+    // 9. Initialize Raft and join cluster
+    self.start_raft(node_id, log_store, state).await?;
 
     Ok(())
 }
@@ -244,14 +259,14 @@ async fn recover(&mut self) -> Result<()> {
 
 The storage engine uses position-based I/O (`pread`/`pwrite` on Unix) for lock-free concurrent reads. Reads use `read_exact_at()` without acquiring any lock, while writes serialize through a `Mutex<()>` write lock.
 
-| Operation     | Lock Required | Syscall        |
-| ------------- | ------------- | -------------- |
-| `read_page`   | None          | `pread(2)`     |
-| `read_header` | None          | `pread(2)`     |
-| `write_page`  | `write_lock`  | `pwrite(2)`    |
-| `write_header`| `write_lock`  | `pwrite(2)`    |
-| `extend`      | `write_lock`  | `ftruncate(2)` |
-| `sync`        | None          | `fdatasync(2)` |
+| Operation      | Lock Required | Syscall        |
+| -------------- | ------------- | -------------- |
+| `read_page`    | None          | `pread(2)`     |
+| `read_header`  | None          | `pread(2)`     |
+| `write_page`   | `write_lock`  | `pwrite(2)`    |
+| `write_header` | `write_lock`  | `pwrite(2)`    |
+| `extend`       | `write_lock`  | `ftruncate(2)` |
+| `sync`         | None          | `fdatasync(2)` |
 
 On Windows, reads fall back to `seek_read()` which requires the write lock due to cursor mutation.
 
@@ -287,12 +302,12 @@ fn acquire_lock(data_dir: &Path) -> Result<FileLock> {
 
 ### Resolution
 
-| Corruption Type     | Detection                   | Resolution                           |
-| ------------------- | --------------------------- | ------------------------------------ |
-| Chain hash break    | previous_hash mismatch      | Re-fetch blocks from healthy replica |
-| State divergence    | state_root mismatch         | Rebuild state tree from chain        |
-| Partial block       | Incomplete block data       | Re-fetch from quorum                 |
-| Snapshot corruption | SHA-256 checksum mismatch   | Discard, use older or rebuild        |
+| Corruption Type     | Detection                 | Resolution                           |
+| ------------------- | ------------------------- | ------------------------------------ |
+| Chain hash break    | previous_hash mismatch    | Re-fetch blocks from healthy replica |
+| State divergence    | state_root mismatch       | Rebuild state tree from chain        |
+| Partial block       | Incomplete block data     | Re-fetch from quorum                 |
+| Snapshot corruption | SHA-256 checksum mismatch | Discard, use older or rebuild        |
 
 **Authoritative source**: Quorum determines truth. Corrupted nodes resync from healthy replicas.
 
@@ -301,7 +316,7 @@ fn acquire_lock(data_dir: &Path) -> Result<FileLock> {
 1. **Raft log durability**: Log entries fsync'd before Raft acknowledgment
 2. **State consistency**: `state.db` reflects all applied log entries up to `applied_index`
 3. **Block archive append-only**: Segment files never modified after creation
-4. **Snapshot validity**: Snapshot `state_root` matches block header at `shard_height`
+4. **Snapshot validity**: Snapshot `state_root` matches block header at `region_height`
 5. **Externalized table atomicity**: `AppliedStateCore` and all 9 externalized tables are written in a single `WriteTransaction` — either all succeed or none are visible
 6. **Snapshot integrity**: SHA-256 checksum over compressed bytes is verified before any decompression or state changes during installation
 

@@ -6,35 +6,35 @@ How to run and write tests for Ledger.
 
 ## Running Tests
 
-### Quick Test (Recommended for Development)
-
-```bash
-just test-fast
-# or
-cargo +1.92 test -p inferadb-ledger-types -p inferadb-ledger-store
-```
-
-Runs unit tests for core crates (~15 seconds).
-
-### Standard Test Suite
+### Unit Tests (Recommended for Development)
 
 ```bash
 just test
 # or
-cargo +1.92 test --workspace
+cargo +1.92 test --workspace --lib
 ```
 
-Runs all tests except those marked `#[ignore]` (~30 seconds).
+Runs inline `#[cfg(test)]` modules only (~8 seconds).
+
+### Integration Tests
+
+```bash
+just test-integration
+# or
+cargo +1.92 test -p inferadb-ledger-server --test integration -- --test-threads=8
+```
+
+Spawns real clusters with Raft nodes, file backends, and gRPC servers (~2 minutes).
 
 ### Full Test Suite
 
 ```bash
-just test-full
+just test-all
 # or
-cargo +1.92 test --workspace -- --include-ignored
+cargo +1.92 test --workspace
 ```
 
-Includes slow integration tests (~5 minutes).
+Runs all tests including integration and stress tests.
 
 ### Single Test
 

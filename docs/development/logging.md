@@ -12,7 +12,7 @@ let mut ctx = RequestContext::new("MyService", "my_method");
 
 // Fields populated as information becomes available
 ctx.set_client_id(&req.client_id);
-ctx.set_organization_slug(req.organization_slug);
+ctx.set_organization(req.organization_slug);
 
 // Outcome set before return
 ctx.set_success();
@@ -83,7 +83,7 @@ Add fields as information becomes available during request processing:
 // From request proto
 let req = request.into_inner();
 ctx.set_client_id(&req.client_id);
-ctx.set_organization_slug(req.organization_slug);
+ctx.set_organization(req.organization_slug);
 
 // System context (from Raft state)
 ctx.set_system_context(
@@ -168,8 +168,8 @@ async fn read(
 
     // 2. Populate request fields
     ctx.set_client_id(&req.client_id);
-    ctx.set_organization_slug(req.organization_slug);
-    ctx.set_vault_slug(req.vault_slug);
+    ctx.set_organization(req.organization_slug);
+    ctx.set_vault(req.vault_slug);
     ctx.set_key(&req.key);
     ctx.set_consistency("linearizable");
 
@@ -256,21 +256,21 @@ async fn test_read_emits_log_event() {
 
 ### Request Metadata
 
-| Method                 | Description                   |
-| ---------------------- | ----------------------------- |
-| `set_client_id(id)`    | Idempotency client identifier |
-| `set_sequence(seq)`    | Per-client sequence number    |
-| `set_organization_slug(id)` | Target organization              |
-| `set_vault_slug(slug)` | Target vault                  |
-| `set_actor(actor)`     | Identity performing operation |
+| Method                   | Description                   |
+| ------------------------ | ----------------------------- |
+| `set_client_id(id)`      | Idempotency client identifier |
+| `set_sequence(seq)`      | Per-client sequence number    |
+| `set_organization(slug)` | Target organization slug      |
+| `set_vault(slug)`        | Target vault slug             |
+| `set_actor(actor)`       | Identity performing operation |
 
 ### System Context
 
-| Method                                              | Description              |
-| --------------------------------------------------- | ------------------------ |
-| `set_system_context(node_id, is_leader, raft_term)` | Set all system fields    |
-| `set_shard_id(id)`                                  | Shard routing identifier |
-| `set_is_vip(is_vip)`                                | VIP organization indicator  |
+| Method                                              | Description                |
+| --------------------------------------------------- | -------------------------- |
+| `set_system_context(node_id, is_leader, raft_term)` | Set all system fields      |
+| `set_region(region)`                                | Data residency region      |
+| `set_is_vip(is_vip)`                                | VIP organization indicator |
 
 ### Operation Fields
 

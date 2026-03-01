@@ -32,10 +32,10 @@
         "sort": 1
       },
       {
-        "name": "shard_id",
+        "name": "region",
         "type": "query",
         "datasource": { "uid": "${datasource}" },
-        "query": "label_values(inferadb_ledger_raft_term, shard_id)",
+        "query": "label_values(inferadb_ledger_raft_term, region)",
         "includeAll": true,
         "multi": true,
         "current": { "text": "All", "value": "$__all" },
@@ -76,7 +76,13 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "0": { "text": "NO QUORUM", "color": "red" }, "1": { "text": "QUORUM OK", "color": "green" } } }
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "NO QUORUM", "color": "red" },
+                "1": { "text": "QUORUM OK", "color": "green" }
+              }
+            }
           ],
           "thresholds": {
             "mode": "absolute",
@@ -102,7 +108,13 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "0": { "text": "Follower", "color": "blue" }, "1": { "text": "LEADER", "color": "green" } } }
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "Follower", "color": "blue" },
+                "1": { "text": "LEADER", "color": "green" }
+              }
+            }
           ]
         }
       },
@@ -311,7 +323,14 @@
               {
                 "id": "mappings",
                 "value": [
-                  { "type": "value", "options": { "0": { "text": "Healthy", "color": "green" }, "1": { "text": "Diverged", "color": "red" }, "2": { "text": "Recovering", "color": "orange" } } }
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": { "text": "Healthy", "color": "green" },
+                      "1": { "text": "Diverged", "color": "red" },
+                      "2": { "text": "Recovering", "color": "orange" }
+                    }
+                  }
                 ]
               }
             ]
@@ -331,7 +350,11 @@
           "id": "organize",
           "options": {
             "excludeByName": { "Time": true, "__name__": true, "state": true },
-            "renameByName": { "organization_slug": "Organization", "vault_id": "Vault", "Value": "Status" }
+            "renameByName": {
+              "organization_slug": "Organization",
+              "vault_id": "Vault",
+              "Value": "Status"
+            }
           }
         }
       ]
@@ -344,7 +367,12 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "custom": { "drawStyle": "bars", "fillOpacity": 80, "lineWidth": 1, "stacking": { "mode": "normal" } }
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "stacking": { "mode": "normal" }
+          }
         }
       },
       "targets": [

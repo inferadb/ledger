@@ -417,13 +417,13 @@ Each variant needs three method entries:
 # enum EventScope { Organization }
 # impl EventAction {
 # fn scope(&self) -> EventScope { EventScope::Organization }
-# fn action_str(&self) -> &'static str { "vault_archived" }
+# fn as_str(&self) -> &'static str { "vault_archived" }
 # fn event_type(&self) -> &'static str { "ledger.vault.archived" }
 # }
 ```
 
 - **`scope()`** — `System` or `Organization` (compile-time enforced, no dual-writing)
-- **`action_str()`** — snake_case action name for filtering
+- **`as_str()`** — snake_case action name for filtering
 - **`event_type()`** — hierarchical `{service}.{domain}.{action}` for the catalog
 
 ### Step 3: Emit the Event

@@ -27,18 +27,18 @@ All metrics follow the pattern: `ledger_{subsystem}_{name}_{unit}`
 
 ## Write Service
 
-| Metric                             | Type      | Labels         | Description                  |
-| ---------------------------------- | --------- | -------------- | ---------------------------- |
-| `ledger_writes_total`              | Counter   | `status`       | Total write operations       |
-| `ledger_write_latency_seconds`     | Histogram | `status`       | Write operation latency      |
-| `ledger_batch_writes_total`        | Counter   | `status`       | Total batch write operations |
-| `ledger_batch_size`                | Histogram | -              | Operations per batch         |
-| `ledger_rate_limit_exceeded_total` | Counter   | `organization_slug` | Rate limit violations        |
+| Metric                             | Type      | Labels            | Description                  |
+| ---------------------------------- | --------- | ----------------- | ---------------------------- |
+| `ledger_writes_total`              | Counter   | `status`          | Total write operations       |
+| `ledger_write_latency_seconds`     | Histogram | `status`          | Write operation latency      |
+| `ledger_batch_writes_total`        | Counter   | `status`          | Total batch write operations |
+| `ledger_batch_size`                | Histogram | -                 | Operations per batch         |
+| `ledger_rate_limit_exceeded_total` | Counter   | `organization_id` | Rate limit violations        |
 
 **Labels:**
 
 - `status`: `success` or `error`
-- `organization_slug`: Organization identifier
+- `organization_id`: Internal organization identifier
 
 ## Read Service
 
@@ -152,11 +152,11 @@ rate(ledger_batch_eager_commits_total[5m]) /
 
 ## Recovery
 
-| Metric                          | Type    | Labels                               | Description                             |
-| ------------------------------- | ------- | ------------------------------------ | --------------------------------------- |
-| `ledger_recovery_success_total` | Counter | `organization_slug`, `vault_id`           | Successful vault recoveries             |
-| `ledger_recovery_failure_total` | Counter | `organization_slug`, `vault_id`, `reason` | Failed recovery attempts                |
-| `ledger_determinism_bug_total`  | Counter | `organization_slug`, `vault_id`           | **CRITICAL**: Determinism bugs detected |
+| Metric                          | Type    | Labels                                  | Description                             |
+| ------------------------------- | ------- | --------------------------------------- | --------------------------------------- |
+| `ledger_recovery_success_total` | Counter | `organization_id`, `vault_id`           | Successful vault recoveries             |
+| `ledger_recovery_failure_total` | Counter | `organization_id`, `vault_id`, `reason` | Failed recovery attempts                |
+| `ledger_determinism_bug_total`  | Counter | `organization_id`, `vault_id`           | **CRITICAL**: Determinism bugs detected |
 
 ### Critical Alert
 

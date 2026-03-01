@@ -41,7 +41,7 @@ Formal guarantees the system maintains under all conditions.
 | #   | Invariant                     | Description                                                            |
 | --- | ----------------------------- | ---------------------------------------------------------------------- |
 | 15  | Joint consensus atomicity     | Membership changes use joint consensus; no single-step reconfiguration |
-| 16  | Serialized membership changes | At most one membership change in progress per shard                    |
+| 16  | Serialized membership changes | At most one membership change in progress per region                   |
 | 17  | No-op commit on election      | New leaders commit no-op before accepting membership changes           |
 
 ## Verification Invariants
@@ -52,22 +52,22 @@ Formal guarantees the system maintains under all conditions.
 | 19  | Snapshot chain continuity  | Every snapshot links to genesis via `genesis_hash` and `chain_commitment` |
 | 20  | Verifiability preservation | Integrity check succeeds regardless of transaction body compaction        |
 
-## Shard Group Invariants
+## Region Group Invariants
 
-| #   | Invariant                    | Description                                                                   |
-| --- | ---------------------------- | ----------------------------------------------------------------------------- |
-| 21  | Vault chain independence     | Each vault's chain is independently verifiable regardless of shard assignment |
-| 22  | Shard membership consistency | Organization-to-shard mapping in `_system` matches actual shard state            |
-| 23  | Cross-shard isolation        | Transactions in one shard cannot affect state in another shard                |
+| #   | Invariant                     | Description                                                                    |
+| --- | ----------------------------- | ------------------------------------------------------------------------------ |
+| 21  | Vault chain independence      | Each vault's chain is independently verifiable regardless of region assignment |
+| 22  | Region membership consistency | Organization-to-region mapping in `_system` matches actual region state        |
+| 23  | Cross-region isolation        | Transactions in one region cannot affect state in another region               |
 
 ## Idempotency Invariants
 
-| #   | Invariant                    | Description                                                                                                            |
-| --- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| 24  | Sequence monotonicity        | For any client, committed sequences are strictly increasing (no gaps, no duplicates)                                   |
-| 25  | Duplicate rejection          | A sequence ≤ `last_committed_seq` never creates a new transaction                                                      |
+| #   | Invariant                    | Description                                                                                                             |
+| --- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| 24  | Sequence monotonicity        | For any client, committed sequences are strictly increasing (no gaps, no duplicates)                                    |
+| 25  | Duplicate rejection          | A sequence ≤ `last_committed_seq` never creates a new transaction                                                       |
 | 26  | Sequence persistence         | `last_committed_seq` per client survives leader failover (part of replicated `ClientSequences` table within TTL window) |
-| 27  | Cross-failover deduplication | Idempotency key match with same request hash returns `ALREADY_COMMITTED` after leader change (within 24h TTL)          |
+| 27  | Cross-failover deduplication | Idempotency key match with same request hash returns `ALREADY_COMMITTED` after leader change (within 24h TTL)           |
 
 ## Operation Semantics Invariants
 
@@ -84,42 +84,42 @@ Formal guarantees the system maintains under all conditions.
 | 31  | Raft log durability       | Log entries are fsync'd before Raft acknowledgment                |
 | 32  | State consistency         | `state.db` reflects all applied log entries up to `applied_index` |
 | 33  | Block archive append-only | Segment files are never modified after creation                   |
-| 34  | Snapshot validity         | Snapshot `state_root` matches block header at `shard_height`      |
+| 34  | Snapshot validity         | Snapshot `state_root` matches block header at `region_height`     |
 
 ## AppliedState Decomposition Invariants
 
-| #   | Invariant                        | Description                                                                                                                                  |
-| --- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| #   | Invariant                        | Description                                                                                                                                   |
+| --- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | 35  | Externalized table atomicity     | `AppliedStateCore` and all 9 externalized tables are written in a single `WriteTransaction` — either all succeed or none are visible          |
 | 36  | Core blob compactness            | `AppliedStateCore` serialized size remains <512 bytes regardless of cluster scale (organizations, vaults, client sequences)                   |
 | 37  | Table reconstruction correctness | `load_state_from_tables()` reconstructs an `AppliedState` identical to the in-memory state at the time of the last `save_state_core()` commit |
 
 ## Snapshot Streaming Invariants
 
-| #   | Invariant                        | Description                                                                                                    |
-| --- | -------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| 38  | Snapshot integrity               | SHA-256 checksum over compressed bytes is verified before any decompression or state changes                   |
-| 39  | Snapshot atomicity               | `install_snapshot()` writes all state in a single `WriteTransaction` — incomplete installs leave no state      |
-| 40  | Event best-effort restoration    | Event restoration failure during snapshot install is logged but non-fatal — core state installation completes  |
-| 41  | No entity cap                    | Snapshot creation and installation handle any number of entities per vault (no 10,000 cap)                     |
+| #   | Invariant                     | Description                                                                                                   |
+| --- | ----------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| 38  | Snapshot integrity            | SHA-256 checksum over compressed bytes is verified before any decompression or state changes                  |
+| 39  | Snapshot atomicity            | `install_snapshot()` writes all state in a single `WriteTransaction` — incomplete installs leave no state     |
+| 40  | Event best-effort restoration | Event restoration failure during snapshot install is logged but non-fatal — core state installation completes |
+| 41  | No entity cap                 | Snapshot creation and installation handle any number of entities per vault (no 10,000 cap)                    |
 
 ## Leaf Linked List Invariants
 
-| #   | Invariant                | Description                                                                                            |
-| --- | ------------------------ | ------------------------------------------------------------------------------------------------------ |
-| 42  | Chain completeness       | `next_leaf` chain starting from the leftmost leaf visits every leaf exactly once in key order           |
-| 43  | Chain termination        | The rightmost leaf has `next_leaf = 0` (null page ID), terminating iteration                           |
-| 44  | Split maintenance        | After leaf split: `left.next_leaf = right.page_id`, `right.next_leaf = old_left.next_leaf`             |
-| 45  | Merge maintenance        | After leaf merge: `left.next_leaf = right.next_leaf` (right page freed)                                |
+| #   | Invariant          | Description                                                                                   |
+| --- | ------------------ | --------------------------------------------------------------------------------------------- |
+| 42  | Chain completeness | `next_leaf` chain starting from the leftmost leaf visits every leaf exactly once in key order |
+| 43  | Chain termination  | The rightmost leaf has `next_leaf = 0` (null page ID), terminating iteration                  |
+| 44  | Split maintenance  | After leaf split: `left.next_leaf = right.page_id`, `right.next_leaf = old_left.next_leaf`    |
+| 45  | Merge maintenance  | After leaf merge: `left.next_leaf = right.next_leaf` (right page freed)                       |
 
 ## Multi-Vault Failure Isolation Invariants
 
-| #   | Invariant                        | Description                                                                          |
-| --- | -------------------------------- | ------------------------------------------------------------------------------------ |
-| 46  | Vault divergence read isolation  | Vault divergence does not affect read availability of other vaults in the same shard |
-| 47  | Vault divergence write isolation | Vault divergence does not block writes to other vaults in the same shard             |
-| 48  | Vault recovery independence      | Vault recovery requires no shard-wide coordination                                   |
-| 49  | Determinism bug surfacing        | Determinism bugs surface during recovery replay                                      |
+| #   | Invariant                        | Description                                                                           |
+| --- | -------------------------------- | ------------------------------------------------------------------------------------- |
+| 46  | Vault divergence read isolation  | Vault divergence does not affect read availability of other vaults in the same region |
+| 47  | Vault divergence write isolation | Vault divergence does not block writes to other vaults in the same region             |
+| 48  | Vault recovery independence      | Vault recovery requires no region-wide coordination                                   |
+| 49  | Determinism bug surfacing        | Determinism bugs surface during recovery replay                                       |
 
 ## Storage Layer Boundaries
 

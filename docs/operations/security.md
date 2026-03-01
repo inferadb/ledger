@@ -201,7 +201,7 @@ Ledger uses Raft (a crash-fault-tolerant protocol) for consensus. While Raft ass
 | Forged snapshot membership     | Membership config referencing unknown nodes             | Rejects snapshot                          |
 | Snapshot with future log index | Log index beyond any committed entry                    | Rejects snapshot                          |
 | Replay attacks                 | Re-sent entries with old terms or stale committed index | Ignored by term/index monotonicity checks |
-| Invalid shard routing          | Requests targeting non-existent shard IDs               | Returns NOT_FOUND status                  |
+| Invalid region routing         | Requests targeting non-existent regions                 | Returns NOT_FOUND status                  |
 | Oversized chunks               | Snapshot chunks exceeding expected bounds               | Processed without buffer overflow         |
 
 **Key properties:**
@@ -209,7 +209,7 @@ Ledger uses Raft (a crash-fault-tolerant protocol) for consensus. While Raft ass
 - No invalid Raft message corrupts the log, state machine, or committed data
 - The node remains a functioning cluster member after receiving any malformed message
 - Stale-term messages are silently dropped per the Raft protocol
-- Multi-shard routing validates shard existence before forwarding
+- Multi-region routing validates region existence before forwarding
 
 These properties are verified by 22 Byzantine fault tests in `crates/raft/src/services/raft.rs`.
 
@@ -235,7 +235,7 @@ These properties are verified by 22 Byzantine fault tests in `crates/raft/src/se
 
 - Organizations cannot access each other's data
 - Vaults within an organization are cryptographically independent
-- Shard assignment is transparent to clients
+- Region assignment is transparent to clients
 
 ## Operational Security
 

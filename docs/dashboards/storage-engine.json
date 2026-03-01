@@ -43,10 +43,10 @@
         "sort": 1
       },
       {
-        "name": "shard_id",
+        "name": "region",
         "type": "query",
         "datasource": { "uid": "${datasource}" },
-        "query": "label_values(ledger_disk_bytes_total, shard_id)",
+        "query": "label_values(ledger_disk_bytes_total, region)",
         "includeAll": true,
         "multi": true,
         "current": { "text": "All", "value": "$__all" },
