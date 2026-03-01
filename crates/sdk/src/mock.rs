@@ -1570,6 +1570,31 @@ impl AdminService for MockAdminService {
             directory_status: "migrating".to_string(),
         }))
     }
+
+    async fn migrate_existing_users(
+        &self,
+        _request: Request<proto::MigrateExistingUsersRequest>,
+    ) -> Result<Response<proto::MigrateExistingUsersResponse>, Status> {
+        self.state.check_injection().await?;
+
+        Ok(Response::new(proto::MigrateExistingUsersResponse {
+            users: 0,
+            migrated: 0,
+            skipped: 0,
+            errors: 0,
+            elapsed_secs: 0.0,
+        }))
+    }
+
+    async fn provision_region(
+        &self,
+        request: Request<proto::ProvisionRegionRequest>,
+    ) -> Result<Response<proto::ProvisionRegionResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        Ok(Response::new(proto::ProvisionRegionResponse { created: true, region: req.region }))
+    }
 }
 
 // =============================================================================

@@ -200,12 +200,19 @@ pub enum LedgerRequest {
 /// System-level requests that modify `_system` organization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SystemRequest {
-    /// Creates a new user.
+    /// Creates a new user (global control-plane entry only).
+    ///
+    /// PII fields (name, email) are excluded — the global control plane must
+    /// not contain plaintext personal data. User PII is written directly to
+    /// the regional store.
     CreateUser {
-        /// User's display name.
-        name: String,
-        /// User's email address.
-        email: String,
+        /// Pre-allocated user ID from the saga orchestrator.
+        ///
+        /// The saga allocates this ID via CAS sequence in step 0 and writes it
+        /// to the email-hash index. The state machine must use this exact ID
+        /// (not allocate a new one) to keep the slug index consistent with
+        /// the email-hash index.
+        user: UserId,
         /// Whether this user is a global service administrator.
         admin: bool,
         /// External Snowflake identifier.
@@ -295,6 +302,18 @@ pub enum SystemRequest {
         erased_by: String,
         /// Region where the user's PII resides.
         region: Region,
+    },
+
+    /// One-time migration of existing users from flat `_system` store to
+    /// regional directory structure.
+    ///
+    /// Each entry contains pre-computed data (email HMAC, subject key) so
+    /// the blinding key never enters the Raft log. The state machine creates
+    /// directory entries, slug indexes, email hash indexes, subject keys,
+    /// and removes old plaintext email indexes atomically.
+    MigrateExistingUsers {
+        /// Pre-computed migration entries (one per user).
+        entries: Vec<inferadb_ledger_state::system::UserMigrationEntry>,
     },
 }
 
@@ -418,6 +437,18 @@ pub enum LedgerResponse {
         user_id: UserId,
     },
 
+    /// Flat-to-regional user migration completed.
+    UsersMigrated {
+        /// User records processed.
+        users: u64,
+        /// Users successfully migrated.
+        migrated: u64,
+        /// Users skipped (already migrated).
+        skipped: u64,
+        /// Users that failed migration.
+        errors: u64,
+    },
+
     /// Error response.
     Error {
         /// Error message.
@@ -509,6 +540,13 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::UserErased { user_id } => {
                 write!(f, "UserErased(id={})", user_id)
             },
+            LedgerResponse::UsersMigrated { users, migrated, skipped, errors } => {
+                write!(
+                    f,
+                    "UsersMigrated(total={}, migrated={}, skipped={}, errors={})",
+                    users, migrated, skipped, errors
+                )
+            },
             LedgerResponse::Error { message } => {
                 write!(f, "Error({})", message)
             },
@@ -559,8 +597,7 @@ mod tests {
     #[test]
     fn test_system_request_serialization() {
         let request = SystemRequest::CreateUser {
-            name: "Alice".to_string(),
-            email: "alice@example.com".to_string(),
+            user: UserId::new(42),
             admin: false,
             slug: UserSlug::new(12345),
             region: Region::US_EAST_VA,
@@ -570,9 +607,8 @@ mod tests {
         let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            SystemRequest::CreateUser { name, email, admin, slug, region } => {
-                assert_eq!(name, "Alice");
-                assert_eq!(email, "alice@example.com");
+            SystemRequest::CreateUser { user, admin, slug, region } => {
+                assert_eq!(user, UserId::new(42));
                 assert!(!admin);
                 assert_eq!(slug, UserSlug::new(12345));
                 assert_eq!(region, Region::US_EAST_VA);

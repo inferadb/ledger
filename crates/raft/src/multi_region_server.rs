@@ -148,7 +148,8 @@ impl MultiRegionLedgerServer {
             .listen_addr(self.addr)
             .proposal_timeout(self.proposal_timeout)
             .build()
-            .with_health_state(self.health_state.clone());
+            .with_health_state(self.health_state.clone())
+            .with_multi_raft_manager(self.manager.clone());
 
         // Extract connection tracker before health_state is moved into HealthServiceImpl
         let connection_tracker = self.health_state.connection_tracker().clone();

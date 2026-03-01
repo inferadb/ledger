@@ -95,6 +95,10 @@ pub enum MultiRaftError {
     #[snafu(display("Region {region} not found"))]
     RegionNotFound { region: Region },
 
+    /// Region storage already open (concurrent creation).
+    #[snafu(display("Region {region} storage already open"))]
+    RegionAlreadyOpen { region: Region },
+
     /// Failed to open storage.
     #[snafu(display("Storage error for region {region}: {message}"))]
     Storage { region: Region, message: String },
@@ -520,6 +524,62 @@ impl MultiRaftManager {
         self.start_region(region_config).await
     }
 
+    /// Ensures a data region is active, creating it lazily if needed.
+    ///
+    /// Returns the existing `RegionGroup` if the region is already running.
+    /// Otherwise creates the region with the provided config. This is the
+    /// entry point for lazy Raft group creation: the first organization or
+    /// user assigned to a region triggers group creation.
+    ///
+    /// Thread-safe: concurrent calls for the same region are handled via
+    /// fallback — if `start_region` fails because the region already exists
+    /// (either via `RegionExists` or a storage `AlreadyOpen` error from a
+    /// concurrent opener), we fall through to `get_region_group`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MultiRaftError::SystemRegionRequired`] if the system region
+    /// has not been started, or a storage/Raft error if initialization fails.
+    /// Returns `(group, created)` where `created` is `true` if this call
+    /// actually created the region, `false` if it already existed.
+    pub async fn ensure_data_region(
+        &self,
+        region_config: RegionConfig,
+    ) -> Result<(Arc<RegionGroup>, bool)> {
+        let region = region_config.region;
+
+        // GLOBAL is the control plane — always created eagerly via start_system_region
+        if region == Region::GLOBAL {
+            return Ok((self.get_region_group(Region::GLOBAL)?, false));
+        }
+
+        // Fast path: region already running
+        if let Ok(group) = self.get_region_group(region) {
+            return Ok((group, false));
+        }
+
+        // Verify system region is running
+        if !self.has_region(Region::GLOBAL) {
+            return Err(MultiRaftError::SystemRegionRequired);
+        }
+
+        // Attempt to start — if a concurrent caller beat us, fall through.
+        // Two error variants can indicate concurrency:
+        // - RegionExists: start_region's has_region check saw it
+        // - RegionAlreadyOpen: RegionStorageManager's open_region lock detected it
+        match self.start_region(region_config).await {
+            Ok(group) => {
+                info!(region = region.as_str(), "Lazily created region group");
+                Ok((group, true))
+            },
+            Err(MultiRaftError::RegionExists { .. } | MultiRaftError::RegionAlreadyOpen { .. }) => {
+                // Concurrent creation succeeded — read from the map
+                Ok((self.get_region_group(region)?, false))
+            },
+            Err(e) => Err(e),
+        }
+    }
+
     /// Starts a region group.
     async fn start_region(&self, region_config: RegionConfig) -> Result<Arc<RegionGroup>> {
         let region = region_config.region;
@@ -710,10 +770,13 @@ impl MultiRaftManager {
     /// higher-level wrappers (`StateLayer`, `BlockArchive`) and the `RaftLogStore`.
     fn open_region_storage(&self, region: Region) -> Result<OpenedRegionStorage> {
         // Open databases via storage manager (creates directory + state.db, blocks.db, events.db)
-        let storage = self
-            .storage_manager
-            .open_region(region)
-            .map_err(|e| MultiRaftError::Storage { region, message: format!("{e}") })?;
+        let storage = self.storage_manager.open_region(region).map_err(|e| {
+            if matches!(e, crate::region_storage::RegionStorageError::AlreadyOpen { .. }) {
+                MultiRaftError::RegionAlreadyOpen { region }
+            } else {
+                MultiRaftError::Storage { region, message: format!("{e}") }
+            }
+        })?;
 
         // Wrap raw databases in domain-specific types
         let state = Arc::new(StateLayer::new(storage.state_db().clone()));
@@ -1335,5 +1398,143 @@ mod tests {
         assert!(!Region::GLOBAL.requires_residency());
         assert!(!Region::US_EAST_VA.requires_residency());
         assert!(!Region::US_WEST_OR.requires_residency());
+    }
+
+    #[tokio::test]
+    async fn test_ensure_data_region_creates_new() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = MultiRaftManager::new(config);
+
+        // Start system region first
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        // ensure_data_region should create a new region
+        let region_config =
+            RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
+        let result = manager.ensure_data_region(region_config).await;
+
+        assert!(result.is_ok(), "ensure_data_region failed: {:?}", result.err());
+        let (_group, created) = result.expect("just asserted ok");
+        assert!(created, "should report created=true for new region");
+        assert!(manager.has_region(Region::US_EAST_VA));
+        assert_eq!(manager.list_regions().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_data_region_returns_existing() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = MultiRaftManager::new(config);
+
+        // Start system region and a data region
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let data_config =
+            RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
+        manager.start_data_region(data_config).await.expect("start data");
+
+        // ensure_data_region should return the existing group
+        let region_config =
+            RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
+        let result = manager.ensure_data_region(region_config).await;
+
+        assert!(result.is_ok(), "ensure_data_region on existing failed: {:?}", result.err());
+        let (_group, created) = result.expect("just asserted ok");
+        assert!(!created, "should report created=false for existing region");
+        assert_eq!(manager.list_regions().len(), 2); // Still 2 regions
+    }
+
+    #[tokio::test]
+    async fn test_ensure_data_region_requires_system() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = MultiRaftManager::new(config);
+
+        // Without system region, ensure_data_region should fail
+        let region_config =
+            RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
+        let result = manager.ensure_data_region(region_config).await;
+
+        assert!(matches!(result, Err(MultiRaftError::SystemRegionRequired)));
+    }
+
+    #[tokio::test]
+    async fn test_ensure_data_region_global_returns_system() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = MultiRaftManager::new(config);
+
+        // Before system region: GLOBAL should return RegionNotFound
+        let region_config =
+            RegionConfig::data(Region::GLOBAL, vec![(1, "127.0.0.1:50051".to_string())]);
+        let result = manager.ensure_data_region(region_config).await;
+        assert!(matches!(result, Err(MultiRaftError::RegionNotFound { .. })));
+
+        // After system region: GLOBAL should return the existing system group
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let region_config =
+            RegionConfig::data(Region::GLOBAL, vec![(1, "127.0.0.1:50051".to_string())]);
+        let result = manager.ensure_data_region(region_config).await;
+        assert!(result.is_ok());
+        let (group, created) = result.expect("just asserted ok");
+        assert!(!created, "GLOBAL should never be reported as newly created");
+        assert_eq!(group.region(), Region::GLOBAL);
+    }
+
+    #[tokio::test]
+    async fn test_discover_and_reopen_regions_on_restart() {
+        let temp = TestDir::new();
+
+        // First "session": create regions
+        {
+            let config = create_test_config(&temp);
+            let manager = MultiRaftManager::new(config);
+
+            let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+            manager.start_system_region(system_config).await.expect("start system");
+
+            let data_config =
+                RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
+            manager.start_data_region(data_config).await.expect("start us-east-va");
+
+            // Shutdown
+            manager.shutdown().await;
+        }
+
+        // Second "session": discover and reopen
+        {
+            let config = create_test_config(&temp);
+            let manager = MultiRaftManager::new(config);
+
+            // Discover regions that have existing data on disk
+            let existing = manager.storage_manager().discover_existing_regions();
+
+            // Should find the data region we created
+            assert_eq!(existing.len(), 1);
+            assert!(existing.contains(&Region::US_EAST_VA));
+
+            // Re-open system region (no bootstrap on restart)
+            let mut system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+            system_config.bootstrap = false;
+            manager.start_system_region(system_config).await.expect("restart system");
+
+            // Re-open discovered regions (no bootstrap on restart)
+            for region in &existing {
+                let mut region_config =
+                    RegionConfig::data(*region, vec![(1, "127.0.0.1:50051".to_string())]);
+                region_config.bootstrap = false;
+                manager.start_data_region(region_config).await.expect("restart data region");
+            }
+
+            // Both regions should be active
+            assert_eq!(manager.list_regions().len(), 2);
+            assert!(manager.has_region(Region::GLOBAL));
+            assert!(manager.has_region(Region::US_EAST_VA));
+        }
     }
 }

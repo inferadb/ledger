@@ -265,7 +265,7 @@ async fn test_delete_user_saga_state_transitions() {
     // Create a DeleteUser saga
     let saga_id = "test-delete-user-1".to_string();
     let input = DeleteUserInput {
-        user_id: UserId::new(user_id),
+        user: UserId::new(user_id),
         organization_ids: vec![OrganizationId::new(organization.value() as i64)],
     };
     let saga = DeleteUserSaga::new(saga_id.clone(), input);

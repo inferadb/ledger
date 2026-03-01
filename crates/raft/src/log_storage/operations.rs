@@ -994,8 +994,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             LedgerRequest::System(system_request) => {
                 let response = match system_request {
-                    SystemRequest::CreateUser { slug, .. } => {
-                        let user_id = state.sequences.next_user();
+                    SystemRequest::CreateUser { user, slug, .. } => {
+                        let user_id = *user;
                         let slug = *slug;
                         state.user_slug_index.insert(slug, user_id);
                         state.user_id_to_slug.insert(user_id, slug);
@@ -1171,21 +1171,39 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             LedgerResponse::Empty
                         }
                     },
+                    SystemRequest::MigrateExistingUsers { entries } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            let sys = inferadb_ledger_state::system::SystemOrganizationService::new(
+                                state_layer.clone(),
+                            );
+                            match sys.migrate_existing_users(entries) {
+                                Ok(summary) => LedgerResponse::UsersMigrated {
+                                    users: summary.users,
+                                    migrated: summary.migrated,
+                                    skipped: summary.skipped,
+                                    errors: summary.errors,
+                                },
+                                Err(e) => LedgerResponse::Error {
+                                    message: format!("User migration failed: {e}"),
+                                },
+                            }
+                        } else {
+                            LedgerResponse::Empty
+                        }
+                    },
                 };
 
                 // Emit events for system request variants
                 match (&response, system_request) {
                     (
                         LedgerResponse::UserCreated { user_id, slug },
-                        SystemRequest::CreateUser { name, email, admin, region, .. },
+                        SystemRequest::CreateUser { admin, region, .. },
                     ) => {
                         events.push(
                             ApplyPhaseEmitter::for_system(EventAction::UserCreated)
                                 .principal("system")
                                 .detail("user_id", &user_id.to_string())
                                 .detail("slug", &slug.to_string())
-                                .detail("name", name)
-                                .detail("email", email)
                                 .detail("admin", &admin.to_string())
                                 .detail("region", region.as_str())
                                 .outcome(EventOutcome::Success)
@@ -1236,6 +1254,22 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 .principal(erased_by)
                                 .detail("user_id", &user_id.to_string())
                                 .detail("region", region.as_str())
+                                .outcome(EventOutcome::Success)
+                                .build(block_height, *op_index, block_timestamp, ttl_days),
+                        );
+                        *op_index += 1;
+                    },
+                    (
+                        LedgerResponse::UsersMigrated { migrated, skipped, errors, .. },
+                        SystemRequest::MigrateExistingUsers { entries },
+                    ) => {
+                        events.push(
+                            ApplyPhaseEmitter::for_system(EventAction::UsersMigrated)
+                                .principal("system")
+                                .detail("users", &entries.len().to_string())
+                                .detail("migrated", &migrated.to_string())
+                                .detail("skipped", &skipped.to_string())
+                                .detail("errors", &errors.to_string())
                                 .outcome(EventOutcome::Success)
                                 .build(block_height, *op_index, block_timestamp, ttl_days),
                         );

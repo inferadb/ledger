@@ -924,6 +924,20 @@ service AdminService {
   // removes email hash indexes, and creates erasure audit record.
   // Each step is idempotent — safe to retry on failure.
   rpc EraseUser(EraseUserRequest) returns (EraseUserResponse);
+
+  // ==========================================================================
+  // User Migration (flat _system → regional)
+  // ==========================================================================
+
+  // Migrate existing users from flat _system store to regional directory
+  // structure. One-time admin operation for pre-release data migration.
+  // Idempotent — re-run skips already-migrated users.
+  rpc MigrateExistingUsers(MigrateExistingUsersRequest) returns (MigrateExistingUsersResponse);
+
+  // Eagerly provision a Raft group for a region without assigning data.
+  // Normally regional groups are created lazily on first organization or
+  // user assignment. This RPC allows pre-provisioning for capacity planning.
+  rpc ProvisionRegion(ProvisionRegionRequest) returns (ProvisionRegionResponse);
 }
 
 // -----------------------------------------------------------------------------
@@ -1958,5 +1972,45 @@ message EraseUserRequest {
 message EraseUserResponse {
   // User ID that was erased.
   int64 user_id = 1;
+}
+
+// -----------------------------------------------------------------------------
+// User Migration Messages
+// -----------------------------------------------------------------------------
+
+// Migrate existing users from flat _system store to regional directory
+// structure. Explicit admin action for pre-release data migration.
+message MigrateExistingUsersRequest {
+  // Default region for users without an assigned region.
+  Region default_region = 1;
+  // Hex-encoded email blinding key for HMAC computation.
+  // The key stays in the handler and never enters the Raft log.
+  string email_blinding_key = 2;
+}
+
+message MigrateExistingUsersResponse {
+  // User records found in the flat _system store.
+  uint64 users = 1;
+  // Users successfully migrated in this run.
+  uint64 migrated = 2;
+  // Users skipped (already have directory entries).
+  uint64 skipped = 3;
+  // Users that failed migration.
+  uint64 errors = 4;
+  // Elapsed time in seconds.
+  double elapsed_secs = 5;
+}
+
+// Eagerly provision a Raft group for a region.
+message ProvisionRegionRequest {
+  // Region to provision.
+  Region region = 1;
+}
+
+message ProvisionRegionResponse {
+  // Whether the region was newly created (false if already active).
+  bool created = 1;
+  // Region that was provisioned.
+  Region region = 2;
 }
 

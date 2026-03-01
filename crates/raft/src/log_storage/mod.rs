@@ -2066,15 +2066,13 @@ mod tests {
                 request_hash: 0,
             },
             LedgerRequest::System(SystemRequest::CreateUser {
-                name: "Alice".to_string(),
-                email: "alice@example.com".to_string(),
+                user: UserId::new(1),
                 admin: false,
                 slug: UserSlug::new(111),
                 region: Region::US_EAST_VA,
             }),
             LedgerRequest::System(SystemRequest::CreateUser {
-                name: "Bob".to_string(),
-                email: "bob@example.com".to_string(),
+                user: UserId::new(2),
                 admin: false,
                 slug: UserSlug::new(222),
                 region: Region::US_EAST_VA,
@@ -4527,8 +4525,7 @@ mod tests {
         let mut state = store.applied_state.write();
 
         let request = LedgerRequest::System(SystemRequest::CreateUser {
-            name: "Alice Admin".to_string(),
-            email: "alice@example.com".to_string(),
+            user: UserId::new(1),
             admin: true,
             slug: UserSlug::new(333),
             region: Region::US_EAST_VA,
@@ -4557,8 +4554,6 @@ mod tests {
             user_event.details.contains_key("user_id"),
             "UserCreated should have user_id detail"
         );
-        assert_eq!(user_event.details.get("name").map(|s| s.as_str()), Some("Alice Admin"));
-        assert_eq!(user_event.details.get("email").map(|s| s.as_str()), Some("alice@example.com"));
         assert_eq!(user_event.details.get("admin").map(|s| s.as_str()), Some("true"));
         assert_eq!(user_event.organization_id, OrganizationId::new(0));
     }

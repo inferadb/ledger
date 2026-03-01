@@ -39,8 +39,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Re-exports core types, errors, hashing utilities, and codec
 - **Key Types/Functions**:
-  - Public modules: `codec`, `config`, `error`, `events`, `hash`, `merkle`, `snowflake`, `types`, `validation`
-  - Re-exports: `OrganizationId`, `OrganizationSlug`, `OrganizationUsage`, `VaultId`, `VaultSlug`, `ShardId`, `UserId`, `UserSlug`, `BlockHeader`, `Transaction`, `Entity`, `Relationship`, `Operation`, etc.
+  - Public modules: `codec`, `config`, `email_hash`, `error`, `events`, `hash`, `merkle`, `snowflake`, `types`, `validation`
+  - Re-exports: `OrganizationId`, `OrganizationSlug`, `OrganizationUsage`, `VaultId`, `VaultSlug`, `ShardId`, `UserId`, `UserSlug`, `BlockHeader`, `Transaction`, `Entity`, `Relationship`, `Operation`, `EmailBlindingKey`, `compute_email_hmac`, `normalize_email`, etc.
 - **Insights**: Clean public API surface, excellent organization
 
 #### `codec.rs` (562 lines)
@@ -53,29 +53,31 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - 29 unit tests + 1 proptest block covering all domain types
 - **Insights**: Excellent test coverage, postcard chosen for determinism and compactness
 
-#### `config/` (3733 lines across 7 submodules)
+#### `config/` (4426 lines across 9 submodules)
 
 - **Purpose**: Configuration types for all subsystems with fallible builders, serde, and JSON Schema
 - **Structure**:
-  - `config/mod.rs` (1398 lines) — `ConfigError` enum, re-exports from submodules
+  - `config/mod.rs` (1402 lines) — `ConfigError` enum, re-exports from submodules
   - `config/node.rs` (51 lines) — `NodeConfig`, `PeerConfig`
-  - `config/storage.rs` (628 lines) — `StorageConfig`, `BTreeCompactionConfig`, `IntegrityConfig`, `BackupConfig`, `TieredStorageConfig`
+  - `config/storage.rs` (786 lines) — `StorageConfig`, `BTreeCompactionConfig`, `IntegrityConfig`, `BackupConfig`, `TieredStorageConfig`, `RegionTieredStorageOverride`
   - `config/raft.rs` (370 lines) — `RaftConfig`, `BatchConfig`, `ClientSequenceEvictionConfig`
-  - `config/resilience.rs` (740 lines) — `RateLimitConfig`, `ShutdownConfig` (with `leader_transfer_timeout_secs`, default 10, 0 disables), `HealthCheckConfig`, `ValidationConfig`, `SagaConfig`, `CleanupConfig`
+  - `config/resilience.rs` (787 lines) — `RateLimitConfig`, `ShutdownConfig` (with `leader_transfer_timeout_secs`, default 10, 0 disables), `HealthCheckConfig`, `ValidationConfig`, `SagaConfig`, `CleanupConfig`, `MigrationConfig`
   - `config/observability.rs` (274 lines) — `HotKeyConfig`, `MetricsCardinalityConfig` (note: `AuditConfig` previously here was removed — replaced by `EventConfig` in `events.rs`)
   - `config/runtime.rs` (272 lines) — `RuntimeConfig`, `RuntimeEventsConfig`, `ConfigChange`, `NonReconfigurableField`
+  - `config/encryption.rs` (377 lines) — `EncryptionConfig` (enabled, key_source, algorithm, dek_cache_capacity, strict_memory_protection), `KeySource` enum (Env, File), `EncryptionAlgorithm` enum (Aes256Gcm), `RewrapConfig` (enabled, batch_size, interval_secs, target_rmk_version). Envelope encryption at-rest configuration for all persisted data (pages, snapshots, Raft logs) via DEK/RMK wrapping. 13 unit tests.
+  - `config/key_management.rs` (109 lines) — `RmkStatus` enum (Active, Deprecated, Decommissioned), `RmkVersionInfo` (region, version, status, created_at), `KeyManagerBackend` enum (SecretsManager, Env, File), `SecretsManagerConfig`, `SecretsProvider` enum (Infisical, Vault, AwsKms, GcpKms, AzureKeyVault). Region Master Key lifecycle and key manager backend selection.
 - **Key Types/Functions**:
-  - 20 config structs across submodules (was monolithic, now organized by subsystem)
+  - 28 config structs across submodules (was monolithic, now organized by subsystem)
   - All use `#[bon::bon]` fallible builders with validation
   - All derive `serde::Serialize/Deserialize` for TOML loading
   - All derive `schemars::JsonSchema` for schema export
-- **Insights**: Well-organized module split groups configs by subsystem. Excellent validation with humantime-serde for durations, byte-unit for sizes. Each struct's tests and default functions live alongside the struct definition.
+- **Insights**: Well-organized module split groups configs by subsystem. Excellent validation with humantime-serde for durations, byte-unit for sizes. Each struct's tests and default functions live alongside the struct definition. Encryption config supports multi-provider key management (Infisical, Vault, AWS KMS, GCP KMS, Azure Key Vault) with per-region RMK lifecycle tracking.
 
-#### `error.rs` (1188 lines)
+#### `error.rs` (1257 lines)
 
 - **Purpose**: Structured error taxonomy with numeric codes, retryability, and guidance
 - **Key Types/Functions**:
-  - `ErrorCode`: 29 numeric codes spanning 1000-1101 (storage), 2000-2102 (consensus), 3000-3205 (application) for classification
+  - `ErrorCode`: 33 numeric codes spanning 1000-1101 (storage), 2000-2102 (consensus), 3000-3207 (application) for classification. Includes region-aware codes: `AppInsufficientRegionNodes` (3206), `AppInvalidRegionAssignment` (3207), `AppOrganizationMigrating` (3106), `AppUserMigrating` (3107)
   - `LedgerError`: Domain-level errors with `#[snafu]` for context propagation
   - `StorageError`: Storage layer errors (IO, corruption, capacity)
   - `ConsensusError`: Raft consensus errors (leadership, quorum, log gaps)
@@ -92,7 +94,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `BucketHasher`: State bucketing (256 buckets) for incremental hashing
 - **Insights**: Excellent security practices. Constant-time comparison prevents timing attacks. seahash is used internally for non-cryptographic hashing (Prometheus labels, event key encoding) but not exposed as a named type.
 
-#### `merkle.rs` (331 lines)
+#### `merkle.rs` (341 lines)
 
 - **Purpose**: Merkle tree and proof generation/verification using rs_merkle
 - **Key Types/Functions**:
@@ -102,7 +104,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `MerkleProof::verify()`: Verify proof against root
 - **Insights**: Power-of-2 leaf count limitation documented (rs_merkle constraint). Adequate for block-level Merkle trees.
 
-#### `types.rs` (1364 lines)
+#### `types.rs` (1735 lines)
 
 - **Purpose**: Core domain types (blocks, transactions, operations, entities, relationships)
 - **Key Types/Functions**:
@@ -116,7 +118,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `Operation`: 5 variants (CreateRelationship, DeleteRelationship, SetEntity, DeleteEntity, ExpireEntity)
   - `Entity`: key, value, expires_at (0 = never), version
   - `Relationship`: resource, relation, subject (authorization tuple)
-- **Insights**: Dual-ID architecture for both organizations and vaults: internal sequential IDs (`OrganizationId`/`VaultId`, `i64`) for B+ tree key density, external Snowflake IDs (`OrganizationSlug`/`VaultSlug`, `u64`) for API-facing use. Fallible Transaction builder validates constraints (max 100 ops, max 1MB size). `BlockHeader` includes `organization`/`vault` scope and Raft consensus fields (`term`, `committed_index`).
+- **Insights**: Dual-ID architecture for both organizations and vaults: internal sequential IDs (`OrganizationId`/`VaultId`, `i64`) for B+ tree key density, external Snowflake IDs (`OrganizationSlug`/`VaultSlug`, `u64`) for API-facing use. Fallible Transaction builder validates constraints (max 1000 ops, max 100MB batch payload). `BlockHeader` includes `organization`/`vault` scope and Raft consensus fields (`term`, `committed_index`).
 
 #### `snowflake.rs` (384 lines)
 
@@ -145,7 +147,18 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Character sets: alphanumeric + hyphen/underscore for names, UTF-8 for values
 - **Insights**: Defense-in-depth security. Prevents injection attacks, DoS via large requests. Configurable limits support different deployment environments.
 
-#### `events.rs` (1343 lines)
+#### `email_hash.rs` (294 lines)
+
+- **Purpose**: HMAC-SHA256 based email hashing with a blinding key for privacy-preserving global email uniqueness across regions without storing plaintext
+- **Key Types/Functions**:
+  - `EmailBlindingKey`: 32-byte secret key for HMAC-SHA256 hashing, loaded externally at node startup, never persisted. `new(bytes, version)`, `version()`, `as_bytes()`, `FromStr` for 64-char hex strings
+  - `EmailBlindingKeyParseError`: snafu error with `InvalidLength` and `InvalidHex` variants
+  - `normalize_email(email: &str) -> String`: Trims and lowercases for consistent HMAC computation (RFC 5321 convention)
+  - `compute_email_hmac(key: &EmailBlindingKey, email: &str) -> String`: HMAC-SHA256 as lowercase hex (64 chars)
+  - 15 unit tests (13 traditional + 2 property tests)
+- **Insights**: `Debug` intentionally redacts key material. Property tests verify HMAC collision resistance and output format consistency. Enables global email uniqueness enforcement across regions without storing plaintext personal data.
+
+#### `events.rs` (1355 lines)
 
 - **Purpose**: Core domain types for the organization-scoped event logging system
 - **Key Types/Functions**:
@@ -153,13 +166,13 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `EmissionMeta`: Thin deserialization target for `scan_apply_phase()` — reads only the `emission` discriminant (~2 bytes) to filter handler-phase events without full deserialization
   - `EventMeta`: Thin GC wrapper — postcard deserializes `emission` (field 1) and `expires_at` (field 2) to check expiry without full deserialization
   - `EventScope`: `System` (org_id=0) or `Organization` — compile-time mapped from `EventAction`
-  - `EventAction`: 26 variants (15 system, 11 org) with exhaustive `scope()`, `event_type()`, `as_str()` — adding a variant without updating all three is a compile error
+  - `EventAction`: 28 variants (17 system, 11 org) with exhaustive `scope()`, `event_type()`, `as_str()` — adding a variant without updating all three is a compile error. System variants include `UserErased` and `UsersMigrated` for crypto-shredding and flat-to-regional migration.
   - `EventEmission`: `ApplyPhase` (deterministic, all replicas) or `HandlerPhase { node_id }` (node-local)
   - `EventOutcome`: `Success`, `Failed { code, detail }`, `Denied { reason }`
   - `EventConfig`: Master config with `enabled`, `default_ttl_days` (90), `max_details_size_bytes` (4096), `system_log_enabled`, `organization_log_enabled`, `max_snapshot_events` (100,000), `ingestion: IngestionConfig`
   - `IngestionConfig`: External ingestion config — `ingest_enabled`, `allowed_sources` (default: `["engine", "control"]`), `max_ingest_batch_size` (500), `ingest_rate_limit_per_source` (10,000/sec)
   - 56 unit tests covering all enum variants, scope mapping, serialization round-trips, config validation
-- **Insights**: Replaces the deleted `audit.rs`. Events use the canonical log line pattern (wide events) with rich structured context. `EventAction::scope()` enforces no-dual-write at the type level. `emission` as first field enables thin postcard deserialization for snapshot collection (`EmissionMeta`); `expires_at` as second field enables thin deserialization for GC (`EventMeta`). Serialization byte-pinning test prevents accidental field reorders. `source_service` is `String` (not `&'static str`) for postcard round-trip compatibility with external services (Engine, Control).
+- **Insights**: Replaces the deleted `audit.rs`. Events use the canonical log line pattern (wide events) with rich structured context. `EventAction::scope()` enforces no-dual-write at the type level. `emission` as first field enables thin postcard deserialization for snapshot collection (`EmissionMeta`); `expires_at` as second field enables thin deserialization for GC (`EventMeta`). Serialization byte-pinning test prevents accidental field reorders. `source_service` is `String` (not `&'static str`) for postcard round-trip compatibility with external services (Engine, Control). `UserErased` and `UsersMigrated` system events track crypto-shredding and bulk migration operations.
 
 ---
 
@@ -171,14 +184,14 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 ### Files
 
-#### `lib.rs` (107 lines)
+#### `lib.rs` (119 lines)
 
 - **Purpose**: Re-exports public API (Database, Transaction, StorageBackend, Table)
 - **Key Types/Functions**:
-  - Modules: `backend`, `bloom` (pub(crate)), `btree`, `db`, `dirty_bitmap`, `error`, `integrity`, `page`, `tables`, `transaction`, `types`
-- **Insights**: Clean layering: backend abstraction → page management → B+ tree → database → transactions. `bloom` is crate-private; `error` was missing from original listing.
+  - Modules: `backend`, `bloom` (pub(crate)), `btree`, `crypto`, `db`, `dirty_bitmap`, `error`, `integrity`, `page`, `tables`, `transaction`, `types`
+- **Insights**: Clean layering: backend abstraction → page management → B+ tree → database → transactions. `bloom` is crate-private. `crypto` module adds envelope encryption layer.
 
-#### `backend/mod.rs` (505 lines)
+#### `backend/mod.rs` (530 lines)
 
 - **Purpose**: Storage backend trait definition and module re-exports
 - **Key Types/Functions**:
@@ -205,7 +218,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `insert(&hash)`, `contains(&hash) -> bool`: Add/check membership
 - **Insights**: Space-efficient probabilistic data structure. Used to avoid disk reads for non-existent keys.
 
-#### `btree/mod.rs` (2664 lines)
+#### `btree/mod.rs` (2672 lines)
 
 - **Purpose**: B+ tree core logic (insert, get, remove, split, merge, compact) with extensive tests
 - **Key Types/Functions**:
@@ -218,7 +231,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `BTreeIterator::advance()`: O(1) via `next_leaf` pointer (replaces O(depth) tree re-descent)
 - **Insights**: Custom implementation (not using existing crate). Supports variable-length keys/values. Compaction uses forward-only iteration via leaf linked list (O(N)) instead of repeated DFS traversals (old O(N²)). Same-parent merge restriction prevents cross-branch merges. Greedy merge re-checks after each merge for multi-leaf collapse. Bulk of line count is comprehensive inline tests (26+ compaction tests).
 
-#### `btree/node.rs` (1000 lines)
+#### `btree/node.rs` (1174 lines)
 
 - **Purpose**: B+ tree node representation (internal and leaf nodes) with singly-linked leaf list
 - **Key Types/Functions**:
@@ -238,7 +251,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `promote_key()`: Promote separator key to parent internal node
 - **Insights**: Clean separation of concerns. Split logic is complex enough to warrant dedicated file.
 
-#### `btree/cursor.rs` (340 lines)
+#### `btree/cursor.rs` (360 lines)
 
 - **Purpose**: Iterator over B+ tree (forward scan, range queries)
 - **Key Types/Functions**:
@@ -247,7 +260,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `advance()`: Move to next leaf via linked list or parent backtracking
 - **Insights**: Supports range queries with start_key bound. Fixed critical bug in `advance()` for multi-leaf traversal (resume-key pattern).
 
-#### `page/mod.rs` (219 lines)
+#### `page/mod.rs` (244 lines)
 
 - **Purpose**: Page abstraction (configurable-size blocks), page header types
 - **Key Types/Functions**:
@@ -256,7 +269,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `read_page()`, `write_page()`, `allocate_page()`, `free_page()`
 - **Insights**: Fixed-size pages simplify memory management. XXH3-64 checksums detect corruption. Actual cache and allocator live in sub-files.
 
-#### `page/cache.rs` (427 lines)
+#### `page/cache.rs` (421 lines)
 
 - **Purpose**: LRU page cache (reduces disk I/O)
 - **Key Types/Functions**:
@@ -265,7 +278,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `insert(page_id, page)`: Add to cache, evict LRU if full
 - **Insights**: `Arc<Page>` enables safe sharing across threads. LRU eviction policy is simple and effective.
 
-#### `page/allocator.rs` (182 lines)
+#### `page/allocator.rs` (181 lines)
 
 - **Purpose**: Free page tracking (bitmap-based)
 - **Key Types/Functions**:
@@ -295,7 +308,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `ScrubError`: Error for integrity check failures
 - **Insights**: Uses XXH3-64 (not CRC32) for page checksum verification. Background `IntegrityScrubberJob` in raft crate wraps this for periodic scrubbing.
 
-#### `db.rs` (2952 lines)
+#### `db.rs` (2982 lines)
 
 - **Purpose**: Database layer with ACID transactions, multiple B+ trees (tables), and comprehensive tests
 - **Key Types/Functions**:
@@ -304,7 +317,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `open_table<T: Table>() -> Result<()>`: Initialize table (allocate root page)
 - **Insights**: Multiple tables share same PageManager. Dual-slot commit protocol (commit bit + sync) ensures atomicity. Large file primarily due to extensive inline test coverage.
 
-#### `error.rs` (312 lines)
+#### `error.rs` (328 lines)
 
 - **Purpose**: Storage engine error types with snafu
 - **Key Types/Functions**:
@@ -335,12 +348,12 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `ClientSequences` (11), `CompactionMeta` (12): Operational tables
   - `OrganizationSlugIndex` (13): Org slug→internal ID mapping (`u64` → `i64`)
   - `VaultSlugIndex` (14): Vault slug→internal ID mapping (`u64` → `i64`)
-  - `UserSlugIndex` (15): User slug→internal ID mapping (`u64` → `i64`)
-  - `VaultHeights` (16): Composite-key vault block heights (`[org_id ++ vault_id]` → `u64`)
-  - `VaultHashes` (17): Composite-key vault hashes (`[org_id ++ vault_id]` → `Hash`)
-  - `VaultHealth` (18): Composite-key vault health status (`[org_id ++ vault_id]` → `VaultHealthStatus`)
+  - `VaultHeights` (15): Composite-key vault block heights (`[org_id ++ vault_id]` → `u64`)
+  - `VaultHashes` (16): Composite-key vault hashes (`[org_id ++ vault_id]` → `Hash`)
+  - `VaultHealth` (17): Composite-key vault health status (`[org_id ++ vault_id]` → `VaultHealthStatus`)
+  - `UserSlugIndex` (18): User slug→internal ID mapping (`u64` → `i64`)
   - `TableEntry`: Encoded (table_id, key, value) triple for snapshot streaming
-- **Insights**: Phantom types prevent mixing keys/values from different tables. Compile-time table ID assignment. 19 tables total. Tables 16-18 use composite byte keys for externalized `AppliedState` persistence.
+- **Insights**: Phantom types prevent mixing keys/values from different tables. Compile-time table ID assignment. 19 tables total. Tables 15-17 use composite byte keys for externalized `AppliedState` persistence.
 
 #### `types.rs` (322 lines)
 
@@ -352,6 +365,19 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `encode_length_prefixed()`, `decode_length_prefixed()`: Variable-length encoding helpers
   - `encode_varint()`, `decode_varint()`: Varint encoding for compact integer storage
 - **Insights**: Trait-based key/value abstraction enables type-safe table definitions. Length-prefixed encoding supports variable-length keys while maintaining sort order.
+
+#### `crypto/` (3313 lines across 7 files)
+
+- **Purpose**: AES-256-GCM envelope encryption for data at rest with transparent backend wrapping, DEK caching, and RMK lifecycle management
+- **Structure**:
+  - `crypto/mod.rs` (37 lines) — Module re-exports (`EncryptedBackend`, caches, key managers, operations, sidecar, types)
+  - `crypto/backend.rs` (873 lines) — `EncryptedBackend<B: StorageBackend>`: Transparent encryption wrapper. Reads decrypt via DEK cache + AES-256-GCM. Writes generate per-page DEK, encrypt body, wrap DEK with active RMK via AES-KWP, store sidecar metadata. Lock-free reads via underlying backend's pread.
+  - `crypto/key_manager.rs` (1445 lines) — `KeyManager` trait + implementations: `FileKeyManager` (versioned files at `{key_dir}/{region}/v{version}.key`), `EnvKeyManager` (env vars `LEDGER_RMK_{REGION}_V{VERSION}`), `SecretsManagerKeyManager` (external provider). RMK provisioning validation and version lifecycle tracking.
+  - `crypto/cache.rs` (243 lines) — `DekCache`: moka bounded LRU keyed by wrapped DEK form. `RmkCache`: version→key HashMap. Both implement `ZeroizeOnDrop` for secure memory cleanup.
+  - `crypto/operations.rs` (265 lines) — Core cryptographic primitives: `generate_dek()`, `wrap_dek()`/`unwrap_dek()` (AES-KWP), `encrypt_page_body()`/`decrypt_page_body()` (AES-256-GCM with 12-byte nonce + 16-byte auth tag). 2 proptests for round-trip verification.
+  - `crypto/sidecar.rs` (245 lines) — Per-page metadata sidecar storage (File or Memory implementation). 72 bytes per page: `rmk_version` (4) + `wrapped_dek` (40) + `nonce` (12) + `auth_tag` (16). Stored in separate `{db_path}.sidecar` file.
+  - `crypto/types.rs` (205 lines) — `DataEncryptionKey`, `RegionMasterKey`, `WrappedDek`, `CryptoMetadata`. All sensitive types implement `ZeroizeOnDrop` for secure memory cleanup.
+- **Insights**: Envelope encryption pattern — each page has its own DEK (wrapped with the active RMK). RMK rotation only re-wraps DEK metadata (72 bytes/page), never re-encrypts page bodies. DEK cache provides O(1) amortized decryption. Sidecar file is separate from the main database file to avoid changing the page format. Supports transparent encryption — all existing code paths work unchanged via the `EncryptedBackend` wrapper implementing `StorageBackend`.
 
 #### `tests/crash_recovery.rs` (17 tests)
 
@@ -380,7 +406,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Re-exports from `tiered_storage`: `LocalBackend`, `ObjectStorageBackend`, `StorageBackend`, `StorageTier`, `TieredSnapshotManager`, `TieredStorageConfig`, `TieredStorageError`
 - **Insights**: Rich feature set: snapshots, tiered storage, multi-region, saga-based cross-region transactions, and dedicated events storage.
 
-#### `engine.rs` (118 lines)
+#### `engine.rs` (132 lines)
 
 - **Purpose**: StorageEngine wrapper around store::Database with transaction helpers
 - **Key Types/Functions**:
@@ -389,7 +415,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `db() -> Arc<Database<B>>`: Returns raw database handle for transaction access
 - **Insights**: Thin wrapper provides backend-specific construction. Transactions are on the `Database` itself (not on the engine wrapper).
 
-#### `state.rs` (1,713 lines)
+#### `state.rs` (1,768 lines)
 
 - **Purpose**: StateLayer applies blocks, computes state roots using bucket-based incremental hashing
 - **Key Types/Functions**:
@@ -430,7 +456,6 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `decode_event_key(key) -> Option<DecodedEventKey>`: Decode back to components
   - `org_prefix(org_id) -> [u8; 8]`: Prefix for scanning all events in an organization
   - `org_time_prefix(org_id, timestamp_ns) -> [u8; 16]`: Prefix for time-bounded scans within an org
-  - `increment_key(key) -> Vec<u8>`: Big-endian byte increment for cursor-based pagination (skip cursor entry on resume)
   - **Secondary index** key/value encoding:
   - `encode_event_index_key(org_id, event_id) -> Vec<u8>`: 24 bytes: `org_id(8 BE) || event_id(16)`
   - `encode_event_index_value(timestamp_ns, event_id) -> Vec<u8>`: 16 bytes: `timestamp_ns(8 BE) || seahash(event_id)(8 BE)`
@@ -439,7 +464,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - 16 unit tests (10 primary key + 6 secondary index)
 - **Insights**: Big-endian encoding ensures lexicographic ordering matches chronological ordering. 8-byte seahash of event_id provides uniqueness without storing the full 16-byte UUID in the key. Index value stores `(timestamp_ns, event_hash)` — combined with `org_id`, this reconstructs the exact primary key for a single B+ tree lookup.
 
-#### `entity.rs` (625 lines)
+#### `entity.rs` (698 lines)
 
 - **Purpose**: Entity CRUD operations (zero-sized type with static methods)
 - **Key Types/Functions**:
@@ -450,7 +475,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `exists()`, `list_in_vault()`, `list_in_bucket()`, `count_in_vault()`, `scan_prefix()`: Query methods (all accept `vault: VaultId`)
 - **Insights**: Zero-sized type avoids unnecessary allocations. Static methods generic over backend enable reuse across file and in-memory stores.
 
-#### `relationship.rs` (511 lines)
+#### `relationship.rs` (577 lines)
 
 - **Purpose**: Relationship CRUD operations with dual indexing (object and subject)
 - **Key Types/Functions**:
@@ -462,7 +487,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `list_in_vault()`, `count_in_vault()`, `get()`: Additional query methods
 - **Insights**: Dual indexing (object + subject) via `IndexManager` enables efficient queries in both directions (who can access X? what can Y access?). Critical for authorization.
 
-#### `keys.rs` (129 lines)
+#### `keys.rs` (135 lines)
 
 - **Purpose**: Key encoding for storage layer (vault prefix, bucket prefix, storage keys)
 - **Key Types/Functions**:
@@ -473,7 +498,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `encode_obj_index_key()`, `encode_subj_index_key()`: Relationship index key constructors
 - **Insights**: Fixed-size prefix (8-byte vault + 1-byte bucket_id) enables range scans. Big-endian for lexicographic ordering.
 
-#### `indexes.rs` (379 lines)
+#### `indexes.rs` (433 lines)
 
 - **Purpose**: Dual object/subject indexes for relationships
 - **Key Types/Functions**:
@@ -482,7 +507,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `list_by_object()`, `list_by_subject()`: Query indexes
 - **Insights**: Index keys include all tuple components to support efficient lookups. Consistent with relationship key encoding.
 
-#### `bucket.rs` (279 lines)
+#### `bucket.rs` (326 lines)
 
 - **Purpose**: VaultCommitment with 256 buckets, dirty tracking, incremental state root computation
 - **Key Types/Functions**:
@@ -492,7 +517,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `commit()`: Flush dirty buckets to storage
 - **Insights**: Incremental hashing is critical for performance. Dirty tracking prevents redundant computation.
 
-#### `block_archive.rs` (864 lines)
+#### `block_archive.rs` (867 lines)
 
 - **Purpose**: Persistent block storage with optional compaction
 - **Key Types/Functions**:
@@ -502,7 +527,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `compact_blocks(retention_policy: &BlockRetentionPolicy) -> Result<()>`: Remove old blocks
 - **Insights**: Blocks stored by height. Compaction policy configurable (retain last N blocks or time-based). Supports audit requirements.
 
-#### `shard.rs` (660 lines)
+#### `shard.rs` (691 lines)
 
 - **Purpose**: ShardManager coordinates multiple vaults within a shard
 - **Key Types/Functions**:
@@ -513,7 +538,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `list_vaults() -> Vec<VaultId>`: List all vaults in shard
 - **Insights**: Shard = collection of organizations sharing a Raft group. ShardManager is coordination layer above StateLayer.
 
-#### `snapshot.rs` (836 lines)
+#### `snapshot.rs` (1,200 lines)
 
 - **Purpose**: Point-in-time snapshots with zstd compression, chain verification
 - **Key Types/Functions**:
@@ -535,14 +560,14 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `TieredStorageConfig` (from `types/src/config/storage.rs`): `hot_count`, `warm_url`, `warm_days`, `cold_enabled`, `demote_interval_secs`, `multipart_threshold_bytes`
 - **Insights**: `ObjectStorageBackend` is a single generic implementation (not separate S3/GCS/Azure backends) — URL scheme determines provider. `load_latest_hot()` reads only from local (hot) tier, bypassing tier fallback for Raft follower catch-up to avoid S3 latency. Multipart upload uses 8 MB chunks for snapshots exceeding threshold. `TieredStorageConfig` moved to types crate for cross-crate access. Cost optimization for large deployments.
 
-#### `system/mod.rs` (28 lines)
+#### `system/mod.rs` (35 lines)
 
 - **Purpose**: `_system` organization for cluster metadata, sagas, service discovery
 - **Key Types/Functions**:
   - Submodules: `cluster`, `keys`, `saga`, `service`, `types`
-- **Insights**: System organization stores metadata (cluster config, node registry, distributed transactions). Total system/ directory: 2,212 lines.
+- **Insights**: System organization stores metadata (cluster config, node registry, distributed transactions). Total system/ directory: 6,301 lines.
 
-#### `system/cluster.rs` (368 lines)
+#### `system/cluster.rs` (750 lines)
 
 - **Purpose**: Cluster metadata (nodes, shards, rebalancing)
 - **Key Types/Functions**:
@@ -551,7 +576,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `ShardAssignment`: Organization → shard mapping
 - **Insights**: Supports dynamic shard assignment. Enables horizontal scaling.
 
-#### `system/saga.rs` (589 lines)
+#### `system/saga.rs` (1,998 lines)
 
 - **Purpose**: Distributed transaction orchestration (saga pattern)
 - **Key Types/Functions**:
@@ -560,9 +585,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `SagaExecutor`: Orchestrates execution, handles failures
 - **Insights**: Saga pattern for cross-region transactions. Compensating actions ensure eventual consistency.
 
-#### `system/service.rs` (686 lines)
+#### `system/service.rs` (2,485 lines)
 
-- **Purpose**: `SystemOrganizationService` — organization CRUD with slug-based lookup, vault slug storage
+- **Purpose**: `SystemOrganizationService` — organization CRUD with slug-based lookup, vault slug storage, user directory management, email hash indexing
 - **Key Types/Functions**:
   - `create_organization()`, `delete_organization()`, `list_organizations()`
   - `get_organization_by_slug(slug: OrganizationSlug)`: Slug-based lookup (replaces name-based)
@@ -570,7 +595,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `register_vault_slug()`, `remove_vault_slug()`, `get_vault_id_by_slug()`: Vault slug index operations
 - **Insights**: Slug index always created alongside organization registration. Vault slug index uses entity-storage pattern (`_idx:vault:slug:{slug}` → VaultId). Name-based lookup removed (organization names are not unique).
 
-#### `system/keys.rs` (255 lines)
+#### `system/keys.rs` (485 lines)
 
 - **Purpose**: Key encoding for system organization entries
 - **Key Types/Functions**:
@@ -580,7 +605,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `parse_organization_key()`: Key parser
 - **Insights**: Dedicated key scheme for system metadata. Org slug index: `"_idx:org:slug:{slug}"`. Vault slug index: `"_idx:vault:slug:{slug}"`. Name-based index removed (organization names are not unique).
 
-#### `system/types.rs` (286 lines)
+#### `system/types.rs` (548 lines)
 
 - **Purpose**: Type definitions for system organization (cluster membership, saga state, service records)
 - **Insights**: Decoupled from user-facing types to maintain clean separation.
@@ -612,7 +637,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Re-exports: `ledger.v1` module with all message types
 - **Insights**: Custom cfg flag (not a feature flag) set by build.rs controls compilation mode.
 
-#### `convert.rs` (1893 lines)
+#### `convert.rs` (2173 lines)
 
 - **Purpose**: From/TryFrom trait implementations for domain↔proto conversions
 - **Key Types/Functions**:
@@ -622,15 +647,15 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Events conversions: `From<EventScope>`, `From<&EventOutcome>`, `From<&EventEmission>`, `From<&EventEntry>` (both directions), `TryFrom<proto::EventEntry>` for domain `EventEntry`, datetime↔Timestamp helpers
   - `impl std::str::FromStr for EventAction`: Iterates `EventAction::ALL` array, matches via `as_str()`
   - Covers all domain types: Block, Transaction, Operation, Entity, Relationship, VaultSlug, EventEntry, etc.
-  - 58+ unit tests + 5 proptests validating round-trip conversions (including events)
+  - 69 unit tests + 6 proptests validating round-trip conversions (including events)
 - **Insights**: Deduplication effort (Phase 2 Task 15) removed duplicate helper functions. Events proto conversion flattens Rust's data-carrying enums (`EventOutcome::Failed { code, detail }`) into separate proto fields (outcome enum + optional error_code + error_detail). Comprehensive test coverage prevents serialization bugs.
 
-#### `generated/ledger.v1.rs` (8045 lines)
+#### `generated/ledger.v1.rs` (9122 lines)
 
 - **Purpose**: prost-generated Rust code from proto definitions
 - **Key Types/Functions**:
   - All gRPC message types: ReadRequest, WriteRequest, CreateVaultRequest, VaultSlug, etc.
-  - Service traits: ReadService, WriteService, AdminService, EventsService, HealthService, DiscoveryService, RaftService
+  - Service traits: ReadService, WriteService, AdminService, EventsService, HealthService, SystemDiscoveryService, RaftService
   - AdminService leader transfer RPCs: `TransferLeadership(TransferLeadershipRequest) -> TransferLeadershipResponse`
   - RaftService internal RPCs: `TriggerElection(TriggerElectionRequest) -> TriggerElectionResponse`
   - Leader transfer messages: `TransferLeadershipRequest` (target_node_id, timeout_ms), `TransferLeadershipResponse` (success, new_leader_id, message), `TriggerElectionRequest` (leader_term, leader_id), `TriggerElectionResponse` (accepted, message)
@@ -659,16 +684,16 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - 30+ `#[doc(hidden)] pub mod` declarations for server-internal infrastructure (includes `event_writer`, `events_gc`, `snapshot`, `leader_transfer`)
 - **Insights**: Phase 2 Task 2 cleaned up public API. 2 stable modules + many doc-hidden modules. `leader_transfer` module added for graceful leadership handoff. Excellent encapsulation.
 
-#### `log_storage/` (~11,965 lines across 6 submodules)
+#### `log_storage/` (~11,839 lines across 6 submodules)
 
 - **Purpose**: openraft LogStore and StateMachine implementation, log storage, externalized state persistence, streaming snapshot building
 - **Structure**:
-  - `log_storage/mod.rs` (6194 lines) — Metadata constants, `ShardChainState`, re-exports, test suite (test fixtures use `wrap_payload` helper to construct `EntryPayload::Normal(RaftPayload { ... })`, includes deterministic timestamp tests, eviction tests, pending writes tests, state persistence tests)
-  - `log_storage/types.rs` (901 lines) — `AppliedState`, `AppliedStateCore` (5-field persistence struct for new snapshot format), `PendingExternalWrites` (14-field accumulator for externalized table writes), `ClientSequenceEntry` (sequence + last_seen + idempotency_key + request_hash), `OrganizationMeta` (fields: `organization: OrganizationId`, `slug`, `name`, `shard: ShardId`, `status`, `tier`, `pending_shard: Option<ShardId>`, `storage_bytes`), `VaultMeta` (fields: `organization: OrganizationId`, `vault: VaultId`, `slug`, `name`, `health`), `SequenceCounters`, `VaultHealthStatus`. `AppliedState` maintains bidirectional slug ↔ internal ID maps for both organizations and vaults. Deleted: `CombinedSnapshot` (replaced by file-based streaming snapshots).
+  - `log_storage/mod.rs` (5891 lines) — Metadata constants, `ShardChainState`, re-exports, test suite (test fixtures use `wrap_payload` helper to construct `EntryPayload::Normal(RaftPayload { ... })`, includes deterministic timestamp tests, eviction tests, pending writes tests, state persistence tests)
+  - `log_storage/types.rs` (869 lines) — `AppliedState`, `AppliedStateCore` (5-field persistence struct for new snapshot format), `PendingExternalWrites` (14-field accumulator for externalized table writes), `ClientSequenceEntry` (sequence + last_seen + idempotency_key + request_hash), `OrganizationMeta` (fields: `organization: OrganizationId`, `slug`, `name`, `shard: ShardId`, `status`, `tier`, `pending_shard: Option<ShardId>`, `storage_bytes`), `VaultMeta` (fields: `organization: OrganizationId`, `vault: VaultId`, `slug`, `name`, `health`), `SequenceCounters`, `VaultHealthStatus`. `AppliedState` maintains bidirectional slug ↔ internal ID maps for both organizations and vaults. Deleted: `CombinedSnapshot` (replaced by file-based streaming snapshots).
   - `log_storage/accessor.rs` (441 lines) — `AppliedStateAccessor` (19 pub query methods including org/vault slug resolution), `IdempotencyCheckResult` enum (`AlreadyCommitted`/`KeyReused`/`Miss`), `client_idempotency_check()` for cross-failover deduplication via replicated `ClientSequenceEntry`. 8 idempotency unit tests.
-  - `log_storage/store.rs` (1855 lines) — `RaftLogStore` struct definition with `client_sequence_eviction: ClientSequenceEvictionConfig` field, creation/config/accessor methods, optional `event_writer: Option<EventWriter<B>>`. New externalized state methods: `flush_external_writes()` (writes 9 tables atomically), `save_state_core()` (version-sentinel + AppliedStateCore + flush in single WriteTransaction), `load_state_from_tables()` (three-way format detection: new/old/fresh). 15+ persistence tests + benchmark test.
-  - `log_storage/operations.rs` (1169 lines) — `apply_request()` and `apply_request_with_events()` state machine dispatch logic. `apply_request_with_events` accepts `&mut PendingExternalWrites` parameter and mirrors all 12 `LedgerRequest` variants' state mutations to the accumulator for externalized persistence.
-  - `log_storage/raft_impl.rs` (1405 lines) — `RaftLogReader`, `LedgerSnapshotBuilder` (reads from DB, not in-memory `Arc<RwLock<AppliedState>>`), `RaftStorage` trait impls. `apply_to_state_machine` creates `PendingExternalWrites`, passes through apply loop, saves via `save_state_core()`. Client sequence TTL eviction triggers on `log_id.index % eviction_interval`. `write_snapshot_to_file()` uses `SnapshotWriter` for zstd-compressed, SHA-256 checksummed file-based snapshots. `install_snapshot()` uses `SyncSnapshotReader` with `block_in_place()` for sync zstd decoding — streams directly into WriteTransactions with zero staging. `collect_snapshot_events()` uses org_ids + timestamp cutoff via `scan_apply_phase_ranged()`.
+  - `log_storage/store.rs` (1867 lines) — `RaftLogStore` struct definition with `client_sequence_eviction: ClientSequenceEvictionConfig` field, creation/config/accessor methods, optional `event_writer: Option<EventWriter<B>>`. New externalized state methods: `flush_external_writes()` (writes 9 tables atomically), `save_state_core()` (version-sentinel + AppliedStateCore + flush in single WriteTransaction), `load_state_from_tables()` (three-way format detection: new/old/fresh). 15+ persistence tests + benchmark test.
+  - `log_storage/operations.rs` (1354 lines) — `apply_request()` and `apply_request_with_events()` state machine dispatch logic. `apply_request_with_events` accepts `&mut PendingExternalWrites` parameter and mirrors all 12 `LedgerRequest` variants' state mutations to the accumulator for externalized persistence.
+  - `log_storage/raft_impl.rs` (1417 lines) — `RaftLogReader`, `LedgerSnapshotBuilder` (reads from DB, not in-memory `Arc<RwLock<AppliedState>>`), `RaftStorage` trait impls. `apply_to_state_machine` creates `PendingExternalWrites`, passes through apply loop, saves via `save_state_core()`. Client sequence TTL eviction triggers on `log_id.index % eviction_interval`. `write_snapshot_to_file()` uses `SnapshotWriter` for zstd-compressed, SHA-256 checksummed file-based snapshots. `install_snapshot()` uses `SyncSnapshotReader` with `block_in_place()` for sync zstd decoding — streams directly into WriteTransactions with zero staging. `collect_snapshot_events()` uses org_ids + timestamp cutoff via `scan_apply_phase_ranged()`.
 - **Key Types/Functions**:
   - `RaftLogStore`: Implements openraft's `RaftStorage` trait (combined log + state machine)
   - `AppliedState`: State machine with vault heights, organizations, sequences
@@ -702,7 +727,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - 5 unit tests: config defaults, custom config, guard reset, concurrent lock prevention, error display
 - **Insights**: Composes transfer from openraft primitives (no built-in `transfer_leader()` API). Accepts *any* new leader (not just requested target) — pragmatic for "stop being leader before shutdown." Concurrency guard shared between AdminService RPC and GracefulShutdown.
 
-#### `server.rs` (401 lines)
+#### `server.rs` (407 lines)
 
 - **Purpose**: LedgerServer builder with all gRPC services and Raft integration
 - **Key Types/Functions**:
@@ -722,7 +747,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `RaftPayload`: Wrapper around `LedgerRequest` with leader-assigned `proposed_at: DateTime<Utc>` timestamp. Ensures all replicas apply with identical timestamps (deterministic apply-phase).
   - `LedgerTypeConfig`: openraft type config with `D = RaftPayload` (was `D = LedgerRequest`)
   - `LedgerNodeId`: Newtype for node ID (Snowflake ID)
-  - `LedgerRequest`: 12 variants (Write, CreateOrganization, CreateVault, DeleteOrganization, DeleteVault, SuspendOrganization, ResumeOrganization, StartMigration, CompleteMigration, UpdateVaultHealth, BatchWrite, System(SystemRequest)) — `SystemRequest` has 4 sub-variants (CreateUser, AddNode, RemoveNode, UpdateOrganizationRouting)
+  - `LedgerRequest`: 12 variants (Write, CreateOrganization, CreateVault, DeleteOrganization, DeleteVault, SuspendOrganization, ResumeOrganization, StartMigration, CompleteMigration, UpdateVaultHealth, BatchWrite, System(SystemRequest)) — `SystemRequest` has 12 sub-variants (CreateUser, AddNode, RemoveNode, UpdateOrganizationRouting, RegisterEmailHash, RemoveEmailHash, SetBlindingKeyVersion, UpdateRehashProgress, ClearRehashProgress, UpdateUserDirectoryStatus, EraseUser, MigrateExistingUsers)
   - `LedgerResponse`: Operation results (OrganizationCreated with slug, VaultCreated with slug, success/error)
 - **Insights**: Type-safe Raft integration. `RaftPayload` wraps `LedgerRequest` at the proposal boundary so leaders embed wall-clock timestamps — all replicas apply with the same timestamp, producing byte-identical event storage, B+ tree keys, and pagination cursors across nodes. Both `CreateOrganization` and `CreateVault` include pre-generated slugs (`OrganizationSlug`/`VaultSlug`) for atomic slug index insertion during state machine apply.
 
@@ -740,7 +765,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 ### Service Layer (15 files)
 
-#### `services/admin.rs` (3044 lines)
+#### `services/admin.rs` (4326 lines)
 
 - **Purpose**: AdminService gRPC implementation (organization/vault/shard management, runtime config, backup/restore, leader transfer)
 - **Key Types/Functions**:
@@ -754,7 +779,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `event_handle: Option<EventHandle<B>>` for handler-phase events (ConfigurationChanged, SnapshotCreated, BackupCreated, BackupRestored, IntegrityChecked, VaultRecovered, quota denial)
 - **Insights**: Largest service file — includes admin CRUD, runtime config, backup management, leader transfer, and comprehensive tests. Handler-phase events replace the former `AuditLogger`.
 
-#### `services/write.rs` (1772 lines)
+#### `services/write.rs` (1765 lines)
 
 - **Purpose**: WriteService gRPC implementation (entity/relationship mutations)
 - **Key Types/Functions**:
@@ -766,7 +791,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Error classification via `classify_batch_error()`
 - **Insights**: Core data path. Rate limiting + hot key detection protect cluster. Drain guard returns `UNAVAILABLE` during Draining phase (clients retry on another node). Batch writes go through BatchWriter. Includes extensive inline tests.
 
-#### `services/read.rs` (1827 lines)
+#### `services/read.rs` (1829 lines)
 
 - **Purpose**: ReadService gRPC implementation (entity/relationship queries)
 - **Key Types/Functions**:
@@ -807,12 +832,12 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### Additional Services
 
-- `services/raft.rs` (1196 lines): RaftService (inter-node Raft RPCs) including `TriggerElection` RPC handler — validates leader term (rejects stale), calls `raft.trigger().elect()`, records metrics via `record_trigger_election()`. Implemented on both `RaftServiceImpl` (single-region) and `MultiRegionRaftService` (routes to system region).
+- `services/raft.rs` (1209 lines): RaftService (inter-node Raft RPCs) including `TriggerElection` RPC handler — validates leader term (rejects stale), calls `raft.trigger().elect()`, records metrics via `record_trigger_election()`. Implemented on both `RaftServiceImpl` (single-region) and `MultiRegionRaftService` (routes to system region).
 - `services/discovery.rs`: DiscoveryService (cluster membership)
 - `services/forward_client.rs`: Leader forwarding
 - `services/multi_region_read.rs`: Multi-region read coordination
-- `services/multi_region_write.rs` (1010 lines): Multi-region write coordination (2PC + saga). `health_state: Option<HealthState>` field with drain guard at outermost layer (before region resolution). Holds `manager: Option<Arc<MultiRaftManager>>` for automatic write forwarding — `resolve_with_forward()` detects remote-region organizations and forwards raw requests via `ForwardClient` (destination resolves vault slugs).
-- `services/events.rs` (~1785 lines): `EventsServiceImpl` — EventsService gRPC implementation with 4 RPCs (`ListEvents`, `GetEvent`, `CountEvents`, `IngestEvents`). `GetEvent` uses O(log n) `EventStore::get_by_id()` via secondary index (replaces former O(n) full-org scan with `COUNT_SCAN_LIMIT` cap, eliminating false-not-found for orgs with >100k events). `ListEvents` supports HMAC-signed `EventPageToken` pagination with in-memory filtering (actions, event_type_prefix, principal, outcome, emission_path, correlation_id). `IngestEvents` implements 10-step pipeline: master switch → source allow-list → batch size → rate limit → org resolution → validation → write → metrics → log. 30+ unit tests.
+- `services/multi_region_write.rs` (975 lines): Multi-region write coordination (2PC + saga). `health_state: Option<HealthState>` field with drain guard at outermost layer (before region resolution). Holds `manager: Option<Arc<MultiRaftManager>>` for automatic write forwarding — `resolve_with_forward()` detects remote-region organizations and forwards raw requests via `ForwardClient` (destination resolves vault slugs).
+- `services/events.rs` (1790 lines): `EventsServiceImpl` — EventsService gRPC implementation with 4 RPCs (`ListEvents`, `GetEvent`, `CountEvents`, `IngestEvents`). `GetEvent` uses O(log n) `EventStore::get_by_id()` via secondary index (replaces former O(n) full-org scan with `COUNT_SCAN_LIMIT` cap, eliminating false-not-found for orgs with >100k events). `ListEvents` supports HMAC-signed `EventPageToken` pagination with in-memory filtering (actions, event_type_prefix, principal, outcome, emission_path, correlation_id). `IngestEvents` implements 10-step pipeline: master switch → source allow-list → batch size → rate limit → org resolution → validation → write → metrics → log. 30+ unit tests.
 - `services/slug_resolver.rs` (795 lines): Organization and vault slug ↔ internal ID resolution at gRPC boundary. `SlugResolver` wraps `AppliedStateAccessor`. Organization methods: `extract_slug`, `resolve`, `resolve_slug`, `extract_and_resolve`, `extract_and_resolve_optional`. Vault methods: `extract_vault_slug`, `resolve_vault`, `resolve_vault_slug`, `extract_and_resolve_vault`, `extract_and_resolve_vault_optional`. Events method: `extract_and_resolve_for_events()` (slug=0 → system org bypass). 37 unit tests (14 org + 19 vault + 4 events).
 - `services/region_resolver.rs`: Organization→region routing
 - `services/error_details.rs`: ErrorDetails proto builder
@@ -827,7 +852,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `pagination.rs`: HMAC-signed page tokens. Includes `EventPageToken` (version, organization, last_key, query_hash) with encode/decode/validate methods on `PageTokenCodec`.
 - `rate_limit.rs`: 3-tier token bucket rate limiter
 - `hot_key_detector.rs`: Count-Min Sketch with rotating windows
-- `metrics.rs` (1215 lines): Prometheus metrics with SLI histograms. Leader transfer metrics: `ledger_leader_transfers_total` (status label), `ledger_leader_transfer_latency_seconds` (histogram), `ledger_trigger_elections_total` (result label). Events metrics: `ledger_event_writes_total` (emission/scope/action labels), `ledger_events_gc_*` (entries_deleted, cycle_duration, cycles), `ledger_events_ingest_*` (total, batch_size, rate_limited, duration). Recording functions: `record_leader_transfer(success, latency_secs)`, `record_trigger_election(accepted)`.
+- `metrics.rs` (1404 lines): Prometheus metrics with SLI histograms. Leader transfer metrics: `ledger_leader_transfers_total` (status label), `ledger_leader_transfer_latency_seconds` (histogram), `ledger_trigger_elections_total` (result label). Events metrics: `ledger_event_writes_total` (emission/scope/action labels), `ledger_events_gc_*` (entries_deleted, cycle_duration, cycles), `ledger_events_ingest_*` (total, batch_size, rate_limited, duration). Recording functions: `record_leader_transfer(success, latency_secs)`, `record_trigger_election(accepted)`.
 - `otel.rs` (582 lines): OpenTelemetry tracing setup and OTLP exporter configuration. `SpanAttributes` uses `vault_slug` key.
 
 #### Enterprise Features
@@ -855,15 +880,17 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 #### Advanced Features
 
 - `multi_raft.rs`: Multi-Raft orchestration
-- `multi_region_server.rs` (241 lines): Multi-region LedgerServer (with optional `events_db` for EventsService registration, threads `HealthState` to multi-region write service)
+- `multi_region_server.rs` (247 lines): Multi-region LedgerServer (with optional `events_db` for EventsService registration, threads `HealthState` to multi-region write service)
 - `raft_network.rs`: gRPC-based Raft transport
 - `proto_compat.rs`: Orphan rule workarounds (`organization_status_to_proto`)
 - `trace_context.rs`: W3C Trace Context
 - `logging.rs`: Canonical log lines (vault_slug field, `set_target(organization, vault_slug)`)
 - `proof.rs`: Merkle proof generation (accepts `vault_slug: Option<VaultSlug>` parameter)
 - `region_router.rs`: Dynamic region routing
-- `saga_orchestrator.rs` (758 lines): Distributed transaction orchestration — CAS-based sequence ID allocation (prevents duplicates on leader failover), watchdog/metrics integration, configurable via `SagaConfig`, with optional `event_handle` for UserDeleted handler-phase events
-- `vip_cache.rs` (524 lines): VIP organization cache with static + dynamic discovery, `OrganizationSlug` typed keys
+- `saga_orchestrator.rs` (1149 lines): Distributed transaction orchestration — CAS-based sequence ID allocation (prevents duplicates on leader failover), watchdog/metrics integration, configurable via `SagaConfig`, with optional `event_handle` for UserDeleted handler-phase events
+- `vip_cache.rs` (545 lines): VIP organization cache with static + dynamic discovery, `OrganizationSlug` typed keys
+- `dek_rewrap.rs` (339 lines): Background job for re-wrapping Data Encryption Key sidecar metadata after Region Master Key rotation. `RewrapProgress` (AtomicU64 fields for lock-free admin queries), `DekRewrapJob<B>` (bon builder, periodic cycles, leader-only). Idempotent — pages already at target RMK version are skipped. 5 unit tests.
+- `region_storage.rs` (664 lines): Per-region database file layout and lifecycle management. `RegionStorage` (holds raw database handles for state, blocks, events per region), `RegionStorageManager` (HashMap of open regions, directory layout enforcement: `global/` for GLOBAL Raft group, `regions/{name}/` for data regions). TOCTOU-safe region opening, legacy layout detection, 16KB page size. 21 unit tests.
 - `cardinality.rs`: HyperLogLog for metrics
 - `file_lock.rs`: Data directory locking
 - `peer_tracker.rs`: Peer connection state
@@ -886,7 +913,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Events re-exports: `EventEmissionPath`, `EventFilter`, `EventOutcome`, `EventPage`, `EventScope`, `IngestRejection`, `IngestResult`, `SdkEventEntry`, `SdkIngestEventEntry`
 - **Insights**: Comprehensive SDK. All features needed for production use, including events query and ingestion.
 
-#### `client.rs` (7911 lines)
+#### `client.rs` (8369 lines)
 
 - **Purpose**: LedgerClient with 40+ public methods, retry, cancellation, metrics, and comprehensive tests
 - **Key Types/Functions**:
@@ -901,7 +928,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - 22 events unit tests
 - **Insights**: Clean API. Cancellation support via CancellationToken. Circuit breaker integrated. Metrics track end-to-end latency. Events SDK uses `from_proto`/`into_proto` associated functions (not From trait impls).
 
-#### `config.rs` (1157 lines)
+#### `config.rs` (1179 lines)
 
 - **Purpose**: ClientConfig with fallible builder, TLS support
 - **Key Types/Functions**:
@@ -911,7 +938,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Validation: at least one endpoint, valid TLS config
 - **Insights**: Fallible builder validates constraints. TLS support for secure communication. Precedent for other configs.
 
-#### `connection.rs` (623 lines)
+#### `connection.rs` (626 lines)
 
 - **Purpose**: ConnectionPool with circuit breaker integration
 - **Key Types/Functions**:
@@ -921,17 +948,17 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - ServerSelector syncs with circuit breaker (open→mark_unhealthy, close→mark_healthy)
 - **Insights**: Circuit breaker prevents cascade failures. Pool handles connection lifecycle. Sync with ServerSelector for consistent routing.
 
-#### `error.rs` (1204 lines)
+#### `error.rs` (1400 lines)
 
 - **Purpose**: SdkError with rich context, ServerErrorDetails decoding, and comprehensive tests
 - **Key Types/Functions**:
-  - `SdkError`: 10 variants (Connection, Rpc, RateLimited, Timeout, Cancelled, CircuitOpen, etc.)
+  - `SdkError`: 19 variants (Connection, Transport, Rpc, RateLimited, RetryExhausted, Config, Idempotency, AlreadyCommitted, StreamDisconnected, Timeout, Shutdown, Cancelled, InvalidUrl, Unavailable, ProofVerification, Validation, CircuitOpen, OrganizationMigrating, UserMigrating)
   - `ServerErrorDetails`: Decoded from proto ErrorDetails (error_code, retryable, retry_after, context, action)
   - `is_retryable()`, `error_type()`: Classification helpers
   - `attempt_history: Vec<(u32, String)>`: Retry tracking (PRD Task 2)
 - **Insights**: Rich error context for debugging. ServerErrorDetails decode via prost. RateLimited variant with retry_after guidance.
 
-#### `retry.rs` (924 lines)
+#### `retry.rs` (944 lines)
 
 - **Purpose**: with_retry_cancellable (manual retry loop with tokio::select!)
 - **Key Types/Functions**:
@@ -942,7 +969,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Metrics: retries, circuit state
 - **Insights**: Replaced backon for cancellation support. Manual loop is more flexible. Circuit breaker integration prevents hammering open circuits.
 
-#### `circuit_breaker.rs` (668 lines)
+#### `circuit_breaker.rs` (669 lines)
 
 - **Purpose**: Per-endpoint circuit breaker state machine (PRD Task 5)
 - **Key Types/Functions**:
@@ -953,7 +980,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `CircuitBreakerConfig`: failure_threshold, success_threshold, timeout
 - **Insights**: State machine prevents cascade failures. Open state rejects fast. HalfOpen tests recovery. Syncs with ServerSelector.
 
-#### `discovery.rs` (643 lines)
+#### `discovery.rs` (644 lines)
 
 - **Purpose**: Background endpoint refresh (dynamic service discovery)
 - **Key Types/Functions**:
@@ -972,7 +999,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Prefix: `ledger_sdk_` for all metrics
 - **Insights**: Dynamic dispatch (Arc<dyn SdkMetrics>) avoids type param infection. Noop default ensures zero overhead when disabled.
 
-#### `streaming.rs` (568 lines)
+#### `streaming.rs` (574 lines)
 
 - **Purpose**: WatchBlocksStream with auto-reconnection
 - **Key Types/Functions**:
@@ -982,7 +1009,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Backoff on errors
 - **Insights**: Streaming API for real-time block updates. Auto-reconnection for resilience. Used for event sourcing.
 
-#### `tracing.rs` (299 lines)
+#### `tracing.rs` (300 lines)
 
 - **Purpose**: W3C Trace Context propagation, API version header injection
 - **Key Types/Functions**:
@@ -1010,21 +1037,19 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - `ServerResolver`: Resolves DNS names to IPs
 - **Insights**: Abstraction enables multiple endpoint sources. ServerSelector uses health tracking + circuit breaker.
 
-#### `idempotency.rs`
+#### `idempotency.rs` (16 lines)
 
-- **Purpose**: Client-side idempotency (sequence number generation)
+- **Purpose**: Documentation module explaining that idempotency is server-side only
+- **Key Types/Functions**: None — documentation only. Idempotency is handled entirely server-side via `ClientSequenceEntry` in the Raft state machine. Clients generate UUIDs for transaction IDs.
+- **Insights**: This module exists as a documentation stub. The actual deduplication logic lives in `raft/src/log_storage/accessor.rs` (`client_idempotency_check()`).
+
+#### `mock.rs` (2667 lines)
+
+- **Purpose**: MockLedgerServer for testing (spawns a real gRPC server with in-memory state)
 - **Key Types/Functions**:
-  - `IdempotencyProvider`: Generates unique sequence numbers per client
-  - `next_sequence() -> u64`: Monotonic sequence
-- **Insights**: Client-side sequence numbers. Server deduplicates via IdempotencyCache.
-
-#### `mock.rs` (2493 lines)
-
-- **Purpose**: MockLedgerClient for testing
-- **Key Types/Functions**:
-  - `MockLedgerClient`: In-memory mock with HashMap storage, keyed by `(OrganizationSlug, VaultSlug, ...)`
-  - All LedgerClient methods implemented (no network)
-- **Insights**: Enables unit testing without server. In-memory state for fast tests. Tuple keys use `OrganizationSlug`/`VaultSlug` newtypes, not raw integers or internal IDs. Large due to comprehensive mock implementations and inline tests.
+  - `MockLedgerServer`: Spawns a `tonic::transport::Server` with mock service implementations backed by HashMap storage, keyed by `(OrganizationSlug, VaultSlug, ...)`
+  - All LedgerClient methods work against it (real gRPC transport, in-memory state)
+- **Insights**: Enables integration testing with real gRPC transport without a Raft cluster. In-memory state for fast tests. Tuple keys use `OrganizationSlug`/`VaultSlug` newtypes, not raw integers or internal IDs. Large due to comprehensive mock service implementations and inline tests.
 
 ---
 
@@ -1042,8 +1067,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Key Types/Functions**:
   - `Cli`: clap command-line args (config path, node-id, bootstrap, etc.)
   - `main()`: Parse args, load config, call bootstrap. Wires `node.raft` into `GracefulShutdown` via `with_raft()` for leader transfer during shutdown.
-  - Subcommands: `start`, `export-schema`, `config-diff` (Phase 2 Task 14)
-- **Insights**: Clean CLI. Supports TOML config file + env var overrides. Subcommands for schema export and config diff.
+  - Subcommands: `config schema` (JSON Schema export for RuntimeConfig)
+- **Insights**: Clean CLI. Supports CLI args + env var overrides (`INFERADB__LEDGER__<FIELD>`). `config schema` subcommand for JSON Schema export.
 
 #### `bootstrap.rs`
 
@@ -1056,7 +1081,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Tiered storage wiring: Conditional `TieredSnapshotManager` construction based on `warm_url`, background demotion task
 - **Insights**: Central orchestration point. Spawns 11 background jobs and holds `JoinHandle`s to keep them alive. Events GC and integrity scrubber run on all nodes (not leader-only). Saga orchestrator and orphan cleanup are leader-only.
 
-#### `config.rs` (1714 lines)
+#### `config.rs` (1771 lines)
 
 - **Purpose**: ServerConfig with all subsystem configs, CLI/env-based configuration, and comprehensive tests
 - **Key Types/Functions**:
@@ -1065,24 +1090,23 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Env var overrides: `INFERADB__LEDGER__<FIELD>` convention
 - **Insights**: CLI args + env vars (no config file). Runtime reconfiguration via `UpdateConfig` RPC (JSON). JSON Schema export for validation.
 
-#### `coordinator.rs` (552 lines)
+#### `coordinator.rs` (560 lines)
 
 - **Purpose**: Multi-node bootstrap coordination via Snowflake IDs
 - **Key Types/Functions**:
   - `Coordinator::new(config) -> Self`
-  - `bootstrap_cluster(nodes) -> Result<ClusterMetadata>`: Coordinate multi-node bootstrap
+  - `coordinate_bootstrap(my_node_id, my_address, config) -> Result<BootstrapDecision, CoordinatorError>`: Coordinate multi-node bootstrap, returns `BootstrapDecision` enum
   - Snowflake ID: 64-bit (timestamp + node_id + sequence)
 - **Insights**: Snowflake IDs enable decentralized ID generation (no coordination needed). Bootstrap requires initial seed nodes.
 
-#### `discovery.rs` (445 lines)
+#### `discovery.rs` (447 lines)
 
-- **Purpose**: Peer discovery via DNS or file
+- **Purpose**: Peer discovery via DNS resolution and node info exchange
 - **Key Types/Functions**:
-  - `DiscoveryProvider` trait: discover_peers method
-  - `DnsDiscoveryProvider`: DNS SRV records
-  - `FileDiscoveryProvider`: JSON file with peer list
-  - Background refresh (configurable interval)
-- **Insights**: Multiple discovery mechanisms (DNS for cloud, file for on-prem). Background refresh for dynamic membership.
+  - `resolve_bootstrap_peers(config) -> Result<Vec<PeerInfo>>`: One-time peer resolution during bootstrap
+  - `discover_node_info(addr) -> Result<NodeInfo>`: Query a peer for its node metadata
+  - `DiscoveryError`: snafu error with resolution and connection variants
+- **Insights**: Functional design (no trait-based providers). One-time resolution during bootstrap rather than background refresh. DNS-based peer discovery for cloud deployments.
 
 #### `node_id.rs` (213 lines)
 
@@ -1102,35 +1126,35 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
   - Used by `serve_with_shutdown(addr, shutdown_signal)`
 - **Insights**: `shutdown_signal()` is the primary entry point used by `main.rs`. `ShutdownCoordinator` provides broadcast-based notification for components that need shutdown awareness.
 
-#### Integration Tests (25 test files + 2 helper modules, 12,823 lines total)
+#### Integration Tests (25 test files + 2 helper modules, ~12,833 lines total)
 
 - **Purpose**: End-to-end tests covering replication, failover, multi-region, chaos, and more
 - **Test Helper Modules**:
-  - `tests/common/mod.rs` (971 lines): Shared cluster setup, assertions, test harness
+  - `tests/common/mod.rs` (974 lines): Shared cluster setup, assertions, test harness
   - `tests/turmoil_common/mod.rs` (197 lines): Turmoil-based network simulation helpers
 - **Test Files**:
-  - `tests/stress_test.rs` (1606 lines): Concurrent write stress testing
-  - `tests/design_compliance.rs` (984 lines): Validates implementation against DESIGN.md spec
-  - `tests/chaos_consistency.rs` (960 lines): Network partitions, node crashes, Byzantine scenarios
-  - `tests/network_simulation.rs` (785 lines): Turmoil-based network failure simulation
+  - `tests/stress_test.rs` (1578 lines): Concurrent write stress testing
+  - `tests/design_compliance.rs` (1122 lines): Validates implementation against DESIGN.md spec
+  - `tests/network_simulation.rs` (811 lines): Turmoil-based network failure simulation
+  - `tests/chaos_consistency.rs` (800 lines): Network partitions, node crashes, Byzantine scenarios
   - `tests/externalized_state.rs` (691 lines): Externalized state persistence and streaming snapshots
-  - `tests/isolation.rs` (635 lines): Organization and vault isolation guarantees
-  - `tests/watch_blocks_realtime.rs` (584 lines): Block streaming via gRPC
+  - `tests/isolation.rs` (647 lines): Organization and vault isolation guarantees
+  - `tests/multi_region.rs` (576 lines): Cross-region queries and transactions
   - `tests/stress_integration.rs` (547 lines): Integration-level stress tests
-  - `tests/leader_failover.rs` (473 lines): Leader failure and re-election
-  - `tests/ttl_gc.rs` (468 lines): Time-to-live garbage collection
-  - `tests/multi_region.rs` (452 lines): Cross-region queries and transactions
-  - `tests/saga_orchestrator.rs` (385 lines): Distributed transaction orchestration
-  - `tests/bootstrap_coordination.rs` (376 lines): Multi-node cluster bootstrap
-  - `tests/orphan_cleanup.rs` (367 lines): Resource leak cleanup
+  - `tests/leader_failover.rs` (536 lines): Leader failure and re-election
+  - `tests/watch_blocks_realtime.rs` (501 lines): Block streaming via gRPC
+  - `tests/ttl_gc.rs` (474 lines): Time-to-live garbage collection
+  - `tests/saga_orchestrator.rs` (414 lines): Distributed transaction orchestration
+  - `tests/orphan_cleanup.rs` (413 lines): Resource leak cleanup
+  - `tests/write_read.rs` (411 lines): Basic read/write/permission checks
+  - `tests/bootstrap_coordination.rs` (338 lines): Multi-node cluster bootstrap
   - `tests/stress_scale.rs` (336 lines): Scale stress tests
-  - `tests/write_read.rs` (326 lines): Basic read/write/permission checks
-  - `tests/background_jobs.rs` (323 lines): Background job lifecycle
-  - `tests/backup_restore.rs` (298 lines): Backup and restore flows
+  - `tests/background_jobs.rs` (324 lines): Background job lifecycle
+  - `tests/backup_restore.rs` (307 lines): Backup and restore flows
+  - `tests/replication.rs` (269 lines): Multi-node consensus tests
   - `tests/stress_watch.rs` (247 lines): Watch/streaming stress tests
-  - `tests/replication.rs` (191 lines): Multi-node consensus tests
-  - `tests/get_node_info.rs` (167 lines): Node info RPC
-  - `tests/election.rs` (117 lines): Raft election scenarios
+  - `tests/get_node_info.rs` (159 lines): Node info RPC
+  - `tests/election.rs` (113 lines): Raft election scenarios
   - `tests/integration.rs` (27 lines): Main integration test binary entry point
   - `tests/stress.rs` (11 lines): Stress test module entry point
   - `tests/external.rs` (10 lines): External test module entry point
@@ -1146,9 +1170,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 ### Files
 
-#### `lib.rs` (172 lines)
+#### `lib.rs` (161 lines)
 
-- **Purpose**: Re-exports test utilities; inline integration tests for all utilities (9 `#[test]`/`#[tokio::test]` functions)
+- **Purpose**: Re-exports test utilities; inline integration tests for all utilities (13 `#[test]`/`#[tokio::test]` functions)
 - **Key Types/Functions**:
   - Modules: `test_dir`, `assertions`, `config`, `crash_injector`, `strategies` (strategies is `pub mod`, rest are private with `pub use` re-exports)
   - Re-exports: `TestDir`, `assert_eventually`, `test_batch_config`, `test_rate_limit_config`, `TestRateLimitConfig`, `CrashInjector`, `CrashPoint`
@@ -1215,7 +1239,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 The codebase demonstrates state-of-the-art error handling:
 
 - **snafu exclusively**: No `thiserror` or `anyhow`. All errors use snafu with implicit location tracking via `#[snafu(implicit)] location: snafu::Location`.
-- **Structured error taxonomy**: `ErrorCode` enum (29 numeric codes) with `code()`, `is_retryable()`, and `suggested_action()` methods on all error types.
+- **Structured error taxonomy**: `ErrorCode` enum (33 numeric codes) with `code()`, `is_retryable()`, and `suggested_action()` methods on all error types.
 - **Context selectors**: Propagation via `.context(XxxSnafu)?` captures location automatically, never manual error construction.
 - **Rich error details**: Proto `ErrorDetails` message enriches gRPC errors with structured context (error_code, retryability, retry_after, context map, suggested_action). SDK decodes via `ServerErrorDetails`.
 - **Attempt history**: SDK `SdkError` tracks retry attempts with `attempt_history: Vec<(u32, String)>` for debugging.
@@ -1234,12 +1258,12 @@ The codebase uses the `bon` crate extensively for type-safe builders:
 
 The codebase has exceptional test coverage:
 
-- **Property-based testing**: 26 proptest functions across 7 crates (types, proto, state, sdk, raft, store, test-utils) using proptest. 30 reusable strategy generators in test-utils. Nightly CI runs with 10k iterations via `PROPTEST_CASES` env var.
+- **Property-based testing**: 53 proptest functions across 10 crates (types, proto, state, sdk, raft, store, test-utils, and sub-crates) using proptest. 30 reusable strategy generators in test-utils. Nightly CI runs with 10k iterations via `PROPTEST_CASES` env var.
 - **Crash recovery testing**: 17 crash injection tests in store crate using `CrashInjector`. Validates durability guarantees.
 - **Chaos testing**: Integration tests cover network partitions, node crashes, Byzantine faults. 22 in-process unit tests for Byzantine scenarios.
 - **Benchmarks**: Criterion benchmarks for B+ tree, read/write operations, whitepaper validation. CI tracks regressions via benchmark.yml workflow.
-- **Integration tests**: 25 integration test files in server crate (12,823 lines total) covering replication, failover, multi-region, backup/restore, rate limiting, cancellation, circuit breaker, API version, quotas, resource metrics, dependency health, canonical log lines, config reload, externalized state persistence, streaming snapshots, and stress testing.
-- **Unit tests**: ~2,458 `#[test]` and `#[tokio::test]` functions across all crates. Coverage target: 90%+.
+- **Integration tests**: 25 integration test files in server crate (~12,833 lines total) covering replication, failover, multi-region, backup/restore, rate limiting, cancellation, circuit breaker, API version, quotas, resource metrics, dependency health, canonical log lines, config reload, externalized state persistence, streaming snapshots, and stress testing.
+- **Unit tests**: ~2,815 `#[test]` and `#[tokio::test]` functions across all crates. Coverage target: 90%+.
 
 ### 4. Security Practices
 
@@ -1286,7 +1310,10 @@ The codebase includes 40+ production-ready features:
 - **B+ tree compaction**: Merge underfull leaves, reclaim dead space. Background job with configurable interval.
 - **Event logging**: Organization-scoped audit trails in dedicated `events.db`. Apply-phase (deterministic via `RaftPayload` timestamps, byte-identical across replicas) and handler-phase (node-local) emission. O(log n) `GetEvent` via `EventIndex` secondary index (eliminates false-not-found from former 100k scan cap). Optimized `scan_apply_phase` via `EmissionMeta` thin deserialization. GC with TTL. EventsService for queries. IngestEvents for cross-service audit aggregation.
 - **Externalized state & streaming snapshots**: AppliedState fields persisted to dedicated B+ tree tables (VaultHeights, VaultHashes, VaultHealth) instead of monolithic postcard blob. File-based streaming snapshots with zstd compression + SHA-256 checksums via `SnapshotWriter`/`SnapshotReader`. Three-way format detection for migration. Client sequence persistence with TTL eviction for cross-failover deduplication. Automatic write forwarding via `MultiRaftManager`.
-- **And 25+ more features**...
+- **Envelope encryption at rest**: AES-256-GCM per-page DEKs wrapped with Region Master Keys (RMK) via AES-KWP. Transparent `EncryptedBackend` wrapper. DEK cache for O(1) amortized decryption. Background `DekRewrapJob` for RMK rotation (re-wraps metadata only, never re-encrypts page bodies). Multi-provider key management (Infisical, Vault, AWS KMS, GCP KMS, Azure Key Vault).
+- **Per-region database layout**: `RegionStorageManager` enforces per-region directory tree (`global/` for control plane, `regions/{name}/` for data regions). Eliminates cross-region write-lock contention. Enables per-region encryption keys and independent scaling.
+- **Privacy-preserving email hashing**: HMAC-SHA256 with `EmailBlindingKey` for global email uniqueness across regions without storing plaintext PII on the control plane.
+- **And 20+ more features**...
 
 ### 7. Documentation Quality
 
@@ -1298,10 +1325,10 @@ The codebase has excellent documentation:
 - **rustdoc examples**: Many public functions have ` ```no_run ` examples (cargo test skips execution, cargo doc validates syntax).
 - **Architecture docs**: `docs/architecture/audit-protocol.md` documents the centralized audit architecture and shared event protocol for all InferaDB services.
 - **Development docs**: `docs/development/events.md` — SDK usage guide for events client methods, EventFilter builder, query patterns, ingestion guide, adding new event types
-- **Operations docs**: `docs/operations/` has 19 .md files covering alerting, API versioning, background jobs, capacity planning, configuration, dashboards, deployment, events, logging, metrics reference, multi-region, organization metrics, production deployment tutorial, security, shard management, SLO, troubleshooting, vault repair, and a README. Includes `events.md` with full EventConfig reference, event catalog (15 system + 11 org events), Prometheus metrics, and troubleshooting.
+- **Operations docs**: `docs/operations/` has 25 .md files covering alerting, API versioning, background jobs, capacity planning, configuration, dashboards, deployment, encryption, events, key management, logging, metrics reference, multi-region, organization metrics, production deployment tutorial, region management, security, shard management, SLO, troubleshooting, vault repair, and a README. Includes `events.md` with full EventConfig reference, event catalog (15 system + 11 org events), Prometheus metrics, and troubleshooting.
 - **Grafana dashboards**: `docs/operations/dashboards/grafana-events-v1.json` — 11-panel Grafana dashboard for event monitoring (write rates, emission paths, denial tracking, GC health)
 - **Client docs**: `docs/client/` has 7 guides (admin, API, discovery, errors, health, idempotency, SDK).
-- **Error codes**: `docs/errors.md` documents all 29 error codes with descriptions, causes, and suggested actions.
+- **Error codes**: `docs/errors.md` documents all 33 error codes with descriptions, causes, and suggested actions.
 
 ### 8. Dual-ID Architecture
 
@@ -1316,8 +1343,8 @@ Translation happens at the gRPC service boundary via `SlugResolver`, backed by `
 
 Two previously identified large-file concerns have been resolved:
 
-- **`types/src/config.rs` (was 3,534 lines)** → Split into `config/` directory module with 7 submodules (mod.rs, node.rs, storage.rs, raft.rs, resilience.rs, observability.rs, runtime.rs). Total 3,610 lines across files. All public APIs preserved via `pub use` re-exports.
-- **`raft/src/log_storage.rs` (was ~5,000 lines)** → Split into `log_storage/` directory module with 6 submodules (mod.rs, types.rs, accessor.rs, store.rs, operations.rs, raft_impl.rs). Total ~11,700 lines (up from 6,135 — growth from externalized state persistence, streaming snapshots, client sequence eviction, and PendingExternalWrites accumulator). Fields use `pub(super)` for cross-submodule access. All openraft trait implementations preserved.
+- **`types/src/config.rs` (was 3,534 lines)** → Split into `config/` directory module with 9 submodules (mod.rs, node.rs, storage.rs, raft.rs, resilience.rs, observability.rs, runtime.rs, encryption.rs, key_management.rs). Total 4,426 lines across files. All public APIs preserved via `pub use` re-exports. Encryption and key management configs added for envelope encryption at rest.
+- **`raft/src/log_storage.rs` (was ~5,000 lines)** → Split into `log_storage/` directory module with 6 submodules (mod.rs, types.rs, accessor.rs, store.rs, operations.rs, raft_impl.rs). Total ~11,839 lines (up from 6,135 — growth from externalized state persistence, streaming snapshots, client sequence eviction, and PendingExternalWrites accumulator). Fields use `pub(super)` for cross-submodule access. All openraft trait implementations preserved.
 
 ---
 
@@ -1325,14 +1352,14 @@ Two previously identified large-file concerns have been resolved:
 
 InferaDB Ledger is a **production-grade blockchain database** with exceptional engineering quality:
 
-- **8 crates**, 157 Rust source files, ~129,000 lines of Rust (excluding generated), 2,458 test functions, 90%+ coverage
+- **8 crates**, 204 Rust source files, ~153,000 lines of Rust (excluding generated), 2,815 test functions, 90%+ coverage
 - **Zero `unsafe` code**, comprehensive error handling (snafu), structured error taxonomy
 - **Custom B+ tree engine** with ACID transactions, crash recovery, compaction
 - **Raft consensus** via openraft, batching, idempotency, multi-region horizontal scaling
 - **Enterprise features**: graceful shutdown with leader transfer (Draining phase, best-effort handoff before election timeout), circuit breaker, rate limiting, hot key detection, quota enforcement, backup/restore, tiered storage with multipart upload, API versioning, deadline propagation, dependency health checks, runtime reconfiguration, organization-scoped event logging, externalized state persistence, streaming snapshots, automatic write forwarding, and 30+ more
 - **Excellent observability**: OpenTelemetry tracing, Prometheus metrics, canonical log lines, structured request logging, SDK-side metrics, queryable event audit trails via gRPC EventsService
-- **Comprehensive testing**: 2,458 test functions, property-based tests (proptest), crash recovery tests, chaos tests, 25 integration test files
-- **Security practices**: No unsafe, constant-time comparison, input validation, deterministic event replication via leader-assigned timestamps, event logging with audit trails, TLS/mTLS, rate limiting, quotas
-- **Documentation**: 10 ADRs, invariant specs, module docs, rustdoc examples, 19 operations guides, 7 client guides, error code reference, events architecture doc, Grafana dashboard templates
+- **Comprehensive testing**: 2,815 test functions, 53 property-based tests (proptest), crash recovery tests, chaos tests, 25 integration test files
+- **Security practices**: No unsafe, constant-time comparison, input validation, deterministic event replication via leader-assigned timestamps, event logging with audit trails, TLS/mTLS, rate limiting, quotas, envelope encryption at rest (AES-256-GCM with per-page DEKs wrapped by Region Master Keys), privacy-preserving email hashing (HMAC-SHA256 blinding)
+- **Documentation**: 10 ADRs, invariant specs, module docs, rustdoc examples, 25 operations guides, 7 client guides, error code reference, events architecture doc, Grafana dashboard templates
 
 Overall assessment: **★★★★★ Exemplary codebase** ready for production deployment.

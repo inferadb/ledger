@@ -249,6 +249,8 @@ pub enum EventAction {
     SnapshotCreated,
     /// User data erased via crypto-shredding.
     UserErased,
+    /// Flat-to-regional user migration completed.
+    UsersMigrated,
 
     // ── Organization scope ──────────────────────────────────
     /// Vault created.
@@ -298,7 +300,8 @@ impl EventAction {
             | EventAction::BackupCreated
             | EventAction::BackupRestored
             | EventAction::SnapshotCreated
-            | EventAction::UserErased => EventScope::System,
+            | EventAction::UserErased
+            | EventAction::UsersMigrated => EventScope::System,
 
             // Organization scope
             EventAction::VaultCreated
@@ -338,6 +341,7 @@ impl EventAction {
             EventAction::BackupRestored => "ledger.backup.restored",
             EventAction::SnapshotCreated => "ledger.snapshot.created",
             EventAction::UserErased => "ledger.user.erased",
+            EventAction::UsersMigrated => "ledger.user.migrated",
             // Organization scope
             EventAction::VaultCreated => "ledger.vault.created",
             EventAction::VaultDeleted => "ledger.vault.deleted",
@@ -375,6 +379,7 @@ impl EventAction {
             EventAction::BackupRestored => "backup_restored",
             EventAction::SnapshotCreated => "snapshot_created",
             EventAction::UserErased => "user_erased",
+            EventAction::UsersMigrated => "users_migrated",
             EventAction::VaultCreated => "vault_created",
             EventAction::VaultDeleted => "vault_deleted",
             EventAction::WriteCommitted => "write_committed",
@@ -407,6 +412,7 @@ impl EventAction {
         EventAction::BackupRestored,
         EventAction::SnapshotCreated,
         EventAction::UserErased,
+        EventAction::UsersMigrated,
         EventAction::VaultCreated,
         EventAction::VaultDeleted,
         EventAction::WriteCommitted,
@@ -819,8 +825,8 @@ mod tests {
 
     #[test]
     fn event_action_all_count() {
-        // 16 system + 11 organization = 27 total
-        assert_eq!(EventAction::ALL.len(), 27);
+        // 17 system + 11 organization = 28 total
+        assert_eq!(EventAction::ALL.len(), 28);
     }
 
     // ── EventOutcome ────────────────────────────────────────

@@ -294,6 +294,41 @@ impl RegionStorageManager {
     pub fn open_count(&self) -> usize {
         self.regions.read().len()
     }
+
+    /// Discovers regions with existing data on disk.
+    ///
+    /// Scans `{data_dir}/regions/` for subdirectories whose names match a known
+    /// `Region` variant. Returns the list of regions that have on-disk data and
+    /// should be opened eagerly on startup. GLOBAL is not included — it is always
+    /// started eagerly via `start_system_region`.
+    ///
+    /// Unknown directory names are silently skipped (future regions added after
+    /// a binary downgrade).
+    pub fn discover_existing_regions(&self) -> Vec<Region> {
+        let regions_dir = self.data_dir.join("regions");
+        let entries = match std::fs::read_dir(&regions_dir) {
+            Ok(entries) => entries,
+            Err(_) => return Vec::new(), // No regions/ directory yet
+        };
+
+        let mut discovered = Vec::new();
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let dir_name = match entry.file_name().into_string() {
+                Ok(name) => name,
+                Err(_) => continue,
+            };
+            // Try to parse directory name as a Region (kebab-case)
+            if let Ok(region) = dir_name.parse::<Region>()
+                && region != Region::GLOBAL
+            {
+                discovered.push(region);
+            }
+        }
+        discovered
+    }
 }
 
 // ============================================================================
@@ -538,5 +573,92 @@ mod tests {
         // Opening should succeed even if directory already exists
         let storage = mgr.open_region(Region::GLOBAL).expect("open global");
         assert_eq!(storage.region(), Region::GLOBAL);
+    }
+
+    #[test]
+    fn test_discover_existing_regions_empty() {
+        let temp = TestDir::new();
+        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
+
+        // No regions/ directory yet — should return empty
+        let discovered = mgr.discover_existing_regions();
+        assert!(discovered.is_empty());
+    }
+
+    #[test]
+    fn test_discover_existing_regions_no_regions_dir() {
+        let temp = TestDir::new();
+        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
+
+        // Create global/ but not regions/ — only GLOBAL would exist
+        std::fs::create_dir_all(temp.path().join("global")).expect("create global");
+
+        let discovered = mgr.discover_existing_regions();
+        assert!(discovered.is_empty());
+    }
+
+    #[test]
+    fn test_discover_existing_regions_finds_opened_regions() {
+        let temp = TestDir::new();
+        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
+
+        // Open some regions (creates directories with databases)
+        mgr.open_region(Region::GLOBAL).expect("open global");
+        mgr.open_region(Region::US_EAST_VA).expect("open us-east-va");
+        mgr.open_region(Region::IE_EAST_DUBLIN).expect("open ie-east-dublin");
+
+        // Close all (discover reads the filesystem, not the open map)
+        mgr.close_region(Region::GLOBAL).expect("close");
+        mgr.close_region(Region::US_EAST_VA).expect("close");
+        mgr.close_region(Region::IE_EAST_DUBLIN).expect("close");
+
+        let mut discovered = mgr.discover_existing_regions();
+        discovered.sort_by_key(|r| r.as_str());
+
+        // GLOBAL is excluded from discover — it's always opened eagerly
+        assert_eq!(discovered.len(), 2);
+        assert_eq!(discovered[0], Region::IE_EAST_DUBLIN);
+        assert_eq!(discovered[1], Region::US_EAST_VA);
+    }
+
+    #[test]
+    fn test_discover_existing_regions_skips_unknown_dirs() {
+        let temp = TestDir::new();
+        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
+
+        let regions_dir = temp.path().join("regions");
+        std::fs::create_dir_all(&regions_dir).expect("create regions/");
+
+        // Create a valid region directory
+        std::fs::create_dir_all(regions_dir.join("us-east-va")).expect("create us-east-va");
+
+        // Create invalid directories that should be skipped
+        std::fs::create_dir_all(regions_dir.join("unknown-region")).expect("create unknown");
+        std::fs::create_dir_all(regions_dir.join("temp")).expect("create temp");
+
+        // Create a file (not a directory) — should be skipped
+        std::fs::write(regions_dir.join("not-a-dir.txt"), b"").expect("create file");
+
+        let discovered = mgr.discover_existing_regions();
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0], Region::US_EAST_VA);
+    }
+
+    #[test]
+    fn test_discover_existing_regions_excludes_global() {
+        let temp = TestDir::new();
+        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
+
+        let regions_dir = temp.path().join("regions");
+        std::fs::create_dir_all(&regions_dir).expect("create regions/");
+
+        // A directory named "global" under regions/ would match Region::GLOBAL
+        // but should be excluded from discovery
+        std::fs::create_dir_all(regions_dir.join("global")).expect("create global");
+        std::fs::create_dir_all(regions_dir.join("us-west-or")).expect("create us-west-or");
+
+        let discovered = mgr.discover_existing_regions();
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0], Region::US_WEST_OR);
     }
 }

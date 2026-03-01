@@ -17,6 +17,7 @@
 //! - Max 10 retries before marking saga as permanently failed
 
 use std::{
+    collections::HashSet,
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
@@ -24,8 +25,9 @@ use std::{
 use inferadb_ledger_state::{
     StateLayer,
     system::{
-        CreateOrgSaga, CreateOrgSagaState, DeleteUserSaga, DeleteUserSagaState, MigrateOrgSaga,
-        MigrateOrgSagaState, MigrateUserSaga, MigrateUserSagaState, SAGA_POLL_INTERVAL, Saga,
+        CreateOrgSaga, CreateOrgSagaState, CreateUserSaga, CreateUserSagaState, DeleteUserSaga,
+        DeleteUserSagaState, MigrateOrgSaga, MigrateOrgSagaState, MigrateUserSaga,
+        MigrateUserSagaState, SAGA_POLL_INTERVAL, Saga, SagaLockKey,
     },
 };
 use inferadb_ledger_store::StorageBackend;
@@ -132,28 +134,33 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             .collect()
     }
 
-    /// Saves a saga back to storage.
-    async fn save_saga(&self, saga: &Saga) -> Result<(), SagaError> {
-        let key = format!("{}{}", SAGA_KEY_PREFIX, saga.id());
-        let value = serde_json::to_vec(saga).context(SerializationSnafu)?;
-
-        let operation = Operation::SetEntity { key, value, expires_at: None, condition: None };
-
-        let transaction = Transaction {
+    /// Builds a saga transaction wrapping the given operations.
+    fn build_transaction(operations: Vec<Operation>) -> Transaction {
+        Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
             client_id: SAGA_ACTOR.to_string(),
             sequence: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0),
-            operations: vec![operation],
+            operations,
             timestamp: chrono::Utc::now(),
             actor: SAGA_ACTOR.to_string(),
-        };
+        }
+    }
+
+    /// Proposes a write through Raft for the given organization and vault.
+    async fn propose_write(
+        &self,
+        organization: OrganizationId,
+        vault: VaultId,
+        operations: Vec<Operation>,
+    ) -> Result<(), SagaError> {
+        let transaction = Self::build_transaction(operations);
 
         let request = LedgerRequest::Write {
-            organization: SYSTEM_ORGANIZATION_ID,
-            vault: SYSTEM_VAULT_ID,
+            organization,
+            vault,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
@@ -163,11 +170,20 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
             .await
             .map_err(|e| SagaError::SagaRaftWrite {
-                message: format!("{:?}", e),
+                message: format!("{e:?}"),
                 backtrace: snafu::Backtrace::generate(),
             })?;
 
         Ok(())
+    }
+
+    /// Saves a saga back to storage.
+    async fn save_saga(&self, saga: &Saga) -> Result<(), SagaError> {
+        let key = format!("{}{}", SAGA_KEY_PREFIX, saga.id());
+        let value = serde_json::to_vec(saga).context(SerializationSnafu)?;
+
+        let operation = Operation::SetEntity { key, value, expires_at: None, condition: None };
+        self.propose_write(SYSTEM_ORGANIZATION_ID, SYSTEM_VAULT_ID, vec![operation]).await
     }
 
     /// Executes a single step of a CreateOrg saga.
@@ -293,7 +309,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         match &saga.state.clone() {
             DeleteUserSagaState::Pending => {
                 // Step 1: Mark user as deleting
-                let user_key = format!("user:{}", saga.input.user_id.value());
+                let user_key = format!("user:{}", saga.input.user.value());
 
                 // Read current user value (StateLayer is internally thread-safe)
                 let user_entity = self
@@ -318,17 +334,17 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     .await?;
 
                     saga.transition(DeleteUserSagaState::MarkingDeleted {
-                        user_id: saga.input.user_id,
+                        user_id: saga.input.user,
                         remaining_organizations: saga.input.organization_ids.clone(),
                     });
                     info!(
                         saga_id = %saga.id,
-                        user_id = saga.input.user_id.value(),
+                        user_id = saga.input.user.value(),
                         "DeleteUser: marked as deleting"
                     );
                 } else {
                     // User already doesn't exist - skip to completed
-                    saga.transition(DeleteUserSagaState::Completed { user_id: saga.input.user_id });
+                    saga.transition(DeleteUserSagaState::Completed { user_id: saga.input.user });
                 }
                 Ok(())
             },
@@ -436,24 +452,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             },
         };
 
-        let next_id = current;
         let new_seq = (current + 1).to_le_bytes().to_vec();
 
         // Write incremented value with CAS condition
         let operation =
             Operation::SetEntity { key: seq_key, value: new_seq, expires_at: None, condition };
 
-        let transaction = Transaction {
-            id: *uuid::Uuid::new_v4().as_bytes(),
-            client_id: SAGA_ACTOR.to_string(),
-            sequence: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0),
-            operations: vec![operation],
-            timestamp: chrono::Utc::now(),
-            actor: SAGA_ACTOR.to_string(),
-        };
+        let transaction = Self::build_transaction(vec![operation]);
 
         let request = LedgerRequest::Write {
             organization: SYSTEM_ORGANIZATION_ID,
@@ -467,11 +472,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
             .await
             .map_err(|e| SagaError::SequenceAllocation {
-                message: format!("{:?}", e),
+                message: format!("{e:?}"),
                 backtrace: snafu::Backtrace::generate(),
             })?;
 
-        Ok(next_id)
+        Ok(current)
     }
 
     /// Writes an entity to storage through Raft.
@@ -491,35 +496,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             condition: None,
         };
 
-        let transaction = Transaction {
-            id: *uuid::Uuid::new_v4().as_bytes(),
-            client_id: SAGA_ACTOR.to_string(),
-            sequence: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0),
-            operations: vec![operation],
-            timestamp: chrono::Utc::now(),
-            actor: SAGA_ACTOR.to_string(),
-        };
-
-        let request = LedgerRequest::Write {
-            organization,
-            vault,
-            transactions: vec![transaction],
-            idempotency_key: [0; 16],
-            request_hash: 0,
-        };
-
-        self.raft
-            .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
-            .await
-            .map_err(|e| SagaError::SagaRaftWrite {
-                message: format!("{:?}", e),
-                backtrace: snafu::Backtrace::generate(),
-            })?;
-
-        Ok(())
+        self.propose_write(organization, vault, vec![operation]).await
     }
 
     /// Deletes an entity from storage through Raft.
@@ -530,36 +507,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         key: &str,
     ) -> Result<(), SagaError> {
         let operation = Operation::DeleteEntity { key: key.to_string() };
-
-        let transaction = Transaction {
-            id: *uuid::Uuid::new_v4().as_bytes(),
-            client_id: SAGA_ACTOR.to_string(),
-            sequence: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0),
-            operations: vec![operation],
-            timestamp: chrono::Utc::now(),
-            actor: SAGA_ACTOR.to_string(),
-        };
-
-        let request = LedgerRequest::Write {
-            organization,
-            vault,
-            transactions: vec![transaction],
-            idempotency_key: [0; 16],
-            request_hash: 0,
-        };
-
-        self.raft
-            .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
-            .await
-            .map_err(|e| SagaError::SagaRaftWrite {
-                message: format!("{:?}", e),
-                backtrace: snafu::Backtrace::generate(),
-            })?;
-
-        Ok(())
+        self.propose_write(organization, vault, vec![operation]).await
     }
 
     /// Executes a single step of a MigrateOrg saga.
@@ -745,13 +693,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         if saga.is_timed_out(timeout) {
             warn!(
                 saga_id = %saga.id,
-                user_id = %saga.input.user_id,
+                user_id = %saga.input.user,
                 "User migration saga timed out, initiating compensation"
             );
 
             // Compensation: revert directory entry to Active with source region
             let request = LedgerRequest::System(SystemRequest::UpdateUserDirectoryStatus {
-                user_id: saga.input.user_id,
+                user_id: saga.input.user,
                 status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
                 region: Some(saga.input.source_region),
             });
@@ -768,7 +716,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             MigrateUserSagaState::Pending => {
                 // Step 1: Mark directory entry as Migrating in GLOBAL
                 let request = LedgerRequest::System(SystemRequest::UpdateUserDirectoryStatus {
-                    user_id: saga.input.user_id,
+                    user_id: saga.input.user,
                     status: inferadb_ledger_state::system::UserDirectoryStatus::Migrating,
                     region: None, // keep current region
                 });
@@ -799,7 +747,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             MigrateUserSagaState::UserDataWritten => {
                 // Step 4: Update directory entry: region = target, status = Active
                 let request = LedgerRequest::System(SystemRequest::UpdateUserDirectoryStatus {
-                    user_id: saga.input.user_id,
+                    user_id: saga.input.user,
                     status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
                     region: Some(saga.input.target_region),
                 });
@@ -834,6 +782,176 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         }
     }
 
+    /// Executes a single step of a CreateUser saga.
+    ///
+    /// Multi-group saga coordinating GLOBAL + regional writes:
+    /// Step 0 (GLOBAL): allocate UserId/UserSlug, CAS email HMAC
+    /// Step 1 (Regional): create User, UserEmail, SubjectKey
+    /// Step 2 (GLOBAL): create UserDirectoryEntry + slug index
+    #[allow(clippy::disallowed_methods)]
+    async fn execute_create_user_step(&self, saga: &mut CreateUserSaga) -> Result<(), SagaError> {
+        // User creation is faster than migrations — cap timeout at 60s
+        let timeout = Duration::from_secs(self.migration_config.timeout_secs.min(60));
+        if saga.is_timed_out(timeout) {
+            warn!(
+                saga_id = %saga.id,
+                "CreateUser saga timed out, initiating compensation"
+            );
+            // Compensate: remove email HMAC reservation if we got past step 0
+            if let CreateUserSagaState::EmailReserved { ref hmac_hex, .. }
+            | CreateUserSagaState::RegionalDataWritten { ref hmac_hex, .. } = saga.state
+            {
+                let hmac = hmac_hex.clone();
+                let request =
+                    LedgerRequest::System(SystemRequest::RemoveEmailHash { hmac_hex: hmac });
+                let _ = self
+                    .raft
+                    .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
+                    .await;
+            }
+            saga.transition(CreateUserSagaState::TimedOut);
+            return Ok(());
+        }
+
+        match saga.state.clone() {
+            CreateUserSagaState::Pending => {
+                // Step 0 (GLOBAL): Allocate UserId/UserSlug + CAS email HMAC
+                let raw_id = self.allocate_sequence_id("user").await?;
+                let user_id = UserId::new(raw_id);
+                let user_slug = snowflake::generate_user_slug().map_err(|e| {
+                    SagaError::UnexpectedSagaResponse {
+                        description: format!("failed to generate user slug: {e}"),
+                    }
+                })?;
+
+                // CAS email HMAC in GLOBAL (reserves uniqueness)
+                let request = LedgerRequest::System(SystemRequest::RegisterEmailHash {
+                    hmac_hex: saga.input.hmac.clone(),
+                    user_id,
+                });
+                self.raft
+                    .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
+                        message: format!("{e:?}"),
+                        backtrace: snafu::Backtrace::generate(),
+                    })?;
+
+                saga.transition(CreateUserSagaState::EmailReserved {
+                    user_id,
+                    user_slug,
+                    hmac_hex: saga.input.hmac.clone(),
+                });
+                info!(
+                    saga_id = %saga.id,
+                    user_id = user_id.value(),
+                    "CreateUser: email reserved, IDs allocated (GLOBAL)"
+                );
+                Ok(())
+            },
+
+            CreateUserSagaState::EmailReserved { user_id, user_slug, ref hmac_hex } => {
+                // Step 1 (Regional): Create User + UserEmail + SubjectKey
+                // This step targets the user's declared region.
+                // In the current single-Raft setup, all writes go through the same
+                // Raft group. With multi-Raft, this would route to the regional group.
+                let request = LedgerRequest::System(SystemRequest::CreateUser {
+                    user: user_id,
+                    admin: saga.input.admin,
+                    slug: user_slug,
+                    region: saga.input.region,
+                });
+                self.raft
+                    .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
+                        message: format!("{e:?}"),
+                        backtrace: snafu::Backtrace::generate(),
+                    })?;
+
+                saga.transition(CreateUserSagaState::RegionalDataWritten {
+                    user_id,
+                    user_slug,
+                    hmac_hex: hmac_hex.clone(),
+                });
+                info!(
+                    saga_id = %saga.id,
+                    user_id = user_id.value(),
+                    region = %saga.input.region,
+                    "CreateUser: regional data written"
+                );
+                Ok(())
+            },
+
+            CreateUserSagaState::RegionalDataWritten { user_id, user_slug, .. } => {
+                // Step 2 (GLOBAL): Create UserDirectoryEntry + slug index
+                let request = LedgerRequest::System(SystemRequest::UpdateUserDirectoryStatus {
+                    user_id,
+                    status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
+                    region: Some(saga.input.region),
+                });
+                self.raft
+                    .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
+                        message: format!("{e:?}"),
+                        backtrace: snafu::Backtrace::generate(),
+                    })?;
+
+                saga.transition(CreateUserSagaState::Completed { user_id, user_slug });
+                info!(
+                    saga_id = %saga.id,
+                    user_id = user_id.value(),
+                    user_slug = user_slug.value(),
+                    "CreateUser: saga completed"
+                );
+                Ok(())
+            },
+
+            CreateUserSagaState::Completed { .. }
+            | CreateUserSagaState::Failed { .. }
+            | CreateUserSagaState::Compensated { .. }
+            | CreateUserSagaState::TimedOut => {
+                // Terminal states — nothing to do
+                Ok(())
+            },
+        }
+    }
+
+    /// Compensates a permanently failed saga by cleaning up partial state.
+    ///
+    /// For `CreateUser`, removes the email HMAC reservation if step 0 completed.
+    /// Other saga types do not currently require compensation.
+    async fn compensate_failed_saga(&self, saga: &Saga) {
+        if let Saga::CreateUser(s) = saga
+            && let CreateUserSagaState::Failed { step, .. } = &s.state
+            && *step > 0
+        {
+            // Remove email HMAC reservation since step 0 (email CAS) completed
+            let request = LedgerRequest::System(SystemRequest::RemoveEmailHash {
+                hmac_hex: s.input.hmac.clone(),
+            });
+            let _ = self
+                .raft
+                .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
+                .await;
+            warn!(
+                saga_id = %s.id,
+                "CreateUser: compensated email HMAC after permanent failure"
+            );
+        }
+    }
+
+    /// Checks if a saga conflicts with any currently-executing sagas.
+    ///
+    /// Returns the conflicting lock key if there is a conflict.
+    fn check_saga_conflicts(
+        active_locks: &HashSet<SagaLockKey>,
+        saga: &Saga,
+    ) -> Option<SagaLockKey> {
+        saga.lock_keys().into_iter().find(|key| active_locks.contains(key))
+    }
+
     /// Executes a single saga.
     async fn execute_saga(&self, mut saga: Saga) {
         let saga_id = saga.id().to_string();
@@ -846,54 +964,22 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             Saga::DeleteUser(s) => self.execute_delete_user_step(s).await,
             Saga::MigrateOrg(s) => self.execute_migrate_org_step(s).await,
             Saga::MigrateUser(s) => self.execute_migrate_user_step(s).await,
+            Saga::CreateUser(s) => self.execute_create_user_step(s).await,
         };
 
-        // Handle result
-        match result {
-            Ok(()) => {
-                // Save updated saga state
-                if let Err(e) = self.save_saga(&saga).await {
-                    warn!(saga_id = %saga_id, error = %e, "Failed to save saga state");
-                }
-            },
-            Err(e) => {
-                warn!(saga_id = %saga_id, error = %e, "Saga step failed");
+        if let Err(e) = result {
+            warn!(saga_id = %saga_id, error = %e, "Saga step failed");
+            saga.fail(e.to_string());
 
-                // Mark failure and schedule retry
-                let step = match &saga {
-                    Saga::CreateOrg(s) => match &s.state {
-                        CreateOrgSagaState::Pending => 0,
-                        CreateOrgSagaState::UserCreated { .. } => 1,
-                        CreateOrgSagaState::OrganizationCreated { .. } => 2,
-                        _ => 0,
-                    },
-                    Saga::DeleteUser(s) => match &s.state {
-                        DeleteUserSagaState::Pending => 0,
-                        DeleteUserSagaState::MarkingDeleted { .. } => 1,
-                        DeleteUserSagaState::MembershipsRemoved { .. } => 2,
-                        _ => 0,
-                    },
-                    Saga::MigrateOrg(s) => s.current_step(),
-                    Saga::MigrateUser(s) => s.current_step(),
-                };
+            // If the saga exhausted retries and transitioned to Failed,
+            // compensate to clean up partial state (e.g., email HMAC reservation).
+            if saga.is_terminal() {
+                self.compensate_failed_saga(&saga).await;
+            }
+        }
 
-                let error_msg = e.to_string();
-                match &mut saga {
-                    Saga::CreateOrg(s) => s.fail(step, error_msg.clone()),
-                    Saga::DeleteUser(s) => s.fail(step, error_msg.clone()),
-                    Saga::MigrateOrg(s) => s.fail(step, error_msg.clone()),
-                    Saga::MigrateUser(s) => s.fail(step, error_msg),
-                }
-
-                // Save failed state
-                if let Err(save_err) = self.save_saga(&saga).await {
-                    warn!(
-                        saga_id = %saga_id,
-                        error = %save_err,
-                        "Failed to save saga failure state"
-                    );
-                }
-            },
+        if let Err(e) = self.save_saga(&saga).await {
+            warn!(saga_id = %saga_id, error = %e, "Failed to save saga state");
         }
     }
 
@@ -918,7 +1004,23 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         } else {
             info!(count = saga_count, "Found pending sagas");
 
+            // Track active lock keys to reject concurrent sagas for the same entity
+            let mut active_locks: HashSet<SagaLockKey> = HashSet::new();
+
             for saga in sagas {
+                // Check for conflicts with already-executing sagas in this cycle
+                if let Some(conflict) = Self::check_saga_conflicts(&active_locks, &saga) {
+                    warn!(
+                        saga_id = %saga.id(),
+                        conflict = %conflict,
+                        "Skipping saga: concurrent saga for same entity"
+                    );
+                    continue;
+                }
+
+                // Acquire locks for this saga
+                active_locks.extend(saga.lock_keys());
+
                 self.execute_saga(saga).await;
             }
         }
@@ -994,7 +1096,7 @@ mod tests {
     #[test]
     fn test_delete_user_saga_serialization() {
         let input = DeleteUserInput {
-            user_id: UserId::new(42),
+            user: UserId::new(42),
             organization_ids: vec![
                 OrganizationId::new(1),
                 OrganizationId::new(2),

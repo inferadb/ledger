@@ -161,6 +161,39 @@ pub struct ErasureAuditRecord {
     pub region: Region,
 }
 
+/// Pre-computed migration data for a single user during flat-to-regional migration.
+///
+/// The admin handler reads flat `user:*` records, computes email HMACs (using
+/// the blinding key, which stays out of Raft log), generates per-subject
+/// encryption keys, and packages everything into this struct. The Raft state
+/// machine then applies directory entries, indexes, and keys atomically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMigrationEntry {
+    /// Internal user identifier.
+    pub user: UserId,
+    /// External Snowflake slug.
+    pub slug: UserSlug,
+    /// Target data residency region.
+    pub region: Region,
+    /// Pre-computed `HMAC-SHA256(blinding_key, normalize(email))` hex string.
+    pub hmac: String,
+    /// Random 256-bit per-subject encryption key.
+    pub bytes: [u8; 32],
+}
+
+/// Summary of a flat-to-regional user migration run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationSummary {
+    /// User records found in the flat `_system` store.
+    pub users: u64,
+    /// Users successfully migrated in this run.
+    pub migrated: u64,
+    /// Users skipped (already have directory entries).
+    pub skipped: u64,
+    /// Users that failed migration.
+    pub errors: u64,
+}
+
 // ============================================================================
 // User Directory Types (GLOBAL control plane)
 // ============================================================================

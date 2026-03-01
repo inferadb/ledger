@@ -2140,10 +2140,6 @@ pub struct EraseUserRequest {
     /// Region where the user's PII resides.
     #[prost(enumeration = "Region", tag = "3")]
     pub region: i32,
-    /// Confirmation token from RequestConfirmation RPC (hex-encoded).
-    /// Required — erasure is irreversible.
-    #[prost(string, tag = "4")]
-    pub confirmation_token: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct EraseUserResponse {
@@ -2151,32 +2147,51 @@ pub struct EraseUserResponse {
     #[prost(int64, tag = "1")]
     pub user_id: i64,
 }
-/// Request a confirmation token for an irreversible operation.
+/// Migrate existing users from flat \_system store to regional directory
+/// structure. Explicit admin action for pre-release data migration.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RequestConfirmationRequest {
-    /// The operation requiring confirmation.
-    #[prost(enumeration = "AdminPermission", tag = "1")]
-    pub operation: i32,
-    /// Target entity identifier (e.g., user ID string for EraseUser).
+pub struct MigrateExistingUsersRequest {
+    /// Default region for users without an assigned region.
+    #[prost(enumeration = "Region", tag = "1")]
+    pub default_region: i32,
+    /// Hex-encoded email blinding key for HMAC computation.
+    /// The key stays in the handler and never enters the Raft log.
     #[prost(string, tag = "2")]
-    pub target_id: ::prost::alloc::string::String,
-    /// Actor (admin user) requesting the confirmation.
-    #[prost(int64, tag = "3")]
-    pub actor_id: i64,
+    pub email_blinding_key: ::prost::alloc::string::String,
 }
-/// Response containing a time-limited, single-use confirmation token.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RequestConfirmationResponse {
-    /// Opaque confirmation token (hex-encoded 32 random bytes).
-    /// Present this token when executing the confirmed operation.
-    #[prost(string, tag = "1")]
-    pub confirmation_token: ::prost::alloc::string::String,
-    /// When the token expires (RFC 3339 timestamp).
-    #[prost(string, tag = "2")]
-    pub expires_at: ::prost::alloc::string::String,
-    /// Human-readable summary of what the operation will do.
-    #[prost(string, tag = "3")]
-    pub operation_summary: ::prost::alloc::string::String,
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct MigrateExistingUsersResponse {
+    /// User records found in the flat \_system store.
+    #[prost(uint64, tag = "1")]
+    pub users: u64,
+    /// Users successfully migrated in this run.
+    #[prost(uint64, tag = "2")]
+    pub migrated: u64,
+    /// Users skipped (already have directory entries).
+    #[prost(uint64, tag = "3")]
+    pub skipped: u64,
+    /// Users that failed migration.
+    #[prost(uint64, tag = "4")]
+    pub errors: u64,
+    /// Elapsed time in seconds.
+    #[prost(double, tag = "5")]
+    pub elapsed_secs: f64,
+}
+/// Eagerly provision a Raft group for a region.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProvisionRegionRequest {
+    /// Region to provision.
+    #[prost(enumeration = "Region", tag = "1")]
+    pub region: i32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProvisionRegionResponse {
+    /// Whether the region was newly created (false if already active).
+    #[prost(bool, tag = "1")]
+    pub created: bool,
+    /// Region that was provisioned.
+    #[prost(enumeration = "Region", tag = "2")]
+    pub region: i32,
 }
 /// Geographic region for data residency. Each Raft consensus group maps 1:1 to
 /// a region. Organizations declare a region governing where their data is stored.
@@ -2875,55 +2890,6 @@ impl HealthStatus {
             "HEALTH_STATUS_HEALTHY" => Some(Self::Healthy),
             "HEALTH_STATUS_DEGRADED" => Some(Self::Degraded),
             "HEALTH_STATUS_UNAVAILABLE" => Some(Self::Unavailable),
-            _ => None,
-        }
-    }
-}
-/// Administrative permission for sensitive operations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum AdminPermission {
-    Unspecified = 0,
-    MigrateOrganization = 1,
-    MigrateUserRegion = 2,
-    EraseUser = 3,
-    RotateRegionKey = 4,
-    DecommissionRegionKey = 5,
-    RotateBlindingKey = 6,
-    ManageRegionMembership = 7,
-}
-impl AdminPermission {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "ADMIN_PERMISSION_UNSPECIFIED",
-            Self::MigrateOrganization => "ADMIN_PERMISSION_MIGRATE_ORGANIZATION",
-            Self::MigrateUserRegion => "ADMIN_PERMISSION_MIGRATE_USER_REGION",
-            Self::EraseUser => "ADMIN_PERMISSION_ERASE_USER",
-            Self::RotateRegionKey => "ADMIN_PERMISSION_ROTATE_REGION_KEY",
-            Self::DecommissionRegionKey => "ADMIN_PERMISSION_DECOMMISSION_REGION_KEY",
-            Self::RotateBlindingKey => "ADMIN_PERMISSION_ROTATE_BLINDING_KEY",
-            Self::ManageRegionMembership => "ADMIN_PERMISSION_MANAGE_REGION_MEMBERSHIP",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "ADMIN_PERMISSION_UNSPECIFIED" => Some(Self::Unspecified),
-            "ADMIN_PERMISSION_MIGRATE_ORGANIZATION" => Some(Self::MigrateOrganization),
-            "ADMIN_PERMISSION_MIGRATE_USER_REGION" => Some(Self::MigrateUserRegion),
-            "ADMIN_PERMISSION_ERASE_USER" => Some(Self::EraseUser),
-            "ADMIN_PERMISSION_ROTATE_REGION_KEY" => Some(Self::RotateRegionKey),
-            "ADMIN_PERMISSION_DECOMMISSION_REGION_KEY" => {
-                Some(Self::DecommissionRegionKey)
-            }
-            "ADMIN_PERMISSION_ROTATE_BLINDING_KEY" => Some(Self::RotateBlindingKey),
-            "ADMIN_PERMISSION_MANAGE_REGION_MEMBERSHIP" => {
-                Some(Self::ManageRegionMembership)
-            }
             _ => None,
         }
     }
@@ -5346,15 +5312,14 @@ pub mod admin_service_client {
                 .insert(GrpcMethod::new("ledger.v1.AdminService", "EraseUser"));
             self.inner.unary(req, path, codec).await
         }
-        /// Request a confirmation token for an irreversible operation.
-        /// Returns a single-use, time-limited token that must be presented
-        /// when executing the operation. Required for EraseUser and
-        /// DecommissionRegionKey.
-        pub async fn request_confirmation(
+        /// Migrate existing users from flat \_system store to regional directory
+        /// structure. One-time admin operation for pre-release data migration.
+        /// Idempotent — re-run skips already-migrated users.
+        pub async fn migrate_existing_users(
             &mut self,
-            request: impl tonic::IntoRequest<super::RequestConfirmationRequest>,
+            request: impl tonic::IntoRequest<super::MigrateExistingUsersRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::RequestConfirmationResponse>,
+            tonic::Response<super::MigrateExistingUsersResponse>,
             tonic::Status,
         > {
             self.inner
@@ -5367,13 +5332,40 @@ pub mod admin_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.AdminService/RequestConfirmation",
+                "/ledger.v1.AdminService/MigrateExistingUsers",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new("ledger.v1.AdminService", "RequestConfirmation"),
+                    GrpcMethod::new("ledger.v1.AdminService", "MigrateExistingUsers"),
                 );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Eagerly provision a Raft group for a region without assigning data.
+        /// Normally regional groups are created lazily on first organization or
+        /// user assignment. This RPC allows pre-provisioning for capacity planning.
+        pub async fn provision_region(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ProvisionRegionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ProvisionRegionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/ProvisionRegion",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "ProvisionRegion"));
             self.inner.unary(req, path, codec).await
         }
     }
@@ -5661,15 +5653,24 @@ pub mod admin_service_server {
             tonic::Response<super::EraseUserResponse>,
             tonic::Status,
         >;
-        /// Request a confirmation token for an irreversible operation.
-        /// Returns a single-use, time-limited token that must be presented
-        /// when executing the operation. Required for EraseUser and
-        /// DecommissionRegionKey.
-        async fn request_confirmation(
+        /// Migrate existing users from flat \_system store to regional directory
+        /// structure. One-time admin operation for pre-release data migration.
+        /// Idempotent — re-run skips already-migrated users.
+        async fn migrate_existing_users(
             &self,
-            request: tonic::Request<super::RequestConfirmationRequest>,
+            request: tonic::Request<super::MigrateExistingUsersRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::RequestConfirmationResponse>,
+            tonic::Response<super::MigrateExistingUsersResponse>,
+            tonic::Status,
+        >;
+        /// Eagerly provision a Raft group for a region without assigning data.
+        /// Normally regional groups are created lazily on first organization or
+        /// user assignment. This RPC allows pre-provisioning for capacity planning.
+        async fn provision_region(
+            &self,
+            request: tonic::Request<super::ProvisionRegionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ProvisionRegionResponse>,
             tonic::Status,
         >;
     }
@@ -7116,25 +7117,25 @@ pub mod admin_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/ledger.v1.AdminService/RequestConfirmation" => {
+                "/ledger.v1.AdminService/MigrateExistingUsers" => {
                     #[allow(non_camel_case_types)]
-                    struct RequestConfirmationSvc<T: AdminService>(pub Arc<T>);
+                    struct MigrateExistingUsersSvc<T: AdminService>(pub Arc<T>);
                     impl<
                         T: AdminService,
-                    > tonic::server::UnaryService<super::RequestConfirmationRequest>
-                    for RequestConfirmationSvc<T> {
-                        type Response = super::RequestConfirmationResponse;
+                    > tonic::server::UnaryService<super::MigrateExistingUsersRequest>
+                    for MigrateExistingUsersSvc<T> {
+                        type Response = super::MigrateExistingUsersResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::RequestConfirmationRequest>,
+                            request: tonic::Request<super::MigrateExistingUsersRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as AdminService>::request_confirmation(&inner, request)
+                                <T as AdminService>::migrate_existing_users(&inner, request)
                                     .await
                             };
                             Box::pin(fut)
@@ -7146,7 +7147,52 @@ pub mod admin_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = RequestConfirmationSvc(inner);
+                        let method = MigrateExistingUsersSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/ProvisionRegion" => {
+                    #[allow(non_camel_case_types)]
+                    struct ProvisionRegionSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::ProvisionRegionRequest>
+                    for ProvisionRegionSvc<T> {
+                        type Response = super::ProvisionRegionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ProvisionRegionRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::provision_region(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ProvisionRegionSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

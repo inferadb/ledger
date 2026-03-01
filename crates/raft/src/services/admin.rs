@@ -2,7 +2,7 @@
 //!
 //! Handles organization and vault management, cluster membership, snapshots, and integrity checks.
 
-use std::{collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 
 use inferadb_ledger_proto::proto::{
     BackupInfo, BlockHeader, CheckIntegrityRequest, CheckIntegrityResponse, ClusterMember,
@@ -16,13 +16,15 @@ use inferadb_ledger_proto::proto::{
     GetRewrapStatusResponse, GetVaultRequest, GetVaultResponse, Hash, IntegrityIssue,
     JoinClusterRequest, JoinClusterResponse, LeaveClusterRequest, LeaveClusterResponse,
     ListBackupsRequest, ListBackupsResponse, ListOrganizationsRequest, ListOrganizationsResponse,
-    ListVaultsRequest, ListVaultsResponse, MigrateOrganizationRequest, MigrateOrganizationResponse,
+    ListVaultsRequest, ListVaultsResponse, MigrateExistingUsersRequest,
+    MigrateExistingUsersResponse, MigrateOrganizationRequest, MigrateOrganizationResponse,
     MigrateUserRegionRequest, MigrateUserRegionResponse, NodeId, OrganizationSlug,
-    OrganizationStatus as ProtoOrganizationStatus, RecoverVaultRequest, RecoverVaultResponse,
-    Region as ProtoRegion, RestoreBackupRequest, RestoreBackupResponse, RotateBlindingKeyRequest,
-    RotateBlindingKeyResponse, RotateRegionKeyRequest, RotateRegionKeyResponse,
-    TransferLeadershipRequest, TransferLeadershipResponse, UpdateConfigRequest,
-    UpdateConfigResponse, UserSlug as ProtoUserSlug, VaultHealthProto, VaultSlug as ProtoVaultSlug,
+    OrganizationStatus as ProtoOrganizationStatus, ProvisionRegionRequest, ProvisionRegionResponse,
+    RecoverVaultRequest, RecoverVaultResponse, Region as ProtoRegion, RestoreBackupRequest,
+    RestoreBackupResponse, RotateBlindingKeyRequest, RotateBlindingKeyResponse,
+    RotateRegionKeyRequest, RotateRegionKeyResponse, TransferLeadershipRequest,
+    TransferLeadershipResponse, UpdateConfigRequest, UpdateConfigResponse,
+    UserSlug as ProtoUserSlug, VaultHealthProto, VaultSlug as ProtoVaultSlug,
     admin_service_server::AdminService,
 };
 use inferadb_ledger_state::{BlockArchive, StateLayer, system::SystemOrganizationService};
@@ -111,6 +113,9 @@ pub struct AdminServiceImpl {
     /// Shared DEK re-wrapping progress (read by `GetRewrapStatus`).
     #[builder(default)]
     rewrap_progress: Option<Arc<crate::dek_rewrap::RewrapProgress>>,
+    /// Multi-Raft manager for lazy region provisioning.
+    #[builder(default)]
+    multi_raft_manager: Option<Arc<crate::multi_raft::MultiRaftManager>>,
 }
 
 impl AdminServiceImpl {
@@ -171,6 +176,16 @@ impl AdminServiceImpl {
         health_state: crate::graceful_shutdown::HealthState,
     ) -> Self {
         self.health_state = Some(health_state);
+        self
+    }
+
+    /// Attaches the multi-Raft manager for lazy region provisioning.
+    #[must_use]
+    pub fn with_multi_raft_manager(
+        mut self,
+        manager: Arc<crate::multi_raft::MultiRaftManager>,
+    ) -> Self {
+        self.multi_raft_manager = Some(manager);
         self
     }
 
@@ -3547,7 +3562,7 @@ impl AdminService for AdminServiceImpl {
         let saga = inferadb_ledger_state::system::MigrateUserSaga::new(
             saga_id,
             inferadb_ledger_state::system::MigrateUserInput {
-                user_id,
+                user: user_id,
                 source_region,
                 target_region,
             },
@@ -3848,6 +3863,284 @@ impl AdminService for AdminServiceImpl {
                 Err(Status::internal("Unexpected response from Raft state machine"))
             },
         }
+    }
+
+    /// Migrates existing users from flat `_system` store to regional directory
+    /// structure. One-time admin operation.
+    ///
+    /// Pre-validates blinding key and default region. Reads flat user records,
+    /// computes email HMACs (blinding key stays in handler, never enters Raft
+    /// log), generates per-subject keys, and proposes a single atomic Raft
+    /// write with all migration entries.
+    async fn migrate_existing_users(
+        &self,
+        request: Request<MigrateExistingUsersRequest>,
+    ) -> Result<Response<MigrateExistingUsersResponse>, Status> {
+        crate::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
+
+        let start = std::time::Instant::now();
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = RequestContext::new("AdminService", "migrate_existing_users");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.extract_transport_metadata(&grpc_metadata);
+        ctx.set_admin_action("migrate_existing_users");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
+
+        // Pre-validation: parse default region (reject UNSPECIFIED).
+        let default_region = inferadb_ledger_proto::convert::region_from_i32(req.default_region)?;
+
+        // Pre-validation: reject GLOBAL as default region (users must live in
+        // a data region, not the control plane).
+        if default_region == inferadb_ledger_types::Region::GLOBAL {
+            ctx.set_error("InvalidArgument", "default_region cannot be GLOBAL");
+            return Err(Status::invalid_argument(
+                "default_region cannot be GLOBAL: users must reside in a data region",
+            ));
+        }
+
+        // Pre-validation: parse email blinding key from hex.
+        if req.email_blinding_key.is_empty() {
+            ctx.set_error("InvalidArgument", "email_blinding_key is required");
+            return Err(Status::invalid_argument("email_blinding_key is required"));
+        }
+        let blinding_key =
+            match inferadb_ledger_types::EmailBlindingKey::from_str(&req.email_blinding_key) {
+                Ok(k) => k,
+                Err(e) => {
+                    ctx.set_error("InvalidArgument", &format!("invalid blinding key: {e}"));
+                    return Err(Status::invalid_argument(format!(
+                        "invalid email_blinding_key: {e}"
+                    )));
+                },
+            };
+
+        // Read all flat user records from the applied state.
+        let sys = SystemOrganizationService::new(self.state.clone());
+        let users = match sys.list_flat_users() {
+            Ok(u) => u,
+            Err(e) => {
+                ctx.set_error("Internal", &format!("failed to list users: {e}"));
+                return Err(Status::internal(format!("Failed to list users: {e}")));
+            },
+        };
+
+        if users.is_empty() {
+            ctx.set_success();
+            return Ok(Response::new(MigrateExistingUsersResponse {
+                users: 0,
+                migrated: 0,
+                skipped: 0,
+                errors: 0,
+                elapsed_secs: start.elapsed().as_secs_f64(),
+            }));
+        }
+
+        // Build pre-computed migration entries.
+        let mut entries = Vec::with_capacity(users.len());
+        let mut pre_skipped: u64 = 0;
+
+        for user in &users {
+            // Check if already migrated (directory entry exists).
+            match sys.get_user_directory(user.id) {
+                Ok(Some(_)) => {
+                    pre_skipped += 1;
+                    continue;
+                },
+                Ok(None) => {},
+                Err(_) => {
+                    pre_skipped += 1;
+                    continue;
+                },
+            }
+
+            // Determine target region: use user's declared region if not GLOBAL,
+            // otherwise use the default.
+            let target_region = if user.region == inferadb_ledger_types::Region::GLOBAL {
+                default_region
+            } else {
+                user.region
+            };
+
+            // Read the user's email to compute HMAC.
+            let email_hmac_hex = match sys.get_user_email(user.email) {
+                Ok(Some(user_email)) => {
+                    inferadb_ledger_types::compute_email_hmac(&blinding_key, &user_email.email)
+                },
+                _ => {
+                    // No email record — skip this user (corrupted data).
+                    pre_skipped += 1;
+                    continue;
+                },
+            };
+
+            // Generate random per-subject encryption key.
+            let mut subject_key_bytes = [0u8; 32];
+            rand::Rng::fill_bytes(&mut rand::rng(), &mut subject_key_bytes);
+
+            entries.push(inferadb_ledger_state::system::UserMigrationEntry {
+                user: user.id,
+                slug: user.slug,
+                region: target_region,
+                hmac: email_hmac_hex,
+                bytes: subject_key_bytes,
+            });
+        }
+
+        // If all users were pre-skipped, return early without Raft proposal.
+        if entries.is_empty() {
+            ctx.set_success();
+            return Ok(Response::new(MigrateExistingUsersResponse {
+                users: users.len() as u64,
+                migrated: 0,
+                skipped: pre_skipped,
+                errors: 0,
+                elapsed_secs: start.elapsed().as_secs_f64(),
+            }));
+        }
+
+        // Propose migration through Raft.
+        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+
+        let ledger_request = LedgerRequest::System(SystemRequest::MigrateExistingUsers { entries });
+        let payload = RaftPayload { request: ledger_request, proposed_at: chrono::Utc::now() };
+
+        let migration_result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
+
+        let response = match migration_result {
+            Ok(Ok(resp)) => resp.data,
+            Ok(Err(e)) => {
+                ctx.set_error("RaftError", &e.to_string());
+                return Err(classify_raft_error(&e.to_string()));
+            },
+            Err(_) => {
+                ctx.set_error("Timeout", "Raft proposal timed out");
+                return Err(Status::deadline_exceeded("Raft proposal timed out"));
+            },
+        };
+
+        match response {
+            LedgerResponse::UsersMigrated { users, migrated, skipped, errors } => {
+                // Record audit event.
+                if let Some(node_id) = self.node_id {
+                    self.record_handler_event(
+                        HandlerPhaseEmitter::for_system(EventAction::UsersMigrated, node_id)
+                            .principal("admin")
+                            .detail("users", &users.to_string())
+                            .detail("migrated", &migrated.to_string())
+                            .detail("skipped", &(skipped + pre_skipped).to_string())
+                            .detail("errors", &errors.to_string())
+                            .detail("default_region", default_region.as_str())
+                            .trace_id(&trace_ctx.trace_id)
+                            .outcome(EventOutcomeType::Success)
+                            .build(
+                                self.event_handle
+                                    .as_ref()
+                                    .map_or(90, |h| h.config().default_ttl_days),
+                            ),
+                    );
+                }
+
+                ctx.set_success();
+                Ok(Response::new(MigrateExistingUsersResponse {
+                    users,
+                    migrated,
+                    skipped: skipped + pre_skipped,
+                    errors,
+                    elapsed_secs: start.elapsed().as_secs_f64(),
+                }))
+            },
+            LedgerResponse::Error { message } => {
+                ctx.set_error("MigrationFailed", &message);
+                Err(Status::internal(format!("Migration failed: {message}")))
+            },
+            other => {
+                ctx.set_error("UnexpectedResponse", &format!("{other:?}"));
+                Err(Status::internal("Unexpected response from Raft state machine"))
+            },
+        }
+    }
+
+    /// Eagerly provisions a Raft group for a region.
+    ///
+    /// Normally regional groups are created lazily on first organization or
+    /// user assignment. This RPC allows pre-provisioning for capacity planning.
+    async fn provision_region(
+        &self,
+        request: Request<ProvisionRegionRequest>,
+    ) -> Result<Response<ProvisionRegionResponse>, Status> {
+        crate::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
+
+        let start = std::time::Instant::now();
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = RequestContext::new("AdminService", "provision_region");
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.extract_transport_metadata(&grpc_metadata);
+        ctx.set_admin_action("provision_region");
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
+
+        let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
+
+        if region == inferadb_ledger_types::Region::GLOBAL {
+            ctx.set_error("InvalidArgument", "GLOBAL region cannot be provisioned");
+            return Err(Status::invalid_argument(
+                "GLOBAL region is always created eagerly on startup",
+            ));
+        }
+
+        let manager = self.multi_raft_manager.as_ref().ok_or_else(|| {
+            Status::unavailable("Region provisioning not available on single-region nodes")
+        })?;
+
+        let node_id = self.node_id.ok_or_else(|| {
+            Status::failed_precondition("Node ID not configured for region provisioning")
+        })?;
+        let addr = self.listen_addr.to_string();
+        let region_config = crate::multi_raft::RegionConfig::data(region, vec![(node_id, addr)]);
+        let (_group, created) = manager.ensure_data_region(region_config).await.map_err(|e| {
+            ctx.set_error("Internal", &format!("{e}"));
+            Status::internal(format!("Failed to provision region {}: {e}", region.as_str()))
+        })?;
+
+        tracing::info!(
+            region = region.as_str(),
+            created,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "provision_region completed"
+        );
+
+        let proto_region: ProtoRegion = region.into();
+        Ok(Response::new(ProvisionRegionResponse { created, region: proto_region.into() }))
     }
 }
 

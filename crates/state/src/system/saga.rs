@@ -16,7 +16,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use inferadb_ledger_types::{OrganizationId, OrganizationSlug, Region, UserId};
+use inferadb_ledger_types::{OrganizationId, OrganizationSlug, Region, UserId, UserSlug};
 use serde::{Deserialize, Serialize};
 
 /// Unique identifier for a saga.
@@ -183,6 +183,18 @@ impl CreateOrgSaga {
         }
         self.updated_at = Utc::now();
     }
+
+    /// Returns the step number for the current state (used in fail tracking).
+    pub fn current_step(&self) -> u8 {
+        match &self.state {
+            CreateOrgSagaState::Pending => 0,
+            CreateOrgSagaState::UserCreated { .. } => 1,
+            CreateOrgSagaState::OrganizationCreated { .. } => 2,
+            CreateOrgSagaState::Completed { .. }
+            | CreateOrgSagaState::Failed { .. }
+            | CreateOrgSagaState::Compensated { .. } => 0,
+        }
+    }
 }
 
 // =============================================================================
@@ -226,7 +238,7 @@ pub enum DeleteUserSagaState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteUserInput {
     /// User to delete.
-    pub user_id: UserId,
+    pub user: UserId,
     /// Lists of organization IDs where user has memberships.
     pub organization_ids: Vec<OrganizationId>,
 }
@@ -321,6 +333,16 @@ impl DeleteUserSaga {
                 Some(Utc::now() + chrono::Duration::from_std(backoff).unwrap_or_default());
         }
         self.updated_at = Utc::now();
+    }
+
+    /// Returns the step number for the current state (used in fail tracking).
+    pub fn current_step(&self) -> u8 {
+        match &self.state {
+            DeleteUserSagaState::Pending => 0,
+            DeleteUserSagaState::MarkingDeleted { .. } => 1,
+            DeleteUserSagaState::MembershipsRemoved { .. } => 2,
+            DeleteUserSagaState::Completed { .. } | DeleteUserSagaState::Failed { .. } => 0,
+        }
     }
 }
 
@@ -538,8 +560,8 @@ pub enum MigrateUserSagaState {
 /// Input parameters for the Migrate User Region saga.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrateUserInput {
-    /// Internal user ID.
-    pub user_id: UserId,
+    /// Internal user identifier.
+    pub user: UserId,
     /// Region the user's PII is migrating from.
     pub source_region: Region,
     /// Region the user's PII is migrating to.
@@ -655,6 +677,257 @@ impl MigrateUserSaga {
 }
 
 // =============================================================================
+// Multi-Group Saga Infrastructure
+// =============================================================================
+
+/// Status of an individual saga step within a multi-group saga.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    /// Step has not yet been executed.
+    Pending,
+    /// Step completed successfully (Raft commit confirmed).
+    Completed,
+    /// Step execution failed.
+    Failed,
+    /// Step was compensated (rollback action executed).
+    Compensated,
+}
+
+/// A single step in a multi-group saga, targeting a specific region's Raft group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SagaStep {
+    /// Sequential step identifier within the saga (0-indexed).
+    pub step_id: u32,
+    /// The region whose Raft group this step targets.
+    pub target_region: Region,
+    /// Describes what action this step performs.
+    pub action: String,
+    /// Describes the compensation action if rollback is needed.
+    pub compensate: String,
+    /// Current execution status.
+    pub status: StepStatus,
+}
+
+/// Identifies the entity locked by an active saga to prevent concurrent sagas.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SagaLockKey {
+    /// Lock on a user (prevents concurrent user creation/migration/erasure).
+    User(UserId),
+    /// Lock on a user email (prevents concurrent creation with the same email).
+    Email(String),
+    /// Lock on an organization (prevents concurrent migration).
+    Organization(OrganizationId),
+}
+
+impl std::fmt::Display for SagaLockKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SagaLockKey::User(id) => write!(f, "user:{}", id.value()),
+            SagaLockKey::Email(email) => write!(f, "email:{email}"),
+            SagaLockKey::Organization(id) => write!(f, "org:{}", id.value()),
+        }
+    }
+}
+
+// =============================================================================
+// Create User Saga
+// =============================================================================
+
+/// State machine for the Create User saga.
+///
+/// Coordinates writes across GLOBAL + regional Raft groups:
+/// 1. GLOBAL: allocate UserId/UserSlug, CAS email HMAC (reserves uniqueness)
+/// 2. Regional: create User, UserEmail, SubjectKey
+/// 3. GLOBAL: create UserDirectoryEntry + slug index
+///
+/// Compensation in reverse: step 3 → delete directory/slug index,
+/// step 2 → delete User/UserEmail/SubjectKey from regional store,
+/// step 1 → delete email HMAC from GLOBAL (releases reservation).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CreateUserSagaState {
+    /// Initial state: about to allocate IDs and reserve email in GLOBAL.
+    Pending,
+    /// Step 1 complete: UserId, UserSlug allocated, email HMAC reserved in GLOBAL.
+    EmailReserved {
+        /// Allocated internal user ID.
+        user_id: UserId,
+        /// Allocated external Snowflake slug.
+        user_slug: UserSlug,
+        /// Hex-encoded HMAC used for email uniqueness.
+        hmac_hex: String,
+    },
+    /// Step 2 complete: User, UserEmail, SubjectKey created in regional store.
+    RegionalDataWritten {
+        /// The user's internal ID.
+        user_id: UserId,
+        /// The user's external slug.
+        user_slug: UserSlug,
+        /// HMAC hex for compensation reference.
+        hmac_hex: String,
+    },
+    /// Step 3 complete: directory entry and slug index created in GLOBAL.
+    Completed {
+        /// Created user's internal ID.
+        user_id: UserId,
+        /// Created user's external slug.
+        user_slug: UserSlug,
+    },
+    /// Saga failed after exhausting retries.
+    Failed {
+        /// The step that failed (0-indexed).
+        step: u8,
+        /// Error description.
+        error: String,
+    },
+    /// Saga failed and compensation completed.
+    Compensated {
+        /// The step that failed.
+        step: u8,
+        /// Summary of compensation actions taken.
+        cleanup_summary: String,
+    },
+    /// Saga exceeded the configured timeout and was auto-compensated.
+    TimedOut,
+}
+
+/// Input parameters for Create User saga.
+///
+/// PII (name, email) is intentionally excluded — the saga is stored in the
+/// global control plane, and only pseudonymous identifiers are permitted.
+/// Plaintext PII is written directly to the regional store, not through the
+/// saga's serialized state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateUserInput {
+    /// Hex-encoded HMAC-SHA256 of the normalized email (for global uniqueness).
+    pub hmac: String,
+    /// Data residency region for the user's PII.
+    pub region: Region,
+    /// Whether this user is a global service administrator.
+    pub admin: bool,
+}
+
+/// Record for the Create User saga, tracking state and retry progress.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateUserSaga {
+    /// Unique saga identifier.
+    pub id: SagaId,
+    /// Current state.
+    pub state: CreateUserSagaState,
+    /// Input parameters.
+    pub input: CreateUserInput,
+    /// When the saga was created.
+    pub created_at: DateTime<Utc>,
+    /// When the saga was last updated.
+    pub updated_at: DateTime<Utc>,
+    /// Number of retry attempts.
+    pub retries: u8,
+    /// Next retry time (for exponential backoff).
+    pub next_retry_at: Option<DateTime<Utc>>,
+}
+
+impl CreateUserSaga {
+    /// Creates a new saga in Pending state.
+    pub fn new(id: SagaId, input: CreateUserInput) -> Self {
+        let now = Utc::now();
+        Self {
+            id,
+            state: CreateUserSagaState::Pending,
+            input,
+            created_at: now,
+            updated_at: now,
+            retries: 0,
+            next_retry_at: None,
+        }
+    }
+
+    /// Checks if the saga is complete (success or permanently failed).
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.state,
+            CreateUserSagaState::Completed { .. }
+                | CreateUserSagaState::Failed { .. }
+                | CreateUserSagaState::Compensated { .. }
+                | CreateUserSagaState::TimedOut
+        )
+    }
+
+    /// Checks if the saga is ready for retry.
+    pub fn is_ready_for_retry(&self) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        match self.next_retry_at {
+            Some(retry_at) => Utc::now() >= retry_at,
+            None => true,
+        }
+    }
+
+    /// Checks if the saga has exceeded the given timeout.
+    pub fn is_timed_out(&self, timeout: Duration) -> bool {
+        let elapsed = Utc::now() - self.created_at;
+        elapsed > chrono::Duration::from_std(timeout).unwrap_or(chrono::Duration::MAX)
+    }
+
+    /// Calculates next backoff duration using exponential backoff.
+    pub fn next_backoff(&self) -> Duration {
+        let base = Duration::from_secs(1);
+        let backoff = base * 2u32.saturating_pow(self.retries as u32);
+        std::cmp::min(backoff, MAX_BACKOFF)
+    }
+
+    /// Transitions to a new state.
+    pub fn transition(&mut self, new_state: CreateUserSagaState) {
+        self.state = new_state;
+        self.updated_at = Utc::now();
+        self.next_retry_at = None;
+    }
+
+    /// Marks as failed with error.
+    ///
+    /// After MAX_RETRIES failures, transitions to terminal Failed state.
+    pub fn fail(&mut self, step: u8, error: String) {
+        self.retries = self.retries.saturating_add(1);
+        if self.retries >= MAX_RETRIES {
+            self.state = CreateUserSagaState::Failed { step, error };
+        } else {
+            let backoff = self.next_backoff();
+            self.next_retry_at =
+                Some(Utc::now() + chrono::Duration::from_std(backoff).unwrap_or_default());
+        }
+        self.updated_at = Utc::now();
+    }
+
+    /// Returns the step number for the current state.
+    pub fn current_step(&self) -> u8 {
+        match &self.state {
+            CreateUserSagaState::Pending => 0,
+            CreateUserSagaState::EmailReserved { .. } => 1,
+            CreateUserSagaState::RegionalDataWritten { .. } => 2,
+            CreateUserSagaState::Completed { .. }
+            | CreateUserSagaState::Failed { .. }
+            | CreateUserSagaState::Compensated { .. }
+            | CreateUserSagaState::TimedOut => 0,
+        }
+    }
+
+    /// Returns the target region for the current step.
+    ///
+    /// Steps 0, 2 target GLOBAL; step 1 targets the user's declared region.
+    pub fn target_region(&self) -> Region {
+        match &self.state {
+            CreateUserSagaState::Pending => Region::GLOBAL,
+            CreateUserSagaState::EmailReserved { .. } => self.input.region,
+            CreateUserSagaState::RegionalDataWritten { .. } => Region::GLOBAL,
+            CreateUserSagaState::Completed { .. }
+            | CreateUserSagaState::Failed { .. }
+            | CreateUserSagaState::Compensated { .. }
+            | CreateUserSagaState::TimedOut => Region::GLOBAL,
+        }
+    }
+}
+
+// =============================================================================
 // Generic Saga Wrapper
 // =============================================================================
 
@@ -669,6 +942,8 @@ pub enum SagaType {
     MigrateOrg,
     /// Migrate User Region saga type.
     MigrateUser,
+    /// Create User saga type (multi-group: GLOBAL + regional).
+    CreateUser,
 }
 
 /// Generic saga record that wraps specific saga types.
@@ -682,6 +957,8 @@ pub enum Saga {
     MigrateOrg(MigrateOrgSaga),
     /// Migrate User Region saga.
     MigrateUser(MigrateUserSaga),
+    /// Create User saga (multi-group: GLOBAL + regional).
+    CreateUser(CreateUserSaga),
 }
 
 impl Saga {
@@ -692,6 +969,7 @@ impl Saga {
             Saga::DeleteUser(s) => &s.id,
             Saga::MigrateOrg(s) => &s.id,
             Saga::MigrateUser(s) => &s.id,
+            Saga::CreateUser(s) => &s.id,
         }
     }
 
@@ -702,6 +980,7 @@ impl Saga {
             Saga::DeleteUser(_) => SagaType::DeleteUser,
             Saga::MigrateOrg(_) => SagaType::MigrateOrg,
             Saga::MigrateUser(_) => SagaType::MigrateUser,
+            Saga::CreateUser(_) => SagaType::CreateUser,
         }
     }
 
@@ -712,6 +991,7 @@ impl Saga {
             Saga::DeleteUser(s) => s.is_terminal(),
             Saga::MigrateOrg(s) => s.is_terminal(),
             Saga::MigrateUser(s) => s.is_terminal(),
+            Saga::CreateUser(s) => s.is_terminal(),
         }
     }
 
@@ -722,6 +1002,7 @@ impl Saga {
             Saga::DeleteUser(s) => s.is_ready_for_retry(),
             Saga::MigrateOrg(s) => s.is_ready_for_retry(),
             Saga::MigrateUser(s) => s.is_ready_for_retry(),
+            Saga::CreateUser(s) => s.is_ready_for_retry(),
         }
     }
 
@@ -732,6 +1013,7 @@ impl Saga {
             Saga::DeleteUser(s) => s.created_at,
             Saga::MigrateOrg(s) => s.created_at,
             Saga::MigrateUser(s) => s.created_at,
+            Saga::CreateUser(s) => s.created_at,
         }
     }
 
@@ -742,6 +1024,7 @@ impl Saga {
             Saga::DeleteUser(s) => s.updated_at,
             Saga::MigrateOrg(s) => s.updated_at,
             Saga::MigrateUser(s) => s.updated_at,
+            Saga::CreateUser(s) => s.updated_at,
         }
     }
 
@@ -752,6 +1035,49 @@ impl Saga {
             Saga::DeleteUser(s) => s.retries,
             Saga::MigrateOrg(s) => s.retries,
             Saga::MigrateUser(s) => s.retries,
+            Saga::CreateUser(s) => s.retries,
+        }
+    }
+
+    /// Returns the entity lock keys held by this saga.
+    ///
+    /// Used to reject concurrent sagas targeting the same entity.
+    pub fn lock_keys(&self) -> Vec<SagaLockKey> {
+        match self {
+            Saga::CreateOrg(_) => Vec::new(),
+            Saga::DeleteUser(s) => vec![SagaLockKey::User(s.input.user)],
+            Saga::MigrateOrg(s) => {
+                vec![SagaLockKey::Organization(s.input.organization_id)]
+            },
+            Saga::MigrateUser(s) => vec![SagaLockKey::User(s.input.user)],
+            Saga::CreateUser(s) => {
+                vec![SagaLockKey::Email(s.input.hmac.clone())]
+            },
+        }
+    }
+
+    /// Returns the step number for the current state (used in fail tracking).
+    pub fn current_step(&self) -> u8 {
+        match self {
+            Saga::CreateOrg(s) => s.current_step(),
+            Saga::DeleteUser(s) => s.current_step(),
+            Saga::MigrateOrg(s) => s.current_step(),
+            Saga::MigrateUser(s) => s.current_step(),
+            Saga::CreateUser(s) => s.current_step(),
+        }
+    }
+
+    /// Marks the saga as failed at the current step.
+    ///
+    /// After `MAX_RETRIES` failures, transitions to terminal Failed state.
+    pub fn fail(&mut self, error: String) {
+        let step = self.current_step();
+        match self {
+            Saga::CreateOrg(s) => s.fail(step, error),
+            Saga::DeleteUser(s) => s.fail(step, error),
+            Saga::MigrateOrg(s) => s.fail(step, error),
+            Saga::MigrateUser(s) => s.fail(step, error),
+            Saga::CreateUser(s) => s.fail(step, error),
         }
     }
 
@@ -885,7 +1211,7 @@ mod tests {
     #[test]
     fn test_delete_user_saga() {
         let input = DeleteUserInput {
-            user_id: UserId::new(1),
+            user: UserId::new(1),
             organization_ids: vec![OrganizationId::new(100), OrganizationId::new(101)],
         };
         let mut saga = DeleteUserSaga::new("delete-123".to_string(), input);
@@ -1153,7 +1479,7 @@ mod tests {
 
     fn make_migrate_user_input() -> MigrateUserInput {
         MigrateUserInput {
-            user_id: UserId::new(7),
+            user: UserId::new(7),
             source_region: Region::US_EAST_VA,
             target_region: Region::IE_EAST_DUBLIN,
         }
@@ -1321,7 +1647,7 @@ mod tests {
         // Verify inner fields survive the round-trip.
         let Saga::MigrateUser(ref original) = saga else { panic!("expected MigrateUser") };
         let Saga::MigrateUser(ref deserialized) = restored else { panic!("expected MigrateUser") };
-        assert_eq!(original.input.user_id, deserialized.input.user_id);
+        assert_eq!(original.input.user, deserialized.input.user);
         assert_eq!(original.input.source_region, deserialized.input.source_region);
         assert_eq!(original.input.target_region, deserialized.input.target_region);
         assert_eq!(original.state, deserialized.state);
@@ -1337,5 +1663,336 @@ mod tests {
         assert!(!saga.is_terminal());
         assert!(saga.is_ready_for_retry());
         assert_eq!(saga.retries(), 0);
+    }
+
+    // =========================================================================
+    // SagaStep and StepStatus tests
+    // =========================================================================
+
+    #[test]
+    fn test_step_status_serialization() {
+        let statuses = [
+            (StepStatus::Pending, "\"pending\""),
+            (StepStatus::Completed, "\"completed\""),
+            (StepStatus::Failed, "\"failed\""),
+            (StepStatus::Compensated, "\"compensated\""),
+        ];
+
+        for (status, expected_json) in &statuses {
+            let json = serde_json::to_string(status).unwrap();
+            assert_eq!(&json, expected_json);
+
+            let deserialized: StepStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(*status, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_saga_step_construction_and_serialization() {
+        let step = SagaStep {
+            step_id: 0,
+            target_region: Region::GLOBAL,
+            action: "reserve email HMAC".to_string(),
+            compensate: "delete email HMAC".to_string(),
+            status: StepStatus::Pending,
+        };
+
+        assert_eq!(step.step_id, 0);
+        assert_eq!(step.target_region, Region::GLOBAL);
+        assert_eq!(step.status, StepStatus::Pending);
+
+        let bytes = serde_json::to_vec(&step).unwrap();
+        let restored: SagaStep = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(step, restored);
+    }
+
+    // =========================================================================
+    // SagaLockKey tests
+    // =========================================================================
+
+    #[test]
+    fn test_saga_lock_key_display() {
+        assert_eq!(SagaLockKey::User(UserId::new(42)).to_string(), "user:42");
+        assert_eq!(SagaLockKey::Email("abc123".to_string()).to_string(), "email:abc123");
+        assert_eq!(SagaLockKey::Organization(OrganizationId::new(7)).to_string(), "org:7");
+    }
+
+    #[test]
+    fn test_saga_lock_key_equality_and_hash() {
+        use std::collections::HashSet;
+
+        let key1 = SagaLockKey::User(UserId::new(1));
+        let key2 = SagaLockKey::User(UserId::new(1));
+        let key3 = SagaLockKey::User(UserId::new(2));
+
+        assert_eq!(key1, key2);
+        assert_ne!(key1, key3);
+
+        let mut set = HashSet::new();
+        set.insert(key1.clone());
+        assert!(set.contains(&key2));
+        assert!(!set.contains(&key3));
+    }
+
+    #[test]
+    fn test_saga_lock_key_serialization() {
+        let keys = vec![
+            SagaLockKey::User(UserId::new(42)),
+            SagaLockKey::Email("hmac_hex".to_string()),
+            SagaLockKey::Organization(OrganizationId::new(7)),
+        ];
+
+        for key in &keys {
+            let json = serde_json::to_vec(key).unwrap();
+            let restored: SagaLockKey = serde_json::from_slice(&json).unwrap();
+            assert_eq!(*key, restored);
+        }
+    }
+
+    // =========================================================================
+    // CreateUserSaga tests
+    // =========================================================================
+
+    fn make_create_user_input() -> CreateUserInput {
+        CreateUserInput {
+            hmac: "deadbeef0123456789abcdef".to_string(),
+            region: Region::IE_EAST_DUBLIN,
+            admin: false,
+        }
+    }
+
+    #[test]
+    fn test_create_user_saga_new() {
+        let saga = CreateUserSaga::new("cu-1".to_string(), make_create_user_input());
+
+        assert_eq!(saga.id, "cu-1");
+        assert_eq!(saga.state, CreateUserSagaState::Pending);
+        assert_eq!(saga.retries, 0);
+        assert!(saga.next_retry_at.is_none());
+        assert!(!saga.is_terminal());
+        assert!(saga.is_ready_for_retry());
+    }
+
+    #[test]
+    fn test_create_user_saga_transitions() {
+        let mut saga = CreateUserSaga::new("cu-2".to_string(), make_create_user_input());
+
+        // Step 0 → EmailReserved
+        saga.transition(CreateUserSagaState::EmailReserved {
+            user_id: UserId::new(10),
+            user_slug: UserSlug::new(1_000_000),
+            hmac_hex: "deadbeef".to_string(),
+        });
+        assert!(matches!(saga.state, CreateUserSagaState::EmailReserved { .. }));
+        assert!(!saga.is_terminal());
+
+        // Step 1 → RegionalDataWritten
+        saga.transition(CreateUserSagaState::RegionalDataWritten {
+            user_id: UserId::new(10),
+            user_slug: UserSlug::new(1_000_000),
+            hmac_hex: "deadbeef".to_string(),
+        });
+        assert!(matches!(saga.state, CreateUserSagaState::RegionalDataWritten { .. }));
+        assert!(!saga.is_terminal());
+
+        // Step 2 → Completed
+        saga.transition(CreateUserSagaState::Completed {
+            user_id: UserId::new(10),
+            user_slug: UserSlug::new(1_000_000),
+        });
+        assert!(saga.is_terminal());
+        assert!(!saga.is_ready_for_retry());
+    }
+
+    #[test]
+    fn test_create_user_saga_is_terminal() {
+        let base = CreateUserSaga::new("cu-3".to_string(), make_create_user_input());
+
+        let mut s = base.clone();
+        s.state =
+            CreateUserSagaState::Completed { user_id: UserId::new(1), user_slug: UserSlug::new(1) };
+        assert!(s.is_terminal());
+
+        let mut s = base.clone();
+        s.state = CreateUserSagaState::Failed { step: 1, error: "err".to_string() };
+        assert!(s.is_terminal());
+
+        let mut s = base.clone();
+        s.state =
+            CreateUserSagaState::Compensated { step: 0, cleanup_summary: "cleaned".to_string() };
+        assert!(s.is_terminal());
+
+        let mut s = base.clone();
+        s.state = CreateUserSagaState::TimedOut;
+        assert!(s.is_terminal());
+
+        // Non-terminal
+        let mut s = base;
+        s.state = CreateUserSagaState::EmailReserved {
+            user_id: UserId::new(1),
+            user_slug: UserSlug::new(1),
+            hmac_hex: "abc".to_string(),
+        };
+        assert!(!s.is_terminal());
+    }
+
+    #[test]
+    fn test_create_user_saga_fail_and_retry() {
+        let mut saga = CreateUserSaga::new("cu-4".to_string(), make_create_user_input());
+
+        for _ in 0..MAX_RETRIES.saturating_sub(1) {
+            saga.fail(0, "transient".to_string());
+            assert!(!saga.is_terminal());
+            assert!(saga.next_retry_at.is_some());
+        }
+
+        saga.fail(0, "permanent".to_string());
+        assert!(saga.is_terminal());
+        assert!(matches!(
+            saga.state,
+            CreateUserSagaState::Failed { step: 0, ref error } if error == "permanent"
+        ));
+    }
+
+    #[test]
+    fn test_create_user_saga_is_timed_out() {
+        let mut saga = CreateUserSaga::new("cu-5".to_string(), make_create_user_input());
+        saga.created_at = Utc::now() - chrono::Duration::minutes(5);
+
+        assert!(saga.is_timed_out(Duration::from_secs(60))); // 1 min timeout
+        assert!(!saga.is_timed_out(Duration::from_secs(600))); // 10 min timeout
+    }
+
+    #[test]
+    fn test_create_user_saga_current_step() {
+        let mut saga = CreateUserSaga::new("cu-6".to_string(), make_create_user_input());
+
+        assert_eq!(saga.current_step(), 0); // Pending
+
+        saga.state = CreateUserSagaState::EmailReserved {
+            user_id: UserId::new(1),
+            user_slug: UserSlug::new(1),
+            hmac_hex: "abc".to_string(),
+        };
+        assert_eq!(saga.current_step(), 1);
+
+        saga.state = CreateUserSagaState::RegionalDataWritten {
+            user_id: UserId::new(1),
+            user_slug: UserSlug::new(1),
+            hmac_hex: "abc".to_string(),
+        };
+        assert_eq!(saga.current_step(), 2);
+
+        // Terminal states return 0
+        saga.state =
+            CreateUserSagaState::Completed { user_id: UserId::new(1), user_slug: UserSlug::new(1) };
+        assert_eq!(saga.current_step(), 0);
+    }
+
+    #[test]
+    fn test_create_user_saga_target_region() {
+        let mut saga = CreateUserSaga::new("cu-7".to_string(), make_create_user_input());
+        assert_eq!(saga.input.region, Region::IE_EAST_DUBLIN);
+
+        // Pending → GLOBAL (step 0 targets GLOBAL for ID allocation + email CAS)
+        assert_eq!(saga.target_region(), Region::GLOBAL);
+
+        // EmailReserved → user's region (step 1 targets regional store)
+        saga.state = CreateUserSagaState::EmailReserved {
+            user_id: UserId::new(1),
+            user_slug: UserSlug::new(1),
+            hmac_hex: "abc".to_string(),
+        };
+        assert_eq!(saga.target_region(), Region::IE_EAST_DUBLIN);
+
+        // RegionalDataWritten → GLOBAL (step 2 targets GLOBAL for directory entry)
+        saga.state = CreateUserSagaState::RegionalDataWritten {
+            user_id: UserId::new(1),
+            user_slug: UserSlug::new(1),
+            hmac_hex: "abc".to_string(),
+        };
+        assert_eq!(saga.target_region(), Region::GLOBAL);
+    }
+
+    #[test]
+    fn test_create_user_saga_serialization() {
+        let inner = CreateUserSaga::new("cu-8".to_string(), make_create_user_input());
+        let saga = Saga::CreateUser(inner);
+
+        let bytes = saga.to_bytes().unwrap();
+        let restored = Saga::from_bytes(&bytes).unwrap();
+
+        assert_eq!(saga.id(), restored.id());
+        assert_eq!(saga.saga_type(), SagaType::CreateUser);
+        assert_eq!(restored.saga_type(), SagaType::CreateUser);
+        assert_eq!(saga.retries(), restored.retries());
+        assert_eq!(saga.created_at(), restored.created_at());
+
+        let Saga::CreateUser(ref original) = saga else { panic!("expected CreateUser") };
+        let Saga::CreateUser(ref deserialized) = restored else { panic!("expected CreateUser") };
+        assert_eq!(original.input.hmac, deserialized.input.hmac);
+        assert_eq!(original.input.region, deserialized.input.region);
+        assert_eq!(original.input.admin, deserialized.input.admin);
+        assert_eq!(original.state, deserialized.state);
+    }
+
+    #[test]
+    fn test_create_user_saga_wrapper_integration() {
+        let inner = CreateUserSaga::new("cu-9".to_string(), make_create_user_input());
+        let saga = Saga::CreateUser(inner);
+
+        assert_eq!(saga.id(), "cu-9");
+        assert_eq!(saga.saga_type(), SagaType::CreateUser);
+        assert!(!saga.is_terminal());
+        assert!(saga.is_ready_for_retry());
+        assert_eq!(saga.retries(), 0);
+    }
+
+    // =========================================================================
+    // Lock key integration tests
+    // =========================================================================
+
+    #[test]
+    fn test_saga_lock_keys_create_user() {
+        let inner = CreateUserSaga::new("cu-lock".to_string(), make_create_user_input());
+        let saga = Saga::CreateUser(inner);
+
+        let keys = saga.lock_keys();
+        assert_eq!(keys.len(), 1);
+        assert!(matches!(&keys[0], SagaLockKey::Email(h) if h == "deadbeef0123456789abcdef"));
+    }
+
+    #[test]
+    fn test_saga_lock_keys_migrate_org() {
+        let inner = MigrateOrgSaga::new("mo-lock".to_string(), make_migrate_org_input());
+        let saga = Saga::MigrateOrg(inner);
+
+        let keys = saga.lock_keys();
+        assert_eq!(keys.len(), 1);
+        assert!(matches!(keys[0], SagaLockKey::Organization(id) if id == OrganizationId::new(42)));
+    }
+
+    #[test]
+    fn test_saga_lock_keys_migrate_user() {
+        let inner = MigrateUserSaga::new("mu-lock".to_string(), make_migrate_user_input());
+        let saga = Saga::MigrateUser(inner);
+
+        let keys = saga.lock_keys();
+        assert_eq!(keys.len(), 1);
+        assert!(matches!(keys[0], SagaLockKey::User(id) if id == UserId::new(7)));
+    }
+
+    #[test]
+    fn test_saga_lock_keys_create_org_has_none() {
+        let input = CreateOrgInput {
+            user_name: "Alice".to_string(),
+            user_email: "alice@example.com".to_string(),
+            org_name: "Acme Corp".to_string(),
+            existing_user_id: None,
+        };
+        let inner = CreateOrgSaga::new("co-lock".to_string(), input);
+        let saga = Saga::CreateOrg(inner);
+
+        assert!(saga.lock_keys().is_empty());
     }
 }
