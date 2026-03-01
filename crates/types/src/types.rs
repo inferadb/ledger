@@ -305,6 +305,21 @@ define_id!(
     UserEmailId, i64, "email"
 );
 
+define_id!(
+    /// Unique identifier for an email verification token.
+    ///
+    /// Sequential `i64` assigned by the Raft leader from the
+    /// `_meta:seq:email_verify` sequence counter.
+    ///
+    /// Wraps an `i64` with compile-time type safety to prevent mixing
+    /// with [`UserEmailId`], [`UserId`], or other identifier types.
+    ///
+    /// # Display
+    ///
+    /// Formats with `verify:` prefix: `verify:42`.
+    EmailVerifyTokenId, i64, "verify"
+);
+
 /// Transaction identifier (16 bytes, typically UUIDv4).
 pub type TxId = [u8; 16];
 

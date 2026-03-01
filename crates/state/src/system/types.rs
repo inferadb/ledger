@@ -3,7 +3,9 @@
 use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
-use inferadb_ledger_types::{NodeId, OrganizationId, ShardId, UserEmailId, UserId, UserSlug};
+use inferadb_ledger_types::{
+    EmailVerifyTokenId, NodeId, OrganizationId, ShardId, UserEmailId, UserId, UserSlug,
+};
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -71,23 +73,22 @@ pub enum UserRole {
 
 /// User email address.
 ///
-/// Users can have multiple email addresses. One is marked as primary.
+/// Users can have multiple email addresses. The primary email is whichever
+/// email the [`User::email`] field references. Verification status is derived
+/// from `verified_at` — if present, the email is verified.
+///
 /// Global email uniqueness is enforced via the `_idx:email:{email}` index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserEmail {
     /// Unique email record identifier.
     pub id: UserEmailId,
     /// User who owns this email.
-    pub user_id: UserId,
+    pub user: UserId,
     /// Email address (lowercase normalized).
     pub email: String,
-    /// Whether this email has been verified.
-    pub verified: bool,
-    /// Whether this is the user's primary email.
-    pub primary: bool,
     /// When this email was added.
     pub created_at: DateTime<Utc>,
-    /// When this email was verified (if verified).
+    /// When this email was verified (`None` if unverified).
     pub verified_at: Option<DateTime<Utc>>,
 }
 
@@ -97,7 +98,7 @@ pub struct UserEmail {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmailVerificationToken {
     /// Unique token identifier.
-    pub id: i64,
+    pub id: EmailVerifyTokenId,
     /// Email record this token is for.
     pub email_id: UserEmailId,
     /// SHA-256 hash of the token (not the plaintext token).

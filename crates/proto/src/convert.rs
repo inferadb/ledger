@@ -31,8 +31,8 @@
 
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
-    BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId, OrganizationId, OrganizationSlug,
-    UserEmailId, UserSlug, VaultSlug,
+    BlockRetentionMode, BlockRetentionPolicy, EmailVerifyTokenId, LedgerNodeId, OrganizationId,
+    OrganizationSlug, UserEmailId, UserSlug, VaultSlug,
     events::{EventAction, EventEmission, EventEntry, EventOutcome, EventScope},
     merkle::MerkleProof as InternalMerkleProof,
 };
@@ -481,6 +481,31 @@ impl From<proto::UserEmailId> for UserEmailId {
 impl From<&proto::UserEmailId> for UserEmailId {
     fn from(proto: &proto::UserEmailId) -> Self {
         UserEmailId::new(proto.id)
+    }
+}
+
+// EmailVerifyTokenId conversions
+// =============================================================================
+
+/// Converts a domain [`EmailVerifyTokenId`] to its protobuf representation.
+impl From<EmailVerifyTokenId> for proto::EmailVerifyTokenId {
+    fn from(id: EmailVerifyTokenId) -> Self {
+        proto::EmailVerifyTokenId { id: id.value() }
+    }
+}
+
+/// Converts a protobuf [`EmailVerifyTokenId`](proto::EmailVerifyTokenId) to the domain type.
+impl From<proto::EmailVerifyTokenId> for EmailVerifyTokenId {
+    fn from(proto: proto::EmailVerifyTokenId) -> Self {
+        EmailVerifyTokenId::new(proto.id)
+    }
+}
+
+/// Converts a protobuf [`EmailVerifyTokenId`](proto::EmailVerifyTokenId) reference to the domain
+/// type.
+impl From<&proto::EmailVerifyTokenId> for EmailVerifyTokenId {
+    fn from(proto: &proto::EmailVerifyTokenId) -> Self {
+        EmailVerifyTokenId::new(proto.id)
     }
 }
 

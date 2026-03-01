@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
 use inferadb_ledger_types::{
-    Hash, Operation, OrganizationId, OrganizationSlug, ShardId, Transaction, UserEmailId, UserId,
-    UserSlug, VaultId, VaultSlug,
+    EmailVerifyTokenId, Hash, Operation, OrganizationId, OrganizationSlug, ShardId, Transaction,
+    UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
 use openraft::{LogId, StoredMembership};
 use serde::{Deserialize, Serialize};
@@ -165,11 +165,11 @@ pub struct SequenceCounters {
     /// Next vault ID.
     pub vault: VaultId,
     /// Next user ID.
-    pub user: i64,
+    pub user: UserId,
     /// Next user email ID.
     pub user_email: UserEmailId,
     /// Next email verification token ID.
-    pub email_verify: i64,
+    pub email_verify: EmailVerifyTokenId,
 }
 
 impl Default for SequenceCounters {
@@ -177,9 +177,9 @@ impl Default for SequenceCounters {
         Self {
             organization: OrganizationId::new(0),
             vault: VaultId::new(0),
-            user: 0,
+            user: UserId::new(0),
             user_email: UserEmailId::new(0),
-            email_verify: 0,
+            email_verify: EmailVerifyTokenId::new(0),
         }
     }
 }
@@ -190,9 +190,9 @@ impl SequenceCounters {
         Self {
             organization: OrganizationId::new(1),
             vault: VaultId::new(1),
-            user: 1,
+            user: UserId::new(1),
             user_email: UserEmailId::new(1),
-            email_verify: 1,
+            email_verify: EmailVerifyTokenId::new(1),
         }
     }
 
@@ -213,8 +213,8 @@ impl SequenceCounters {
     /// Returns and increments the next user ID.
     pub fn next_user(&mut self) -> UserId {
         let id = self.user;
-        self.user += 1;
-        UserId::new(id)
+        self.user = UserId::new(id.value() + 1);
+        id
     }
 
     /// Returns and increments the next user email ID.
@@ -225,9 +225,9 @@ impl SequenceCounters {
     }
 
     /// Returns and increments the next email verification token ID.
-    pub fn next_email_verify(&mut self) -> i64 {
+    pub fn next_email_verify(&mut self) -> EmailVerifyTokenId {
         let id = self.email_verify;
-        self.email_verify += 1;
+        self.email_verify = EmailVerifyTokenId::new(id.value() + 1);
         id
     }
 }

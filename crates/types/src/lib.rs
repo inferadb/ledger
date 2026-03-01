@@ -45,6 +45,7 @@ pub use types::{
     ChainCommitment,
     // Type aliases
     ClientId,
+    EmailVerifyTokenId,
     Entity,
     // Raft node ID
     LedgerNodeId,

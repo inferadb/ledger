@@ -8,8 +8,8 @@ use inferadb_ledger_store::{
     Database, DatabaseConfig, FileBackend, Key, StorageBackend, Value, WriteTransaction, tables,
 };
 use inferadb_ledger_types::{
-    OrganizationId, OrganizationSlug, ShardId, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
-    decode, encode,
+    EmailVerifyTokenId, OrganizationId, OrganizationSlug, ShardId, UserEmailId, UserId, UserSlug,
+    VaultId, VaultSlug, decode, encode,
 };
 use openraft::{Entry, LogId, StorageError, Vote};
 use parking_lot::RwLock;
@@ -618,9 +618,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     state.sequences.organization = OrganizationId::new(value as i64);
                 },
                 "vault" => state.sequences.vault = VaultId::new(value as i64),
-                "user" => state.sequences.user = value as i64,
+                "user" => state.sequences.user = UserId::new(value as i64),
                 "user_email" => state.sequences.user_email = UserEmailId::new(value as i64),
-                "email_verify" => state.sequences.email_verify = value as i64,
+                "email_verify" => {
+                    state.sequences.email_verify = EmailVerifyTokenId::new(value as i64);
+                },
                 unknown => {
                     warn!(key = unknown, "Unknown sequence key in Sequences table, skipping");
                 },
@@ -912,13 +914,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
             .sequences
             .push(("organization".to_string(), old_state.sequences.organization.value() as u64));
         pending.sequences.push(("vault".to_string(), old_state.sequences.vault.value() as u64));
-        pending.sequences.push(("user".to_string(), old_state.sequences.user as u64));
+        pending.sequences.push(("user".to_string(), old_state.sequences.user.value() as u64));
         pending
             .sequences
             .push(("user_email".to_string(), old_state.sequences.user_email.value() as u64));
         pending
             .sequences
-            .push(("email_verify".to_string(), old_state.sequences.email_verify as u64));
+            .push(("email_verify".to_string(), old_state.sequences.email_verify.value() as u64));
 
         // Populate client sequences
         for ((org_id, vault_id, client_id), sequence) in &old_state.client_sequences {
@@ -981,9 +983,9 @@ mod tests {
             sequences: SequenceCounters {
                 organization: OrganizationId::new(10),
                 vault: VaultId::new(20),
-                user: 30,
+                user: UserId::new(30),
                 user_email: UserEmailId::new(40),
-                email_verify: 50,
+                email_verify: EmailVerifyTokenId::new(50),
             },
             ..Default::default()
         };
@@ -1090,11 +1092,13 @@ mod tests {
             .sequences
             .push(("organization".to_string(), state.sequences.organization.value() as u64));
         pending.sequences.push(("vault".to_string(), state.sequences.vault.value() as u64));
-        pending.sequences.push(("user".to_string(), state.sequences.user as u64));
+        pending.sequences.push(("user".to_string(), state.sequences.user.value() as u64));
         pending
             .sequences
             .push(("user_email".to_string(), state.sequences.user_email.value() as u64));
-        pending.sequences.push(("email_verify".to_string(), state.sequences.email_verify as u64));
+        pending
+            .sequences
+            .push(("email_verify".to_string(), state.sequences.email_verify.value() as u64));
 
         for ((org_id, vault_id, client_id), sequence) in &state.client_sequences {
             let key = PendingExternalWrites::client_sequence_key(
@@ -1419,7 +1423,8 @@ mod tests {
             "missing key defaults to SequenceCounters::new() initial value"
         );
         assert_eq!(
-            loaded.sequences.email_verify, 1,
+            loaded.sequences.email_verify,
+            EmailVerifyTokenId::new(1),
             "missing key defaults to SequenceCounters::new() initial value"
         );
     }
@@ -1710,9 +1715,9 @@ mod tests {
             sequences: SequenceCounters {
                 organization: OrganizationId::new(1001),
                 vault: VaultId::new(5001),
-                user: 10000,
+                user: UserId::new(10000),
                 user_email: UserEmailId::new(10000),
-                email_verify: 10000,
+                email_verify: EmailVerifyTokenId::new(10000),
             },
             ..Default::default()
         };
@@ -1810,9 +1815,9 @@ mod tests {
             sequences: SequenceCounters {
                 organization: OrganizationId::new(50),
                 vault: VaultId::new(60),
-                user: 70,
+                user: UserId::new(70),
                 user_email: UserEmailId::new(80),
-                email_verify: 90,
+                email_verify: EmailVerifyTokenId::new(90),
             },
             ..Default::default()
         };

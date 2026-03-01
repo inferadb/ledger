@@ -72,8 +72,8 @@ mod tests {
     };
     use inferadb_ledger_store::{FileBackend, tables};
     use inferadb_ledger_types::{
-        Operation, OrganizationId, ShardId, Transaction, UserEmailId, UserId, UserSlug, VaultId,
-        VaultSlug,
+        EmailVerifyTokenId, Operation, OrganizationId, ShardId, Transaction, UserEmailId, UserId,
+        UserSlug, VaultId, VaultSlug,
         events::{EventAction, EventConfig, EventEntry, EventScope},
     };
     use openraft::{
@@ -139,8 +139,8 @@ mod tests {
         assert_eq!(counters.next_user(), UserId::new(2));
         assert_eq!(counters.next_user_email(), UserEmailId::new(1));
         assert_eq!(counters.next_user_email(), UserEmailId::new(2));
-        assert_eq!(counters.next_email_verify(), 1);
-        assert_eq!(counters.next_email_verify(), 2);
+        assert_eq!(counters.next_email_verify(), EmailVerifyTokenId::new(1));
+        assert_eq!(counters.next_email_verify(), EmailVerifyTokenId::new(2));
     }
 
     #[tokio::test]
@@ -2699,13 +2699,17 @@ mod tests {
             "Organization counter should start at 1"
         );
         assert_eq!(counters.vault, VaultId::new(1), "Vault counter should start at 1");
-        assert_eq!(counters.user, 1, "User counter should start at 1");
+        assert_eq!(counters.user, UserId::new(1), "User counter should start at 1");
         assert_eq!(
             counters.user_email,
             UserEmailId::new(1),
             "User email counter should start at 1"
         );
-        assert_eq!(counters.email_verify, 1, "Email verify counter should start at 1");
+        assert_eq!(
+            counters.email_verify,
+            EmailVerifyTokenId::new(1),
+            "Email verify counter should start at 1"
+        );
     }
 
     // ========================================================================

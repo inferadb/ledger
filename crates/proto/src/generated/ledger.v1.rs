@@ -57,6 +57,13 @@ pub struct UserEmailId {
     #[prost(int64, tag = "1")]
     pub id: i64,
 }
+/// Unique identifier for an email verification token.
+/// Sequential int64 assigned by Ledger leader from sequence counter "\_meta:seq:email_verify"
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EmailVerifyTokenId {
+    #[prost(int64, tag = "1")]
+    pub id: i64,
+}
 /// User record (stored in \_system organization as Entity with key "user:{id}")
 /// Users can have multiple email addresses via separate UserEmail entities.
 /// Organization access is derived from membership records (member:{id} in each org).
@@ -86,8 +93,6 @@ pub struct User {
     pub slug: ::core::option::Option<UserSlug>,
 }
 /// User email address (stored in \_system organization as Entity with key "user_email:{id}")
-/// Each user can have multiple emails; primary is tracked by UserEmail.primary field.
-/// Constraint: Primary email cannot be deleted (must reassign primary first).
 /// Global email uniqueness is enforced via index: "\_idx:email:{email}" → email_id
 /// ID assigned by Ledger leader from sequence counter "\_meta:seq:user_email"
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -97,20 +102,14 @@ pub struct UserEmail {
     pub id: ::core::option::Option<UserEmailId>,
     /// Owning user
     #[prost(message, optional, tag = "2")]
-    pub user_id: ::core::option::Option<UserId>,
+    pub user: ::core::option::Option<UserId>,
     /// Normalized to lowercase (max 320 chars per RFC 5321)
     #[prost(string, tag = "3")]
     pub email: ::prost::alloc::string::String,
-    /// Whether email has been verified
-    #[prost(bool, tag = "4")]
-    pub verified: bool,
-    /// Whether this is the user's primary email
-    #[prost(bool, tag = "5")]
-    pub primary: bool,
-    #[prost(message, optional, tag = "6")]
+    #[prost(message, optional, tag = "4")]
     pub created_at: ::core::option::Option<::prost_types::Timestamp>,
     /// When verified (null if unverified)
-    #[prost(message, optional, tag = "7")]
+    #[prost(message, optional, tag = "5")]
     pub verified_at: ::core::option::Option<::prost_types::Timestamp>,
 }
 /// Email verification token (stored in \_system organization with TTL)
@@ -120,8 +119,8 @@ pub struct UserEmail {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct EmailVerificationToken {
     /// Sequential ID (Ledger-assigned)
-    #[prost(int64, tag = "1")]
-    pub id: i64,
+    #[prost(message, optional, tag = "1")]
+    pub id: ::core::option::Option<EmailVerifyTokenId>,
     /// Email being verified
     #[prost(message, optional, tag = "2")]
     pub user_email_id: ::core::option::Option<UserEmailId>,

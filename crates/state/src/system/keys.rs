@@ -1,7 +1,7 @@
 //! Key patterns for the `_system` organization.
 
 use inferadb_ledger_types::{
-    NodeId, OrganizationId, OrganizationSlug, UserEmailId, UserId, VaultSlug,
+    EmailVerifyTokenId, NodeId, OrganizationId, OrganizationSlug, UserEmailId, UserId, VaultSlug,
 };
 
 /// Key pattern generators for `_system` organization entities.
@@ -66,8 +66,8 @@ impl SystemKeys {
     /// Primary key for an email verification token.
     ///
     /// Pattern: `email_verify:{id}`
-    pub fn email_verify_key(token_id: i64) -> String {
-        format!("email_verify:{token_id}")
+    pub fn email_verify_key(token_id: EmailVerifyTokenId) -> String {
+        format!("email_verify:{}", token_id.value())
     }
 
     // ========================================================================

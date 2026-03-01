@@ -7,7 +7,9 @@ use std::{fmt::Debug, ops::RangeBounds, sync::Arc};
 
 use inferadb_ledger_state::EventsDatabase;
 use inferadb_ledger_store::{FileBackend, TableId, tables};
-use inferadb_ledger_types::{UserEmailId, decode, encode, events::EventConfig};
+use inferadb_ledger_types::{
+    EmailVerifyTokenId, UserEmailId, UserId, decode, encode, events::EventConfig,
+};
 use openraft::{
     Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
     StoredMembership, Vote,
@@ -883,11 +885,13 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             .sequences
             .push(("organization".to_string(), state.sequences.organization.value() as u64));
         pending.sequences.push(("vault".to_string(), state.sequences.vault.value() as u64));
-        pending.sequences.push(("user".to_string(), state.sequences.user as u64));
+        pending.sequences.push(("user".to_string(), state.sequences.user.value() as u64));
         pending
             .sequences
             .push(("user_email".to_string(), state.sequences.user_email.value() as u64));
-        pending.sequences.push(("email_verify".to_string(), state.sequences.email_verify as u64));
+        pending
+            .sequences
+            .push(("email_verify".to_string(), state.sequences.email_verify.value() as u64));
 
         // Persist core state blob + external table writes atomically
         self.save_state_core(&state, &pending)?;
@@ -1247,9 +1251,13 @@ impl RaftLogStore {
                     "vault" => {
                         state.sequences.vault = inferadb_ledger_types::VaultId::new(val as i64);
                     },
-                    "user" => state.sequences.user = val as i64,
+                    "user" => {
+                        state.sequences.user = UserId::new(val as i64);
+                    },
                     "user_email" => state.sequences.user_email = UserEmailId::new(val as i64),
-                    "email_verify" => state.sequences.email_verify = val as i64,
+                    "email_verify" => {
+                        state.sequences.email_verify = EmailVerifyTokenId::new(val as i64);
+                    },
                     _ => {},
                 }
             }

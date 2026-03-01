@@ -65,6 +65,12 @@ message UserEmailId {
   int64 id = 1;
 }
 
+// Unique identifier for an email verification token.
+// Sequential int64 assigned by Ledger leader from sequence counter "_meta:seq:email_verify"
+message EmailVerifyTokenId {
+  int64 id = 1;
+}
+
 // User account status (lifecycle state machine)
 enum UserStatus {
   USER_STATUS_UNSPECIFIED = 0;
@@ -99,18 +105,14 @@ message User {
 }
 
 // User email address (stored in _system organization as Entity with key "user_email:{id}")
-// Each user can have multiple emails; primary is tracked by UserEmail.primary field.
-// Constraint: Primary email cannot be deleted (must reassign primary first).
 // Global email uniqueness is enforced via index: "_idx:email:{email}" → email_id
 // ID assigned by Ledger leader from sequence counter "_meta:seq:user_email"
 message UserEmail {
-  UserEmailId id = 1;           // Sequential ID (Ledger-assigned)
-  UserId user_id = 2;           // Owning user
-  string email = 3;             // Normalized to lowercase (max 320 chars per RFC 5321)
-  bool verified = 4;            // Whether email has been verified
-  bool primary = 5;             // Whether this is the user's primary email
-  google.protobuf.Timestamp created_at = 6;
-  google.protobuf.Timestamp verified_at = 7; // When verified (null if unverified)
+  UserEmailId id = 1;                      // Sequential ID (Ledger-assigned)
+  UserId user = 2;                         // Owning user
+  string email = 3;                        // Normalized to lowercase (max 320 chars per RFC 5321)
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp verified_at = 5; // When verified (null if unverified)
 }
 
 // Email verification token (stored in _system organization with TTL)
@@ -118,7 +120,7 @@ message UserEmail {
 // Tokens expire after 24 hours via Ledger's TTL mechanism.
 // ID assigned by Ledger leader from sequence counter "_meta:seq:email_verify"
 message EmailVerificationToken {
-  int64 id = 1; // Sequential ID (Ledger-assigned)
+  EmailVerifyTokenId id = 1; // Sequential ID (Ledger-assigned)
   UserEmailId user_email_id = 2; // Email being verified
   string token = 3; // 64-char hex string (32 random bytes)
   google.protobuf.Timestamp created_at = 4;
