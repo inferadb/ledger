@@ -18,7 +18,7 @@ use super::types::{DataEncryptionKey, RegionMasterKey, WrappedDek};
 /// All cached keys implement [`zeroize::ZeroizeOnDrop`], so evicted
 /// entries are securely wiped from memory.
 pub struct DekCache {
-    /// Moka sync cache: WrappedDek → Arc<DataEncryptionKey>.
+    /// Moka sync cache: WrappedDek → `Arc<DataEncryptionKey>`.
     ///
     /// Arc is needed because moka returns clones; the inner key
     /// is still zeroized when all Arcs are dropped.

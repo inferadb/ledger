@@ -128,7 +128,7 @@ impl CryptoSidecar {
     ///
     /// For the file backend, this is `file_len / CRYPTO_METADATA_SIZE`.
     /// For in-memory, this is `max(page_id) + 1` or 0 if empty.
-    /// Not all slots contain valid metadata — use [`read`] to check.
+    /// Not all slots contain valid metadata — use [`Self::read`] to check.
     pub fn page_count(&self) -> Result<u64> {
         match self {
             Self::File { file, .. } => {
