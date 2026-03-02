@@ -609,7 +609,7 @@ mod tests {
         let config = CircuitBreakerConfig::builder()
             .failure_threshold(2)
             .success_threshold(1)
-            .reset_timeout(Duration::from_millis(200))
+            .reset_timeout(Duration::from_secs(2))
             .build();
         let cb = CircuitBreaker::new(config);
         let ep = "endpoint-a";
@@ -625,8 +625,9 @@ mod tests {
             _ => panic!("expected CircuitOpen"),
         };
 
-        // Wait a bit
-        std::thread::sleep(Duration::from_millis(50));
+        // Wait a bit — use generous timeout above (2s) so that
+        // macOS timer coalescing doesn't push us past reset_timeout
+        std::thread::sleep(Duration::from_millis(100));
 
         // retry_after should be smaller
         let err2 = cb.check(ep).unwrap_err();
