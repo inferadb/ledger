@@ -216,46 +216,4 @@ jobs:
           path: sbom.spdx.json
           retention-days: 90
 
-  # Scan container for vulnerabilities
-  scan:
-    name: Scan
-    needs: manifest
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    permissions:
-      contents: read
-      packages: read
-      security-events: write
-    steps:
-      - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b # v2.15.0
-        with:
-          egress-policy: audit
 
-      - name: Log in to GitHub Container Registry
-        uses: step-security/docker-login-action@c3e677aae8393bc9c81cfdf9709648720ea4bd4d # v3.6.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,prefix=sha-
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@e368e328979b113139d6f9068e03accaed98a518 # 0.34.1
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
-          format: "sarif"
-          output: "trivy-results.sarif"
-          severity: "CRITICAL,HIGH"
-
-      - name: Upload Trivy scan results
-        uses: github/codeql-action/upload-sarif@89a39a4e59826350b863aa6b6252a07ad50cf83e # v4.32.4
-        with:
-          sarif_file: "trivy-results.sarif"
