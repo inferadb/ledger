@@ -12,7 +12,7 @@
 > [!IMPORTANT]
 > Under active development. Not production-ready.
 
-[InferaDB](https://inferadb.com) Ledger is a distributed blockchain database optimized for authorization workloads. It commits every state change cryptographically, replicates via Raft consensus, and lets clients verify independently. Ledger is the persistent storage layer used by the [InferaDB Engine](https://github.com/inferadb/engine) and [InferaDB Control](https://github.com/inferadb/control).
+**[InferaDB](https://inferadb.com) Ledger is a distributed database purpose-built for authorization.** Every permission change is committed to an append-only blockchain, replicated via Raft consensus, and independently verifiable by clients through Merkle proofs — giving you a tamper-proof record of who had access to what, when. Ledger is the storage layer behind [InferaDB Engine](https://github.com/inferadb/engine) and [InferaDB Control](https://github.com/inferadb/control).
 
 - [Features](#features)
 - [Quick Start](#quick-start)
@@ -24,11 +24,12 @@
 
 ## Features
 
-- **Sub-millisecond Reads** — O(1) lookups via B+ tree indexes, no merkle overhead on hot path
-- **Cryptographic Auditability** — Per-vault blockchain with chain-linked state roots, SHA-256 commitments, tamper-evident history
-- **Strong Consistency** — Raft consensus ensures permission changes are immediately visible cluster-wide
-- **Fault Isolation** — Per-vault chains prevent failures from cascading across tenants
-- **Horizontal Scaling** — Shard groups distribute organizations across independent Raft clusters
+- **Tamper-Proof Authorization History** — Every permission change is committed to a per-vault blockchain. Not even database administrators can retroactively alter who had access to what, when.
+- **Client-Side Proof Verification** — Clients receive Merkle proofs with every read and can verify authorization decisions independently, without trusting the server.
+- **Data Residency** — Pin authorization data to geographic regions. Nodes only join Raft groups for their assigned region, keeping data within jurisdictional boundaries.
+- **Tenant Isolation** — Per-organization, per-vault security boundaries. Each vault maintains its own blockchain — one tenant's data can never leak into another's.
+- **Immediate Consistency** — Raft consensus ensures permission changes are visible cluster-wide before the write returns. No stale reads on authorization decisions.
+- **Sub-Millisecond Reads** — B+ tree indexes serve lookups without touching the Merkle layer. Cryptographic verification adds no overhead to the hot path.
 
 ## Quick Start
 
@@ -61,6 +62,7 @@ See the [deployment guide](docs/operations/deployment.md) for multi-node setup, 
 | `--join`    | Add this server to an existing cluster ([details](docs/operations/deployment.md#adding-a-node))        |                   |
 | `--cluster` | Start a new N-node cluster ([details](docs/operations/deployment.md#multi-node-cluster-3-nodes))       | `3`               |
 | `--peers`   | How to [find other nodes](docs/operations/deployment.md#discovery-options): DNS domain or file path    | _(disabled)_      |
+| `--region`  | Geographic [region](docs/operations/deployment.md) for data residency (`us-east-va`, `ie-east-dublin`) | `global`          |
 
 See [Configuration Reference](docs/operations/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
 
