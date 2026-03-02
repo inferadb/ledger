@@ -423,6 +423,7 @@ mod tests {
             max_backoff: Duration::from_secs(10),
             multiplier: 2.0,
             jitter: 0.0, // No jitter for deterministic test
+            total_timeout: None,
         };
 
         // We can't easily test backoff_duration without a full stream setup

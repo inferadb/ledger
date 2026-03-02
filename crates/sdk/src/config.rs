@@ -289,6 +289,14 @@ pub struct RetryPolicy {
     #[builder(default = 0.25)]
     #[serde(default = "default_jitter")]
     pub jitter: f64,
+
+    /// Maximum total duration for all retry attempts combined.
+    ///
+    /// When set, the entire retry loop is bounded by this duration.
+    /// If the timeout expires mid-retry, returns `SdkError::Timeout`.
+    /// When `None` (the default), only `max_attempts` limits retries.
+    #[serde(default)]
+    pub total_timeout: Option<Duration>,
 }
 
 impl Default for RetryPolicy {

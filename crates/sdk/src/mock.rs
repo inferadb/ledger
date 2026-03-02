@@ -1973,6 +1973,39 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_read_with_consistency_eventual() {
+            let server = MockLedgerServer::start().await.unwrap();
+            server.set_entity(ORG, VAULT, "key", b"eventual");
+            let client = create_client_for_mock(&server).await;
+
+            let result = client
+                .read_with_consistency(ORG, Some(VAULT), "key", crate::ReadConsistency::Eventual)
+                .await
+                .unwrap();
+
+            assert_eq!(result, Some(b"eventual".to_vec()));
+        }
+
+        #[tokio::test]
+        async fn test_read_with_consistency_linearizable() {
+            let server = MockLedgerServer::start().await.unwrap();
+            server.set_entity(ORG, VAULT, "key", b"linearizable");
+            let client = create_client_for_mock(&server).await;
+
+            let result = client
+                .read_with_consistency(
+                    ORG,
+                    Some(VAULT),
+                    "key",
+                    crate::ReadConsistency::Linearizable,
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(result, Some(b"linearizable".to_vec()));
+        }
+
+        #[tokio::test]
         async fn test_batch_read_mixed_found_not_found() {
             let server = MockLedgerServer::start().await.unwrap();
             server.set_entity(ORG, VAULT, "exists1", b"value1");
@@ -2123,6 +2156,76 @@ mod tests {
             assert_eq!(
                 client.read(ORG, Some(VAULT), "batch2:c").await.unwrap(),
                 Some(b"c".to_vec())
+            );
+        }
+
+        // ==================== Single-Operation Convenience Methods ====================
+
+        #[tokio::test]
+        async fn test_set_entity_convenience() {
+            let server = MockLedgerServer::start().await.unwrap();
+            let client = create_client_for_mock(&server).await;
+
+            let result =
+                client.set_entity(ORG, Some(VAULT), "entity:1", b"data".to_vec()).await.unwrap();
+
+            assert!(!result.tx_id.is_empty());
+            assert_eq!(
+                client.read(ORG, Some(VAULT), "entity:1").await.unwrap(),
+                Some(b"data".to_vec())
+            );
+        }
+
+        #[tokio::test]
+        async fn test_delete_entity_convenience() {
+            let server = MockLedgerServer::start().await.unwrap();
+            server.set_entity(ORG, VAULT, "to_delete", b"exists");
+            let client = create_client_for_mock(&server).await;
+
+            assert!(client.read(ORG, Some(VAULT), "to_delete").await.unwrap().is_some());
+
+            client.delete_entity(ORG, Some(VAULT), "to_delete").await.unwrap();
+
+            assert_eq!(client.read(ORG, Some(VAULT), "to_delete").await.unwrap(), None);
+        }
+
+        #[tokio::test]
+        async fn test_set_entity_if_convenience() {
+            let server = MockLedgerServer::start().await.unwrap();
+            let client = create_client_for_mock(&server).await;
+
+            let result = client
+                .set_entity_if(
+                    ORG,
+                    Some(VAULT),
+                    "cond:1",
+                    b"value".to_vec(),
+                    crate::SetCondition::NotExists,
+                )
+                .await
+                .unwrap();
+
+            assert!(!result.tx_id.is_empty());
+            assert_eq!(
+                client.read(ORG, Some(VAULT), "cond:1").await.unwrap(),
+                Some(b"value".to_vec())
+            );
+        }
+
+        #[tokio::test]
+        async fn test_set_entity_with_expiry_convenience() {
+            let server = MockLedgerServer::start().await.unwrap();
+            let client = create_client_for_mock(&server).await;
+
+            let result = client
+                .set_entity_with_expiry(ORG, Some(VAULT), "ttl:1", b"temp".to_vec(), 1_700_000_000)
+                .await
+                .unwrap();
+
+            assert!(!result.tx_id.is_empty());
+            assert_eq!(
+                client.read(ORG, Some(VAULT), "ttl:1").await.unwrap(),
+                Some(b"temp".to_vec())
             );
         }
 

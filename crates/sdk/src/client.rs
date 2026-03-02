@@ -2379,6 +2379,77 @@ impl LedgerClient {
             .await
     }
 
+    /// Reads a value by key with the specified consistency level.
+    ///
+    /// Combines the behavior of [`read`](Self::read) and
+    /// [`read_consistent`](Self::read_consistent) into a single method that
+    /// accepts a [`ReadConsistency`] parameter. Useful in generic code that
+    /// determines consistency at runtime.
+    ///
+    /// # Arguments
+    ///
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (omit for organization-level entities).
+    /// * `key` - The key to read.
+    /// * `consistency` - The consistency level for this read.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(Some(value))` if the key exists, `Ok(None)` if not found.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read fails after retry attempts are exhausted.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug, ReadConsistency};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
+    /// let consistency = ReadConsistency::Linearizable;
+    /// let value = client
+    ///     .read_with_consistency(organization, Some(vault), "key", consistency)
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn read_with_consistency(
+        &self,
+        organization: OrganizationSlug,
+        vault: Option<VaultSlug>,
+        key: impl Into<String>,
+        consistency: ReadConsistency,
+    ) -> Result<Option<Vec<u8>>> {
+        self.read_internal(organization, vault, key.into(), consistency, None).await
+    }
+
+    /// Reads a value by key with the specified consistency level and a
+    /// per-request cancellation token.
+    ///
+    /// Combines [`read_with_consistency`](Self::read_with_consistency) with
+    /// per-request cancellation. Returns `SdkError::Cancelled` if the token
+    /// is cancelled before the RPC completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SdkError::Cancelled` if the token is cancelled.
+    /// Returns `SdkError::Shutdown` if the client has been shut down.
+    /// Returns `SdkError::Rpc` if the read fails after retry attempts.
+    ///
+    /// [`CancellationToken`]: tokio_util::sync::CancellationToken
+    pub async fn read_with_consistency_and_token(
+        &self,
+        organization: OrganizationSlug,
+        vault: Option<VaultSlug>,
+        key: impl Into<String>,
+        consistency: ReadConsistency,
+        token: tokio_util::sync::CancellationToken,
+    ) -> Result<Option<Vec<u8>>> {
+        self.read_internal(organization, vault, key.into(), consistency, Some(&token)).await
+    }
+
     /// Writes a transaction with a per-request cancellation token.
     ///
     /// Like [`write`](Self::write) but accepts a [`CancellationToken`] that can
@@ -3114,6 +3185,191 @@ impl LedgerClient {
                 error_details: None,
             }),
         }
+    }
+
+    // =============================================================================
+    // Single-Operation Convenience Methods
+    // =============================================================================
+
+    /// Writes a single entity (set).
+    ///
+    /// Convenience wrapper around [`write`](Self::write) for the common case of
+    /// setting a single key-value pair. Generates an idempotency key
+    /// automatically.
+    ///
+    /// # Arguments
+    ///
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (omit for organization-level entities).
+    /// * `key` - The entity key.
+    /// * `value` - The entity value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if validation fails or the write fails after retry
+    /// attempts.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
+    /// let result = client
+    ///     .set_entity(organization, Some(vault), "user:123", b"data".to_vec())
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn set_entity(
+        &self,
+        organization: OrganizationSlug,
+        vault: Option<VaultSlug>,
+        key: impl Into<String>,
+        value: Vec<u8>,
+    ) -> Result<WriteSuccess> {
+        self.write(organization, vault, vec![Operation::set_entity(key, value)]).await
+    }
+
+    /// Deletes a single entity.
+    ///
+    /// Convenience wrapper around [`write`](Self::write) for deleting a single
+    /// key.
+    ///
+    /// # Arguments
+    ///
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (omit for organization-level entities).
+    /// * `key` - The entity key to delete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if validation fails or the write fails after retry
+    /// attempts.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
+    /// client.delete_entity(organization, Some(vault), "user:123").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn delete_entity(
+        &self,
+        organization: OrganizationSlug,
+        vault: Option<VaultSlug>,
+        key: impl Into<String>,
+    ) -> Result<WriteSuccess> {
+        self.write(organization, vault, vec![Operation::delete_entity(key)]).await
+    }
+
+    /// Sets a single entity with a conditional write.
+    ///
+    /// Convenience wrapper around [`write`](Self::write) for conditional
+    /// set operations (compare-and-swap). The write only succeeds if the
+    /// condition is met.
+    ///
+    /// # Arguments
+    ///
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (omit for organization-level entities).
+    /// * `key` - The entity key.
+    /// * `value` - The entity value.
+    /// * `condition` - The condition that must be satisfied for the write to succeed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if validation fails, the condition is not met, or the
+    /// write fails after retry attempts.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug, SetCondition};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
+    /// let result = client
+    ///     .set_entity_if(
+    ///         organization,
+    ///         Some(vault),
+    ///         "user:123",
+    ///         b"new-data".to_vec(),
+    ///         SetCondition::NotExists,
+    ///     )
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn set_entity_if(
+        &self,
+        organization: OrganizationSlug,
+        vault: Option<VaultSlug>,
+        key: impl Into<String>,
+        value: Vec<u8>,
+        condition: SetCondition,
+    ) -> Result<WriteSuccess> {
+        self.write(organization, vault, vec![Operation::set_entity_if(key, value, condition)]).await
+    }
+
+    /// Sets a single entity with an expiration timestamp.
+    ///
+    /// Convenience wrapper around [`write`](Self::write) for setting a
+    /// key-value pair with a TTL. The entity is automatically removed after
+    /// the expiration time.
+    ///
+    /// # Arguments
+    ///
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (omit for organization-level entities).
+    /// * `key` - The entity key.
+    /// * `value` - The entity value.
+    /// * `expires_at` - Unix timestamp (seconds) when the entity expires.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if validation fails or the write fails after retry
+    /// attempts.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
+    /// let expires_at = 1700000000; // Unix timestamp
+    /// let result = client
+    ///     .set_entity_with_expiry(
+    ///         organization,
+    ///         Some(vault),
+    ///         "session:abc",
+    ///         b"session-data".to_vec(),
+    ///         expires_at,
+    ///     )
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn set_entity_with_expiry(
+        &self,
+        organization: OrganizationSlug,
+        vault: Option<VaultSlug>,
+        key: impl Into<String>,
+        value: Vec<u8>,
+        expires_at: u64,
+    ) -> Result<WriteSuccess> {
+        self.write(
+            organization,
+            vault,
+            vec![Operation::set_entity_with_expiry(key, value, expires_at)],
+        )
+        .await
     }
 
     // =============================================================================

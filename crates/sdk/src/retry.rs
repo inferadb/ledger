@@ -57,6 +57,26 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
+    match policy.total_timeout {
+        Some(timeout) => {
+            match tokio::time::timeout(timeout, with_retry_inner(policy, operation)).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(SdkError::Timeout { duration_ms: timeout.as_millis() as u64 }),
+            }
+        },
+        None => with_retry_inner(policy, operation).await,
+    }
+}
+
+/// Inner retry loop for [`with_retry`].
+///
+/// Contains the full backon-based retry logic. Extracted so `with_retry` can
+/// wrap it in `tokio::time::timeout` when `total_timeout` is configured.
+async fn with_retry_inner<F, Fut, T>(policy: &RetryPolicy, operation: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
     // Build exponential backoff with policy parameters.
     // Note: backon's max_times is the number of retries, not total attempts.
     // If max_attempts is 3, we want 2 retries (initial + 2 retries = 3 attempts).
@@ -161,6 +181,38 @@ where
 /// # }
 /// ```
 pub async fn with_retry_cancellable<F, Fut, T>(
+    policy: &RetryPolicy,
+    token: &tokio_util::sync::CancellationToken,
+    pool: Option<&crate::ConnectionPool>,
+    method: &str,
+    operation: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    match policy.total_timeout {
+        Some(timeout) => {
+            match tokio::time::timeout(
+                timeout,
+                with_retry_cancellable_inner(policy, token, pool, method, operation),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_elapsed) => Err(SdkError::Timeout { duration_ms: timeout.as_millis() as u64 }),
+            }
+        },
+        None => with_retry_cancellable_inner(policy, token, pool, method, operation).await,
+    }
+}
+
+/// Inner retry loop for [`with_retry_cancellable`].
+///
+/// Contains the full retry logic with cancellation support. Extracted so
+/// `with_retry_cancellable` can wrap it in `tokio::time::timeout` when
+/// `total_timeout` is configured.
+async fn with_retry_cancellable_inner<F, Fut, T>(
     policy: &RetryPolicy,
     token: &tokio_util::sync::CancellationToken,
     pool: Option<&crate::ConnectionPool>,
@@ -305,6 +357,7 @@ mod tests {
             max_backoff: Duration::from_millis(100),
             multiplier: 2.0,
             jitter: 0.0, // No jitter for deterministic tests
+            total_timeout: None,
         }
     }
 
@@ -432,6 +485,7 @@ mod tests {
             max_backoff: Duration::from_millis(200), // Cap at 200ms
             multiplier: 10.0,                        // Would quickly exceed 200ms
             jitter: 0.0,
+            total_timeout: None,
         };
 
         let call_count = Arc::new(AtomicU32::new(0));
@@ -552,6 +606,7 @@ mod tests {
             max_backoff: Duration::from_millis(100),
             multiplier: 2.0,
             jitter: 0.0,
+            total_timeout: None,
         };
         let token = tokio_util::sync::CancellationToken::new();
         let token_clone = token.clone();
@@ -580,6 +635,7 @@ mod tests {
             max_backoff: Duration::from_secs(10),
             multiplier: 1.0,
             jitter: 0.0,
+            total_timeout: None,
         };
         let token = tokio_util::sync::CancellationToken::new();
         let token_clone = token.clone();
@@ -708,6 +764,74 @@ mod tests {
         // Ensure that Cancelled errors short-circuit the retry loop
         let err = SdkError::Cancelled;
         assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn test_total_timeout_expires() {
+        // Slow operation with short total_timeout → SdkError::Timeout
+        let policy = RetryPolicy::builder()
+            .max_attempts(10)
+            .initial_backoff(Duration::from_millis(50))
+            .total_timeout(Duration::from_millis(100))
+            .build();
+
+        let result = with_retry(&policy, || async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok::<_, SdkError>("never")
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), SdkError::Timeout { duration_ms } if duration_ms == 100)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_total_timeout_allows_completion() {
+        // Fast operation with generous total_timeout → success
+        let policy = RetryPolicy::builder()
+            .max_attempts(3)
+            .initial_backoff(Duration::from_millis(1))
+            .total_timeout(Duration::from_secs(5))
+            .build();
+
+        let result = with_retry(&policy, || async { Ok::<_, SdkError>("done") }).await;
+
+        assert_eq!(result.unwrap(), "done");
+    }
+
+    #[tokio::test]
+    async fn test_total_timeout_none_no_effect() {
+        // Default behavior unchanged when total_timeout is None
+        let policy = RetryPolicy::builder().max_attempts(2).build();
+
+        assert!(policy.total_timeout.is_none());
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+
+        let result = with_retry(&policy, || {
+            let c = counter_clone.clone();
+            async move {
+                let attempt = c.fetch_add(1, Ordering::SeqCst) + 1;
+                if attempt < 2 {
+                    Err(SdkError::Rpc {
+                        code: tonic::Code::Unavailable,
+                        message: "transient".to_owned(),
+                        request_id: None,
+                        trace_id: None,
+                        error_details: None,
+                    })
+                } else {
+                    Ok("ok")
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), "ok");
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 }
 
@@ -854,6 +978,7 @@ mod proptest_tests {
                     max_backoff: Duration::from_millis(5),
                     multiplier: 2.0,
                     jitter: 0.0,
+                    total_timeout: None,
                 };
 
                 let call_count = Arc::new(AtomicU32::new(0));
@@ -911,6 +1036,7 @@ mod proptest_tests {
                     max_backoff: Duration::from_millis(5),
                     multiplier: 2.0,
                     jitter: 0.0,
+                    total_timeout: None,
                 };
 
                 let call_count = Arc::new(AtomicU32::new(0));
