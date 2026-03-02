@@ -2166,8 +2166,10 @@ mod tests {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
-            let result =
-                client.set_entity(ORG, Some(VAULT), "entity:1", b"data".to_vec()).await.unwrap();
+            let result = client
+                .set_entity(ORG, Some(VAULT), "entity:1", b"data".to_vec(), None)
+                .await
+                .unwrap();
 
             assert!(!result.tx_id.is_empty());
             assert_eq!(
@@ -2201,6 +2203,7 @@ mod tests {
                     "cond:1",
                     b"value".to_vec(),
                     crate::SetCondition::NotExists,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -2218,7 +2221,7 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let result = client
-                .set_entity_with_expiry(ORG, Some(VAULT), "ttl:1", b"temp".to_vec(), 1_700_000_000)
+                .set_entity(ORG, Some(VAULT), "ttl:1", b"temp".to_vec(), Some(1_700_000_000))
                 .await
                 .unwrap();
 
@@ -2226,6 +2229,30 @@ mod tests {
             assert_eq!(
                 client.read(ORG, Some(VAULT), "ttl:1").await.unwrap(),
                 Some(b"temp".to_vec())
+            );
+        }
+
+        #[tokio::test]
+        async fn test_set_entity_if_with_expiry_convenience() {
+            let server = MockLedgerServer::start().await.unwrap();
+            let client = create_client_for_mock(&server).await;
+
+            let result = client
+                .set_entity_if(
+                    ORG,
+                    Some(VAULT),
+                    "cond_ttl:1",
+                    b"conditional-temp".to_vec(),
+                    crate::SetCondition::NotExists,
+                    Some(1_700_000_000),
+                )
+                .await
+                .unwrap();
+
+            assert!(!result.tx_id.is_empty());
+            assert_eq!(
+                client.read(ORG, Some(VAULT), "cond_ttl:1").await.unwrap(),
+                Some(b"conditional-temp".to_vec())
             );
         }
 

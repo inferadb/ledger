@@ -1753,6 +1753,32 @@ impl Operation {
 }
 
 impl SetCondition {
+    /// Creates a condition for compare-and-set operations from an expected
+    /// previous value.
+    ///
+    /// - `None` → [`SetCondition::NotExists`] (create-if-absent)
+    /// - `Some(value)` → [`SetCondition::ValueEquals`] (update-if-unchanged)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use inferadb_ledger_sdk::SetCondition;
+    ///
+    /// // Insert only if key doesn't exist
+    /// let cond = SetCondition::from_expected(None::<Vec<u8>>);
+    /// assert!(matches!(cond, SetCondition::NotExists));
+    ///
+    /// // Update only if current value matches
+    /// let cond = SetCondition::from_expected(Some(b"old-value".to_vec()));
+    /// assert!(matches!(cond, SetCondition::ValueEquals(_)));
+    /// ```
+    pub fn from_expected(expected: Option<impl Into<Vec<u8>>>) -> Self {
+        match expected {
+            None => SetCondition::NotExists,
+            Some(value) => SetCondition::ValueEquals(value.into()),
+        }
+    }
+
     /// Converts to protobuf set condition.
     fn to_proto(&self) -> proto::SetCondition {
         let condition = match self {
@@ -3191,7 +3217,7 @@ impl LedgerClient {
     // Single-Operation Convenience Methods
     // =============================================================================
 
-    /// Writes a single entity (set).
+    /// Writes a single entity (set), optionally with an expiration timestamp.
     ///
     /// Convenience wrapper around [`write`](Self::write) for the common case of
     /// setting a single key-value pair. Generates an idempotency key
@@ -3203,6 +3229,8 @@ impl LedgerClient {
     /// * `vault` - Optional vault slug (omit for organization-level entities).
     /// * `key` - The entity key.
     /// * `value` - The entity value.
+    /// * `expires_at` - Optional Unix timestamp (seconds) when the entity expires. Pass `None` for
+    ///   no expiration.
     ///
     /// # Errors
     ///
@@ -3216,8 +3244,14 @@ impl LedgerClient {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
+    /// // Without expiration:
     /// let result = client
-    ///     .set_entity(organization, Some(vault), "user:123", b"data".to_vec())
+    ///     .set_entity(organization, Some(vault), "user:123", b"data".to_vec(), None)
+    ///     .await?;
+    ///
+    /// // With expiration:
+    /// let result = client
+    ///     .set_entity(organization, Some(vault), "session:abc", b"token".to_vec(), Some(1700000000))
     ///     .await?;
     /// # Ok(())
     /// # }
@@ -3228,8 +3262,14 @@ impl LedgerClient {
         vault: Option<VaultSlug>,
         key: impl Into<String>,
         value: Vec<u8>,
+        expires_at: Option<u64>,
     ) -> Result<WriteSuccess> {
-        self.write(organization, vault, vec![Operation::set_entity(key, value)]).await
+        self.write(
+            organization,
+            vault,
+            vec![Operation::SetEntity { key: key.into(), value, expires_at, condition: None }],
+        )
+        .await
     }
 
     /// Deletes a single entity.
@@ -3268,7 +3308,7 @@ impl LedgerClient {
         self.write(organization, vault, vec![Operation::delete_entity(key)]).await
     }
 
-    /// Sets a single entity with a conditional write.
+    /// Sets a single entity with a conditional write, optionally with an expiration timestamp.
     ///
     /// Convenience wrapper around [`write`](Self::write) for conditional
     /// set operations (compare-and-swap). The write only succeeds if the
@@ -3281,6 +3321,8 @@ impl LedgerClient {
     /// * `key` - The entity key.
     /// * `value` - The entity value.
     /// * `condition` - The condition that must be satisfied for the write to succeed.
+    /// * `expires_at` - Optional Unix timestamp (seconds) when the entity expires. Pass `None` for
+    ///   no expiration.
     ///
     /// # Errors
     ///
@@ -3301,6 +3343,7 @@ impl LedgerClient {
     ///         "user:123",
     ///         b"new-data".to_vec(),
     ///         SetCondition::NotExists,
+    ///         None,
     ///     )
     ///     .await?;
     /// # Ok(())
@@ -3313,61 +3356,17 @@ impl LedgerClient {
         key: impl Into<String>,
         value: Vec<u8>,
         condition: SetCondition,
-    ) -> Result<WriteSuccess> {
-        self.write(organization, vault, vec![Operation::set_entity_if(key, value, condition)]).await
-    }
-
-    /// Sets a single entity with an expiration timestamp.
-    ///
-    /// Convenience wrapper around [`write`](Self::write) for setting a
-    /// key-value pair with a TTL. The entity is automatically removed after
-    /// the expiration time.
-    ///
-    /// # Arguments
-    ///
-    /// * `organization` - Organization slug (external identifier).
-    /// * `vault` - Optional vault slug (omit for organization-level entities).
-    /// * `key` - The entity key.
-    /// * `value` - The entity value.
-    /// * `expires_at` - Unix timestamp (seconds) when the entity expires.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if validation fails or the write fails after retry
-    /// attempts.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
-    /// let expires_at = 1700000000; // Unix timestamp
-    /// let result = client
-    ///     .set_entity_with_expiry(
-    ///         organization,
-    ///         Some(vault),
-    ///         "session:abc",
-    ///         b"session-data".to_vec(),
-    ///         expires_at,
-    ///     )
-    ///     .await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn set_entity_with_expiry(
-        &self,
-        organization: OrganizationSlug,
-        vault: Option<VaultSlug>,
-        key: impl Into<String>,
-        value: Vec<u8>,
-        expires_at: u64,
+        expires_at: Option<u64>,
     ) -> Result<WriteSuccess> {
         self.write(
             organization,
             vault,
-            vec![Operation::set_entity_with_expiry(key, value, expires_at)],
+            vec![Operation::SetEntity {
+                key: key.into(),
+                value,
+                expires_at,
+                condition: Some(condition),
+            }],
         )
         .await
     }
@@ -5766,6 +5765,31 @@ mod tests {
                 assert_eq!(v, b"test");
             },
             _ => panic!("Expected ValueEquals"),
+        }
+    }
+
+    #[test]
+    fn test_set_condition_from_expected_none() {
+        let cond = SetCondition::from_expected(None::<Vec<u8>>);
+        assert!(matches!(cond, SetCondition::NotExists));
+    }
+
+    #[test]
+    fn test_set_condition_from_expected_some_vec() {
+        let cond = SetCondition::from_expected(Some(b"old-value".to_vec()));
+        match cond {
+            SetCondition::ValueEquals(v) => assert_eq!(v, b"old-value"),
+            other => panic!("Expected ValueEquals, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_set_condition_from_expected_some_slice() {
+        let slice: &[u8] = b"expected";
+        let cond = SetCondition::from_expected(Some(slice.to_vec()));
+        match cond {
+            SetCondition::ValueEquals(v) => assert_eq!(v, b"expected"),
+            other => panic!("Expected ValueEquals, got: {other:?}"),
         }
     }
 

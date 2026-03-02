@@ -432,6 +432,30 @@ impl SdkError {
         }
     }
 
+    /// Returns `true` if the error represents a CAS (compare-and-set)
+    /// conflict — the precondition check failed because the entity was
+    /// modified since it was last read.
+    ///
+    /// This matches only [`Code::FailedPrecondition`], which the server
+    /// returns when a [`SetCondition`](crate::SetCondition) evaluates to
+    /// false. Use this to distinguish CAS conflicts from other error types
+    /// without importing [`tonic::Code`] at call sites.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::SdkError;
+    /// # fn example(err: SdkError) {
+    /// if err.is_cas_conflict() {
+    ///     // Re-read current value and retry the compare-and-set
+    /// }
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn is_cas_conflict(&self) -> bool {
+        matches!(self, Self::Rpc { code: Code::FailedPrecondition, .. })
+    }
+
     /// Returns a short classification string for this error, suitable for
     /// use as a metrics label.
     #[must_use]
@@ -1396,5 +1420,44 @@ mod tests {
             _ => panic!("Expected UserMigrating variant, got {:?}", err),
         }
         assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_is_cas_conflict_failed_precondition() {
+        let err = SdkError::Rpc {
+            code: Code::FailedPrecondition,
+            message: "condition not met".to_owned(),
+            request_id: None,
+            trace_id: None,
+            error_details: None,
+        };
+        assert!(err.is_cas_conflict());
+    }
+
+    #[test]
+    fn test_is_cas_conflict_aborted_is_false() {
+        let err = SdkError::Rpc {
+            code: Code::Aborted,
+            message: "transaction conflict".to_owned(),
+            request_id: None,
+            trace_id: None,
+            error_details: None,
+        };
+        assert!(!err.is_cas_conflict());
+    }
+
+    #[test]
+    fn test_is_cas_conflict_other_errors_are_false() {
+        let err = SdkError::Connection { message: "network down".to_owned() };
+        assert!(!err.is_cas_conflict());
+
+        let err = SdkError::Rpc {
+            code: Code::NotFound,
+            message: "not found".to_owned(),
+            request_id: None,
+            trace_id: None,
+            error_details: None,
+        };
+        assert!(!err.is_cas_conflict());
     }
 }
