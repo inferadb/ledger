@@ -49,6 +49,8 @@ const RAFT_LEADER: &str = "inferadb_ledger_raft_is_leader";
 // State machine metrics
 const STATE_ROOT_COMPUTATIONS: &str = "inferadb_ledger_state_root_computations_total";
 const STATE_ROOT_LATENCY: &str = "inferadb_ledger_state_root_latency_seconds";
+const STATE_ROOT_VERIFICATIONS: &str = "inferadb_ledger_state_root_verifications_total";
+const STATE_ROOT_DIVERGENCES: &str = "inferadb_ledger_state_root_divergences_total";
 const DIRTY_BUCKETS: &str = "ledger_dirty_buckets";
 
 // Storage metrics
@@ -270,6 +272,26 @@ pub fn record_state_root_computation(vault: VaultId, latency_secs: f64) {
     let vault_label = vault.value().to_string();
     counter!(STATE_ROOT_COMPUTATIONS, "vault_id" => vault_label.clone()).increment(1);
     histogram!(STATE_ROOT_LATENCY, "vault_id" => vault_label).record(latency_secs);
+}
+
+/// Records a successful state root verification (local matches leader commitment).
+#[inline]
+pub fn record_state_root_verification() {
+    counter!(STATE_ROOT_VERIFICATIONS).increment(1);
+}
+
+/// Records a state root divergence (local state root differs from leader commitment).
+///
+/// This is a critical alert — it indicates potential Byzantine behavior or a
+/// determinism bug in the state machine.
+#[inline]
+pub fn record_state_root_divergence(organization: OrganizationId, vault: VaultId) {
+    counter!(
+        STATE_ROOT_DIVERGENCES,
+        "organization_id" => organization.value().to_string(),
+        "vault_id" => vault.value().to_string(),
+    )
+    .increment(1);
 }
 
 /// Sets the number of dirty buckets for a vault.

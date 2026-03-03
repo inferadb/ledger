@@ -10,18 +10,16 @@
 //!                                  |
 //!                    +-------------+-------------+
 //!                    |                           |
-//!             SingleRegion                 MultiRegion
-//!            (always region 0)        (lookup by organization)
-//!                                           |
-//!                              +------------+------------+
-//!                              |                         |
-//!                         Local region              Remote region
-//!                        (RegionContext)          (ForwardInfo)
+//!               Local region              Remote region
+//!              (RegionContext)          (ForwardInfo)
 //! ```
+//!
+//! Every server is multi-region capable. A single-region deployment is simply
+//! a `RegionResolverImpl` with one region (GLOBAL).
 //!
 //! ## Request Forwarding
 //!
-//! When a organization is assigned to a region on a different node, the resolver
+//! When an organization is assigned to a region on a different node, the resolver
 //! returns forwarding information that services can use to proxy the request
 //! via gRPC to the correct node.
 
@@ -36,9 +34,10 @@ use tokio::sync::broadcast;
 use tonic::Status;
 
 use crate::{
+    batching::BatchWriterHandle,
     log_storage::AppliedStateAccessor,
     metrics,
-    multi_raft::MultiRaftManager,
+    raft_manager::RaftManager,
     region_router::{RegionRouter, RoutingInfo},
     types::LedgerTypeConfig,
 };
@@ -59,11 +58,19 @@ pub struct RegionContext {
     /// Optional for backward compatibility with single-region setups that
     /// manage the channel externally.
     pub block_announcements: Option<broadcast::Sender<BlockAnnouncement>>,
+    /// Batch writer handle for coalescing writes (if batch writing is enabled).
+    pub batch_handle: Option<BatchWriterHandle>,
+    /// State root commitment buffer for piggybacked verification.
+    ///
+    /// When present, the proposal path drains this buffer and attaches
+    /// commitments to the next `RaftPayload` for follower verification.
+    pub commitment_buffer:
+        Option<std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>>>,
 }
 
 /// Information for forwarding a request to a remote region.
 ///
-/// When a organization is on a region hosted by a different node, this struct
+/// When an organization is on a region hosted by a different node, this struct
 /// provides the routing information needed to forward the request via gRPC.
 #[derive(Debug, Clone)]
 pub struct RemoteRegionInfo {
@@ -75,7 +82,7 @@ pub struct RemoteRegionInfo {
     pub routing: RoutingInfo,
 }
 
-/// Result of resolving a organization to its region.
+/// Result of resolving an organization to its region.
 ///
 /// Either the region is local (can be handled directly) or remote
 /// (needs to be forwarded via gRPC).
@@ -96,6 +103,8 @@ impl std::fmt::Debug for RegionContext {
             .field("block_archive", &"<BlockArchive>")
             .field("applied_state", &"<AppliedState>")
             .field("block_announcements", &self.block_announcements.is_some())
+            .field("batch_handle", &self.batch_handle.is_some())
+            .field("commitment_buffer", &self.commitment_buffer.is_some())
             .finish()
     }
 }
@@ -152,81 +161,36 @@ pub trait RegionResolver: Send + Sync {
     }
 }
 
-/// Single-region resolver for standalone deployments.
-///
-/// Always returns the same region context, as all organizations
-/// are handled by a single Raft group.
-pub struct SingleRegionResolver {
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    state: Arc<StateLayer<FileBackend>>,
-    block_archive: Arc<BlockArchive<FileBackend>>,
-    applied_state: AppliedStateAccessor,
-}
-
-impl SingleRegionResolver {
-    /// Creates a new single-region resolver.
-    pub fn new(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        state: Arc<StateLayer<FileBackend>>,
-        block_archive: Arc<BlockArchive<FileBackend>>,
-        applied_state: AppliedStateAccessor,
-    ) -> Self {
-        Self { raft, state, block_archive, applied_state }
-    }
-
-    /// Returns the single region context.
-    ///
-    /// `block_announcements` is `None` because single-region setups manage
-    /// the channel externally in `LedgerServer`.
-    fn context(&self) -> RegionContext {
-        RegionContext {
-            raft: self.raft.clone(),
-            state: self.state.clone(),
-            block_archive: self.block_archive.clone(),
-            applied_state: self.applied_state.clone(),
-            block_announcements: None,
-        }
-    }
-}
-
-impl RegionResolver for SingleRegionResolver {
-    fn resolve(&self, _organization: OrganizationId) -> Result<RegionContext, Status> {
-        Ok(self.context())
-    }
-
-    fn system_region(&self) -> Result<RegionContext, Status> {
-        Ok(self.context())
-    }
-}
-
 /// Builds a [`RegionContext`] from a [`RegionGroup`], including block announcements.
 ///
 /// Used by the multi-region resolver where every region group provides its own
 /// block announcement channel.
-fn region_context_from(region: &crate::multi_raft::RegionGroup) -> RegionContext {
+fn region_context_from(region: &crate::raft_manager::RegionGroup) -> RegionContext {
     RegionContext {
         raft: region.raft().clone(),
         state: region.state().clone(),
         block_archive: region.block_archive().clone(),
         applied_state: region.applied_state().clone(),
         block_announcements: Some(region.block_announcements().clone()),
+        batch_handle: region.batch_handle().cloned(),
+        commitment_buffer: Some(region.commitment_buffer()),
     }
 }
 
-/// Multi-region resolver using the MultiRaftManager.
+/// Region resolver backed by the [`RaftManager`].
 ///
 /// Routes organizations to their assigned regions using the RegionRouter.
 /// Supports request forwarding to remote regions when the organization
 /// is not hosted locally. Uses `local_region` for data residency decisions:
 /// non-protected regions are always local; protected regions require the
 /// node to be in the same region.
-pub struct MultiRegionResolver {
-    manager: Arc<MultiRaftManager>,
+pub struct RegionResolverImpl {
+    manager: Arc<RaftManager>,
 }
 
-impl MultiRegionResolver {
+impl RegionResolverImpl {
     /// Creates a new multi-region resolver.
-    pub fn new(manager: Arc<MultiRaftManager>) -> Self {
+    pub fn new(manager: Arc<RaftManager>) -> Self {
         Self { manager }
     }
 
@@ -241,7 +205,7 @@ impl MultiRegionResolver {
     }
 }
 
-impl RegionResolver for MultiRegionResolver {
+impl RegionResolver for RegionResolverImpl {
     fn resolve(&self, organization: OrganizationId) -> Result<RegionContext, Status> {
         // System organization (0) always goes to system region
         if organization == OrganizationId::new(0) {
@@ -406,9 +370,8 @@ mod tests {
     }
 
     #[test]
-    fn test_single_region_resolver_supports_forwarding() {
-        // SingleRegionResolver should not support forwarding (all local)
-        // This is a compile-time interface test
+    fn test_region_resolver_trait_is_object_safe() {
+        // Verify RegionResolver is object-safe (can be used as dyn trait)
         fn _check_trait_impl<T: RegionResolver>(_: &T) {}
     }
 
@@ -454,20 +417,20 @@ mod tests {
 
     #[test]
     fn test_multi_region_resolver_local_region() {
-        // MultiRegionResolver delegates local_region() to MultiRaftManager.
+        // RegionResolverImpl delegates local_region() to RaftManager.
         // Verify the accessor exists and returns the manager's local_region.
         // Full integration test requires async Raft setup; here we test the
         // type-level wiring.
         use inferadb_ledger_test_utils::TestDir;
 
-        use crate::multi_raft::{MultiRaftConfig, MultiRaftManager};
+        use crate::raft_manager::{RaftManager, RaftManagerConfig};
 
         let temp = TestDir::new();
         let config =
-            MultiRaftConfig::new(temp.path().to_path_buf(), 1, Region::DE_CENTRAL_FRANKFURT);
-        let manager = Arc::new(MultiRaftManager::new(config));
+            RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::DE_CENTRAL_FRANKFURT);
+        let manager = Arc::new(RaftManager::new(config));
 
-        let resolver = MultiRegionResolver::new(manager);
+        let resolver = RegionResolverImpl::new(manager);
         assert_eq!(resolver.local_region(), Region::DE_CENTRAL_FRANKFURT);
     }
 
@@ -475,13 +438,13 @@ mod tests {
     fn test_multi_region_resolver_supports_forwarding() {
         use inferadb_ledger_test_utils::TestDir;
 
-        use crate::multi_raft::{MultiRaftConfig, MultiRaftManager};
+        use crate::raft_manager::{RaftManager, RaftManagerConfig};
 
         let temp = TestDir::new();
-        let config = MultiRaftConfig::new(temp.path().to_path_buf(), 1, Region::GLOBAL);
-        let manager = Arc::new(MultiRaftManager::new(config));
+        let config = RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::GLOBAL);
+        let manager = Arc::new(RaftManager::new(config));
 
-        let resolver = MultiRegionResolver::new(manager);
+        let resolver = RegionResolverImpl::new(manager);
         assert!(resolver.supports_forwarding());
     }
 

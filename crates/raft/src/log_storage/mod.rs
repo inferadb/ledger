@@ -96,7 +96,7 @@ mod tests {
 
     /// Wraps a `LedgerRequest` into a `RaftPayload` with `Utc::now()` for test entries.
     fn wrap_payload(request: LedgerRequest) -> RaftPayload {
-        RaftPayload { request, proposed_at: Utc::now() }
+        RaftPayload { request, proposed_at: Utc::now(), state_root_commitments: vec![] }
     }
 
     #[tokio::test]
@@ -2925,7 +2925,11 @@ mod tests {
             request_hash: 0,
         };
 
-        let payload = RaftPayload { request: write_request, proposed_at: far_future };
+        let payload = RaftPayload {
+            request: write_request,
+            proposed_at: far_future,
+            state_root_commitments: vec![],
+        };
 
         let entry = Entry { log_id: make_log_id(1, 1), payload: EntryPayload::Normal(payload) };
 
@@ -2997,7 +3001,11 @@ mod tests {
             request_hash: 0,
         };
 
-        let payload = RaftPayload { request: write_request, proposed_at: far_future };
+        let payload = RaftPayload {
+            request: write_request,
+            proposed_at: far_future,
+            state_root_commitments: vec![],
+        };
         let entry = Entry { log_id: make_log_id(1, 1), payload: EntryPayload::Normal(payload) };
 
         store.apply_to_state_machine(&[entry]).await.expect("apply");
@@ -3050,7 +3058,11 @@ mod tests {
                 let mut state = store.applied_state.write();
                 setup_org_and_vault(&mut state);
             }
-            let payload = RaftPayload { request: write_request.clone(), proposed_at: far_future };
+            let payload = RaftPayload {
+                request: write_request.clone(),
+                proposed_at: far_future,
+                state_root_commitments: vec![],
+            };
             let entry = Entry { log_id: make_log_id(1, 1), payload: EntryPayload::Normal(payload) };
             (store, entry)
         };
@@ -5887,5 +5899,614 @@ mod tests {
             snapshot_a.meta.last_log_id, snapshot_b.meta.last_log_id,
             "both snapshots should report the same last_applied"
         );
+    }
+
+    // ========================================================================
+    // State Root Commitment Buffer Tests
+    // ========================================================================
+
+    #[test]
+    fn test_commitment_buffer_drain_returns_all_entries() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+
+        // Push some commitments directly into the buffer
+        {
+            let mut buf = store.state_root_commitments.lock().unwrap();
+            buf.push(crate::types::StateRootCommitment {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
+                vault_height: 10,
+                state_root: [0xAA; 32],
+            });
+            buf.push(crate::types::StateRootCommitment {
+                organization: OrganizationId::new(2),
+                vault: VaultId::new(2),
+                vault_height: 20,
+                state_root: [0xBB; 32],
+            });
+        }
+
+        // Drain should return all entries
+        let drained = store.drain_state_root_commitments();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].organization, OrganizationId::new(1));
+        assert_eq!(drained[0].vault_height, 10);
+        assert_eq!(drained[1].organization, OrganizationId::new(2));
+        assert_eq!(drained[1].vault_height, 20);
+
+        // Buffer should be empty after drain
+        let again = store.drain_state_root_commitments();
+        assert!(again.is_empty());
+    }
+
+    #[test]
+    fn test_commitment_buffer_shared_via_arc() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+
+        // Get a shared handle (same pattern as RegionGroup)
+        let buffer = store.commitment_buffer();
+
+        // Push via the shared handle
+        {
+            let mut buf = buffer.lock().unwrap();
+            buf.push(crate::types::StateRootCommitment {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
+                vault_height: 5,
+                state_root: [0xCC; 32],
+            });
+        }
+
+        // Drain via the store — should see the same data
+        let drained = store.drain_state_root_commitments();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].state_root, [0xCC; 32]);
+
+        // Both should now be empty
+        assert!(buffer.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_commitment_buffer_cap_prevents_unbounded_growth() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+
+        // Fill buffer to capacity
+        {
+            let mut buf = store.state_root_commitments.lock().unwrap();
+            for i in 0..10_000u64 {
+                buf.push(crate::types::StateRootCommitment {
+                    organization: OrganizationId::new(1),
+                    vault: VaultId::new(1),
+                    vault_height: i,
+                    state_root: [0u8; 32],
+                });
+            }
+            assert_eq!(buf.len(), 10_000);
+        }
+
+        // The buffer is at cap but drain still works
+        let drained = store.drain_state_root_commitments();
+        assert_eq!(drained.len(), 10_000);
+        assert!(store.state_root_commitments.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_commitment_buffer_empty_drain() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+
+        let drained = store.drain_state_root_commitments();
+        assert!(drained.is_empty());
+    }
+
+    // ========================================================================
+    // State Root Verification Tests (via apply_to_state_machine)
+    // ========================================================================
+
+    /// Creates a store with a block archive wired up for verification tests.
+    fn store_with_archive(
+        dir: &std::path::Path,
+    ) -> (RaftLogStore<FileBackend>, Arc<inferadb_ledger_state::BlockArchive<FileBackend>>) {
+        // Archive needs its own database (separate from raft log)
+        let archive_db = Arc::new(
+            inferadb_ledger_store::Database::create(dir.join("archive.db"))
+                .expect("create archive db"),
+        );
+        let archive = Arc::new(inferadb_ledger_state::BlockArchive::new(archive_db));
+
+        let store = RaftLogStore::<FileBackend>::open(dir.join("raft_log.db"))
+            .expect("open store")
+            .with_block_archive(Arc::clone(&archive));
+
+        (store, archive)
+    }
+
+    /// Creates a store with block archive and divergence channel.
+    fn store_with_archive_and_divergence(
+        dir: &std::path::Path,
+    ) -> (
+        RaftLogStore<FileBackend>,
+        Arc<inferadb_ledger_state::BlockArchive<FileBackend>>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::types::StateRootDivergence>,
+    ) {
+        let (store, archive) = store_with_archive(dir);
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let store = store.with_divergence_sender(sender);
+        (store, archive, receiver)
+    }
+
+    #[tokio::test]
+    async fn test_apply_emits_commitments_to_buffer() {
+        // When apply_to_state_machine processes a Write that creates vault entries,
+        // it should buffer StateRootCommitments.
+        use openraft::RaftStorage;
+
+        let dir = tempdir().expect("create temp dir");
+        let (mut store, _archive) = store_with_archive(dir.path());
+
+        // Set up org and vault
+        {
+            let mut state = store.applied_state.write();
+            setup_org_and_vault(&mut state);
+        }
+
+        // Apply a write entry
+        let entry = Entry {
+            log_id: make_log_id(1, 1),
+            payload: EntryPayload::Normal(wrap_payload(simple_write_request(
+                OrganizationId::new(1),
+                VaultId::new(1),
+            ))),
+        };
+
+        store.apply_to_state_machine(&[entry]).await.expect("apply");
+
+        // Buffer should contain a commitment for this vault
+        let commitments = store.drain_state_root_commitments();
+        assert_eq!(commitments.len(), 1, "should have one commitment after write");
+        assert_eq!(commitments[0].organization, OrganizationId::new(1));
+        assert_eq!(commitments[0].vault, VaultId::new(1));
+        assert_eq!(commitments[0].vault_height, 1);
+        // State root should be non-zero (actual value depends on state layer)
+        // Without a state layer, it will be the zero hash
+        assert_eq!(commitments[0].state_root.len(), 32);
+    }
+
+    #[tokio::test]
+    async fn test_apply_no_commitments_for_non_write_entries() {
+        // CreateOrganization / CreateVault don't produce vault entries,
+        // so no commitments should be buffered.
+        use openraft::RaftStorage;
+
+        let dir = tempdir().expect("create temp dir");
+        let (mut store, _archive) = store_with_archive(dir.path());
+
+        let entry = Entry {
+            log_id: make_log_id(1, 1),
+            payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateOrganization {
+                name: "test-org".to_string(),
+                slug: inferadb_ledger_types::OrganizationSlug::new(999),
+                region: Region::US_EAST_VA,
+                tier: Default::default(),
+            })),
+        };
+
+        store.apply_to_state_machine(&[entry]).await.expect("apply");
+
+        let commitments = store.drain_state_root_commitments();
+        assert!(commitments.is_empty(), "admin ops should not produce commitments");
+    }
+
+    #[tokio::test]
+    async fn test_apply_multiple_writes_emits_multiple_commitments() {
+        // Two writes in one batch → two commitments.
+        use openraft::RaftStorage;
+
+        let dir = tempdir().expect("create temp dir");
+        let (mut store, _archive) = store_with_archive(dir.path());
+
+        // Set up org with two vaults
+        {
+            let mut state = store.applied_state.write();
+            let (org_id, _vault1) = setup_org_and_vault(&mut state);
+
+            // Add second vault
+            let vault2 = state.sequences.next_vault();
+            let vault2_slug = VaultSlug::new(3000);
+            state.vault_heights.insert((org_id, vault2), 0);
+            state.vaults.insert(
+                (org_id, vault2),
+                VaultMeta {
+                    organization: org_id,
+                    vault: vault2,
+                    slug: vault2_slug,
+                    name: Some("vault-2".to_string()),
+                    deleted: false,
+                    last_write_timestamp: 0,
+                    retention_policy: BlockRetentionPolicy::default(),
+                },
+            );
+            state.vault_slug_index.insert(vault2_slug, vault2);
+            state.vault_id_to_slug.insert(vault2, vault2_slug);
+            state.vault_health.insert((org_id, vault2), VaultHealthStatus::Healthy);
+        }
+
+        let entries = vec![
+            Entry {
+                log_id: make_log_id(1, 1),
+                payload: EntryPayload::Normal(wrap_payload(simple_write_request(
+                    OrganizationId::new(1),
+                    VaultId::new(1),
+                ))),
+            },
+            Entry {
+                log_id: make_log_id(1, 2),
+                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::Write {
+                    organization: OrganizationId::new(1),
+                    vault: VaultId::new(2),
+                    transactions: vec![Transaction {
+                        id: [2u8; 16],
+                        client_id: "test-client".to_string(),
+                        sequence: 0,
+                        actor: "test-actor".to_string(),
+                        operations: vec![Operation::SetEntity {
+                            key: "key2".to_string(),
+                            value: b"value2".to_vec(),
+                            condition: None,
+                            expires_at: None,
+                        }],
+                        timestamp: fixed_timestamp(),
+                    }],
+                    idempotency_key: [0u8; 16],
+                    request_hash: 0,
+                })),
+            },
+        ];
+
+        store.apply_to_state_machine(&entries).await.expect("apply");
+
+        let commitments = store.drain_state_root_commitments();
+        assert_eq!(commitments.len(), 2, "two writes → two commitments");
+        assert_eq!(commitments[0].vault, VaultId::new(1));
+        assert_eq!(commitments[0].vault_height, 1);
+        assert_eq!(commitments[1].vault, VaultId::new(2));
+        assert_eq!(commitments[1].vault_height, 1);
+    }
+
+    #[tokio::test]
+    async fn test_verify_commitment_matching_state_root() {
+        // Full end-to-end: apply a write (which archives the block), then apply
+        // a second entry piggybacking the correct commitment. Verification should
+        // succeed silently (no divergence event).
+        use openraft::RaftStorage;
+
+        let dir = tempdir().expect("create temp dir");
+        let (mut store, _archive, mut divergence_rx) =
+            store_with_archive_and_divergence(dir.path());
+
+        {
+            let mut state = store.applied_state.write();
+            setup_org_and_vault(&mut state);
+        }
+
+        // Step 1: Apply a write → archives block, buffers commitment
+        let write_entry = Entry {
+            log_id: make_log_id(1, 1),
+            payload: EntryPayload::Normal(wrap_payload(simple_write_request(
+                OrganizationId::new(1),
+                VaultId::new(1),
+            ))),
+        };
+        store.apply_to_state_machine(&[write_entry]).await.expect("apply write");
+
+        // Drain the commitment (simulating leader draining for next payload)
+        let commitments = store.drain_state_root_commitments();
+        assert_eq!(commitments.len(), 1);
+
+        // Step 2: Apply a second entry carrying the commitment from step 1.
+        // The commitment's state_root matches the archived block's state_root.
+        let second_entry = Entry {
+            log_id: make_log_id(1, 2),
+            payload: EntryPayload::Normal(RaftPayload {
+                request: LedgerRequest::CreateOrganization {
+                    name: "dummy".to_string(),
+                    slug: inferadb_ledger_types::OrganizationSlug::new(9999),
+                    region: Region::US_EAST_VA,
+                    tier: Default::default(),
+                },
+                proposed_at: Utc::now(),
+                state_root_commitments: commitments,
+            }),
+        };
+        store.apply_to_state_machine(&[second_entry]).await.expect("apply verify");
+
+        // No divergence should have been sent
+        assert!(
+            matches!(divergence_rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+            "matching state root should not trigger divergence"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_commitment_mismatching_state_root_sends_divergence() {
+        // Piggyback a commitment with a deliberately wrong state_root.
+        // The verification should detect the mismatch and send a divergence event.
+        use openraft::RaftStorage;
+
+        let dir = tempdir().expect("create temp dir");
+        let (mut store, _archive, mut divergence_rx) =
+            store_with_archive_and_divergence(dir.path());
+
+        {
+            let mut state = store.applied_state.write();
+            setup_org_and_vault(&mut state);
+        }
+
+        // Apply a write to archive a block
+        let write_entry = Entry {
+            log_id: make_log_id(1, 1),
+            payload: EntryPayload::Normal(wrap_payload(simple_write_request(
+                OrganizationId::new(1),
+                VaultId::new(1),
+            ))),
+        };
+        store.apply_to_state_machine(&[write_entry]).await.expect("apply write");
+
+        // Drain and tamper with the state root
+        let mut commitments = store.drain_state_root_commitments();
+        assert_eq!(commitments.len(), 1);
+        commitments[0].state_root = [0xFF; 32]; // Wrong state root
+
+        // Apply entry carrying the tampered commitment
+        let verify_entry = Entry {
+            log_id: make_log_id(1, 2),
+            payload: EntryPayload::Normal(RaftPayload {
+                request: LedgerRequest::CreateOrganization {
+                    name: "dummy-2".to_string(),
+                    slug: inferadb_ledger_types::OrganizationSlug::new(8888),
+                    region: Region::US_EAST_VA,
+                    tier: Default::default(),
+                },
+                proposed_at: Utc::now(),
+                state_root_commitments: commitments,
+            }),
+        };
+        store.apply_to_state_machine(&[verify_entry]).await.expect("apply verify");
+
+        // Should have received a divergence event
+        let divergence = divergence_rx.try_recv().expect("should receive divergence event");
+        assert_eq!(divergence.organization, OrganizationId::new(1));
+        assert_eq!(divergence.vault, VaultId::new(1));
+        assert_eq!(divergence.vault_height, 1);
+        assert_eq!(divergence.leader_state_root, [0xFF; 32]);
+        // The local state root should be whatever the store computed (not 0xFF)
+        assert_ne!(divergence.local_state_root, [0xFF; 32]);
+    }
+
+    #[tokio::test]
+    async fn test_verify_commitment_missing_block_skips_silently() {
+        // If the commitment references a vault height not yet archived
+        // (e.g., after snapshot install), verification should skip without error.
+        use openraft::RaftStorage;
+
+        let dir = tempdir().expect("create temp dir");
+        let (mut store, _archive, mut divergence_rx) =
+            store_with_archive_and_divergence(dir.path());
+
+        {
+            let mut state = store.applied_state.write();
+            setup_org_and_vault(&mut state);
+        }
+
+        // Don't apply any writes — no blocks exist in the archive.
+        // Piggyback a commitment referencing a non-existent vault height.
+        let entry = Entry {
+            log_id: make_log_id(1, 1),
+            payload: EntryPayload::Normal(RaftPayload {
+                request: LedgerRequest::CreateOrganization {
+                    name: "dummy".to_string(),
+                    slug: inferadb_ledger_types::OrganizationSlug::new(7777),
+                    region: Region::US_EAST_VA,
+                    tier: Default::default(),
+                },
+                proposed_at: Utc::now(),
+                state_root_commitments: vec![crate::types::StateRootCommitment {
+                    organization: OrganizationId::new(1),
+                    vault: VaultId::new(1),
+                    vault_height: 999, // Never archived
+                    state_root: [0xDD; 32],
+                }],
+            }),
+        };
+        store.apply_to_state_machine(&[entry]).await.expect("apply");
+
+        // No divergence — just skipped
+        assert!(
+            matches!(divergence_rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+            "missing block should not trigger divergence"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_commitment_no_archive_skips() {
+        // Without a block archive configured, verification is a no-op.
+        use openraft::RaftStorage;
+
+        let dir = tempdir().expect("create temp dir");
+        let mut store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+
+        {
+            let mut state = store.applied_state.write();
+            setup_org_and_vault(&mut state);
+        }
+
+        // Apply entry with commitments but no archive — should not panic
+        let entry = Entry {
+            log_id: make_log_id(1, 1),
+            payload: EntryPayload::Normal(RaftPayload {
+                request: LedgerRequest::CreateOrganization {
+                    name: "dummy".to_string(),
+                    slug: inferadb_ledger_types::OrganizationSlug::new(6666),
+                    region: Region::US_EAST_VA,
+                    tier: Default::default(),
+                },
+                proposed_at: Utc::now(),
+                state_root_commitments: vec![crate::types::StateRootCommitment {
+                    organization: OrganizationId::new(1),
+                    vault: VaultId::new(1),
+                    vault_height: 1,
+                    state_root: [0xEE; 32],
+                }],
+            }),
+        };
+        store.apply_to_state_machine(&[entry]).await.expect("apply should succeed without archive");
+    }
+
+    #[tokio::test]
+    async fn test_commitment_buffer_cap_during_apply() {
+        // Verify the 10K cap works during apply_to_state_machine.
+        use openraft::RaftStorage;
+
+        let dir = tempdir().expect("create temp dir");
+        let (mut store, _archive) = store_with_archive(dir.path());
+
+        {
+            let mut state = store.applied_state.write();
+            setup_org_and_vault(&mut state);
+        }
+
+        // Pre-fill buffer to capacity so the next apply triggers overflow
+        {
+            let mut buf = store.state_root_commitments.lock().unwrap();
+            for i in 0..10_000u64 {
+                buf.push(crate::types::StateRootCommitment {
+                    organization: OrganizationId::new(1),
+                    vault: VaultId::new(1),
+                    vault_height: i,
+                    state_root: [0u8; 32],
+                });
+            }
+        }
+
+        // Apply a write — should add one commitment and drop the oldest
+        let entry = Entry {
+            log_id: make_log_id(1, 1),
+            payload: EntryPayload::Normal(wrap_payload(simple_write_request(
+                OrganizationId::new(1),
+                VaultId::new(1),
+            ))),
+        };
+        store.apply_to_state_machine(&[entry]).await.expect("apply");
+
+        let buf = store.state_root_commitments.lock().unwrap();
+        assert!(buf.len() <= 10_000, "buffer should not exceed 10K cap, got {}", buf.len());
+    }
+
+    #[tokio::test]
+    async fn test_divergence_sender_none_does_not_panic() {
+        // When no divergence sender is configured, mismatches should be
+        // logged but not panic.
+        use openraft::RaftStorage;
+
+        let dir = tempdir().expect("create temp dir");
+        let (mut store, _archive) = store_with_archive(dir.path());
+        // Note: no with_divergence_sender — sender is None
+
+        {
+            let mut state = store.applied_state.write();
+            setup_org_and_vault(&mut state);
+        }
+
+        // Apply a write to archive a block
+        let write_entry = Entry {
+            log_id: make_log_id(1, 1),
+            payload: EntryPayload::Normal(wrap_payload(simple_write_request(
+                OrganizationId::new(1),
+                VaultId::new(1),
+            ))),
+        };
+        store.apply_to_state_machine(&[write_entry]).await.expect("apply");
+
+        // Drain and tamper
+        let mut commitments = store.drain_state_root_commitments();
+        commitments[0].state_root = [0xFF; 32];
+
+        // Apply with tampered commitment — should not panic despite no sender
+        let verify_entry = Entry {
+            log_id: make_log_id(1, 2),
+            payload: EntryPayload::Normal(RaftPayload {
+                request: LedgerRequest::CreateOrganization {
+                    name: "dummy".to_string(),
+                    slug: inferadb_ledger_types::OrganizationSlug::new(5555),
+                    region: Region::US_EAST_VA,
+                    tier: Default::default(),
+                },
+                proposed_at: Utc::now(),
+                state_root_commitments: commitments,
+            }),
+        };
+        store
+            .apply_to_state_machine(&[verify_entry])
+            .await
+            .expect("should not panic without divergence sender");
+    }
+
+    #[tokio::test]
+    async fn test_piggybacking_end_to_end() {
+        // Full piggybacking cycle: write → buffer → drain → piggyback → verify.
+        // Simulates two consecutive apply batches.
+        use openraft::RaftStorage;
+
+        let dir = tempdir().expect("create temp dir");
+        let (mut store, _archive, mut divergence_rx) =
+            store_with_archive_and_divergence(dir.path());
+
+        {
+            let mut state = store.applied_state.write();
+            setup_org_and_vault(&mut state);
+        }
+
+        // Batch 1: Write to vault → buffers commitment
+        let batch1 = vec![Entry {
+            log_id: make_log_id(1, 1),
+            payload: EntryPayload::Normal(wrap_payload(simple_write_request(
+                OrganizationId::new(1),
+                VaultId::new(1),
+            ))),
+        }];
+        store.apply_to_state_machine(&batch1).await.expect("apply batch 1");
+
+        let commitments_from_batch1 = store.drain_state_root_commitments();
+        assert_eq!(commitments_from_batch1.len(), 1);
+
+        // Batch 2: Another write, piggybacking batch 1's commitments
+        let batch2 = vec![Entry {
+            log_id: make_log_id(1, 2),
+            payload: EntryPayload::Normal(RaftPayload {
+                request: simple_write_request(OrganizationId::new(1), VaultId::new(1)),
+                proposed_at: Utc::now(),
+                state_root_commitments: commitments_from_batch1,
+            }),
+        }];
+        store.apply_to_state_machine(&batch2).await.expect("apply batch 2");
+
+        // Verification passed — no divergence
+        assert!(
+            matches!(divergence_rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+            "correctly piggybacked commitments should not trigger divergence"
+        );
+
+        // Batch 2 also produced commitments for its own writes
+        let commitments_from_batch2 = store.drain_state_root_commitments();
+        assert_eq!(commitments_from_batch2.len(), 1);
+        assert_eq!(commitments_from_batch2[0].vault_height, 2);
     }
 }

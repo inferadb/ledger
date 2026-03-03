@@ -259,13 +259,12 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             request_hash: 0,
         };
 
-        self.raft
-            .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
-            .await
-            .map_err(|e| OrphanCleanupError::OrphanRaftWrite {
+        self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+            OrphanCleanupError::OrphanRaftWrite {
                 message: format!("{:?}", e),
                 backtrace: snafu::Backtrace::generate(),
-            })?;
+            }
+        })?;
 
         info!(organization = organization.value(), count, "Removed orphaned memberships");
 

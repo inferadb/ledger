@@ -320,9 +320,11 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Database layer with ACID transactions, multiple B+ trees (tables), and comprehensive tests
 - **Key Types/Functions**:
-- `Database::open(backend, config) -> Result<Self>`: Open database
-- `begin_read() -> ReadTransaction`, `begin_write() -> WriteTransaction`
-- `open_table<T: Table>() -> Result<()>`: Initialize table (allocate root page)
+- `Database::<FileBackend>::open<P: AsRef<Path>>(path: P) -> Result<Self>`: Open file-based database
+- `Database::<InMemoryBackend>::open_in_memory() -> Result<Self>`: Create in-memory database
+- `read() -> Result<ReadTransaction<'_, B>>`: Start read transaction
+- `write() -> Result<WriteTransaction<'_, B>>`: Start write transaction
+- Tables initialize implicitly on first write (no explicit open_table method needed)
 - **Insights**: Multiple tables share same PageManager. Dual-slot commit protocol (commit bit + sync) ensures atomicity. Large file primarily due to extensive inline test coverage.
 
 #### `error.rs`
@@ -579,12 +581,13 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### `system/cluster.rs`
 
-- **Purpose**: Cluster metadata (nodes, shards, rebalancing)
+- **Purpose**: Multi-region cluster membership and per-Raft-group role tracking
 - **Key Types/Functions**:
-- `ClusterMetadata`: Cluster-wide configuration
-- `NodeMetadata`: Per-node metadata (address, capacity, status)
-- `ShardAssignment`: Organization → shard mapping
-- **Insights**: Supports dynamic shard assignment. Enables horizontal scaling.
+- `GroupMembership`: Per-Raft-group role assignments (Voter/Learner per node per region)
+- `ClusterMembership`: Node registry with heartbeat tracking, wraps `GroupMembership`
+- `SystemRole` enum: `Voter`, `Learner` — per-region role for each node
+- `LearnerCacheConfig`: Cache staleness configuration for learner nodes
+- **Insights**: `GroupMembership` maps `(node_id, region)` → `SystemRole`, enabling per-region voter/learner assignments. `ClusterMembership` composes `GroupMembership` with `NodeInfo` registry.
 
 #### `system/saga.rs`
 
@@ -746,7 +749,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `LedgerServer::builder()`: bon-based builder with 20+ config options
 - `serve(addr) -> Result<()>`: Start gRPC server with all services
 - `serve_with_shutdown(addr, shutdown_signal) -> Result<()>`: Graceful shutdown support
-- `health_state: HealthState` field — threaded to `WriteServiceImpl`, `MultiRegionWriteService`, and `AdminServiceImpl` for drain-phase proposal rejection
+- `health_state: HealthState` field — threaded to `WriteServiceImpl` and `AdminServiceImpl` for drain-phase proposal rejection
 - Optional `events_db: Option<EventsDatabase<FileBackend>>` for EventsService registration
 - Optional `event_handle: Option<EventHandle<FileBackend>>` for handler-phase event recording in services
 - Integrates: Raft node, all services, metrics, tracing, event logging, health checks
@@ -827,11 +830,11 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Shared service utilities (rate limiting, validation, metadata extraction, drain guard)
 - **Key Types/Functions**:
-- `check_not_draining(health_state: Option<&HealthState>) -> Result<(), Status>`: Returns `UNAVAILABLE` if node is in Draining or ShuttingDown phase. Used by write, multi-region write, and admin services before proposal submission.
+- `check_not_draining(health_state: Option<&HealthState>) -> Result<(), Status>`: Returns `UNAVAILABLE` if node is in Draining or ShuttingDown phase. Used by write and admin services before proposal submission.
 - `check_rate_limit()`: Rate limit check with rich ErrorDetails
 - `validation_status()`: Wraps validation errors with gRPC status
 - `extract_organization_from_request()`: Common metadata extraction
-- **Insights**: Phase 2 Task 1 extracted shared code from write/multi-region/admin services. `check_not_draining()` added for leader transfer sprint — centralizes the drain guard pattern.
+- **Insights**: Phase 2 Task 1 extracted shared code from write/admin services. `check_not_draining()` added for leader transfer sprint — centralizes the drain guard pattern.
 
 #### `services/metadata.rs`
 
@@ -844,11 +847,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### Additional Services
 
-- `services/raft.rs`: RaftService (inter-node Raft RPCs) including `TriggerElection` RPC handler — validates leader term (rejects stale), calls `raft.trigger().elect()`, records metrics via `record_trigger_election()`. Implemented on both `RaftServiceImpl` (single-region) and `MultiRegionRaftService` (routes to system region).
+- `services/raft.rs`: RaftService (inter-node Raft RPCs) including `TriggerElection` RPC handler — validates leader term (rejects stale), calls `raft.trigger().elect()`, records metrics via `record_trigger_election()`. Routes to the correct region via `RaftManager`.
 - `services/discovery.rs`: DiscoveryService (cluster membership)
 - `services/forward_client.rs`: Leader forwarding
-- `services/multi_region_read.rs`: Multi-region read coordination
-- `services/multi_region_write.rs`: Multi-region write coordination (2PC + saga). `health_state: Option<HealthState>` field with drain guard at outermost layer (before region resolution). Holds `manager: Option<Arc<MultiRaftManager>>` for automatic write forwarding — `resolve_with_forward()` detects remote-region organizations and forwards raw requests via `ForwardClient` (destination resolves vault slugs).
 - `services/events.rs`: `EventsServiceImpl` — EventsService gRPC implementation with 4 RPCs (`ListEvents`, `GetEvent`, `CountEvents`, `IngestEvents`). `GetEvent` uses O(log n) `EventStore::get_by_id()` via secondary index (replaces former O(n) full-org scan with `COUNT_SCAN_LIMIT` cap, eliminating false-not-found for orgs with >100k events). `ListEvents` supports HMAC-signed `EventPageToken` pagination with in-memory filtering (actions, event_type_prefix, principal, outcome, emission_path, correlation_id). `IngestEvents` implements 10-step pipeline: master switch → source allow-list → batch size → rate limit → org resolution → validation → write → metrics → log. Unit tests.
 - `services/slug_resolver.rs`: Organization and vault slug ↔ internal ID resolution at gRPC boundary. `SlugResolver` wraps `AppliedStateAccessor`. Organization methods: `extract_slug`, `resolve`, `resolve_slug`, `extract_and_resolve`, `extract_and_resolve_optional`. Vault methods: `extract_vault_slug`, `resolve_vault`, `resolve_vault_slug`, `extract_and_resolve_vault`, `extract_and_resolve_vault_optional`. Events method: `extract_and_resolve_for_events()` (slug=0 → system org bypass). Unit tests (14 org + 19 vault + 4 events).
 - `services/region_resolver.rs`: Organization→region routing
@@ -865,7 +866,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `rate_limit.rs`: 3-tier token bucket rate limiter
 - `hot_key_detector.rs`: Count-Min Sketch with rotating windows
 - `metrics.rs`: Prometheus metrics with SLI histograms. Leader transfer metrics: `ledger_leader_transfers_total` (status label), `ledger_leader_transfer_latency_seconds` (histogram), `ledger_trigger_elections_total` (result label). Events metrics: `ledger_event_writes_total` (emission/scope/action labels), `ledger_events_gc_*` (entries*deleted, cycle_duration, cycles), `ledger_events_ingest*\*`(total, batch_size, rate_limited, duration). Recording functions:`record_leader_transfer(success, latency_secs)`, `record_trigger_election(accepted)`.
-- `otel.rs`: OpenTelemetry tracing setup and OTLP exporter configuration. `SpanAttributes` uses `vault_slug` key.
+- `otel.rs`: OpenTelemetry tracing setup and OTLP exporter configuration. `SpanAttributes` uses `vault` key.
 
 #### Enterprise Features
 
@@ -892,19 +893,16 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### Advanced Features
 
-- `multi_raft.rs`: Multi-Raft orchestration
-- `multi_region_server.rs`: Multi-region LedgerServer (with optional `events_db` for EventsService registration, threads `HealthState` to multi-region write service)
+- `raft_manager.rs`: `RaftManager` orchestration — manages multiple `RegionGroup` instances, each with its own Raft, state, and block archive. `RaftManagerConfig`, `RaftManagerError`, `RaftManagerStats` types. Supports `start_system_region()`, `start_data_region()`, `register_external_region()`, `get_region_group()`. Every `LedgerServer` is inherently multi-region capable (single-region is simply one GLOBAL region)
 - `raft_network.rs`: gRPC-based Raft transport
 - `proto_compat.rs`: Orphan rule workarounds (`organization_status_to_proto`)
 - `trace_context.rs`: W3C Trace Context
-- `logging.rs`: Canonical log lines (vault_slug field, `set_target(organization, vault_slug)`)
+- `logging.rs`: Canonical log lines (vault field, `set_target(organization, vault)`)
 - `proof.rs`: Merkle proof generation (accepts `vault_slug: Option<VaultSlug>` parameter)
 - `region_router.rs`: Dynamic region routing
 - `saga_orchestrator.rs`: Distributed transaction orchestration — CAS-based sequence ID allocation (prevents duplicates on leader failover), watchdog/metrics integration, configurable via `SagaConfig`, with optional `event_handle` for UserDeleted handler-phase events
-- `vip_cache.rs`: VIP organization cache with static + dynamic discovery, `OrganizationSlug` typed keys
 - `dek_rewrap.rs`: Background job for re-wrapping Data Encryption Key sidecar metadata after Region Master Key rotation. `RewrapProgress` (AtomicU64 fields for lock-free admin queries), `DekRewrapJob<B>` (bon builder, periodic cycles, leader-only). Idempotent — pages already at target RMK version are skipped. Unit tests.
 - `region_storage.rs`: Per-region database file layout and lifecycle management. `RegionStorage` (holds raw database handles for state, blocks, events per region), `RegionStorageManager` (HashMap of open regions, directory layout enforcement: `global/` for GLOBAL Raft group, `regions/{name}/` for data regions). TOCTOU-safe region opening, legacy layout detection, 16KB page size. Unit tests.
-- `cardinality.rs`: HyperLogLog for metrics
 - `file_lock.rs`: Data directory locking
 - `peer_tracker.rs`: Peer connection state
 
@@ -922,7 +920,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Re-exports public API (LedgerClient, ClientConfig, builders, error types, events types)
 - **Key Types/Functions**:
-- Modules: `client`, `config`, `connection`, `error`, `retry`, `circuit_breaker`, `discovery`, `metrics`, `streaming`, `tracing`, `builders`, `server`, `idempotency`, `mock`
+- Modules: `client`, `config`, `connection`, `error`, `retry`, `circuit_breaker`, `discovery`, `metrics`, `streaming`, `tracing`, `builders`, `server`, `mock`
 - Events re-exports: `EventEmissionPath`, `EventFilter`, `EventOutcome`, `EventPage`, `EventScope`, `IngestRejection`, `IngestResult`, `SdkEventEntry`, `SdkIngestEventEntry`
 - **Insights**: Comprehensive SDK. All features needed for production use, including events query and ingestion.
 
@@ -1053,11 +1051,10 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `ServerResolver`: Resolves DNS names to IPs
 - **Insights**: Abstraction enables multiple endpoint sources. ServerSelector uses health tracking + circuit breaker.
 
-#### `idempotency.rs`
+#### Idempotency (no separate module)
 
-- **Purpose**: Documentation module explaining that idempotency is server-side only
-- **Key Types/Functions**: None — documentation only. Idempotency is handled entirely server-side via `ClientSequenceEntry` in the Raft state machine. Clients generate UUIDs for transaction IDs.
-- **Insights**: This module exists as a documentation stub. The actual deduplication logic lives in `raft/src/log_storage/accessor.rs` (`client_idempotency_check()`).
+- **Purpose**: Idempotency is handled entirely server-side via `ClientSequenceEntry` in the Raft state machine. Clients generate UUIDs for transaction IDs. There is no SDK-side idempotency module.
+- **Insights**: The deduplication logic lives in `raft/src/log_storage/accessor.rs` (`client_idempotency_check()`). SDK documentation in `lib.rs` explains the server-side approach.
 
 #### `mock.rs`
 
@@ -1188,28 +1185,18 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### `lib.rs`
 
-- **Purpose**: Re-exports test utilities; inline integration tests for all utilities (13 `#[test]`/`#[tokio::test]` functions)
+- **Purpose**: Re-exports test utilities; inline integration tests (5 `#[test]` functions)
 - **Key Types/Functions**:
-- Modules: `test_dir`, `assertions`, `config`, `crash_injector`, `strategies` (strategies is `pub mod`, rest are private with `pub use` re-exports)
-- Re-exports: `TestDir`, `assert_eventually`, `test_batch_config`, `test_rate_limit_config`, `TestRateLimitConfig`, `CrashInjector`, `CrashPoint`
+- Modules: `test_dir`, `config`, `crash_injector`, `strategies` (strategies is `pub mod`, rest are private with `pub use` re-exports)
+- Re-exports: `TestDir`, `test_batch_config`, `CrashInjector`, `CrashPoint`
 - **Insights**: Tests for all utilities live in lib.rs's `#[cfg(test)] mod tests` rather than in each submodule's own tests (crash_injector and strategies are exceptions with their own test modules). This is unusual but works well for a small utility crate.
-
-#### `assertions.rs`
-
-- **Purpose**: `assert_eventually` polling helper for async tests
-- **Key Types/Functions**:
-- `assert_eventually<F>(timeout: Duration, condition: F) -> bool`: Poll condition every 10ms until true or timeout. Returns `bool` (not panic).
-- `DEFAULT_POLL_INTERVAL`: 10ms constant
-- **Insights**: Returns `bool` rather than panicking — callers use `assert!(result, ...)` for custom messages. Prevents flaky tests due to timing.
 
 #### `config.rs`
 
-- **Purpose**: Test config factories for `BatchConfig` and rate limits
+- **Purpose**: Test config factories for `BatchConfig`
 - **Key Types/Functions**:
 - `test_batch_config() -> BatchConfig`: Returns config for tests (max_batch_size=10, batch_timeout=10ms, coalesce_enabled=false)
-- `TestRateLimitConfig`: bon `#[derive(bon::Builder)]` struct with `max_concurrent` (default 100) and `timeout_secs` (default 30)
-- `test_rate_limit_config() -> TestRateLimitConfig`: Factory using builder defaults
-- **Insights**: `TestRateLimitConfig` is a local test-only struct (not the production `RateLimitConfig` from types crate) to avoid circular dependencies.
+- **Insights**: Provides sensible batch config defaults for test suites. Avoids hardcoding batch parameters in each test file.
 
 #### `crash_injector.rs`
 
@@ -1230,7 +1217,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - IDs: `arb_organization_id()`, `arb_organization_slug()`, `arb_vault_id()`, `arb_vault_slug()`, `arb_region()`, `arb_shard_id()`
 - Relationship components: `arb_resource()`, `arb_relation()`, `arb_subject()`
 - Domain types: `arb_entity()`, `arb_relationship()`, `arb_set_condition()`, `arb_operation()`, `arb_operation_sequence()`
-- Blocks: `arb_transaction()`, `arb_block_header()`, `arb_vault_block()`, `arb_vault_entry()`, `arb_shard_block()`, `arb_chain_commitment()`
+- Blocks: `arb_transaction()`, `arb_block_header()`, `arb_vault_block()`, `arb_vault_entry()`, `arb_region_block()`, `arb_chain_commitment()`
 - Events: `arb_event_entry()` (with supporting strategies for scope, action, outcome, emission)
 - Proptest functions validate strategy output well-formedness
 - **Insights**: Composable strategy functions (not `Arbitrary` derives) — complex types compose from simpler ones (e.g., `arb_transaction` uses `arb_tx_id`, `arb_operation_sequence`, `arb_timestamp`). Strategy generators; 30+ proptests across multiple crates use these strategies.
@@ -1301,7 +1288,7 @@ The codebase has comprehensive observability:
 
 - **OpenTelemetry tracing**: W3C Trace Context propagation across services. OTLP exporter for traces/metrics. Configurable sampling ratio.
 - **Prometheus metrics**: Extensive metrics covering SLI/SLO, resource saturation, batch queues, rate limiting, hot keys, circuit breakers, etc. Custom histogram buckets for SLI.
-- **Canonical log lines**: Single log line per request with all context (request_id, trace_id, client_id, organization_slug, vault_slug, method, status, latency, raft_round_trips, error_class, sdk_version, client_ip).
+- **Canonical log lines**: Single log line per request with all context (request_id, trace_id, client_id, organization, vault, method, status, latency, raft_round_trips, error_class, sdk_version, client_ip).
 - **Structured logging**: Request-level structured logging with tracing crate. Context propagation via spans.
 - **SDK metrics**: Client-side metrics (request latency, retries, circuit state, connection pool) via `SdkMetrics` trait. Noop default for zero overhead.
 - **Event logging**: Persistent event system with `EventsService` gRPC API (ListEvents, GetEvent, CountEvents, IngestEvents). Dual-path emission (apply-phase deterministic via leader-assigned timestamps + handler-phase node-local). O(log n) `GetEvent` via `EventIndex` secondary index. Optimized snapshot collection via `EmissionMeta` thin deserialization (handler-phase events skipped without full decode). Prometheus metrics for event writes, GC cycles, and ingestion. Events are organization-scoped with configurable TTL and automatic GC. Supports external service ingestion (Engine, Control) via `IngestEvents` RPC with per-source rate limiting.
@@ -1325,7 +1312,7 @@ The codebase includes numerous production-ready features:
 - **Resource quotas**: Per-organization limits (vault count, storage size, request rate). 3-tier resolution (organization → tier → global).
 - **B+ tree compaction**: Merge underfull leaves, reclaim dead space. Background job with configurable interval.
 - **Event logging**: Organization-scoped audit trails in dedicated `events.db`. Apply-phase (deterministic via `RaftPayload` timestamps, byte-identical across replicas) and handler-phase (node-local) emission. O(log n) `GetEvent` via `EventIndex` secondary index (eliminates false-not-found from former scan cap). Optimized `scan_apply_phase` via `EmissionMeta` thin deserialization. GC with TTL. EventsService for queries. IngestEvents for cross-service audit aggregation.
-- **Externalized state & streaming snapshots**: AppliedState fields persisted to dedicated B+ tree tables (VaultHeights, VaultHashes, VaultHealth) instead of monolithic postcard blob. File-based streaming snapshots with zstd compression + SHA-256 checksums via `SnapshotWriter`/`SnapshotReader`. Three-way format detection for migration. Client sequence persistence with TTL eviction for cross-failover deduplication. Automatic write forwarding via `MultiRaftManager`.
+- **Externalized state & streaming snapshots**: AppliedState fields persisted to dedicated B+ tree tables (VaultHeights, VaultHashes, VaultHealth) instead of monolithic postcard blob. File-based streaming snapshots with zstd compression + SHA-256 checksums via `SnapshotWriter`/`SnapshotReader`. Three-way format detection for migration. Client sequence persistence with TTL eviction for cross-failover deduplication. Automatic write forwarding via `RaftManager`.
 - **Envelope encryption at rest**: AES-256-GCM per-page DEKs wrapped with Region Master Keys (RMK) via AES-KWP. Transparent `EncryptedBackend` wrapper. DEK cache for O(1) amortized decryption. Background `DekRewrapJob` for RMK rotation (re-wraps metadata only, never re-encrypts page bodies). Multi-provider key management (Infisical, Vault, AWS KMS, GCP KMS, Azure Key Vault).
 - **Per-region database layout**: `RegionStorageManager` enforces per-region directory tree (`global/` for control plane, `regions/{name}/` for data regions). Eliminates cross-region write-lock contention. Enables per-region encryption keys and independent scaling.
 - **Privacy-preserving email hashing**: HMAC-SHA256 with `EmailBlindingKey` for global email uniqueness across regions without storing plaintext PII on the control plane.

@@ -454,14 +454,12 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
             recovery_started_at,
         };
 
-        let result = self
-            .raft
-            .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
-            .await
-            .map_err(|e| RecoveryError::RaftConsensus {
+        let result = self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+            RecoveryError::RaftConsensus {
                 message: format!("{:?}", e),
                 backtrace: snafu::Backtrace::generate(),
-            })?;
+            }
+        })?;
 
         match result.data {
             LedgerResponse::VaultHealthUpdated { success: true } => Ok(()),

@@ -7,8 +7,8 @@
 //! - `TestCluster`: Single-region cluster using the standard bootstrap flow. Best for testing Raft
 //!   consensus, membership changes, and basic operations.
 //!
-//! - `MultiRegionTestCluster`: Multi-region cluster using `MultiRaftManager`. Best for testing
-//!   horizontal scaling, region routing, and high-throughput.
+//! - `RegionTestCluster`: Multi-region cluster using `RaftManager`. Best for testing horizontal
+//!   scaling, region routing, and high-throughput.
 
 #![allow(
     dead_code,
@@ -38,8 +38,7 @@ pub fn allocate_ports(count: u16) -> u16 {
 
 use inferadb_ledger_proto::proto::{JoinClusterRequest, admin_service_client::AdminServiceClient};
 use inferadb_ledger_raft::{
-    LedgerTypeConfig, MultiRaftConfig, MultiRaftManager, MultiRegionLedgerServer, RegionConfig,
-    RegionGroup,
+    LedgerServer, LedgerTypeConfig, RaftManager, RaftManagerConfig, RegionConfig, RegionGroup,
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
@@ -533,22 +532,22 @@ pub async fn create_admin_client(
 
 /// A test node with multiple regions.
 ///
-/// Uses `MultiRaftManager` to manage independent Raft groups per region,
+/// Uses `RaftManager` to manage independent Raft groups per region,
 /// enabling horizontal scaling and parallel consensus.
-pub struct MultiRegionTestNode {
+pub struct RegionTestNode {
     /// The node ID.
     pub id: u64,
     /// The gRPC address.
     pub addr: SocketAddr,
     /// The multi-raft manager containing all regions.
-    pub manager: Arc<MultiRaftManager>,
+    pub manager: Arc<RaftManager>,
     /// Temporary directory for node data.
     _temp_dir: TestDir,
     /// Server task handle for cleanup.
     _server_handle: tokio::task::JoinHandle<()>,
 }
 
-impl MultiRegionTestNode {
+impl RegionTestNode {
     /// Returns the system region (Global).
     pub fn system_region(&self) -> Arc<RegionGroup> {
         self.manager.system_region().expect("system region exists")
@@ -586,26 +585,26 @@ impl MultiRegionTestNode {
 /// ## Architecture
 ///
 /// ```text
-/// MultiRegionTestCluster
+/// RegionTestCluster
 ///     |
-///     +-- Node 1 (MultiRaftManager)
+///     +-- Node 1 (RaftManager)
 ///     |       +-- Global (system): organization/vault metadata
 ///     |       +-- Region 1 (data): entity storage
 ///     |       +-- Region 2 (data): entity storage
 ///     |
-///     +-- Node 2 (MultiRaftManager)
+///     +-- Node 2 (RaftManager)
 ///     |       +-- Global, Region 1, 2 (same structure)
 ///     |
 ///     +-- Node 3 ...
 /// ```
-pub struct MultiRegionTestCluster {
+pub struct RegionTestCluster {
     /// The nodes in the cluster.
-    nodes: Vec<MultiRegionTestNode>,
+    nodes: Vec<RegionTestNode>,
     /// Number of data regions.
     num_regions: usize,
 }
 
-impl MultiRegionTestCluster {
+impl RegionTestCluster {
     /// Creates a new multi-region test cluster.
     ///
     /// # Arguments
@@ -640,13 +639,13 @@ impl MultiRegionTestCluster {
             let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
             let temp_dir = TestDir::new();
 
-            // Create MultiRaftManager config
-            let config = MultiRaftConfig::new(
+            // Create RaftManager config
+            let config = RaftManagerConfig::new(
                 temp_dir.path().to_path_buf(),
                 node_id,
                 inferadb_ledger_types::Region::GLOBAL,
             );
-            let manager = Arc::new(MultiRaftManager::new(config));
+            let manager = Arc::new(RaftManager::new(config));
 
             // Start system region (Global) - required first
             let system_config = RegionConfig {
@@ -654,6 +653,8 @@ impl MultiRegionTestCluster {
                 initial_members: members.clone(),
                 bootstrap: i == 0, // Only first node bootstraps
                 enable_background_jobs: true,
+                batch_writer_config: None,
+                event_writer: None,
             };
             manager.start_system_region(system_config).await.expect("start system region");
 
@@ -665,6 +666,8 @@ impl MultiRegionTestCluster {
                     initial_members: members.clone(),
                     bootstrap: i == 0,
                     enable_background_jobs: true,
+                    batch_writer_config: None,
+                    event_writer: None,
                 };
                 manager
                     .start_data_region(region_config)
@@ -675,8 +678,8 @@ impl MultiRegionTestCluster {
             // Create health state (starts in Starting phase, marked Ready after leader election)
             let health_state = inferadb_ledger_raft::HealthState::new();
 
-            // Create and start the multi-region gRPC server
-            let server = MultiRegionLedgerServer::builder()
+            // Create and start the gRPC server (LedgerServer is always multi-region capable)
+            let server = LedgerServer::builder()
                 .manager(manager.clone())
                 .addr(addr)
                 .max_concurrent(1000)
@@ -686,7 +689,7 @@ impl MultiRegionTestCluster {
 
             let server_handle = tokio::spawn(async move {
                 if let Err(e) = server.serve().await {
-                    tracing::error!("multi-region server error: {}", e);
+                    tracing::error!("server error: {}", e);
                 }
             });
 
@@ -699,7 +702,7 @@ impl MultiRegionTestCluster {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
 
-            nodes.push(MultiRegionTestNode {
+            nodes.push(RegionTestNode {
                 id: node_id,
                 addr,
                 manager,
@@ -748,22 +751,22 @@ impl MultiRegionTestCluster {
     }
 
     /// Returns all nodes.
-    pub fn nodes(&self) -> &[MultiRegionTestNode] {
+    pub fn nodes(&self) -> &[RegionTestNode] {
         &self.nodes
     }
 
     /// Returns a node by ID.
-    pub fn node(&self, id: u64) -> Option<&MultiRegionTestNode> {
+    pub fn node(&self, id: u64) -> Option<&RegionTestNode> {
         self.nodes.iter().find(|n| n.id == id)
     }
 
     /// Returns the leader node for the system region.
-    pub fn system_leader(&self) -> Option<&MultiRegionTestNode> {
+    pub fn system_leader(&self) -> Option<&RegionTestNode> {
         self.nodes.iter().find(|n| n.is_system_leader())
     }
 
     /// Returns any node (for client connections).
-    pub fn any_node(&self) -> &MultiRegionTestNode {
+    pub fn any_node(&self) -> &RegionTestNode {
         &self.nodes[0]
     }
 

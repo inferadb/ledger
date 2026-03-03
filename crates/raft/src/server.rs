@@ -10,55 +10,46 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use inferadb_ledger_proto::proto::{
-    BlockAnnouncement, admin_service_server::AdminServiceServer,
-    events_service_server::EventsServiceServer, health_service_server::HealthServiceServer,
-    raft_service_server::RaftServiceServer, read_service_server::ReadServiceServer,
+    admin_service_server::AdminServiceServer, events_service_server::EventsServiceServer,
+    health_service_server::HealthServiceServer, raft_service_server::RaftServiceServer,
+    read_service_server::ReadServiceServer,
     system_discovery_service_server::SystemDiscoveryServiceServer,
     write_service_server::WriteServiceServer,
 };
-use inferadb_ledger_state::{BlockArchive, StateLayer};
 use inferadb_ledger_store::FileBackend;
-use openraft::Raft;
-use tokio::sync::broadcast;
 use tonic::transport::Server;
 use tower::ServiceBuilder;
 
 use crate::{
     api_version::{ApiVersionLayer, api_version_interceptor},
-    batching::BatchWriterConfig,
     graceful_shutdown::ConnectionTrackingLayer,
     idempotency::IdempotencyCache,
-    log_storage::AppliedStateAccessor,
+    raft_manager::RaftManager,
     rate_limit::RateLimiter,
     services::{
         AdminServiceImpl, DiscoveryServiceImpl, EventsServiceImpl, HealthServiceImpl,
-        RaftServiceImpl, ReadServiceImpl, WriteServiceImpl,
+        RaftServiceImpl, ReadServiceImpl, RegionResolver, RegionResolverImpl, WriteServiceImpl,
     },
-    types::LedgerTypeConfig,
 };
 
 /// The main Ledger gRPC server.
 ///
 /// Combines all services with the Raft consensus layer and state storage.
+/// Every `LedgerServer` is multi-region capable — a single-region deployment
+/// is simply a `RaftManager` with one region (GLOBAL).
+///
 /// Supports graceful shutdown via a `shutdown_rx` watch channel.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct LedgerServer {
-    /// The Raft consensus instance.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// The shared state layer.
-    state: Arc<StateLayer<FileBackend>>,
-    /// Accessor for applied state (vault heights, health).
-    applied_state: AppliedStateAccessor,
+    /// The Raft manager containing all region groups.
+    ///
+    /// Routes requests to the correct region based on organization assignment.
+    /// A single-region deployment has one region (GLOBAL).
+    manager: Arc<RaftManager>,
     /// Idempotency cache for duplicate detection.
     #[builder(default = Arc::new(IdempotencyCache::new()))]
     idempotency: Arc<IdempotencyCache>,
-    /// Block archive for historical block retrieval.
-    #[builder(default)]
-    block_archive: Option<Arc<BlockArchive<FileBackend>>>,
-    /// Block announcement broadcast channel.
-    #[builder(default = broadcast::channel(1000).0)]
-    block_announcements: broadcast::Sender<BlockAnnouncement>,
     /// Server address.
     addr: SocketAddr,
     /// Max concurrent requests per connection.
@@ -155,68 +146,54 @@ impl LedgerServer {
             .timeout(Duration::from_secs(self.timeout_secs))
             .into_inner();
 
+        // Extract system region for services that need direct Raft/state access
+        // (admin, health, discovery operate on the system region).
+        let system = self.manager.system_region().map_err(|e| {
+            Box::new(std::io::Error::other(format!("System region not available: {e}")))
+                as Box<dyn std::error::Error>
+        })?;
+
+        // Build region resolver from the manager — routes requests to the
+        // correct region based on organization assignment.
+        let resolver: Arc<dyn RegionResolver> =
+            Arc::new(RegionResolverImpl::new(self.manager.clone()));
+
         // Create service implementations
         let read_service = ReadServiceImpl::builder()
-            .state(self.state.clone())
-            .applied_state(self.applied_state.clone())
-            .block_archive(self.block_archive.clone())
-            .block_announcements(self.block_announcements.clone())
-            .raft(Some(self.raft.clone()))
+            .resolver(resolver.clone())
+            .manager(Some(self.manager.clone()))
             .max_read_forward_lag(self.max_read_forward_lag)
             .build();
-        // Create write service with batching enabled for high throughput.
-        // Server-level batching coalesces individual Write RPCs into single Raft
-        // proposals. This improves throughput when clients can't or don't use
-        // BatchWrite RPC.
-        let batch_config = BatchWriterConfig::default();
-        let write_service = if let Some(archive) = &self.block_archive {
-            let (service, task) = WriteServiceImpl::with_block_archive_and_batching(
-                self.raft.clone(),
-                self.idempotency.clone(),
-                archive.clone(),
-                batch_config,
-            );
-            tokio::spawn(task);
-            service
-        } else {
-            let (service, task) = WriteServiceImpl::new_with_batching(
-                self.raft.clone(),
-                self.idempotency.clone(),
-                batch_config,
-            );
-            tokio::spawn(task);
-            service
-        };
-        // Add applied state for sequence gap detection
-        let write_service = write_service.with_applied_state(self.applied_state.clone());
-        // Add per-organization rate limiting if configured
-        let write_service = match &self.organization_rate_limiter {
-            Some(limiter) => write_service.with_rate_limiter(limiter.clone()),
-            None => write_service,
-        };
-        // Add hot key detection if configured
-        let write_service = match &self.hot_key_detector {
-            Some(detector) => write_service.with_hot_key_detector(detector.clone()),
-            None => write_service,
-        };
-        // Wire proposal_timeout into write service
-        let write_service = write_service.with_proposal_timeout(self.proposal_timeout);
-        // Wire handler-phase event handle for denial event recording
-        let write_service = if let Some(ref handle) = self.event_handle {
-            write_service.with_event_handle(handle.clone())
-        } else {
-            write_service
-        };
-        // Wire health state for drain-phase write rejection
-        let write_service = write_service.with_health_state(self.health_state.clone());
+
+        // Create write service using the resolver. Batch writers are per-region
+        // (created by RaftManager::start_region), not constructed here.
+        let mut write_service = WriteServiceImpl::builder()
+            .resolver(resolver.clone())
+            .manager(Some(self.manager.clone()))
+            .idempotency(self.idempotency.clone())
+            .proposal_timeout(self.proposal_timeout)
+            .build()
+            .with_health_state(self.health_state.clone());
+        // Wire optional features via builder methods
+        if let Some(ref limiter) = self.organization_rate_limiter {
+            write_service = write_service.with_rate_limiter(limiter.clone());
+        }
+        if let Some(ref detector) = self.hot_key_detector {
+            write_service = write_service.with_hot_key_detector(detector.clone());
+        }
+        if let Some(ref handle) = self.event_handle {
+            write_service = write_service.with_event_handle(handle.clone());
+        }
+
         let admin_service = AdminServiceImpl::builder()
-            .raft(self.raft.clone())
-            .state(self.state.clone())
-            .applied_state(self.applied_state.clone())
-            .block_archive(self.block_archive.clone())
+            .raft(system.raft().clone())
+            .state(system.state().clone())
+            .applied_state(system.applied_state().clone())
+            .block_archive(Some(system.block_archive().clone()))
             .listen_addr(self.addr)
             .proposal_timeout(self.proposal_timeout)
-            .build();
+            .build()
+            .with_raft_manager(self.manager.clone());
         // Wire runtime config handle into admin service for UpdateConfig/GetConfig RPCs.
         // Pass the rate limiter and hot key detector so config changes propagate to them.
         let admin_service = if let Some(handle) = self.runtime_config {
@@ -244,19 +221,20 @@ impl LedgerServer {
         };
         // Wire health state for drain-phase write rejection
         let admin_service = admin_service.with_health_state(self.health_state.clone());
+
         // Extract connection tracker before health_state is moved into HealthServiceImpl
         let connection_tracker = self.health_state.connection_tracker().clone();
         let health_service = HealthServiceImpl::new(
-            self.raft.clone(),
-            self.state.clone(),
-            self.applied_state.clone(),
+            system.raft().clone(),
+            system.state().clone(),
+            system.applied_state().clone(),
             self.health_state,
         );
         // Attach dependency health checker if data_dir is provided
         let health_service = if let Some(data_dir) = self.data_dir {
             let config = self.health_check_config.unwrap_or_default();
             let checker = crate::dependency_health::DependencyHealthChecker::new(
-                self.raft.clone(),
+                system.raft().clone(),
                 data_dir,
                 config,
             );
@@ -264,15 +242,16 @@ impl LedgerServer {
         } else {
             health_service
         };
+
         let discovery_service = DiscoveryServiceImpl::builder()
-            .raft(self.raft.clone())
-            .state(self.state.clone())
-            .applied_state(self.applied_state.clone())
+            .raft(system.raft().clone())
+            .state(system.state().clone())
+            .applied_state(system.applied_state().clone())
             .region(self.region)
             .build();
 
-        // RaftService handles inter-node Raft RPCs (Vote, AppendEntries, InstallSnapshot)
-        let raft_service = RaftServiceImpl::new(self.raft.clone());
+        // RaftService routes inter-node Raft RPCs to the correct region.
+        let raft_service = RaftServiceImpl::new(self.manager.clone());
 
         // gRPC reflection allows tools like grpcurl to discover services
         // without requiring proto files on the client side.
@@ -308,7 +287,6 @@ impl LedgerServer {
             .add_service(reflection_service);
 
         // EventsService is optional — only registered when events_db is provided.
-        // The bootstrap code (Task 11) provides the EventsDatabase at server start.
         if let Some(events_db) = self.events_db {
             // Extract ingestion fields from EventHandle when available.
             // The EventHandle carries the event config and node_id needed
@@ -327,7 +305,7 @@ impl LedgerServer {
 
             let events_service = EventsServiceImpl::builder()
                 .events_db(events_db)
-                .applied_state(self.applied_state.clone())
+                .applied_state(system.applied_state().clone())
                 .page_token_codec(crate::pagination::PageTokenCodec::with_random_key())
                 .maybe_event_config(event_config)
                 .maybe_node_id(node_id)
@@ -353,16 +331,10 @@ impl LedgerServer {
         Ok(())
     }
 
-    /// Returns the Raft instance.
+    /// Returns the multi-region Raft manager.
     #[must_use]
-    pub fn raft(&self) -> &Arc<Raft<LedgerTypeConfig>> {
-        &self.raft
-    }
-
-    /// Returns the state layer.
-    #[must_use]
-    pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
-        &self.state
+    pub fn manager(&self) -> &Arc<RaftManager> {
+        &self.manager
     }
 
     /// Returns the idempotency cache.
@@ -371,34 +343,10 @@ impl LedgerServer {
         &self.idempotency
     }
 
-    /// Returns the block announcements sender (for broadcasting new blocks).
-    #[must_use]
-    pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
-        &self.block_announcements
-    }
-
-    /// Returns the applied state accessor.
-    #[must_use]
-    pub fn applied_state(&self) -> &AppliedStateAccessor {
-        &self.applied_state
-    }
-
-    /// Returns the block archive.
-    #[must_use]
-    pub fn block_archive(&self) -> Option<&Arc<BlockArchive<FileBackend>>> {
-        self.block_archive.as_ref()
-    }
-
     /// Attaches backup support (backup manager + snapshot manager).
     ///
     /// Enables `CreateBackup`, `ListBackups`, and `RestoreBackup` RPCs on the
     /// admin service.
-    ///
-    /// This uses a two-phase init pattern rather than a builder field because
-    /// backup support is conditional — the `BackupManager` requires a running
-    /// Raft node and state layer that aren't available at builder construction
-    /// time. When backup is not attached, the admin service returns
-    /// `UNIMPLEMENTED` for backup RPCs.
     #[must_use]
     pub fn with_backup(
         mut self,

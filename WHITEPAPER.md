@@ -1,6 +1,6 @@
 # InferaDB Ledger: A Cryptographically Verifiable Authorization Database
 
-**Last Updated**: January 2026
+**Last Updated**: March 2026
 
 ---
 
@@ -20,6 +20,20 @@ InferaDB Ledger resolves this tension through a hybrid architecture that separat
 | State root computation | **14.3 µs**      | O(k)           |
 
 Each authorization decision can be independently verified against a tamper-evident chain of blocks signed by the cluster. This paper describes Ledger's architecture, explains the engineering trade-offs, and provides honest assessment of both capabilities and limitations.
+
+### Contents
+
+1. [Introduction](#1-introduction) — The authorization audit gap and Ledger's approach
+2. [Background](#2-background) — Data model, consistency, and prior art
+3. [Architecture](#3-architecture) — Component layers, isolation model, read/write paths
+4. [State Root Computation](#4-state-root-computation) — Bucket-based merkleization and complexity analysis
+5. [Fault Isolation and Recovery](#5-fault-isolation-and-recovery) — Per-vault chains and automatic recovery
+6. [Data Protection](#6-data-protection) — Envelope encryption, key isolation, and key lifecycle
+7. [Performance Characteristics](#7-performance-characteristics) — Benchmarks, latency, and throughput
+8. [Limitations and Trade-offs](#8-limitations-and-trade-offs) — Known constraints and design decisions
+9. [Comparison with Alternatives](#9-comparison-with-alternatives) — Ledger vs. SpiceDB vs. blockchain
+10. [When to Use Ledger](#10-when-to-use-ledger) — Good and poor fit scenarios
+11. [Conclusion](#11-conclusion)
 
 ---
 
@@ -53,7 +67,7 @@ This separation enables sub-microsecond authorization checks during normal opera
 
 ## 2. Background
 
-> **For decision-makers**: This section explains the data model and consistency requirements. Skip to Section 3 for architecture details or Section 6 for performance benchmarks.
+> **For decision-makers**: This section explains the data model and consistency requirements. Skip to Section 3 for architecture details or Section 7 for performance benchmarks.
 
 ### Authorization Data Model
 
@@ -98,10 +112,10 @@ Ledger consists of four primary layers:
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      gRPC Services                          │
-│         Read | Write | Admin | Health | Discovery           │
+│   Read | Write | Admin | Health | Discovery | Events        │
 ├─────────────────────────────────────────────────────────────┤
 │                    Consensus Layer                          │
-│              Raft (OpenRaft) + Batching                     │
+│         Raft (OpenRaft) + Batching + RaftService            │
 ├─────────────────────────────────────────────────────────────┤
 │                     State Layer                             │
 │     Entity Store | Relationship Store | State Roots         │
@@ -111,7 +125,7 @@ Ledger consists of four primary layers:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**gRPC Services** expose the public API. ReadService handles queries; WriteService processes mutations; AdminService manages organizations and vaults; HealthService provides liveness and readiness checks.
+**gRPC Services** expose the public API. ReadService handles queries; WriteService processes mutations; AdminService manages organizations and vaults; HealthService provides liveness and readiness checks; SystemDiscoveryService enables peer discovery. EventsService provides event query and ingestion capabilities. An internal RaftService handles inter-node consensus transport (vote, append entries, snapshot installation).
 
 **Consensus Layer** implements Raft using the OpenRaft library (v0.9+) [9]. All writes are proposed to the leader, replicated to followers, and committed only after majority acknowledgment. A batching layer aggregates multiple client requests into single Raft proposals, amortizing consensus overhead.
 
@@ -121,17 +135,18 @@ Ledger consists of four primary layers:
 
 ### Isolation Model
 
-Ledger isolates tenants through a three-level hierarchy:
+Ledger isolates tenants through a three-level hierarchy designed for data residency, governance, and regulatory compliance:
 
-- **Organization**: Top-level isolation boundary. Each organization has independent storage. Cross-organization operations are prohibited.
-- **Vault**: Container for related authorization data within an organization. Each vault maintains its own blockchain with independent state roots.
-- **Shard**: Operational grouping for consensus. A shard contains one or more organizations and maps to a Raft group.
+- **Region**: Geographic zone mapped 1:1 to a Raft consensus group. Each organization declares a region at creation, binding its data to a specific geographic jurisdiction. Protected regions (e.g., EU, China) replicate only to in-region nodes, enforcing data residency laws such as GDPR and China's PIPL. Non-protected regions replicate to all cluster nodes for maximum availability.
+- **Organization**: Logical tenant within a region. Multiple organizations share a region's Raft group and underlying storage, with data isolation enforced through B-tree key prefixes. Cross-organization operations are prohibited at the API layer.
+- **Vault**: Container for related authorization data within an organization. Each vault maintains its own blockchain with independent state roots, block heights, and hash chains.
 
 This isolation model enables:
 
-1. **Fault containment**: A bug affecting one vault cannot corrupt another vault's state
-2. **Independent verification**: Auditors can verify a single vault without accessing other data
-3. **Flexible deployment**: Different vaults can have different replication factors based on criticality
+1. **Data residency compliance**: Organizations declare jurisdictional regions, ensuring authorization data never leaves the required geographic boundary—critical for GDPR, HIPAA, and sovereignty requirements
+2. **Fault containment**: A bug affecting one vault cannot corrupt another vault's state, even within the same organization
+3. **Independent verification**: Auditors can verify a single vault without accessing other tenants' data, enabling per-customer compliance attestation
+4. **Flexible governance**: Different organizations can operate under different regulatory regimes by selecting appropriate regions
 
 ### Write Path
 
@@ -147,24 +162,24 @@ sequenceDiagram
 
     C->>N: WriteRequest (gRPC)
     N->>L: Forward to leader
-    L->>L: Validate & assign sequence
-    L->>L: Batch aggregation (≤100 tx, ≤10ms)
+    L->>L: Validate & check idempotency
+    L->>L: Batch aggregation (≤100 tx, ≤5ms)
     L->>F: Raft AppendEntries
     F-->>L: Majority ACK
     L->>S: Apply transactions
     S->>S: Update indexes + state root
-    L-->>C: Response with state root
+    L-->>C: Response with block header
 ```
 
 1. Client sends WriteRequest to any node via gRPC
 2. Non-leader nodes forward to current leader
-3. Leader validates request and assigns sequence number for idempotency
-4. Batcher aggregates request with others (up to 100 transactions or 10ms timeout)
+3. Leader validates request and checks idempotency key for duplicate detection
+4. Batcher aggregates request with others (up to 100 transactions or 5ms timeout)
 5. Batch becomes a Raft proposal
 6. Leader replicates proposal to followers
 7. Majority acknowledgment commits the proposal
 8. State layer applies transactions, updating indexes and computing new state root
-9. Response returns to client with new state root hash
+9. Response returns to client with block header containing the new state root hash
 
 **Measured write latency**: 8.1ms p99 for storage layer operations. Total end-to-end latency with Raft consensus targets sub-50ms at p99.
 
@@ -184,16 +199,16 @@ sequenceDiagram
     end
     N->>S: B+ tree lookup
     S-->>N: Entity data
-    N-->>C: Response + state root
+    N-->>C: Response + block height
 ```
 
 1. Client sends ReadRequest to any node
 2. For linearizable reads: node confirms leadership or forwards to leader
 3. For eventually consistent reads: node serves directly from local state
 4. Storage layer retrieves data from B+ tree indexes
-5. Response includes current state root for optional client-side verification
+5. Response includes entity value and current block height; state roots are available via block headers on write responses and the GetTip RPC for on-demand verification
 
-**Measured read latency**: 2.8µs p99 for single-key lookups (see Section 6).
+**Measured read latency**: 2.8µs p99 for single-key lookups (see Section 7).
 
 ---
 
@@ -209,7 +224,7 @@ At scale, this becomes prohibitive. A vault with millions of relationships would
 
 ### Bucket-Based Approach
 
-Ledger uses a bucket-based merkleization scheme inspired by research on efficient state commitments [10][11]. Instead of a per-key tree structure, keys are distributed across 256 buckets based on the first byte of their hash.
+Ledger uses a bucket-based merkleization scheme inspired by research on efficient state commitments [10][11]. Instead of a per-key tree structure, keys are distributed across 256 buckets using `seahash(key) % 256`. Seahash provides fast, deterministic distribution with minimal collision bias across the bucket space.
 
 Each bucket maintains:
 
@@ -247,13 +262,13 @@ This confirms O(k) complexity—computation time does not increase with database
 
 ### Write Amplification
 
-Storage writes tell a similar story. Each key update in Ledger requires:
+Ledger minimizes write amplification by separating storage writes from cryptographic computation. Each key update requires:
 
-1. Write to entity/relationship store
-2. Update to bucket state
-3. Write to block log
+1. Write to entity/relationship store (the only durable write per key)
+2. Bucket hashes recomputed on-demand from entity data (not persisted separately)
+3. Block metadata written once per block (amortized across all keys in the batch)
 
-Total: **3 key-value writes per update**
+Total: **~1 durable write per key update**, with bucket hashing computed post-hoc during state root derivation.
 
 A naive MPT implementation updating internal nodes would require approximately 15-45 writes per update depending on tree depth and rebalancing [12].
 
@@ -304,22 +319,93 @@ flowchart TD
 4. If replay succeeds, mark vault as `HEALTHY`
 5. If replay fails, escalate for manual intervention
 
-The recovery process uses a circuit breaker pattern: 3 attempts with exponential backoff (1s, 2s, 4s) before escalating.
+The recovery process uses a circuit breaker pattern: 3 attempts with exponential backoff (5s, 10s, 20s) before escalating.
 
 ### Consistency Verification
 
-Followers continuously verify state against the leader:
+All nodes—leader and followers alike—compute state roots deterministically when applying blocks. This deterministic computation provides the foundation for detecting divergence:
 
 1. Apply block received from leader
-2. Compute local state root
-3. Compare against leader's state root in block header
-4. If mismatch, trigger divergence detection
+2. Compute local state root from the applied state
+3. State roots are included in block headers, enabling external and cross-node comparison
+4. If divergence is detected (e.g., through operational monitoring or snapshot comparison), the automatic recovery process described above is triggered
 
-This catches non-determinism bugs (timestamp dependencies, floating-point, hash iteration order) before they propagate.
+This architecture catches non-determinism bugs (timestamp dependencies, floating-point, hash iteration order) by ensuring all nodes produce identical state roots for identical transaction sequences.
 
 ---
 
-## 6. Performance Characteristics
+## 6. Data Protection
+
+> **For decision-makers**: Ledger encrypts all data at rest using per-region envelope encryption. Encryption keys never travel via the consensus protocol. Destroying a region's master key renders all its data cryptographically unrecoverable—enabling GDPR-compliant crypto-shredding without rewriting the blockchain.
+
+### Trust Model
+
+Ledger operates within a trusted network boundary. Access control relies on network-level isolation: WireGuard tunnels, VPC peering, or Kubernetes NetworkPolicy.
+
+There is no application-layer authentication. Ledger **is** the authorization store—authenticating callers against itself creates a circular dependency. The sub-microsecond latency budget (2.8µs p99 reads) leaves no room for per-request credential verification. Optional mutual TLS via service mesh provides defense-in-depth without adding application overhead.
+
+### Envelope Encryption
+
+Each page is encrypted with a unique random 256-bit Data Encryption Key (DEK). The DEK encrypts the page body using AES-256-GCM [15] with a random 12-byte nonce and the 16-byte page header as additional authenticated data (AAD). Authenticating the header prevents an attacker from swapping headers between pages without detection.
+
+The DEK itself is wrapped with the Region Master Key (RMK) using AES-KWP [14]. AES-KWP is a nonce-free key-wrapping algorithm, eliminating an entire class of nonce-reuse vulnerabilities at the wrapping layer.
+
+Per-page crypto metadata is stored in a 72-byte sidecar entry alongside each page:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                     Crypto Metadata (72 bytes)                       │
+├──────────────┬───────────────┬──────────────┬────────────────────────┤
+│ rmk_version  │  wrapped_dek  │    nonce     │       auth_tag         │
+│   (4 bytes)  │  (40 bytes)   │  (12 bytes)  │      (16 bytes)        │
+└──────────────┴───────────────┴──────────────┴────────────────────────┘
+```
+
+The encryption flow:
+
+```
+┌─────────────────┐                           ┌─────────────────┐
+│   Page Write     │                           │   Page Read      │
+├─────────────────┤                           ├─────────────────┤
+│ 1. Generate DEK  │                           │ 1. Load sidecar  │
+│ 2. Encrypt body  │──── AES-256-GCM ────      │ 2. DEK cache hit?│
+│    (header=AAD)  │                           │    ├─ Yes: use   │
+│ 3. Wrap DEK      │──── AES-KWP ───────      │    └─ No: unwrap │
+│    with RMK      │                           │       with RMK   │
+│ 4. Store sidecar │                           │ 3. Decrypt body  │
+│ 5. Write cipher  │                           │ 4. Cache DEK     │
+└─────────────────┘                           └─────────────────┘
+```
+
+A two-tier cache minimizes crypto overhead on reads. The DEK cache (LRU, keyed by wrapped DEK bytes) avoids repeated AES-KWP unwrap operations. The RMK cache maps version numbers to loaded master keys, typically holding 1–2 entries. Cache misses fall through to the key manager backend.
+
+### Per-Region Key Isolation
+
+Each region has its own RMK with independent versioning. Protected regions (EU, China) ensure RMKs only exist on in-region nodes—key material never leaves the geographic boundary, satisfying GDPR and PIPL requirements at the cryptographic layer rather than relying solely on replication policy.
+
+**Crypto-shredding**: Destroying a region's RMK makes all data in that region cryptographically unrecoverable. This satisfies GDPR Article 17 (right to erasure) [16] without rewriting any on-chain history. The blockchain remains intact but becomes opaque ciphertext, indistinguishable from random data.
+
+Key asymmetry governs replication: non-protected region data replicates to all cluster nodes for availability, while protected region data and keys remain strictly in-region.
+
+### Key Lifecycle
+
+RMK versions progress through three states: **Active** → **Decrypt-only** → **Destroyed**. Active versions encrypt new writes (highest version wins during brief multi-version overlap). Decrypt-only versions remain loadable for reading existing data but do not encrypt new pages. Destroyed versions are permanently unloadable—all data must have been re-wrapped to a newer version first.
+
+Multiple versions coexist at runtime for seamless rotation. A background DEK re-wrapping job updates sidecar metadata to reference the new RMK version without touching encrypted page bodies—a metadata-only operation that preserves ciphertext integrity. The job runs on the leader, processes pages in configurable batches, and is resumable across restarts.
+
+Three key backends support different deployment contexts:
+
+| Backend               | Use Case          | Key Source                          |
+| --------------------- | ----------------- | ----------------------------------- |
+| Secrets manager       | Production        | Infisical, Vault, AWS/GCP/Azure KMS |
+| Environment variables | Staging / CI      | `LEDGER_RMK_{REGION}_V{VERSION}`    |
+| File-based            | Local development | `{key_dir}/{region}/v{version}.key` |
+
+Nodes validate all required RMK versions at startup before joining consensus, preventing a node from accepting reads it cannot decrypt.
+
+---
+
+## 7. Performance Characteristics
 
 > **For decision-makers**: Ledger exceeds all performance targets. Read latency is 700x better than the 2ms target. Write throughput is 2.2x the target. These numbers are measured on commodity hardware.
 
@@ -337,7 +423,9 @@ All benchmarks run on Apple M3 (8-core), 24GB RAM, APFS SSD. Storage layer measu
 | Read throughput              | **952K ops/sec** | > 100K ops/sec | **9.5x** |
 | Write throughput (batch 100) | **11K ops/sec**  | > 5K ops/sec   | **2.2x** |
 
-**Methodology**: Criterion.rs benchmarks with 1000+ samples per measurement. Full benchmark source available at `crates/server/benches/whitepaper_bench.rs`.
+**Methodology**: Criterion.rs benchmarks with 1000+ samples per measurement. Storage layer measurements isolated from network overhead.
+
+**Encryption overhead**: When encryption at rest is enabled, writes incur one AES-256-GCM encryption and one AES-KWP key wrap per page. Reads hit the DEK cache on most requests, reducing overhead to a single AES-256-GCM decryption. With a 714x margin on read latency, encryption adds negligible impact to end-to-end authorization checks.
 
 ### Latency Distribution
 
@@ -378,19 +466,19 @@ Write batching significantly affects both latency and throughput:
 Default batch configuration:
 
 - Maximum batch size: 100 transactions
-- Maximum batch delay: 10 milliseconds
+- Maximum batch delay: 5 milliseconds
 
-A batch of 100 transactions with 10ms delay achieves 10,000 tx/sec theoretical throughput. Actual throughput depends on transaction size, network latency, and disk I/O.
+A batch of 100 transactions with 5ms delay achieves 20,000 tx/sec theoretical throughput. Actual throughput depends on transaction size, network latency, and disk I/O.
 
 ### Idempotency
 
-Clients include a `client_id` and `sequence` number with each request. The leader maintains an in-memory map of recently processed sequences. Duplicate requests return the cached response without re-execution.
+Clients include a `client_id` and a 16-byte `idempotency_key` (UUID) with each write request. The leader maintains an in-memory cache of recently processed requests, keyed by the combination of organization, vault, client ID, idempotency key, and request payload hash. Duplicate requests return the cached response without re-execution. The server assigns a monotonically increasing sequence number to each committed write, returned in the response for ordering guarantees.
 
-This enables safe client retries on timeout without risking duplicate mutations. The cache evicts entries after a configurable TTL (default: 60 seconds).
+This enables safe client retries on timeout without risking duplicate mutations. The cache evicts entries after a configurable TTL (default: 24 hours).
 
 ---
 
-## 7. Limitations and Trade-offs
+## 8. Limitations and Trade-offs
 
 ### No Byzantine Fault Tolerance
 
@@ -402,7 +490,7 @@ For environments requiring Byzantine fault tolerance, consider Tendermint-based 
 
 ### Single-Leader Write Bottleneck
 
-All writes flow through the Raft leader. This provides strong consistency but limits write scalability. Horizontal scaling requires sharding at the organization level.
+All writes flow through the Raft leader within a region. This provides strong consistency but limits write scalability per region. Horizontal scaling is achieved through multi-region deployment, where each region operates an independent Raft consensus group with its own leader.
 
 Read scaling is more flexible: any node can serve eventually consistent reads, and linearizable reads only require a leadership check.
 
@@ -422,24 +510,29 @@ Applications requiring range proofs should consider augmenting Ledger with a sep
 
 Eventually consistent reads may return stale data during the Raft replication window (typically milliseconds). Applications requiring strict consistency must use linearizable reads, which add latency.
 
+### No Application-Layer Authentication
+
+Ledger trusts all inbound connections within the network boundary. Callers are responsible for authenticating end users before querying Ledger. The `actor` field in transactions is a claim provided by the caller, not a cryptographically verified identity. This design avoids the circular dependency of Ledger authenticating against itself, but means network-level access control is the sole enforcement boundary.
+
 ### Idempotency Cache Does Not Survive Failover
 
-The in-memory idempotency cache (used to deduplicate client retries) is lost during leader failover. After a failover, a retried request may be executed twice if the client's sequence number was previously processed by the old leader.
+The in-memory idempotency cache (used to deduplicate client retries) is lost during leader failover. After a failover, a retried request may be executed twice if the client's idempotency key was previously processed by the old leader.
 
 For critical operations where exactly-once semantics are required, clients should use application-level idempotency keys stored in the vault itself rather than relying solely on the built-in cache.
 
 ---
 
-## 8. Comparison with Alternatives
+## 9. Comparison with Alternatives
 
-| Capability           | Ledger         | SpiceDB        | Traditional Blockchain |
-| -------------------- | -------------- | -------------- | ---------------------- |
-| Authorization model  | Zanzibar-style | Zanzibar-style | Generic                |
-| Cryptographic proofs | Yes            | No             | Yes                    |
-| Read latency (p99)   | **2.8 µs**     | ~1-5 ms        | 10-100 ms              |
-| Write throughput     | **11K tx/sec** | 10K+ tx/sec    | 100-1K tx/sec          |
-| Fault tolerance      | Crash          | Crash          | Byzantine              |
-| State verification   | Per-vault      | N/A            | Global                 |
+| Capability           | Ledger              | SpiceDB               | Traditional Blockchain |
+| -------------------- | ------------------- | --------------------- | ---------------------- |
+| Authorization model  | Zanzibar-style      | Zanzibar-style        | Generic                |
+| Cryptographic proofs | Yes                 | No                    | Yes                    |
+| Read latency (p99)   | **2.8 µs**          | ~1-5 ms               | 10-100 ms              |
+| Write throughput     | **11K tx/sec**      | 10K+ tx/sec           | 100-1K tx/sec          |
+| Fault tolerance      | Crash               | Crash                 | Byzantine              |
+| State verification   | Per-vault           | N/A                   | Global                 |
+| Encryption at rest   | Per-region envelope | Disk-level (external) | Per-block              |
 
 **Choose Ledger when**: You need cryptographic verification of authorization state without blockchain-level latency, and crash fault tolerance is sufficient.
 
@@ -449,25 +542,26 @@ For critical operations where exactly-once semantics are required, clients shoul
 
 ---
 
-## 9. When to Use Ledger
+## 10. When to Use Ledger
 
 ### Good Fit
 
 - **Regulatory compliance**: SOC 2, HIPAA, PCI-DSS require tamper-evident audit trails
+- **Data residency requirements**: GDPR, PIPL, and sovereignty laws requiring authorization data to stay within geographic boundaries—Ledger's region-based isolation enforces this at the consensus layer
 - **Security-critical applications**: Financial services, healthcare, government
 - **Post-breach forensics**: Prove historical access state during incident response
 - **Multi-tenant SaaS**: Independent verification per customer without exposing other tenants
 
 ### Not a Good Fit
 
-- **Write-heavy workloads**: >50K writes/sec per shard requires horizontal sharding
+- **Write-heavy workloads**: >50K writes/sec per region requires multi-region deployment
 - **Byzantine threat model**: Use Tendermint or PBFT if operators are untrusted
 - **Range queries over proofs**: Traditional MPT better for range proofs
 - **Simple audit logging**: If cryptographic proofs aren't required, SpiceDB is simpler
 
 ---
 
-## 10. Conclusion
+## 11. Conclusion
 
 InferaDB Ledger addresses the gap between high-performance authorization and cryptographic verifiability. By separating state storage from state commitment, it achieves authorization latency competitive with non-verifiable systems while maintaining tamper-evident audit trails.
 
@@ -478,6 +572,8 @@ Performance exceeds targets by significant margins: 714x faster reads than requi
 These benefits come with trade-offs: no Byzantine fault tolerance, single-leader write bottleneck, and no cross-vault transactions. Organizations should evaluate whether these limitations are acceptable for their threat model and operational requirements.
 
 For authorization scenarios requiring both performance and verifiability—regulatory compliance, security-critical applications, or environments where audit integrity matters—Ledger provides a practical middle ground between traditional databases and full blockchain systems.
+
+To get started, see the [documentation](https://docs.inferadb.com), explore the [source code](https://github.com/inferadb/ledger), or join the [community on Discord](https://discord.gg/inferadb).
 
 ---
 
@@ -508,3 +604,9 @@ For authorization scenarios requiring both performance and verifiability—regul
 [12] Pappalardo, G. and Ferretti, S. "Distributed Ledger Technologies: State of the Art, Challenges, and Beyond." IEEE Access, 2022.
 
 [13] Buchman, E., Kwon, J., and Milosevic, Z. "The Latest Gossip on BFT Consensus." arXiv:1807.04938, 2018.
+
+[14] Housley, R. and Dworkin, M. "Advanced Encryption Standard (AES) Key Wrap with Padding Algorithm." RFC 5649, IETF, 2009.
+
+[15] Dworkin, M. "Recommendation for Block Cipher Modes of Operation: Galois/Counter Mode (GCM) and GMAC." NIST Special Publication 800-38D, 2007.
+
+[16] European Parliament and Council. "Regulation (EU) 2016/679 (General Data Protection Regulation), Article 17: Right to Erasure." Official Journal of the European Union, 2016.

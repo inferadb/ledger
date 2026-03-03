@@ -77,10 +77,6 @@ pub mod log_storage;
 #[doc(hidden)]
 pub mod logging;
 #[doc(hidden)]
-pub mod multi_raft;
-#[doc(hidden)]
-pub mod multi_region_server;
-#[doc(hidden)]
 pub mod otel;
 #[doc(hidden)]
 pub mod pagination;
@@ -92,6 +88,8 @@ pub mod peer_tracker;
 pub mod proof;
 #[doc(hidden)]
 pub mod proto_compat;
+#[doc(hidden)]
+pub mod raft_manager;
 #[doc(hidden)]
 pub mod resource_metrics;
 #[doc(hidden)]
@@ -127,6 +125,8 @@ pub mod saga_orchestrator;
 pub mod server;
 #[doc(hidden)]
 pub mod snapshot;
+#[doc(hidden)]
+pub mod state_root_verifier;
 #[doc(hidden)]
 pub mod ttl_gc;
 #[doc(hidden)]
@@ -164,11 +164,9 @@ pub use learner_refresh::LearnerRefreshJob;
 #[doc(hidden)]
 pub use log_storage::RaftLogStore;
 #[doc(hidden)]
-pub use multi_raft::{MultiRaftConfig, MultiRaftManager, RegionConfig, RegionGroup};
-#[doc(hidden)]
-pub use multi_region_server::MultiRegionLedgerServer;
-#[doc(hidden)]
 pub use orphan_cleanup::OrphanCleanupJob;
+#[doc(hidden)]
+pub use raft_manager::{RaftManager, RaftManagerConfig, RegionConfig, RegionGroup};
 #[doc(hidden)]
 pub use raft_network::GrpcRaftNetworkFactory;
 #[doc(hidden)]

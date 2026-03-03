@@ -100,7 +100,7 @@ pub enum RegionStorageError {
 ///
 /// Higher-level wrappers ([`StateLayer`](inferadb_ledger_state::StateLayer),
 /// [`BlockArchive`](inferadb_ledger_state::BlockArchive)) are created from
-/// these raw handles in [`RegionGroup`](crate::multi_raft::RegionGroup).
+/// these raw handles in [`RegionGroup`](crate::raft_manager::RegionGroup).
 pub struct RegionStorage {
     /// Region this storage belongs to.
     region: Region,

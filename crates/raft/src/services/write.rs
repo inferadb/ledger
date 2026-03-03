@@ -12,12 +12,10 @@ use inferadb_ledger_proto::proto::{
     BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, TxId, WriteError, WriteErrorCode,
     WriteRequest, WriteResponse, WriteSuccess, write_service_server::WriteService,
 };
-use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
     OrganizationId, OrganizationSlug, SetCondition, VaultId, VaultSlug, config::ValidationConfig,
 };
-use openraft::Raft;
 use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -25,17 +23,20 @@ use uuid::Uuid;
 use super::forward_client::{ForwardClient, LeaderChannelCache};
 pub(crate) use super::metadata::{response_with_correlation, status_with_correlation};
 use crate::{
-    batching::{BatchError, BatchWriter, BatchWriterConfig, BatchWriterHandle},
+    batching::BatchError,
     error::classify_raft_error,
     idempotency::IdempotencyCache,
-    log_storage::AppliedStateAccessor,
     logging::{OperationType, RequestContext, Sampler},
     metrics,
     proof::{self, ProofError},
+    raft_manager::RaftManager,
     rate_limit::RateLimiter,
-    services::slug_resolver::SlugResolver,
+    services::{
+        region_resolver::{RegionContext, RegionResolver, RemoteRegionInfo, ResolveResult},
+        slug_resolver::SlugResolver,
+    },
     trace_context,
-    types::{LedgerRequest, LedgerResponse, LedgerTypeConfig, RaftPayload},
+    types::{LedgerRequest, LedgerResponse, RaftPayload},
 };
 
 /// Classifies a batch writer error into the appropriate `tonic::Status`.
@@ -52,28 +53,22 @@ fn classify_batch_error(err: &BatchError) -> Status {
 
 /// Handles transaction submission through Raft consensus with batching, idempotency, and rate
 /// limiting.
+///
+/// Supports multi-region deployments via `RegionResolver` for routing requests
+/// to the correct region's Raft instance.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct WriteServiceImpl {
-    /// Raft consensus handle for proposing write transactions.
-    raft: Arc<Raft<LedgerTypeConfig>>,
+    /// Region resolver for routing requests to the correct region.
+    resolver: Arc<dyn RegionResolver>,
+    /// Raft manager for creating forward clients when needed.
+    #[builder(default)]
+    manager: Option<Arc<RaftManager>>,
     /// Idempotency cache for duplicate detection.
     idempotency: Arc<IdempotencyCache>,
-    /// Block archive for proof generation (optional).
-    #[builder(default)]
-    block_archive: Option<Arc<BlockArchive<FileBackend>>>,
     /// Per-organization rate limiter.
     #[builder(default)]
     rate_limiter: Option<Arc<RateLimiter>>,
-    /// Accessor for applied state (client sequences for gap detection).
-    #[builder(default)]
-    applied_state: Option<AppliedStateAccessor>,
-    /// Handles for submitting writes to the batch writer.
-    ///
-    /// Writes are coalesced into batches and submitted as single Raft
-    /// proposals for improved throughput.
-    #[builder(default)]
-    batch_handle: Option<BatchWriterHandle>,
     /// Sampler for log tail sampling.
     #[builder(default)]
     sampler: Option<Sampler>,
@@ -107,99 +102,10 @@ pub struct WriteServiceImpl {
 
 #[allow(clippy::result_large_err)]
 impl WriteServiceImpl {
-    /// Creates a write service with batching enabled.
-    ///
-    /// Batching coalesces multiple writes into single Raft proposals for
-    /// improved throughput.
-    ///
-    /// Returns the service and a task handle for the batch writer background loop.
-    /// The caller must spawn or await the returned task.
-    pub fn new_with_batching(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        idempotency: Arc<IdempotencyCache>,
-        config: BatchWriterConfig,
-    ) -> (Self, impl std::future::Future<Output = ()> + Send + 'static) {
-        let raft_clone = raft.clone();
-
-        // Create the submit function that wraps requests into BatchWrite
-        let submit_fn = move |requests: Vec<LedgerRequest>| {
-            let raft = raft_clone.clone();
-
-            Box::pin(async move {
-                // Wrap multiple requests into a single BatchWrite
-                let batch_request = LedgerRequest::BatchWrite { requests };
-
-                let result = raft
-                    .client_write(RaftPayload {
-                        request: batch_request,
-                        proposed_at: chrono::Utc::now(),
-                    })
-                    .await;
-
-                match result {
-                    Ok(response) => {
-                        // Unwrap the BatchWrite response
-                        match response.data {
-                            LedgerResponse::BatchWrite { responses } => Ok(responses),
-                            other => {
-                                // Single request case - shouldn't happen but handle it
-                                Ok(vec![other])
-                            },
-                        }
-                    },
-                    Err(e) => Err(format!("Raft error: {}", e)),
-                }
-            })
-                as futures::future::BoxFuture<'static, Result<Vec<LedgerResponse>, String>>
-        };
-
-        let writer = BatchWriter::new(config, submit_fn, "global");
-        let handle = writer.handle();
-        let run_future = writer.run();
-
-        let service = Self {
-            raft,
-            idempotency,
-            block_archive: None,
-            rate_limiter: None,
-            applied_state: None,
-            batch_handle: Some(handle),
-            sampler: None,
-            node_id: None,
-            hot_key_detector: None,
-            validation_config: Arc::new(ValidationConfig::default()),
-            proposal_timeout: Duration::from_secs(30),
-            event_handle: None,
-            leader_channel_cache: LeaderChannelCache::new(),
-            health_state: None,
-        };
-
-        (service, run_future)
-    }
-
-    /// Creates a write service with block archive and batching enabled.
-    pub fn with_block_archive_and_batching(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        idempotency: Arc<IdempotencyCache>,
-        block_archive: Arc<BlockArchive<FileBackend>>,
-        config: BatchWriterConfig,
-    ) -> (Self, impl std::future::Future<Output = ()> + Send + 'static) {
-        let (mut service, run_future) = Self::new_with_batching(raft, idempotency, config);
-        service.block_archive = Some(block_archive);
-        (service, run_future)
-    }
-
     /// Adds per-organization rate limiting to an existing service.
     #[must_use]
     pub fn with_rate_limiter(mut self, rate_limiter: Arc<RateLimiter>) -> Self {
         self.rate_limiter = Some(rate_limiter);
-        self
-    }
-
-    /// Attaches applied state accessor for client sequence tracking.
-    #[must_use]
-    pub fn with_applied_state(mut self, applied_state: AppliedStateAccessor) -> Self {
-        self.applied_state = Some(applied_state);
         self
     }
 
@@ -247,8 +153,70 @@ impl WriteServiceImpl {
         self
     }
 
-    /// Checks if this node is the Raft leader. If not, returns a `ForwardClient`
-    /// to the current leader for transparent request forwarding.
+    /// Returns a forward client for a remote region.
+    ///
+    /// Creates a gRPC connection to the remote region's leader (or any member
+    /// if leader unknown).
+    async fn get_forward_client(&self, remote: &RemoteRegionInfo) -> Result<ForwardClient, Status> {
+        let manager = self.manager.as_ref().ok_or_else(|| {
+            Status::unavailable("Request forwarding not configured for this service")
+        })?;
+
+        let router =
+            manager.router().ok_or_else(|| Status::unavailable("Region router not initialized"))?;
+
+        let connection = router
+            .get_connection(
+                remote.region,
+                &remote.routing.member_nodes,
+                remote.routing.leader_hint.as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                Status::unavailable(format!("Failed to connect to remote region: {}", e))
+            })?;
+
+        Ok(ForwardClient::new(connection))
+    }
+
+    /// Rejects writes to organizations undergoing migration.
+    ///
+    /// Returns `Ok(())` if the organization is not migrating (or doesn't exist yet).
+    /// Returns `Err(Status::FailedPrecondition)` with structured error details
+    /// if the organization is actively migrating to another region.
+    fn check_not_migrating(
+        &self,
+        system: &RegionContext,
+        organization_id: OrganizationId,
+    ) -> Result<(), Status> {
+        if let Some(org_meta) = system.applied_state.get_organization(organization_id)
+            && org_meta.status == inferadb_ledger_state::system::OrganizationStatus::Migrating
+        {
+            let mut context = std::collections::HashMap::new();
+            context.insert("organization".to_string(), organization_id.value().to_string());
+            if let Some(pending) = org_meta.pending_region {
+                context.insert("target_region".to_string(), pending.as_str().to_string());
+            }
+            let details = super::error_details::build_error_details(
+                inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.as_u16(),
+                true,
+                Some(30_000),
+                context,
+                Some(inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.suggested_action()),
+            );
+            let encoded = prost::Message::encode_to_vec(&details);
+            return Err(Status::with_details(
+                tonic::Code::FailedPrecondition,
+                "Organization is being migrated to another region; writes are temporarily blocked",
+                encoded.into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Checks if this node is the Raft leader for the given region. If not,
+    /// returns a `ForwardClient` to the current leader for transparent request
+    /// forwarding.
     ///
     /// Uses a cached channel to avoid creating a new TCP+HTTP/2 connection per
     /// forwarded request.
@@ -256,8 +224,11 @@ impl WriteServiceImpl {
     /// Returns `Ok(None)` if this node is the leader (proceed locally).
     /// Returns `Ok(Some(client))` if forwarding is needed.
     /// Returns `Err(Status)` if no leader is known.
-    fn forward_client_if_follower(&self) -> Result<Option<ForwardClient>, Status> {
-        let metrics = self.raft.metrics().borrow().clone();
+    fn forward_client_if_follower(
+        &self,
+        region: &RegionContext,
+    ) -> Result<Option<ForwardClient>, Status> {
+        let metrics = region.raft.metrics().borrow().clone();
 
         let nodes: Vec<(u64, String)> = metrics
             .membership_config
@@ -402,6 +373,9 @@ impl WriteServiceImpl {
 
     /// Generates block header and transaction proof for a committed write.
     ///
+    /// Uses the region resolver to obtain the block archive and applied state
+    /// for the organization's region.
+    ///
     /// Returns (block_header, tx_proof) if successful, (None, None) on error.
     /// Errors are logged with context for debugging.
     fn generate_write_proof(
@@ -413,19 +387,18 @@ impl WriteServiceImpl {
         Option<inferadb_ledger_proto::proto::BlockHeader>,
         Option<inferadb_ledger_proto::proto::MerkleProof>,
     ) {
-        let Some(archive) = &self.block_archive else {
-            debug!("Block archive not available for proof generation");
-            return (None, None);
+        let ctx = match self.resolver.resolve(organization) {
+            Ok(ctx) => ctx,
+            Err(_) => return (None, None),
         };
 
         // Resolve internal IDs to slugs for response construction
-        let org_slug = self.applied_state.as_ref().and_then(|s| s.resolve_id_to_slug(organization));
-        let vault_slug =
-            self.applied_state.as_ref().and_then(|s| s.resolve_vault_id_to_slug(vault));
+        let org_slug = ctx.applied_state.resolve_id_to_slug(organization);
+        let vault_slug = ctx.applied_state.resolve_vault_id_to_slug(vault);
 
         // Use the proof module's SNAFU-based implementation
         match proof::generate_write_proof(
-            archive,
+            &ctx.block_archive,
             organization,
             org_slug,
             vault,
@@ -504,6 +477,8 @@ impl WriteService for WriteServiceImpl {
     /// Processes a single write transaction containing entity and relationship operations.
     ///
     /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
+    /// In multi-region deployments, requests are routed to the correct region
+    /// based on organization, with cross-region forwarding when needed.
     async fn write(
         &self,
         request: Request<WriteRequest>,
@@ -516,10 +491,93 @@ impl WriteService for WriteServiceImpl {
         // Extract trace context and transport metadata from gRPC headers before consuming
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
+        let request_id = Uuid::new_v4();
         let req = request.into_inner();
 
-        // Forward to leader if this node is a follower
-        if let Some(mut client) = self.forward_client_if_follower()? {
+        // Extract client ID
+        let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
+
+        // Resolve organization slug → internal ID via system region
+        let system = self.resolver.system_region()?;
+        let organization_id = SlugResolver::new(system.applied_state.clone())
+            .extract_and_resolve(&req.organization)?;
+
+        // Reject writes to organizations undergoing migration
+        self.check_not_migrating(&system, organization_id)?;
+
+        // Check for cross-region forwarding — if the organization is on a remote
+        // region, run pre-flight checks and forward the raw request.
+        if self.resolver.supports_forwarding()
+            && let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+        {
+            // Pre-flight: validation on originating node
+            if let Err(status) = self.validate_operations(&req.operations) {
+                self.record_handler_event(
+                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                        inferadb_ledger_types::events::EventAction::RequestValidationFailed,
+                        organization_id,
+                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
+                        self.node_id.unwrap_or(0),
+                    )
+                    .principal(&client_id)
+                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                        reason: status.message().to_string(),
+                    })
+                    .trace_id(&trace_ctx.trace_id)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                );
+                return Err(status);
+            }
+
+            // Pre-flight: rate limit on originating node
+            if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
+                self.record_handler_event(
+                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                        inferadb_ledger_types::events::EventAction::RequestRateLimited,
+                        organization_id,
+                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
+                        self.node_id.unwrap_or(0),
+                    )
+                    .principal(&client_id)
+                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                        reason: "rate_limited".to_string(),
+                    })
+                    .trace_id(&trace_ctx.trace_id)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                );
+                return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
+            }
+
+            // Forward to remote region — destination resolves vault slug
+            let source_region =
+                self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
+            debug!(
+                organization_id = organization_id.value(),
+                target_region = remote.region.as_str(),
+                source_region,
+                "Forwarding write to remote region"
+            );
+            let forward_start = std::time::Instant::now();
+            let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let mut client = self.get_forward_client(&remote).await?;
+            let result = client.forward_write(req, Some(&trace_ctx), grpc_deadline).await;
+            metrics::record_cross_region_forward(
+                "write",
+                source_region,
+                remote.region.as_str(),
+                forward_start.elapsed().as_secs_f64(),
+            );
+            return result;
+        }
+
+        // Local processing: resolve vault slug via org's region context
+        let region = self.resolver.resolve(organization_id)?;
+        let vault_id = SlugResolver::new(region.applied_state.clone())
+            .extract_and_resolve_vault(&req.vault)?;
+
+        // Forward to within-region leader if this node is a follower
+        if let Some(mut client) = self.forward_client_if_follower(&region)? {
             let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
             return client.forward_write(req, Some(&trace_ctx), grpc_deadline).await;
         }
@@ -542,57 +600,6 @@ impl WriteService for WriteServiceImpl {
             trace_ctx.parent_span_id.as_deref(),
             trace_ctx.trace_flags,
         );
-
-        // Extract client ID and idempotency key
-        let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-
-        // Extract organization and vault IDs (needed for idempotency key)
-        let organization_id = if let Some(ref state) = self.applied_state {
-            SlugResolver::new(state.clone()).extract_and_resolve(&req.organization)?
-        } else {
-            OrganizationId::new(
-                req.organization
-                    .as_ref()
-                    .map(|n| n.slug as i64)
-                    .ok_or_else(|| Status::invalid_argument("Missing organization"))?,
-            )
-        };
-
-        let vault_id = if let Some(ref state) = self.applied_state {
-            SlugResolver::new(state.clone()).extract_and_resolve_vault(&req.vault)?
-        } else {
-            VaultId::new(
-                req.vault
-                    .as_ref()
-                    .map(|v| v.slug as i64)
-                    .ok_or_else(|| Status::invalid_argument("Missing vault"))?,
-            )
-        };
-
-        // Reject writes to organizations undergoing migration
-        if let Some(ref state) = self.applied_state
-            && let Some(org_meta) = state.get_organization(organization_id)
-            && org_meta.status == inferadb_ledger_state::system::OrganizationStatus::Migrating
-        {
-            let mut context = std::collections::HashMap::new();
-            context.insert("organization".to_string(), organization_id.value().to_string());
-            if let Some(pending) = org_meta.pending_region {
-                context.insert("target_region".to_string(), pending.as_str().to_string());
-            }
-            let details = super::error_details::build_error_details(
-                inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.as_u16(),
-                true,
-                Some(30_000), // suggest retry after 30s
-                context,
-                Some(inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.suggested_action()),
-            );
-            let encoded = prost::Message::encode_to_vec(&details);
-            return Err(Status::with_details(
-                tonic::Code::FailedPrecondition,
-                "Organization is being migrated to another region; writes are temporarily blocked",
-                encoded.into(),
-            ));
-        }
 
         // Parse idempotency key (must be exactly 16 bytes for UUID)
         let idempotency_key: [u8; 16] =
@@ -691,9 +698,9 @@ impl WriteService for WriteServiceImpl {
             IdempotencyCheckResult::NewRequest => {
                 // Moka miss — check replicated state for cross-failover dedup
                 ctx.set_idempotency_hit(false);
-                if let Some(ref state) = self.applied_state {
+                {
                     use crate::log_storage::IdempotencyCheckResult as ReplicatedCheck;
-                    match state.client_idempotency_check(
+                    match region.applied_state.client_idempotency_check(
                         organization_id,
                         vault_id,
                         &client_id,
@@ -798,10 +805,10 @@ impl WriteService for WriteServiceImpl {
         let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
         let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
-        // Submit to Raft via batch writer (if enabled) or direct proposal
+        // Submit to Raft via batch writer (if available for this region) or direct proposal
         metrics::record_raft_proposal();
         ctx.start_raft_timer();
-        let response = if let Some(ref batch_handle) = self.batch_handle {
+        let response = if let Some(ref batch_handle) = region.batch_handle {
             ctx.set_batch_info(true, 1);
             // Submit through batch writer for coalesced proposals
             let rx = batch_handle.submit(ledger_request);
@@ -844,12 +851,18 @@ impl WriteService for WriteServiceImpl {
             }
         } else {
             ctx.set_batch_info(false, 1);
-            // Fallback: direct Raft proposal (OpenRaft serializes internally)
+            // Direct Raft proposal (OpenRaft serializes internally)
+            let commitments = region
+                .commitment_buffer
+                .as_ref()
+                .map(|buf| std::mem::take(&mut *buf.lock().unwrap_or_else(|e| e.into_inner())))
+                .unwrap_or_default();
             match tokio::time::timeout(
                 timeout,
-                self.raft.client_write(RaftPayload {
+                region.raft.client_write(RaftPayload {
                     request: ledger_request,
                     proposed_at: chrono::Utc::now(),
+                    state_root_commitments: commitments,
                 }),
             )
             .await
@@ -1008,6 +1021,8 @@ impl WriteService for WriteServiceImpl {
     /// Processes multiple write transactions atomically as a single batch.
     ///
     /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
+    /// In multi-region deployments, requests are routed to the correct region
+    /// based on organization, with cross-region forwarding when needed.
     async fn batch_write(
         &self,
         request: Request<BatchWriteRequest>,
@@ -1020,10 +1035,98 @@ impl WriteService for WriteServiceImpl {
         // Extract trace context and transport metadata from gRPC headers before consuming
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
+        let request_id = Uuid::new_v4();
         let req = request.into_inner();
 
-        // Forward to leader if this node is a follower
-        if let Some(mut client) = self.forward_client_if_follower()? {
+        // Extract client ID
+        let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
+
+        // Resolve organization slug → internal ID via system region
+        let system = self.resolver.system_region()?;
+        let organization_id = SlugResolver::new(system.applied_state.clone())
+            .extract_and_resolve(&req.organization)?;
+
+        // Reject writes to organizations undergoing migration
+        self.check_not_migrating(&system, organization_id)?;
+
+        // Check for cross-region forwarding — if the organization is on a remote
+        // region, run pre-flight checks and forward the raw request.
+        if self.resolver.supports_forwarding()
+            && let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+        {
+            // Flatten operations for pre-flight validation
+            let all_operations: Vec<inferadb_ledger_proto::proto::Operation> =
+                req.operations.iter().flat_map(|group| group.operations.clone()).collect();
+
+            // Pre-flight: validation on originating node
+            if let Err(status) = self.validate_operations(&all_operations) {
+                self.record_handler_event(
+                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                        inferadb_ledger_types::events::EventAction::RequestValidationFailed,
+                        organization_id,
+                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
+                        self.node_id.unwrap_or(0),
+                    )
+                    .principal(&client_id)
+                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                        reason: status.message().to_string(),
+                    })
+                    .trace_id(&trace_ctx.trace_id)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                );
+                return Err(status);
+            }
+
+            // Pre-flight: rate limit on originating node
+            if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
+                self.record_handler_event(
+                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                        inferadb_ledger_types::events::EventAction::RequestRateLimited,
+                        organization_id,
+                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
+                        self.node_id.unwrap_or(0),
+                    )
+                    .principal(&client_id)
+                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                        reason: "rate_limited".to_string(),
+                    })
+                    .operations_count(all_operations.len() as u32)
+                    .trace_id(&trace_ctx.trace_id)
+                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                );
+                return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
+            }
+
+            // Forward to remote region — destination resolves vault slug
+            let source_region =
+                self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
+            debug!(
+                organization_id = organization_id.value(),
+                target_region = remote.region.as_str(),
+                source_region,
+                "Forwarding batch_write to remote region"
+            );
+            let forward_start = std::time::Instant::now();
+            let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let mut client = self.get_forward_client(&remote).await?;
+            let result = client.forward_batch_write(req, Some(&trace_ctx), grpc_deadline).await;
+            metrics::record_cross_region_forward(
+                "batch_write",
+                source_region,
+                remote.region.as_str(),
+                forward_start.elapsed().as_secs_f64(),
+            );
+            return result;
+        }
+
+        // Local processing: resolve vault slug via org's region context
+        let region = self.resolver.resolve(organization_id)?;
+        let vault_id = SlugResolver::new(region.applied_state.clone())
+            .extract_and_resolve_vault(&req.vault)?;
+
+        // Forward to within-region leader if this node is a follower
+        if let Some(mut client) = self.forward_client_if_follower(&region)? {
             let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
             return client.forward_batch_write(req, Some(&trace_ctx), grpc_deadline).await;
         }
@@ -1046,57 +1149,6 @@ impl WriteService for WriteServiceImpl {
             trace_ctx.parent_span_id.as_deref(),
             trace_ctx.trace_flags,
         );
-
-        // Extract client ID and idempotency key
-        let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-
-        // Extract organization and vault IDs (needed for idempotency key)
-        let organization_id = if let Some(ref state) = self.applied_state {
-            SlugResolver::new(state.clone()).extract_and_resolve(&req.organization)?
-        } else {
-            OrganizationId::new(
-                req.organization
-                    .as_ref()
-                    .map(|n| n.slug as i64)
-                    .ok_or_else(|| Status::invalid_argument("Missing organization"))?,
-            )
-        };
-
-        let vault_id = if let Some(ref state) = self.applied_state {
-            SlugResolver::new(state.clone()).extract_and_resolve_vault(&req.vault)?
-        } else {
-            VaultId::new(
-                req.vault
-                    .as_ref()
-                    .map(|v| v.slug as i64)
-                    .ok_or_else(|| Status::invalid_argument("Missing vault"))?,
-            )
-        };
-
-        // Reject writes to organizations undergoing migration
-        if let Some(ref state) = self.applied_state
-            && let Some(org_meta) = state.get_organization(organization_id)
-            && org_meta.status == inferadb_ledger_state::system::OrganizationStatus::Migrating
-        {
-            let mut context = std::collections::HashMap::new();
-            context.insert("organization".to_string(), organization_id.value().to_string());
-            if let Some(pending) = org_meta.pending_region {
-                context.insert("target_region".to_string(), pending.as_str().to_string());
-            }
-            let details = super::error_details::build_error_details(
-                inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.as_u16(),
-                true,
-                Some(30_000), // suggest retry after 30s
-                context,
-                Some(inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.suggested_action()),
-            );
-            let encoded = prost::Message::encode_to_vec(&details);
-            return Err(Status::with_details(
-                tonic::Code::FailedPrecondition,
-                "Organization is being migrated to another region; writes are temporarily blocked",
-                encoded.into(),
-            ));
-        }
 
         // Parse idempotency key (must be exactly 16 bytes for UUID)
         let idempotency_key: [u8; 16] =
@@ -1207,9 +1259,9 @@ impl WriteService for WriteServiceImpl {
             IdempotencyCheckResult::NewRequest => {
                 // Moka miss — check replicated state for cross-failover dedup
                 ctx.set_idempotency_hit(false);
-                if let Some(ref state) = self.applied_state {
+                {
                     use crate::log_storage::IdempotencyCheckResult as ReplicatedCheck;
-                    match state.client_idempotency_check(
+                    match region.applied_state.client_idempotency_check(
                         organization_id,
                         vault_id,
                         &client_id,
@@ -1315,16 +1367,20 @@ impl WriteService for WriteServiceImpl {
         let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
         let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
-        // Submit to Raft — OpenRaft serializes proposals internally via the Raft log,
-        // so we don't need an external mutex. Removing it enables concurrent proposals
-        // to pipeline through the Raft layer.
+        // Submit to Raft — batch_write always uses direct proposal (not batch writer)
         metrics::record_raft_proposal();
         ctx.start_raft_timer();
+        let commitments = region
+            .commitment_buffer
+            .as_ref()
+            .map(|buf| std::mem::take(&mut *buf.lock().unwrap_or_else(|e| e.into_inner())))
+            .unwrap_or_default();
         let response = match tokio::time::timeout(
             timeout,
-            self.raft.client_write(RaftPayload {
+            region.raft.client_write(RaftPayload {
                 request: ledger_request,
                 proposed_at: chrono::Utc::now(),
+                state_root_commitments: commitments,
             }),
         )
         .await

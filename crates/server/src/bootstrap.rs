@@ -15,8 +15,8 @@ use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_raft::{
     AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, EventsGarbageCollector,
     GrpcRaftNetworkFactory, IntegrityScrubberJob, LearnerRefreshJob, LedgerNodeId, LedgerServer,
-    LedgerTypeConfig, OrphanCleanupJob, RaftLogStore, ResourceMetricsCollector,
-    RuntimeConfigHandle, SagaOrchestrator, TtlGarbageCollector,
+    LedgerTypeConfig, OrphanCleanupJob, RaftLogStore, RaftManager, RaftManagerConfig,
+    ResourceMetricsCollector, RuntimeConfigHandle, SagaOrchestrator, TtlGarbageCollector,
     event_writer::{EventHandle, EventWriter},
 };
 use inferadb_ledger_state::{
@@ -304,12 +304,27 @@ pub async fn bootstrap_node(
     let event_handle = EventHandle::new(Arc::clone(&events_db), event_config, node_id);
     let event_handle_for_saga = Some(event_handle.clone());
 
+    // Create RaftManager and register the externally-created system region.
+    // This bridges the existing manual bootstrap flow with the unified LedgerServer
+    // that requires a manager. Phase 4 will replace this with start_system_region().
+    let raft_manager_config =
+        RaftManagerConfig::new(data_dir.to_path_buf(), node_id, config.region);
+    let manager = Arc::new(RaftManager::new(raft_manager_config));
+    manager
+        .register_external_region(
+            inferadb_ledger_types::Region::GLOBAL,
+            raft.clone(),
+            state.clone(),
+            block_archive.clone(),
+            applied_state_accessor.clone(),
+            block_announcements,
+        )
+        .map_err(|e| BootstrapError::Raft {
+            message: format!("failed to register system region: {e}"),
+        })?;
+
     let server = LedgerServer::builder()
-        .raft(raft.clone())
-        .state(state.clone())
-        .applied_state(applied_state_accessor.clone())
-        .block_archive(Some(block_archive))
-        .block_announcements(block_announcements)
+        .manager(manager)
         .addr(config.listen_addr)
         .max_concurrent(config.max_concurrent)
         .timeout_secs(config.timeout_secs)

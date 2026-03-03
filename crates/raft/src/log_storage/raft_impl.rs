@@ -532,6 +532,8 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             block_announcements: self.block_announcements.clone(),
             event_writer: None,
             client_sequence_eviction: self.client_sequence_eviction.clone(),
+            state_root_commitments: Arc::clone(&self.state_root_commitments),
+            divergence_sender: self.divergence_sender.clone(),
         }
     }
 
@@ -714,6 +716,15 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         let term = entries.last().map(|e| e.log_id.leader_id.term).unwrap_or(0);
 
         for entry in entries {
+            // Verify state root commitments piggybacked from the previous batch.
+            // The leader attached its locally-computed state roots to this entry;
+            // we compare them against our own archived state roots.
+            if let EntryPayload::Normal(payload) = &entry.payload {
+                for commitment in &payload.state_root_commitments {
+                    self.verify_state_root_commitment(commitment);
+                }
+            }
+
             state.last_applied = Some(entry.log_id);
 
             let (response, vault_entry) = match &entry.payload {
@@ -830,6 +841,34 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             // Also update AppliedState for snapshot persistence
             state.region_height = new_region_height;
             state.previous_region_hash = region_hash;
+
+            // Buffer state root commitments for piggybacked verification.
+            // Each node (leader and followers) records what it computed locally.
+            // The leader drains this buffer when constructing the next RaftPayload,
+            // allowing all nodes to cross-check state roots on the next apply.
+            let commitments: Vec<crate::types::StateRootCommitment> = vault_entries
+                .iter()
+                .map(|e| crate::types::StateRootCommitment {
+                    organization: e.organization,
+                    vault: e.vault,
+                    vault_height: e.vault_height,
+                    state_root: e.state_root,
+                })
+                .collect();
+            if let Ok(mut buf) = self.state_root_commitments.lock() {
+                // Cap buffer at 10,000 entries to prevent unbounded growth on
+                // followers that never propose. Oldest entries are already archived
+                // in BlockArchive, so dropping them is safe.
+                const MAX_COMMITMENT_BUFFER: usize = 10_000;
+                let buf_len = buf.len();
+                let available = MAX_COMMITMENT_BUFFER.saturating_sub(buf_len);
+                if available < commitments.len() {
+                    // Drop oldest to make room
+                    let to_drop = commitments.len().saturating_sub(available);
+                    buf.drain(..to_drop.min(buf_len));
+                }
+                buf.extend(commitments);
+            }
         }
 
         // Client sequence TTL eviction — deterministic from log index.
@@ -1377,6 +1416,99 @@ impl RaftLogStore {
         }
 
         Ok(state)
+    }
+
+    /// Verifies a leader's state root commitment against the local block archive.
+    ///
+    /// Looks up the vault entry at `(org, vault, height)` in the archive and
+    /// compares the locally-computed `state_root` against the leader's commitment.
+    /// Mismatches indicate state machine divergence (Byzantine fault).
+    fn verify_state_root_commitment(&self, commitment: &crate::types::StateRootCommitment) {
+        let archive = match &self.block_archive {
+            Some(a) => a,
+            None => return,
+        };
+
+        // Find the region height containing this vault entry
+        let region_height = match archive.find_region_height(
+            commitment.organization,
+            commitment.vault,
+            commitment.vault_height,
+        ) {
+            Ok(Some(h)) => h,
+            Ok(None) => {
+                // Not yet archived locally (e.g., snapshot install skipped this range).
+                // Can't verify — not an error.
+                return;
+            },
+            Err(e) => {
+                tracing::warn!(
+                    organization = commitment.organization.value(),
+                    vault = commitment.vault.value(),
+                    vault_height = commitment.vault_height,
+                    error = %e,
+                    "Failed to look up vault entry for state root verification"
+                );
+                return;
+            },
+        };
+
+        // Read the region block and find the matching vault entry
+        let block = match archive.read_block(region_height) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    region_height,
+                    error = %e,
+                    "Failed to read block for state root verification"
+                );
+                return;
+            },
+        };
+
+        for entry in &block.vault_entries {
+            if entry.organization == commitment.organization
+                && entry.vault == commitment.vault
+                && entry.vault_height == commitment.vault_height
+            {
+                if entry.state_root == commitment.state_root {
+                    metrics::record_state_root_verification();
+                } else {
+                    let local_hex: String =
+                        entry.state_root.iter().map(|b| format!("{b:02x}")).collect();
+                    let leader_hex: String =
+                        commitment.state_root.iter().map(|b| format!("{b:02x}")).collect();
+                    tracing::error!(
+                        organization = commitment.organization.value(),
+                        vault = commitment.vault.value(),
+                        vault_height = commitment.vault_height,
+                        local_state_root = %local_hex,
+                        leader_state_root = %leader_hex,
+                        region = self.region.as_str(),
+                        "STATE ROOT DIVERGENCE DETECTED: local state root does not match leader commitment"
+                    );
+                    metrics::record_state_root_divergence(
+                        commitment.organization,
+                        commitment.vault,
+                    );
+
+                    // Send divergence event to the handler task for vault halting.
+                    if let Some(sender) = &self.divergence_sender {
+                        let _ = sender.send(crate::types::StateRootDivergence {
+                            organization: commitment.organization,
+                            vault: commitment.vault,
+                            vault_height: commitment.vault_height,
+                            local_state_root: entry.state_root,
+                            leader_state_root: commitment.state_root,
+                        });
+                    }
+                }
+                return;
+            }
+        }
+
+        // Vault entry not found in block — possible if block was compacted.
+        // Not an error condition.
     }
 }
 

@@ -37,8 +37,8 @@
 //! 1. **Write Batching**: Multiple operations in a single Raft entry amortizes consensus overhead.
 //!    With 16KB pages, batch_size=100 achieves ~6000 ops/sec.
 //!
-//! 2. **Multi-Region**: Multiple parallel Raft groups via MultiRaftManager. Each region has
-//!    independent consensus, enabling parallel writes. MultiRegionTestCluster is implemented (see
+//! 2. **Multi-Region**: Multiple parallel Raft groups via RaftManager. Each region has independent
+//!    consensus, enabling parallel writes. RegionTestCluster is implemented (see
 //!    test_stress_multi_region_*). NOTE: Organization→region assignment needed for true parallel
 //!    writes.
 
@@ -58,7 +58,7 @@ use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 use parking_lot::Mutex;
 use tokio::sync::Semaphore;
 
-use crate::common::{MultiRegionTestCluster, TestCluster};
+use crate::common::{RegionTestCluster, TestCluster};
 
 /// Configuration for the stress test.
 #[derive(Debug, Clone)]
@@ -1281,7 +1281,7 @@ async fn test_stress_standard() {
 // Multi-Region Stress Tests
 // ============================================================================
 //
-// These tests use MultiRegionTestCluster to achieve higher write throughput
+// These tests use RegionTestCluster to achieve higher write throughput
 // via parallel Raft consensus across multiple independent regions.
 //
 // Each region is a separate Raft group, allowing writes to different regions
@@ -1308,7 +1308,7 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
 
     // Start multi-region cluster
     println!("📦 Creating {}-node, {}-region cluster...", num_nodes, num_regions);
-    let cluster = MultiRegionTestCluster::new(num_nodes, num_regions).await;
+    let cluster = RegionTestCluster::new(num_nodes, num_regions).await;
 
     // Wait for all regions to have leaders
     let leaders_ready = cluster.wait_for_leaders(Duration::from_secs(10)).await;

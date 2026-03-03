@@ -135,7 +135,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
         };
 
         self.raft
-            .client_write(RaftPayload { request, proposed_at: chrono::Utc::now() })
+            .client_write(RaftPayload::new(request))
             .await
             .map_err(|e| format!("Raft write failed: {}", e))?;
 

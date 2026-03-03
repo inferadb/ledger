@@ -31,6 +31,48 @@ use serde::{Deserialize, Serialize};
 // - `AsyncRuntime`: Tokio runtime
 // - `Responder`: One-shot channel responder
 // ============================================================================
+// State Root Commitment
+// ============================================================================
+
+/// A leader's computed state root for a vault at a specific height.
+///
+/// After applying an entry, each node records the state root it computed.
+/// The leader attaches its commitments to the *next* `RaftPayload`
+/// (piggybacking on entry N+1 for entry N's roots). All nodes verify
+/// the commitment against their own archived state root during apply,
+/// detecting divergence without extra RPCs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateRootCommitment {
+    /// Organization owning the vault.
+    pub organization: OrganizationId,
+    /// Vault whose state root was computed.
+    pub vault: VaultId,
+    /// Block height at which the state root was computed.
+    pub vault_height: u64,
+    /// SHA-256 state root the leader computed after applying this block.
+    pub state_root: Hash,
+}
+
+/// A detected state root divergence between the local node and the leader.
+///
+/// Sent through a channel from the apply path to the divergence handler,
+/// which proposes `UpdateVaultHealth { healthy: false }` via Raft to halt
+/// the vault cluster-wide.
+#[derive(Debug, Clone)]
+pub struct StateRootDivergence {
+    /// Organization containing the diverged vault.
+    pub organization: OrganizationId,
+    /// Vault that diverged.
+    pub vault: VaultId,
+    /// Block height at which divergence was detected.
+    pub vault_height: u64,
+    /// State root the local node computed.
+    pub local_state_root: Hash,
+    /// State root the leader committed.
+    pub leader_state_root: Hash,
+}
+
+// ============================================================================
 // Raft Payload Wrapper
 // ============================================================================
 
@@ -45,6 +87,35 @@ pub struct RaftPayload {
     pub request: LedgerRequest,
     /// Leader-assigned wall-clock timestamp at proposal time.
     pub proposed_at: DateTime<Utc>,
+    /// Leader's state root commitments from the previous apply batch.
+    ///
+    /// Piggybacked on entry N+1 for entry N's vault state roots.
+    /// Followers verify these against their locally computed roots to
+    /// detect state machine divergence.
+    #[serde(default)]
+    pub state_root_commitments: Vec<StateRootCommitment>,
+}
+
+impl RaftPayload {
+    /// Creates a payload with no state root commitments.
+    ///
+    /// Used by all proposal sites except the leader's write path, which
+    /// drains the commitment buffer via [`Self::with_commitments`].
+    pub fn new(request: LedgerRequest) -> Self {
+        Self { request, proposed_at: chrono::Utc::now(), state_root_commitments: vec![] }
+    }
+
+    /// Creates a payload carrying piggybacked state root commitments.
+    ///
+    /// The leader drains its commitment buffer and attaches the results
+    /// to the next `RaftPayload` so followers can verify state roots
+    /// without extra RPCs.
+    pub fn with_commitments(
+        request: LedgerRequest,
+        state_root_commitments: Vec<StateRootCommitment>,
+    ) -> Self {
+        Self { request, proposed_at: chrono::Utc::now(), state_root_commitments }
+    }
 }
 
 openraft::declare_raft_types!(
@@ -712,6 +783,7 @@ mod tests {
                 tier: Default::default(),
             },
             proposed_at: Utc.with_ymd_and_hms(2099, 6, 15, 12, 30, 0).unwrap(),
+            state_root_commitments: vec![],
         };
 
         let bytes = postcard::to_allocvec(&payload).expect("serialize");
@@ -742,6 +814,7 @@ mod tests {
                 request_hash: 0,
             },
             proposed_at: ts,
+            state_root_commitments: vec![],
         };
 
         let bytes1 = postcard::to_allocvec(&payload).expect("serialize");
@@ -749,6 +822,139 @@ mod tests {
         let bytes2 = postcard::to_allocvec(&decoded).expect("re-serialize");
 
         assert_eq!(bytes1, bytes2, "re-serialization should produce identical bytes");
+    }
+
+    // ============================================
+    // State Root Commitment Serialization Tests
+    // ============================================
+
+    #[test]
+    fn test_state_root_commitment_serialization_roundtrip() {
+        let commitment = StateRootCommitment {
+            organization: OrganizationId::new(42),
+            vault: VaultId::new(7),
+            vault_height: 100,
+            state_root: [0xAB; 32],
+        };
+
+        let bytes = postcard::to_allocvec(&commitment).expect("serialize");
+        let deserialized: StateRootCommitment = postcard::from_bytes(&bytes).expect("deserialize");
+
+        assert_eq!(commitment, deserialized);
+        assert_eq!(deserialized.organization, OrganizationId::new(42));
+        assert_eq!(deserialized.vault, VaultId::new(7));
+        assert_eq!(deserialized.vault_height, 100);
+        assert_eq!(deserialized.state_root, [0xAB; 32]);
+    }
+
+    #[test]
+    fn test_state_root_commitment_zero_hash() {
+        let commitment = StateRootCommitment {
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
+            vault_height: 0,
+            state_root: [0u8; 32],
+        };
+
+        let bytes = postcard::to_allocvec(&commitment).expect("serialize");
+        let deserialized: StateRootCommitment = postcard::from_bytes(&bytes).expect("deserialize");
+
+        assert_eq!(commitment, deserialized);
+        assert_eq!(deserialized.state_root, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_raft_payload_with_commitments_roundtrip() {
+        use chrono::TimeZone;
+
+        let commitments = vec![
+            StateRootCommitment {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
+                vault_height: 10,
+                state_root: [0xAA; 32],
+            },
+            StateRootCommitment {
+                organization: OrganizationId::new(2),
+                vault: VaultId::new(3),
+                vault_height: 20,
+                state_root: [0xBB; 32],
+            },
+        ];
+
+        let payload = RaftPayload {
+            request: LedgerRequest::Write {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
+                transactions: vec![],
+                idempotency_key: [0; 16],
+                request_hash: 0,
+            },
+            proposed_at: Utc.with_ymd_and_hms(2099, 6, 15, 12, 0, 0).unwrap(),
+            state_root_commitments: commitments.clone(),
+        };
+
+        let bytes = postcard::to_allocvec(&payload).expect("serialize");
+        let deserialized: RaftPayload = postcard::from_bytes(&bytes).expect("deserialize");
+
+        assert_eq!(deserialized.state_root_commitments.len(), 2);
+        assert_eq!(deserialized.state_root_commitments[0].organization, OrganizationId::new(1));
+        assert_eq!(deserialized.state_root_commitments[0].vault_height, 10);
+        assert_eq!(deserialized.state_root_commitments[0].state_root, [0xAA; 32]);
+        assert_eq!(deserialized.state_root_commitments[1].organization, OrganizationId::new(2));
+        assert_eq!(deserialized.state_root_commitments[1].vault_height, 20);
+        assert_eq!(deserialized.state_root_commitments[1].state_root, [0xBB; 32]);
+    }
+
+    #[test]
+    fn test_raft_payload_backward_compat_empty_commitments() {
+        // Payloads serialized before the commitments field was added should
+        // deserialize with an empty vec (thanks to #[serde(default)]).
+        use chrono::TimeZone;
+
+        let payload_without = RaftPayload {
+            request: LedgerRequest::CreateOrganization {
+                name: "test".to_string(),
+                slug: OrganizationSlug::new(1),
+                region: Region::US_EAST_VA,
+                tier: Default::default(),
+            },
+            proposed_at: Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap(),
+            state_root_commitments: vec![],
+        };
+
+        let bytes = postcard::to_allocvec(&payload_without).expect("serialize");
+        let deserialized: RaftPayload = postcard::from_bytes(&bytes).expect("deserialize");
+
+        assert!(deserialized.state_root_commitments.is_empty());
+    }
+
+    #[test]
+    fn test_raft_payload_with_commitments_preserves_bytes_across_reserialize() {
+        use chrono::TimeZone;
+
+        let payload = RaftPayload {
+            request: LedgerRequest::Write {
+                organization: OrganizationId::new(5),
+                vault: VaultId::new(3),
+                transactions: vec![],
+                idempotency_key: [42; 16],
+                request_hash: 12345,
+            },
+            proposed_at: Utc.with_ymd_and_hms(2099, 3, 1, 0, 0, 0).unwrap(),
+            state_root_commitments: vec![StateRootCommitment {
+                organization: OrganizationId::new(5),
+                vault: VaultId::new(3),
+                vault_height: 99,
+                state_root: [0xFF; 32],
+            }],
+        };
+
+        let bytes1 = postcard::to_allocvec(&payload).expect("serialize");
+        let decoded: RaftPayload = postcard::from_bytes(&bytes1).expect("deserialize");
+        let bytes2 = postcard::to_allocvec(&decoded).expect("re-serialize");
+
+        assert_eq!(bytes1, bytes2, "re-serialization with commitments should be stable");
     }
 
     // ============================================

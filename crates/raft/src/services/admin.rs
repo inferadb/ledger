@@ -112,9 +112,9 @@ pub struct AdminServiceImpl {
     /// Shared DEK re-wrapping progress (read by `GetRewrapStatus`).
     #[builder(default)]
     rewrap_progress: Option<Arc<crate::dek_rewrap::RewrapProgress>>,
-    /// Multi-Raft manager for lazy region provisioning.
+    /// Raft manager for lazy region provisioning.
     #[builder(default)]
-    multi_raft_manager: Option<Arc<crate::multi_raft::MultiRaftManager>>,
+    raft_manager: Option<Arc<crate::raft_manager::RaftManager>>,
 }
 
 impl AdminServiceImpl {
@@ -178,13 +178,10 @@ impl AdminServiceImpl {
         self
     }
 
-    /// Attaches the multi-Raft manager for lazy region provisioning.
+    /// Attaches the Raft manager for lazy region provisioning.
     #[must_use]
-    pub fn with_multi_raft_manager(
-        mut self,
-        manager: Arc<crate::multi_raft::MultiRaftManager>,
-    ) -> Self {
-        self.multi_raft_manager = Some(manager);
+    pub fn with_raft_manager(mut self, manager: Arc<crate::raft_manager::RaftManager>) -> Self {
+        self.raft_manager = Some(manager);
         self
     }
 
@@ -317,10 +314,7 @@ impl AdminService for AdminServiceImpl {
         ctx.start_raft_timer();
         let result = match tokio::time::timeout(
             timeout,
-            self.raft.client_write(RaftPayload {
-                request: ledger_request,
-                proposed_at: chrono::Utc::now(),
-            }),
+            self.raft.client_write(RaftPayload::new(ledger_request)),
         )
         .await
         {
@@ -430,10 +424,7 @@ impl AdminService for AdminServiceImpl {
         ctx.start_raft_timer();
         let result = match tokio::time::timeout(
             timeout,
-            self.raft.client_write(RaftPayload {
-                request: ledger_request,
-                proposed_at: chrono::Utc::now(),
-            }),
+            self.raft.client_write(RaftPayload::new(ledger_request)),
         )
         .await
         {
@@ -685,10 +676,7 @@ impl AdminService for AdminServiceImpl {
         ctx.start_raft_timer();
         let result = match tokio::time::timeout(
             timeout,
-            self.raft.client_write(RaftPayload {
-                request: ledger_request,
-                proposed_at: chrono::Utc::now(),
-            }),
+            self.raft.client_write(RaftPayload::new(ledger_request)),
         )
         .await
         {
@@ -837,10 +825,7 @@ impl AdminService for AdminServiceImpl {
         ctx.start_raft_timer();
         let result = match tokio::time::timeout(
             timeout,
-            self.raft.client_write(RaftPayload {
-                request: ledger_request,
-                proposed_at: chrono::Utc::now(),
-            }),
+            self.raft.client_write(RaftPayload::new(ledger_request)),
         )
         .await
         {
@@ -2060,14 +2045,7 @@ impl AdminService for AdminServiceImpl {
                 recovery_started_at: None,
             };
 
-            if let Err(e) = self
-                .raft
-                .client_write(RaftPayload {
-                    request: health_request,
-                    proposed_at: chrono::Utc::now(),
-                })
-                .await
-            {
+            if let Err(e) = self.raft.client_write(RaftPayload::new(health_request)).await {
                 tracing::error!("Failed to update vault health via Raft: {}", e);
                 // Continue with response - the local state will be inconsistent but
                 // the next recovery attempt can retry
@@ -2118,14 +2096,7 @@ impl AdminService for AdminServiceImpl {
                 recovery_started_at: None,
             };
 
-            if let Err(e) = self
-                .raft
-                .client_write(RaftPayload {
-                    request: health_request,
-                    proposed_at: chrono::Utc::now(),
-                })
-                .await
-            {
+            if let Err(e) = self.raft.client_write(RaftPayload::new(health_request)).await {
                 tracing::error!("Failed to update vault health via Raft: {}", e);
                 // The vault was successfully recovered locally - log error but return success
             }
@@ -2251,11 +2222,7 @@ impl AdminService for AdminServiceImpl {
         };
 
         ctx.start_raft_timer();
-        match self
-            .raft
-            .client_write(RaftPayload { request: health_request, proposed_at: chrono::Utc::now() })
-            .await
-        {
+        match self.raft.client_write(RaftPayload::new(health_request)).await {
             Ok(_) => {
                 ctx.end_raft_timer();
                 ctx.set_success();
@@ -2412,11 +2379,7 @@ impl AdminService for AdminServiceImpl {
                 request_hash: 0,
             };
 
-            match self
-                .raft
-                .client_write(RaftPayload { request: gc_request, proposed_at: chrono::Utc::now() })
-                .await
-            {
+            match self.raft.client_write(RaftPayload::new(gc_request)).await {
                 Ok(_) => {
                     total_expired += count as u64;
                 },
@@ -3017,7 +2980,7 @@ impl AdminService for AdminServiceImpl {
         let ledger_request = LedgerRequest::System(SystemRequest::SetBlindingKeyVersion {
             version: req.new_key_version,
         });
-        let payload = RaftPayload { request: ledger_request, proposed_at: chrono::Utc::now() };
+        let payload = RaftPayload::new(ledger_request);
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
         let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
@@ -3314,10 +3277,7 @@ impl AdminService for AdminServiceImpl {
         ctx.start_raft_timer();
         let result = match tokio::time::timeout(
             timeout,
-            self.raft.client_write(RaftPayload {
-                request: ledger_request,
-                proposed_at: chrono::Utc::now(),
-            }),
+            self.raft.client_write(RaftPayload::new(ledger_request)),
         )
         .await
         {
@@ -3393,13 +3353,7 @@ impl AdminService for AdminServiceImpl {
                     request_hash: 0,
                 };
 
-                let _ = self
-                    .raft
-                    .client_write(RaftPayload {
-                        request: saga_request,
-                        proposed_at: chrono::Utc::now(),
-                    })
-                    .await;
+                let _ = self.raft.client_write(RaftPayload::new(saga_request)).await;
 
                 ctx.set_success();
                 metrics::record_organization_operation(organization, "migrate");
@@ -3604,14 +3558,8 @@ impl AdminService for AdminServiceImpl {
         let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         ctx.start_raft_timer();
-        match tokio::time::timeout(
-            timeout,
-            self.raft.client_write(RaftPayload {
-                request: saga_request,
-                proposed_at: chrono::Utc::now(),
-            }),
-        )
-        .await
+        match tokio::time::timeout(timeout, self.raft.client_write(RaftPayload::new(saga_request)))
+            .await
         {
             Ok(Ok(_)) => {
                 ctx.end_raft_timer();
@@ -3812,7 +3760,7 @@ impl AdminService for AdminServiceImpl {
             erased_by: req.erased_by.clone(),
             region,
         });
-        let payload = RaftPayload { request: ledger_request, proposed_at: chrono::Utc::now() };
+        let payload = RaftPayload::new(ledger_request);
 
         let erasure_result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
 
@@ -4022,7 +3970,7 @@ impl AdminService for AdminServiceImpl {
         let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         let ledger_request = LedgerRequest::System(SystemRequest::MigrateExistingUsers { entries });
-        let payload = RaftPayload { request: ledger_request, proposed_at: chrono::Utc::now() };
+        let payload = RaftPayload::new(ledger_request);
 
         let migration_result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
 
@@ -4122,7 +4070,7 @@ impl AdminService for AdminServiceImpl {
             ));
         }
 
-        let manager = self.multi_raft_manager.as_ref().ok_or_else(|| {
+        let manager = self.raft_manager.as_ref().ok_or_else(|| {
             Status::unavailable("Region provisioning not available on single-region nodes")
         })?;
 
@@ -4130,7 +4078,7 @@ impl AdminService for AdminServiceImpl {
             Status::failed_precondition("Node ID not configured for region provisioning")
         })?;
         let addr = self.listen_addr.to_string();
-        let region_config = crate::multi_raft::RegionConfig::data(region, vec![(node_id, addr)]);
+        let region_config = crate::raft_manager::RegionConfig::data(region, vec![(node_id, addr)]);
         let (_group, created) = manager.ensure_data_region(region_config).await.map_err(|e| {
             ctx.set_error("Internal", &format!("{e}"));
             Status::internal(format!("Failed to provision region {}: {e}", region.as_str()))

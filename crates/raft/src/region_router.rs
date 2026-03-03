@@ -80,7 +80,7 @@ pub type Result<T> = std::result::Result<T, RoutingError>;
 /// Public routing information for an organization.
 ///
 /// This is the public view of cached routing data, suitable for
-/// use by other components (like MultiRaftManager).
+/// use by other components (like [`RaftManager`](crate::raft_manager::RaftManager)).
 #[derive(Debug, Clone)]
 pub struct RoutingInfo {
     /// Region hosting this organization.

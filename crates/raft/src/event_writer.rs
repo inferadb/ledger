@@ -78,6 +78,18 @@ pub struct EventWriter<B: StorageBackend> {
     config: EventConfig,
 }
 
+impl<B: StorageBackend> Clone for EventWriter<B> {
+    fn clone(&self) -> Self {
+        Self { events_db: Arc::clone(&self.events_db), config: self.config.clone() }
+    }
+}
+
+impl<B: StorageBackend> std::fmt::Debug for EventWriter<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventWriter").field("config", &self.config).finish_non_exhaustive()
+    }
+}
+
 impl<B: StorageBackend> EventWriter<B> {
     /// Creates a new `EventWriter`.
     pub fn new(events_db: Arc<EventsDatabase<B>>, config: EventConfig) -> Self {

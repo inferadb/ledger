@@ -1,6 +1,9 @@
 //! Raft log storage combining durable log entries with state machine access.
 
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{BlockArchive, StateLayer};
@@ -32,7 +35,7 @@ fn corrupted_error(reason: impl Into<String>) -> StorageError<LedgerNodeId> {
 }
 use crate::{
     event_writer::EventWriter,
-    types::{LedgerNodeId, LedgerTypeConfig},
+    types::{LedgerNodeId, LedgerTypeConfig, StateRootCommitment},
 };
 
 /// Combined Raft storage.
@@ -87,6 +90,19 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     /// from both the in-memory HashMap and the `ClientSequences` B+ tree table.
     pub(super) client_sequence_eviction:
         inferadb_ledger_types::config::ClientSequenceEvictionConfig,
+    /// Buffer of state root commitments from recent applies.
+    ///
+    /// Populated by `apply_to_state_machine` after each block with vault entries.
+    /// Drained by the leader when constructing the next `RaftPayload`, piggybacking
+    /// commitments onto entry N+1 for follower verification.
+    pub(super) state_root_commitments: Arc<Mutex<Vec<StateRootCommitment>>>,
+    /// Channel for sending detected state root divergences to the handler task.
+    ///
+    /// When a mismatch is detected during apply, the divergence event is sent
+    /// through this channel. The handler proposes `UpdateVaultHealth { healthy: false }`
+    /// to halt the vault cluster-wide.
+    pub(super) divergence_sender:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::types::StateRootDivergence>>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -138,6 +154,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
             event_writer: None,
             client_sequence_eviction:
                 inferadb_ledger_types::config::ClientSequenceEvictionConfig::default(),
+            state_root_commitments: Arc::new(Mutex::new(Vec::new())),
+            divergence_sender: None,
         };
 
         // Load cached values
@@ -229,6 +247,35 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// vault heights and health status.
     pub fn accessor(&self) -> AppliedStateAccessor {
         AppliedStateAccessor { state: self.applied_state.clone() }
+    }
+
+    /// Returns the shared commitment buffer handle.
+    ///
+    /// Used to pass the same `Arc` to `RegionGroup` so that the proposal path
+    /// can drain commitments without holding a reference to the log store.
+    pub fn commitment_buffer(&self) -> Arc<Mutex<Vec<StateRootCommitment>>> {
+        Arc::clone(&self.state_root_commitments)
+    }
+
+    /// Configures the divergence sender channel.
+    ///
+    /// When set, detected state root mismatches during apply are sent through
+    /// this channel to an async handler that proposes `UpdateVaultHealth`.
+    pub fn with_divergence_sender(
+        mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<crate::types::StateRootDivergence>,
+    ) -> Self {
+        self.divergence_sender = Some(sender);
+        self
+    }
+
+    /// Drains all buffered state root commitments.
+    ///
+    /// Called by the leader when constructing the next `RaftPayload` to
+    /// piggyback commitments onto the proposal. Returns the full buffer
+    /// contents and leaves it empty.
+    pub fn drain_state_root_commitments(&self) -> Vec<StateRootCommitment> {
+        std::mem::take(&mut *self.state_root_commitments.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Checks if this log store has been previously initialized.

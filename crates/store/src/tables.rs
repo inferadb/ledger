@@ -1,6 +1,6 @@
 //! Fixed table definitions for the store engine.
 //!
-//! The store has exactly 18 tables, all known at compile time.
+//! The store has exactly 19 tables, all known at compile time.
 //! This enables type-safe access and eliminates dynamic table lookup overhead.
 
 use crate::types::KeyType;

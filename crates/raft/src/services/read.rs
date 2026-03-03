@@ -28,9 +28,7 @@ use inferadb_ledger_proto::{
 };
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::{OrganizationId, OrganizationSlug, VaultId, VaultSlug};
-use openraft::Raft;
-use tokio::sync::broadcast;
+use inferadb_ledger_types::{OrganizationId, VaultId, VaultSlug};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
@@ -40,31 +38,34 @@ use crate::{
     logging::{OperationType, RequestContext, Sampler},
     metrics,
     pagination::{PageToken, PageTokenCodec},
-    services::{forward_client::LeaderChannelCache, slug_resolver::SlugResolver},
+    raft_manager::RaftManager,
+    services::{
+        ForwardClient,
+        forward_client::LeaderChannelCache,
+        region_resolver::{RegionContext, RegionResolver, RemoteRegionInfo, ResolveResult},
+        slug_resolver::SlugResolver,
+    },
     trace_context,
-    types::{LedgerNodeId, LedgerTypeConfig},
+    types::LedgerNodeId,
 };
 
 /// Handles read operations including verified reads, entity/relationship listing, and block
 /// streaming.
+///
+/// Routes read requests to the correct region via the `RegionResolver`.
+/// Node-level fields (snapshot manager, pagination, sampler) are shared across
+/// all regions on this node.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct ReadServiceImpl {
-    /// State layer providing entity, vault, and organization read access.
-    state: Arc<StateLayer<FileBackend>>,
-    /// Accessor for applied state (vault heights, health).
-    applied_state: AppliedStateAccessor,
-    /// Block archive for retrieving stored blocks.
+    /// Region resolver for routing requests to the correct region's state.
+    resolver: Arc<dyn RegionResolver>,
+    /// Multi-raft manager for creating forward clients to remote regions.
     #[builder(default)]
-    block_archive: Option<Arc<BlockArchive<FileBackend>>>,
+    manager: Option<Arc<RaftManager>>,
     /// Snapshot manager for historical reads optimization.
     #[builder(default)]
     snapshot_manager: Option<Arc<SnapshotManager>>,
-    /// Block announcement broadcast channel.
-    block_announcements: broadcast::Sender<BlockAnnouncement>,
-    /// Raft instance for consistency checks (linearizable reads).
-    #[builder(default)]
-    raft: Option<Arc<Raft<LedgerTypeConfig>>>,
     /// This node's ID for leadership checks.
     #[builder(default)]
     node_id: Option<LedgerNodeId>,
@@ -91,17 +92,27 @@ pub struct ReadServiceImpl {
 }
 
 impl ReadServiceImpl {
-    /// Checks if this node is the current Raft leader.
+    /// Resolves organization and vault IDs from a request using the region resolver.
     ///
-    /// Returns false if Raft is not configured.
-    fn is_leader(&self) -> bool {
-        match &self.raft {
-            Some(raft) => {
-                let metrics = raft.metrics().borrow().clone();
-                metrics.current_leader == Some(metrics.id)
-            },
-            None => false,
-        }
+    /// Returns `(organization_id, vault_id, region_context)`.
+    fn resolve_org_vault(
+        &self,
+        organization: &Option<inferadb_ledger_proto::proto::OrganizationSlug>,
+        vault: &Option<inferadb_ledger_proto::proto::VaultSlug>,
+    ) -> Result<(OrganizationId, VaultId, RegionContext), Status> {
+        let system = self.resolver.system_region()?;
+        let organization_id =
+            SlugResolver::new(system.applied_state).extract_and_resolve(organization)?;
+        let region = self.resolver.resolve(organization_id)?;
+        let vault_id =
+            SlugResolver::new(region.applied_state.clone()).extract_and_resolve_vault(vault)?;
+        Ok((organization_id, vault_id, region))
+    }
+
+    /// Checks if this node is the current Raft leader for the given region context.
+    fn is_leader_for(ctx: &RegionContext) -> bool {
+        let metrics = ctx.raft.metrics().borrow().clone();
+        metrics.current_leader == Some(metrics.id)
     }
 
     /// Checks if this follower is too far behind the leader and should forward reads.
@@ -111,12 +122,9 @@ impl ReadServiceImpl {
     /// Returns `Err(Status)` if forwarding is needed but no leader is available.
     fn should_forward_to_leader(
         &self,
-    ) -> Result<Option<super::forward_client::ForwardClient>, Status> {
-        let raft = match &self.raft {
-            Some(r) => r,
-            None => return Ok(None),
-        };
-        let metrics = raft.metrics().borrow().clone();
+        ctx: &RegionContext,
+    ) -> Result<Option<ForwardClient>, Status> {
+        let metrics = ctx.raft.metrics().borrow().clone();
 
         // Leader always serves locally
         if metrics.current_leader == Some(metrics.id) {
@@ -150,39 +158,52 @@ impl ReadServiceImpl {
     ///
     /// Returns Ok(()) if the request can proceed, or an error if consistency
     /// requirements cannot be met.
-    fn check_consistency(&self, consistency: i32) -> Result<(), Status> {
+    fn check_consistency(ctx: &RegionContext, consistency: i32) -> Result<(), Status> {
         let consistency =
             ReadConsistency::try_from(consistency).unwrap_or(ReadConsistency::Unspecified);
 
         match consistency {
             ReadConsistency::Linearizable => {
-                // Linearizable reads require this node to be the leader
-                if self.raft.is_none() {
-                    // No Raft configured - cannot guarantee linearizability
-                    return Err(Status::unavailable(
-                        "Linearizable reads not available: Raft not configured",
-                    ));
-                }
-                if !self.is_leader() {
+                if !Self::is_leader_for(ctx) {
                     return Err(Status::failed_precondition(
                         "Linearizable reads require leader; this node is not the leader",
                     ));
                 }
                 Ok(())
             },
-            ReadConsistency::Eventual | ReadConsistency::Unspecified => {
-                // Eventual reads can be served by any node
-                Ok(())
-            },
+            ReadConsistency::Eventual | ReadConsistency::Unspecified => Ok(()),
         }
+    }
+
+    /// Returns a forward client for a remote region.
+    async fn get_forward_client(&self, remote: &RemoteRegionInfo) -> Result<ForwardClient, Status> {
+        let manager = self.manager.as_ref().ok_or_else(|| {
+            Status::unavailable("Request forwarding not configured for this service")
+        })?;
+
+        let router =
+            manager.router().ok_or_else(|| Status::unavailable("Region router not initialized"))?;
+
+        let connection = router
+            .get_connection(
+                remote.region,
+                &remote.routing.member_nodes,
+                remote.routing.leader_hint.as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                Status::unavailable(format!("Failed to connect to remote region: {}", e))
+            })?;
+
+        Ok(ForwardClient::new(connection))
     }
 
     /// Fetches block header from archive for a given vault height.
     ///
     /// Returns None if the block is not found or archive is not available.
     fn get_block_header(
-        &self,
         archive: &BlockArchive<FileBackend>,
+        applied_state: &AppliedStateAccessor,
         organization: OrganizationId,
         vault: VaultId,
         vault_height: u64,
@@ -209,16 +230,12 @@ impl ReadServiceImpl {
         Some(inferadb_ledger_proto::proto::BlockHeader {
             height: entry.vault_height,
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: self
-                    .applied_state
+                slug: applied_state
                     .resolve_id_to_slug(entry.organization)
                     .map_or(entry.organization.value() as u64, |s| s.value()),
             }),
             vault: Some(inferadb_ledger_proto::proto::VaultSlug {
-                slug: self
-                    .applied_state
-                    .resolve_vault_id_to_slug(entry.vault)
-                    .map_or(0, |s| s.value()),
+                slug: applied_state.resolve_vault_id_to_slug(entry.vault).map_or(0, |s| s.value()),
             }),
             previous_hash: Some(inferadb_ledger_proto::proto::Hash {
                 value: entry.previous_vault_hash.to_vec(),
@@ -246,7 +263,6 @@ impl ReadServiceImpl {
     ///
     /// Returns (block_hash, state_root) or (None, None) if not found.
     fn get_tip_hashes(
-        &self,
         archive: &BlockArchive<FileBackend>,
         organization: OrganizationId,
         vault: VaultId,
@@ -372,8 +388,8 @@ impl ReadServiceImpl {
     /// - trusted_height >= response_height (nothing to prove)
     /// - Any block in the range is not found
     fn build_chain_proof(
-        &self,
         archive: &BlockArchive<FileBackend>,
+        applied_state: &AppliedStateAccessor,
         organization: OrganizationId,
         vault: VaultId,
         trusted_height: u64,
@@ -388,7 +404,8 @@ impl ReadServiceImpl {
         let mut headers = Vec::with_capacity((response_height - trusted_height) as usize);
 
         for height in (trusted_height + 1)..=response_height {
-            let header = self.get_block_header(archive, organization, vault, height)?;
+            let header =
+                Self::get_block_header(archive, applied_state, organization, vault, height)?;
             headers.push(header);
         }
 
@@ -399,21 +416,14 @@ impl ReadServiceImpl {
     ///
     /// Used by watch_blocks to replay committed blocks before streaming new ones.
     fn fetch_historical_announcements(
-        &self,
+        archive: &BlockArchive<FileBackend>,
+        applied_state: &AppliedStateAccessor,
         organization: OrganizationId,
         vault: VaultId,
         start_height: u64,
         end_height: u64,
     ) -> Vec<BlockAnnouncement> {
         use prost_types::Timestamp;
-
-        let archive = match &self.block_archive {
-            Some(a) => a,
-            None => {
-                debug!("No block archive configured; cannot replay historical blocks");
-                return vec![];
-            },
-        };
 
         let mut announcements = Vec::with_capacity((end_height - start_height + 1) as usize);
 
@@ -449,14 +459,12 @@ impl ReadServiceImpl {
 
                 announcements.push(BlockAnnouncement {
                     organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                        slug: self
-                            .applied_state
+                        slug: applied_state
                             .resolve_id_to_slug(entry.organization)
                             .map_or(entry.organization.value() as u64, |s| s.value()),
                     }),
                     vault: Some(inferadb_ledger_proto::proto::VaultSlug {
-                        slug: self
-                            .applied_state
+                        slug: applied_state
                             .resolve_vault_id_to_slug(entry.vault)
                             .map_or(0, |s| s.value()),
                     }),
@@ -490,8 +498,37 @@ impl ReadService for ReadServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
+        // Cross-region forwarding: if the organization lives on a remote region,
+        // forward the entire RPC rather than returning UNAVAILABLE.
+        if self.resolver.supports_forwarding() {
+            let system = self.resolver.system_region()?;
+            let organization_id =
+                SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+            if let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+            {
+                let source_region =
+                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
+                let forward_start = std::time::Instant::now();
+                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let mut client = self.get_forward_client(&remote).await?;
+                let result = client.forward_read(req, Some(&trace_ctx), deadline).await;
+                metrics::record_cross_region_forward(
+                    "read",
+                    source_region,
+                    remote.region.as_str(),
+                    forward_start.elapsed().as_secs_f64(),
+                );
+                return result;
+            }
+        }
+
+        // Resolve region first for region-aware forwarding and consistency checks
+        let (organization_id, vault_id, region) =
+            self.resolve_org_vault(&req.organization, &req.vault)?;
+
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader()? {
+        if let Some(mut client) = self.should_forward_to_leader(&region)? {
             let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("read");
             return client.forward_read(req, Some(&trace_ctx), deadline).await;
@@ -527,26 +564,17 @@ impl ReadService for ReadServiceImpl {
         ctx.set_consistency(consistency);
         ctx.set_include_proof(false);
 
-        // Check consistency requirements first
-        if let Err(e) = self.check_consistency(req.consistency) {
+        // Check consistency requirements
+        if let Err(e) = Self::check_consistency(&region, req.consistency) {
             ctx.set_error("consistency_error", e.message());
             return Err(e);
         }
-
-        // Extract IDs
-        let organization_id = match req.organization.as_ref() {
-            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
-                .resolve(OrganizationSlug::new(n.slug))?,
-            _ => OrganizationId::new(0),
-        };
-        let vault_id =
-            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let organization = req.organization.as_ref().map_or(0, |n| n.slug);
         let vault = req.vault.as_ref().map_or(0, |v| v.slug);
         ctx.set_target(organization, vault);
 
         // Check vault health - diverged vaults cannot be read
-        let health = self.applied_state.vault_health(organization_id, vault_id);
+        let health = region.applied_state.vault_health(organization_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
             let msg = format!(
                 "Vault {}:{} has diverged at height {}",
@@ -560,7 +588,7 @@ impl ReadService for ReadServiceImpl {
         ctx.start_storage_timer();
 
         // Read from state layer
-        let state = &*self.state;
+        let state = &*region.state;
         let entity = match state.get_entity(vault_id, req.key.as_bytes()) {
             Ok(e) => e,
             Err(e) => {
@@ -594,7 +622,7 @@ impl ReadService for ReadServiceImpl {
         ctx.set_success();
 
         // Get current block height for this vault
-        let block_height = self.applied_state.vault_height(organization_id, vault_id);
+        let block_height = region.applied_state.vault_height(organization_id, vault_id);
         ctx.set_block_height(block_height);
 
         Ok(Response::new(ReadResponse { value: entity.map(|e| e.value), block_height }))
@@ -615,8 +643,36 @@ impl ReadService for ReadServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
+        // Cross-region forwarding
+        if self.resolver.supports_forwarding() {
+            let system = self.resolver.system_region()?;
+            let organization_id =
+                SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+            if let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+            {
+                let source_region =
+                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
+                let forward_start = std::time::Instant::now();
+                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let mut client = self.get_forward_client(&remote).await?;
+                let result = client.forward_batch_read(req, Some(&trace_ctx), deadline).await;
+                metrics::record_cross_region_forward(
+                    "batch_read",
+                    source_region,
+                    remote.region.as_str(),
+                    forward_start.elapsed().as_secs_f64(),
+                );
+                return result;
+            }
+        }
+
+        // Resolve region first for region-aware forwarding and consistency checks
+        let (organization_id, vault_id, region) =
+            self.resolve_org_vault(&req.organization, &req.vault)?;
+
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader()? {
+        if let Some(mut client) = self.should_forward_to_leader(&region)? {
             let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("batch_read");
             return client.forward_batch_read(req, Some(&trace_ctx), deadline).await;
@@ -653,7 +709,7 @@ impl ReadService for ReadServiceImpl {
         ctx.set_include_proof(false);
 
         // Check consistency requirements
-        if let Err(e) = self.check_consistency(req.consistency) {
+        if let Err(e) = Self::check_consistency(&region, req.consistency) {
             ctx.set_error("consistency_error", e.message());
             return Err(e);
         }
@@ -665,21 +721,12 @@ impl ReadService for ReadServiceImpl {
             ctx.set_error("batch_too_large", &msg);
             return Err(Status::invalid_argument(msg));
         }
-
-        // Extract IDs
-        let organization_id = match req.organization.as_ref() {
-            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
-                .resolve(OrganizationSlug::new(n.slug))?,
-            _ => OrganizationId::new(0),
-        };
-        let vault_id =
-            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let organization = req.organization.as_ref().map_or(0, |n| n.slug);
         let vault = req.vault.as_ref().map_or(0, |v| v.slug);
         ctx.set_target(organization, vault);
 
         // Check vault health - diverged vaults cannot be read
-        let health = self.applied_state.vault_health(organization_id, vault_id);
+        let health = region.applied_state.vault_health(organization_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
             let msg = format!(
                 "Vault {}:{} has diverged at height {}",
@@ -699,7 +746,7 @@ impl ReadService for ReadServiceImpl {
             .unwrap_or(0);
 
         // Read all keys from state layer
-        let state = &*self.state;
+        let state = &*region.state;
         let mut results = Vec::with_capacity(req.keys.len());
         let mut found_count = 0usize;
 
@@ -747,7 +794,7 @@ impl ReadService for ReadServiceImpl {
         ctx.set_success();
 
         // Get current block height for this vault
-        let block_height = self.applied_state.vault_height(organization_id, vault_id);
+        let block_height = region.applied_state.vault_height(organization_id, vault_id);
         ctx.set_block_height(block_height);
 
         Ok(Response::new(BatchReadResponse { results, block_height }))
@@ -765,8 +812,36 @@ impl ReadService for ReadServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
+        // Cross-region forwarding
+        if self.resolver.supports_forwarding() {
+            let system = self.resolver.system_region()?;
+            let organization_id =
+                SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+            if let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+            {
+                let source_region =
+                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
+                let forward_start = std::time::Instant::now();
+                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let mut client = self.get_forward_client(&remote).await?;
+                let result = client.forward_verified_read(req, Some(&trace_ctx), deadline).await;
+                metrics::record_cross_region_forward(
+                    "verified_read",
+                    source_region,
+                    remote.region.as_str(),
+                    forward_start.elapsed().as_secs_f64(),
+                );
+                return result;
+            }
+        }
+
+        // Resolve region first for region-aware forwarding
+        let (organization_id, vault_id, region) =
+            self.resolve_org_vault(&req.organization, &req.vault)?;
+
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader()? {
+        if let Some(mut client) = self.should_forward_to_leader(&region)? {
             let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("verified_read");
             return client.forward_verified_read(req, Some(&trace_ctx), deadline).await;
@@ -795,21 +870,12 @@ impl ReadService for ReadServiceImpl {
         ctx.set_key(&req.key);
         ctx.set_include_proof(true);
         ctx.set_consistency("linearizable"); // verified reads are always linearizable
-
-        // Extract IDs
-        let organization_id = match req.organization.as_ref() {
-            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
-                .resolve(OrganizationSlug::new(n.slug))?,
-            _ => OrganizationId::new(0),
-        };
-        let vault_id =
-            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let organization = req.organization.as_ref().map_or(0, |n| n.slug);
         let vault = req.vault.as_ref().map_or(0, |v| v.slug);
         ctx.set_target(organization, vault);
 
         // Check vault health - diverged vaults cannot be read
-        let health = self.applied_state.vault_health(organization_id, vault_id);
+        let health = region.applied_state.vault_health(organization_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
             let msg = format!(
                 "Vault {}:{} has diverged at height {}",
@@ -824,7 +890,7 @@ impl ReadService for ReadServiceImpl {
         ctx.start_storage_timer();
 
         // Read from state layer
-        let state = &*self.state;
+        let state = &*region.state;
         let entity = match state.get_entity(vault_id, req.key.as_bytes()) {
             Ok(e) => e,
             Err(e) => {
@@ -845,15 +911,17 @@ impl ReadService for ReadServiceImpl {
         ctx.set_bytes_read(value_size);
 
         // Get current block height for this vault
-        let block_height = self.applied_state.vault_height(organization_id, vault_id);
+        let block_height = region.applied_state.vault_height(organization_id, vault_id);
         ctx.set_block_height(block_height);
 
-        // Fetch block header from archive if available
-        let block_header = if let Some(archive) = &self.block_archive {
-            self.get_block_header(archive, organization_id, vault_id, block_height)
-        } else {
-            None
-        };
+        // Fetch block header from archive
+        let block_header = Self::get_block_header(
+            &region.block_archive,
+            &region.applied_state,
+            organization_id,
+            vault_id,
+            block_height,
+        );
 
         // Note: State verification uses bucket-based hashing (not sparse Merkle tree),
         // so we can't generate individual key inclusion proofs. The state_root in the
@@ -864,18 +932,15 @@ impl ReadService for ReadServiceImpl {
 
         // Build chain proof if requested
         let chain_proof = if req.include_chain_proof {
-            if let Some(archive) = &self.block_archive {
-                let trusted_height = req.trusted_height.unwrap_or(0);
-                self.build_chain_proof(
-                    archive,
-                    organization_id,
-                    vault_id,
-                    trusted_height,
-                    block_height,
-                )
-            } else {
-                None
-            }
+            let trusted_height = req.trusted_height.unwrap_or(0);
+            Self::build_chain_proof(
+                &region.block_archive,
+                &region.applied_state,
+                organization_id,
+                vault_id,
+                trusted_height,
+                block_height,
+            )
         } else {
             None
         };
@@ -909,8 +974,36 @@ impl ReadService for ReadServiceImpl {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
+        // Cross-region forwarding
+        if self.resolver.supports_forwarding() {
+            let system = self.resolver.system_region()?;
+            let organization_id =
+                SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+            if let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+            {
+                let source_region =
+                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
+                let forward_start = std::time::Instant::now();
+                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let mut client = self.get_forward_client(&remote).await?;
+                let result = client.forward_historical_read(req, Some(&trace_ctx), deadline).await;
+                metrics::record_cross_region_forward(
+                    "historical_read",
+                    source_region,
+                    remote.region.as_str(),
+                    forward_start.elapsed().as_secs_f64(),
+                );
+                return result;
+            }
+        }
+
+        // Resolve region first for region-aware forwarding
+        let (organization_id, vault_id, region) =
+            self.resolve_org_vault(&req.organization, &req.vault)?;
+
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader()? {
+        if let Some(mut client) = self.should_forward_to_leader(&region)? {
             let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("historical_read");
             return client.forward_historical_read(req, Some(&trace_ctx), deadline).await;
@@ -946,32 +1039,15 @@ impl ReadService for ReadServiceImpl {
             ctx.set_error("invalid_argument", "at_height is required for historical reads");
             return Err(Status::invalid_argument("at_height is required for historical reads"));
         }
-
-        // Extract IDs
-        let organization_id = match req.organization.as_ref() {
-            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
-                .resolve(OrganizationSlug::new(n.slug))?,
-            _ => OrganizationId::new(0),
-        };
-        let vault_id =
-            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
         let organization = req.organization.as_ref().map_or(0, |n| n.slug);
         let vault = req.vault.as_ref().map_or(0, |v| v.slug);
         ctx.set_target(organization, vault);
 
-        // Get block archive - required for historical reads
-        let archive = match &self.block_archive {
-            Some(a) => a,
-            None => {
-                ctx.set_error("unavailable", "Block archive not configured for historical reads");
-                return Err(Status::unavailable(
-                    "Block archive not configured for historical reads",
-                ));
-            },
-        };
+        // Get block archive for historical reads
+        let archive = &region.block_archive;
 
         // Check that requested height doesn't exceed current tip
-        let tip_height = self.applied_state.vault_height(organization_id, vault_id);
+        let tip_height = region.applied_state.vault_height(organization_id, vault_id);
         if req.at_height > tip_height {
             let msg =
                 format!("Requested height {} exceeds current tip {}", req.at_height, tip_height);
@@ -1078,7 +1154,13 @@ impl ReadService for ReadServiceImpl {
 
         // Get block header for proof (if include_proof is set)
         let block_header = if req.include_proof {
-            self.get_block_header(archive, organization_id, vault_id, req.at_height)
+            Self::get_block_header(
+                archive,
+                &region.applied_state,
+                organization_id,
+                vault_id,
+                req.at_height,
+            )
         } else {
             None
         };
@@ -1086,8 +1168,9 @@ impl ReadService for ReadServiceImpl {
         // Build chain proof if requested (requires include_proof to be useful)
         let chain_proof = if req.include_chain_proof && req.include_proof {
             let trusted_height = req.trusted_height.unwrap_or(0);
-            self.build_chain_proof(
+            Self::build_chain_proof(
                 archive,
+                &region.applied_state,
                 organization_id,
                 vault_id,
                 trusted_height,
@@ -1127,25 +1210,45 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<WatchBlocksRequest>,
     ) -> Result<Response<Self::WatchBlocksStream>, Status> {
-        // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader()? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
-            let req = request.into_inner();
-            metrics::record_read_forward("watch_blocks");
-            let resp = client.forward_watch_blocks(req, None, deadline).await?;
-            return Ok(Response::new(Box::pin(resp.into_inner()) as Self::WatchBlocksStream));
-        }
-
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Extract identifiers
-        let organization_id = match req.organization.as_ref() {
-            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
-                .resolve(OrganizationSlug::new(n.slug))?,
-            _ => OrganizationId::new(0),
-        };
-        let vault_id =
-            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
+        // Cross-region forwarding
+        if self.resolver.supports_forwarding() {
+            let system = self.resolver.system_region()?;
+            let organization_id =
+                SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+            if let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+            {
+                let source_region =
+                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
+                let forward_start = std::time::Instant::now();
+                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let mut client = self.get_forward_client(&remote).await?;
+                let resp = client.forward_watch_blocks(req, Some(&trace_ctx), deadline).await?;
+                metrics::record_cross_region_forward(
+                    "watch_blocks",
+                    source_region,
+                    remote.region.as_str(),
+                    forward_start.elapsed().as_secs_f64(),
+                );
+                return Ok(Response::new(Box::pin(resp.into_inner()) as Self::WatchBlocksStream));
+            }
+        }
+
+        // Resolve region first for region-aware forwarding
+        let (organization_id, vault_id, region) =
+            self.resolve_org_vault(&req.organization, &req.vault)?;
+
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            metrics::record_read_forward("watch_blocks");
+            let resp = client.forward_watch_blocks(req, Some(&trace_ctx), deadline).await?;
+            return Ok(Response::new(Box::pin(resp.into_inner()) as Self::WatchBlocksStream));
+        }
         let start_height = req.start_height;
 
         // Validate start_height >= 1
@@ -1156,15 +1259,20 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Get current tip for this vault
-        let current_tip = self.applied_state.vault_height(organization_id, vault_id);
+        let current_tip = region.applied_state.vault_height(organization_id, vault_id);
 
         // Subscribe to broadcast BEFORE reading historical blocks
         // This ensures we don't miss any blocks committed between reading history and subscribing
-        let receiver = self.block_announcements.subscribe();
+        let announcements = region.block_announcements.as_ref().ok_or_else(|| {
+            Status::unavailable("Block announcements not available for this region")
+        })?;
+        let receiver = announcements.subscribe();
 
         // Build historical blocks stream if start_height <= current_tip
         let historical_blocks: Vec<BlockAnnouncement> = if start_height <= current_tip {
-            self.fetch_historical_announcements(
+            Self::fetch_historical_announcements(
+                &region.block_archive,
+                &region.applied_state,
                 organization_id,
                 vault_id,
                 start_height,
@@ -1240,29 +1348,46 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<GetBlockRequest>,
     ) -> Result<Response<GetBlockResponse>, Status> {
-        // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader()? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
-            let req = request.into_inner();
-            metrics::record_read_forward("get_block");
-            return client.forward_get_block(req, None, deadline).await;
-        }
-
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Get block archive, return empty if not configured
-        let archive = match &self.block_archive {
-            Some(a) => a,
-            None => return Ok(Response::new(GetBlockResponse { block: None })),
-        };
+        // Cross-region forwarding
+        if self.resolver.supports_forwarding() {
+            let system = self.resolver.system_region()?;
+            let organization_id =
+                SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+            if let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+            {
+                let source_region =
+                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
+                let forward_start = std::time::Instant::now();
+                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let mut client = self.get_forward_client(&remote).await?;
+                let result = client.forward_get_block(req, Some(&trace_ctx), deadline).await;
+                metrics::record_cross_region_forward(
+                    "get_block",
+                    source_region,
+                    remote.region.as_str(),
+                    forward_start.elapsed().as_secs_f64(),
+                );
+                return result;
+            }
+        }
 
-        let organization_id = match req.organization.as_ref() {
-            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
-                .resolve(OrganizationSlug::new(n.slug))?,
-            _ => OrganizationId::new(0),
-        };
-        let vault_id =
-            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
+        // Resolve region first for region-aware forwarding
+        let (organization_id, vault_id, region) =
+            self.resolve_org_vault(&req.organization, &req.vault)?;
+
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            metrics::record_read_forward("get_block");
+            return client.forward_get_block(req, Some(&trace_ctx), deadline).await;
+        }
+
+        let archive = &region.block_archive;
         let height = req.height;
 
         // Find the region height containing this vault block
@@ -1286,7 +1411,7 @@ impl ReadService for ReadServiceImpl {
         });
 
         let vault =
-            self.applied_state.resolve_vault_id_to_slug(vault_id).unwrap_or(VaultSlug::new(0));
+            region.applied_state.resolve_vault_id_to_slug(vault_id).unwrap_or(VaultSlug::new(0));
         let block =
             vault_entry.map(|entry| vault_entry_to_proto_block(entry, &region_block, vault));
 
@@ -1300,31 +1425,46 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<GetBlockRangeRequest>,
     ) -> Result<Response<GetBlockRangeResponse>, Status> {
-        // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader()? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
-            let req = request.into_inner();
-            metrics::record_read_forward("get_block_range");
-            return client.forward_get_block_range(req, None, deadline).await;
-        }
-
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Get block archive, return empty if not configured
-        let archive = match &self.block_archive {
-            Some(a) => a,
-            None => {
-                return Ok(Response::new(GetBlockRangeResponse { blocks: vec![], current_tip: 0 }));
-            },
-        };
+        // Cross-region forwarding
+        if self.resolver.supports_forwarding() {
+            let system = self.resolver.system_region()?;
+            let organization_id =
+                SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+            if let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+            {
+                let source_region =
+                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
+                let forward_start = std::time::Instant::now();
+                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let mut client = self.get_forward_client(&remote).await?;
+                let result = client.forward_get_block_range(req, Some(&trace_ctx), deadline).await;
+                metrics::record_cross_region_forward(
+                    "get_block_range",
+                    source_region,
+                    remote.region.as_str(),
+                    forward_start.elapsed().as_secs_f64(),
+                );
+                return result;
+            }
+        }
 
-        let organization_id = match req.organization.as_ref() {
-            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
-                .resolve(OrganizationSlug::new(n.slug))?,
-            _ => OrganizationId::new(0),
-        };
-        let vault_id =
-            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
+        // Resolve region first for region-aware forwarding
+        let (organization_id, vault_id, region) =
+            self.resolve_org_vault(&req.organization, &req.vault)?;
+
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            metrics::record_read_forward("get_block_range");
+            return client.forward_get_block_range(req, Some(&trace_ctx), deadline).await;
+        }
+
+        let archive = &region.block_archive;
         let start_height = req.start_height;
         let end_height = req.end_height;
 
@@ -1354,7 +1494,7 @@ impl ReadService for ReadServiceImpl {
             if let Some(entry) = region_block.vault_entries.iter().find(|e| {
                 e.organization == organization_id && e.vault == vault_id && e.vault_height == height
             }) {
-                let vault = self
+                let vault = region
                     .applied_state
                     .resolve_vault_id_to_slug(vault_id)
                     .unwrap_or(VaultSlug::new(0));
@@ -1363,7 +1503,7 @@ impl ReadService for ReadServiceImpl {
         }
 
         // Get current tip for this vault
-        let current_tip = self.applied_state.vault_height(organization_id, vault_id);
+        let current_tip = region.applied_state.vault_height(organization_id, vault_id);
 
         Ok(Response::new(GetBlockRangeResponse { blocks, current_tip }))
     }
@@ -1375,31 +1515,52 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<GetTipRequest>,
     ) -> Result<Response<GetTipResponse>, Status> {
-        // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader()? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
-            let req = request.into_inner();
-            metrics::record_read_forward("get_tip");
-            return client.forward_get_tip(req, None, deadline).await;
-        }
-
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Get the vault specified in the request, or return the global max height
-        let organization_id = match req.organization.as_ref() {
-            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
-                .resolve(OrganizationSlug::new(n.slug))?,
-            _ => OrganizationId::new(0),
-        };
-        let vault_id =
-            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
+        // Cross-region forwarding
+        if self.resolver.supports_forwarding() {
+            let system = self.resolver.system_region()?;
+            let organization_id =
+                SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+            if let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+            {
+                let source_region =
+                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
+                let forward_start = std::time::Instant::now();
+                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let mut client = self.get_forward_client(&remote).await?;
+                let result = client.forward_get_tip(req, Some(&trace_ctx), deadline).await;
+                metrics::record_cross_region_forward(
+                    "get_tip",
+                    source_region,
+                    remote.region.as_str(),
+                    forward_start.elapsed().as_secs_f64(),
+                );
+                return result;
+            }
+        }
+
+        // Resolve region first for region-aware forwarding
+        let (organization_id, vault_id, region) =
+            self.resolve_org_vault(&req.organization, &req.vault)?;
+
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            metrics::record_read_forward("get_tip");
+            return client.forward_get_tip(req, Some(&trace_ctx), deadline).await;
+        }
 
         let height = if vault_id.value() != 0 {
             // Specific vault requested
-            self.applied_state.vault_height(organization_id, vault_id)
+            region.applied_state.vault_height(organization_id, vault_id)
         } else if organization_id.value() != 0 {
             // Organization requested - return max height across all vaults in organization
-            self.applied_state
+            region
+                .applied_state
                 .all_vault_heights()
                 .iter()
                 .filter(|((ns, _), _)| *ns == organization_id)
@@ -1408,14 +1569,12 @@ impl ReadService for ReadServiceImpl {
                 .unwrap_or(0)
         } else {
             // No filter - return max height across all vaults
-            self.applied_state.all_vault_heights().values().copied().max().unwrap_or(0)
+            region.applied_state.all_vault_heights().values().copied().max().unwrap_or(0)
         };
 
-        // Get block_hash and state_root from archive if available and a specific vault is requested
-        let (block_hash, state_root) = if let (Some(archive), true) =
-            (&self.block_archive, vault_id.value() != 0 && height > 0)
-        {
-            self.get_tip_hashes(archive, organization_id, vault_id, height)
+        // Get block_hash and state_root from archive
+        let (block_hash, state_root) = if vault_id.value() != 0 && height > 0 {
+            Self::get_tip_hashes(&region.block_archive, organization_id, vault_id, height)
         } else {
             (None, None)
         };
@@ -1430,31 +1589,51 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<GetClientStateRequest>,
     ) -> Result<Response<GetClientStateResponse>, Status> {
-        // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader()? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
-            let req = request.into_inner();
-            metrics::record_read_forward("get_client_state");
-            return client.forward_get_client_state(req, None, deadline).await;
-        }
-
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Extract IDs
-        let organization_id = match req.organization.as_ref() {
-            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
-                .resolve(OrganizationSlug::new(n.slug))?,
-            _ => OrganizationId::new(0),
-        };
-        let vault_id =
-            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
+        // Cross-region forwarding
+        if self.resolver.supports_forwarding() {
+            let system = self.resolver.system_region()?;
+            let organization_id =
+                SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+            if let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+            {
+                let source_region =
+                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
+                let forward_start = std::time::Instant::now();
+                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let mut client = self.get_forward_client(&remote).await?;
+                let result = client.forward_get_client_state(req, Some(&trace_ctx), deadline).await;
+                metrics::record_cross_region_forward(
+                    "get_client_state",
+                    source_region,
+                    remote.region.as_str(),
+                    forward_start.elapsed().as_secs_f64(),
+                );
+                return result;
+            }
+        }
+
+        // Resolve region first for region-aware forwarding
+        let (organization_id, vault_id, region) =
+            self.resolve_org_vault(&req.organization, &req.vault)?;
+
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            metrics::record_read_forward("get_client_state");
+            return client.forward_get_client_state(req, Some(&trace_ctx), deadline).await;
+        }
         let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or("");
 
         // Server-assigned sequences: Query the persistent AppliedState directly
         // The idempotency cache no longer tracks sequence numbers by sequence;
         // it uses idempotency keys instead.
         let last_committed_sequence =
-            self.applied_state.client_sequence(organization_id, vault_id, client_id);
+            region.applied_state.client_sequence(organization_id, vault_id, client_id);
 
         Ok(Response::new(GetClientStateResponse { last_committed_sequence }))
     }
@@ -1467,26 +1646,48 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<ListRelationshipsRequest>,
     ) -> Result<Response<ListRelationshipsResponse>, Status> {
-        // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader()? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
-            let req = request.into_inner();
-            metrics::record_read_forward("list_relationships");
-            return client.forward_list_relationships(req, None, deadline).await;
-        }
-
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Check consistency requirements first
-        self.check_consistency(req.consistency)?;
+        // Cross-region forwarding
+        if self.resolver.supports_forwarding() {
+            let system = self.resolver.system_region()?;
+            let organization_id =
+                SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+            if let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+            {
+                let source_region =
+                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
+                let forward_start = std::time::Instant::now();
+                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let mut client = self.get_forward_client(&remote).await?;
+                let result =
+                    client.forward_list_relationships(req, Some(&trace_ctx), deadline).await;
+                metrics::record_cross_region_forward(
+                    "list_relationships",
+                    source_region,
+                    remote.region.as_str(),
+                    forward_start.elapsed().as_secs_f64(),
+                );
+                return result;
+            }
+        }
 
-        let organization_id = match req.organization.as_ref() {
-            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
-                .resolve(OrganizationSlug::new(n.slug))?,
-            _ => OrganizationId::new(0),
-        };
-        let vault_id =
-            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
+        // Resolve region first for region-aware forwarding and consistency checks
+        let (organization_id, vault_id, region) =
+            self.resolve_org_vault(&req.organization, &req.vault)?;
+
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            metrics::record_read_forward("list_relationships");
+            return client.forward_list_relationships(req, Some(&trace_ctx), deadline).await;
+        }
+
+        // Check consistency requirements
+        Self::check_consistency(&region, req.consistency)?;
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         // Compute query hash from all filter parameters for token validation
@@ -1499,7 +1700,7 @@ impl ReadService for ReadServiceImpl {
         let query_hash = PageTokenCodec::compute_query_hash(query_params.as_bytes());
 
         // Get current block height for consistent pagination
-        let block_height = self.applied_state.vault_height(organization_id, vault_id);
+        let block_height = region.applied_state.vault_height(organization_id, vault_id);
 
         // Decode and validate page token if provided
         let (resume_key, at_height) = if req.page_token.is_empty() {
@@ -1518,7 +1719,7 @@ impl ReadService for ReadServiceImpl {
             (Some(String::from_utf8_lossy(&token.last_key).to_string()), token.at_height)
         };
 
-        let state = &*self.state;
+        let state = &*region.state;
 
         // Determine which method to use based on filters
         let relationships: Vec<inferadb_ledger_proto::proto::Relationship> =
@@ -1601,26 +1802,47 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<ListResourcesRequest>,
     ) -> Result<Response<ListResourcesResponse>, Status> {
-        // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader()? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
-            let req = request.into_inner();
-            metrics::record_read_forward("list_resources");
-            return client.forward_list_resources(req, None, deadline).await;
-        }
-
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Check consistency requirements first
-        self.check_consistency(req.consistency)?;
+        // Cross-region forwarding
+        if self.resolver.supports_forwarding() {
+            let system = self.resolver.system_region()?;
+            let organization_id =
+                SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+            if let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+            {
+                let source_region =
+                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
+                let forward_start = std::time::Instant::now();
+                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let mut client = self.get_forward_client(&remote).await?;
+                let result = client.forward_list_resources(req, Some(&trace_ctx), deadline).await;
+                metrics::record_cross_region_forward(
+                    "list_resources",
+                    source_region,
+                    remote.region.as_str(),
+                    forward_start.elapsed().as_secs_f64(),
+                );
+                return result;
+            }
+        }
 
-        let organization_id = match req.organization.as_ref() {
-            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
-                .resolve(OrganizationSlug::new(n.slug))?,
-            _ => OrganizationId::new(0),
-        };
-        let vault_id =
-            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
+        // Resolve region first for region-aware forwarding and consistency checks
+        let (organization_id, vault_id, region) =
+            self.resolve_org_vault(&req.organization, &req.vault)?;
+
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            metrics::record_read_forward("list_resources");
+            return client.forward_list_resources(req, Some(&trace_ctx), deadline).await;
+        }
+
+        // Check consistency requirements
+        Self::check_consistency(&region, req.consistency)?;
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         // Compute query hash from filter parameters for token validation
@@ -1628,7 +1850,7 @@ impl ReadService for ReadServiceImpl {
         let query_hash = PageTokenCodec::compute_query_hash(query_params.as_bytes());
 
         // Get current block height for consistent pagination
-        let block_height = self.applied_state.vault_height(organization_id, vault_id);
+        let block_height = region.applied_state.vault_height(organization_id, vault_id);
 
         // Decode and validate page token if provided
         let (resume_key, at_height) = if req.page_token.is_empty() {
@@ -1648,7 +1870,7 @@ impl ReadService for ReadServiceImpl {
         };
 
         // List relationships and extract unique resources matching the type prefix
-        let state = &*self.state;
+        let state = &*region.state;
         let relationships = state
             .list_relationships(vault_id, resume_key.as_deref(), limit * 10) // Over-fetch to filter
             .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
@@ -1695,30 +1917,50 @@ impl ReadService for ReadServiceImpl {
         &self,
         request: Request<ListEntitiesRequest>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
-        // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader()? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(request.metadata());
-            let req = request.into_inner();
-            metrics::record_read_forward("list_entities");
-            return client.forward_list_entities(req, None, deadline).await;
-        }
-
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Check consistency requirements first
-        self.check_consistency(req.consistency)?;
+        // Cross-region forwarding
+        if self.resolver.supports_forwarding() {
+            let system = self.resolver.system_region()?;
+            let organization_id =
+                SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
+            if let ResolveResult::Remote(remote) =
+                self.resolver.resolve_with_forward(organization_id)?
+            {
+                let source_region =
+                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
+                let forward_start = std::time::Instant::now();
+                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let mut client = self.get_forward_client(&remote).await?;
+                let result = client.forward_list_entities(req, Some(&trace_ctx), deadline).await;
+                metrics::record_cross_region_forward(
+                    "list_entities",
+                    source_region,
+                    remote.region.as_str(),
+                    forward_start.elapsed().as_secs_f64(),
+                );
+                return result;
+            }
+        }
 
-        let organization_id = match req.organization.as_ref() {
-            Some(n) if n.slug != 0 => SlugResolver::new(self.applied_state.clone())
-                .resolve(OrganizationSlug::new(n.slug))?,
-            _ => OrganizationId::new(0),
-        };
+        // Resolve region first for region-aware forwarding and consistency checks
+        let (organization_id, vault_id, region) =
+            self.resolve_org_vault(&req.organization, &req.vault)?;
+
+        // Forward to leader if this follower is lagging behind
+        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            metrics::record_read_forward("list_entities");
+            return client.forward_list_entities(req, Some(&trace_ctx), deadline).await;
+        }
+
+        // Check consistency requirements
+        Self::check_consistency(&region, req.consistency)?;
+
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
         let prefix = if req.key_prefix.is_empty() { None } else { Some(req.key_prefix.as_str()) };
-
-        // Use vault_id from request, defaulting to 0 for organization-level entities
-        let vault_id =
-            SlugResolver::new(self.applied_state.clone()).extract_and_resolve_vault(&req.vault)?;
 
         // Compute query hash from filter parameters for token validation
         // This prevents clients from changing filters mid-pagination
@@ -1731,10 +1973,11 @@ impl ReadService for ReadServiceImpl {
         // Get current block height for consistent pagination
         let block_height = if vault_id.value() != 0 {
             // Specific vault requested - use its height
-            self.applied_state.vault_height(organization_id, vault_id)
+            region.applied_state.vault_height(organization_id, vault_id)
         } else {
             // Organization-level entities - use max height across all vaults in organization
-            self.applied_state
+            region
+                .applied_state
                 .all_vault_heights()
                 .iter()
                 .filter(|((ns, _), _)| *ns == organization_id)
@@ -1761,7 +2004,7 @@ impl ReadService for ReadServiceImpl {
         };
 
         // Get entities from state layer
-        let state = &*self.state;
+        let state = &*region.state;
         let raw_entities = state
             .list_entities(vault_id, prefix, resume_key.as_deref(), limit + 1)
             .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;

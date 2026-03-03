@@ -45,7 +45,7 @@ Node B → Node A: WriteResponse
 Node A → Client: WriteResponse
 ```
 
-Pre-flight checks (validation, rate limiting, quota) execute on the originating node before forwarding. Vault slug resolution and idempotency deduplication happen on the destination leader. The `MultiRegionWriteService` uses `resolve_with_forward()` to determine whether to handle locally or forward.
+Pre-flight checks (validation, rate limiting, quota) execute on the originating node before forwarding. Vault slug resolution and idempotency deduplication happen on the destination leader. The `WriteServiceImpl` uses `resolve_with_forward()` to determine whether to handle locally or forward.
 
 ### Write Stages
 

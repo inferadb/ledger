@@ -3,7 +3,7 @@
 //! inferadb-ledger-store is a simplified B+ tree storage engine designed for InferaDB's
 //! specific requirements:
 //!
-//! - **Fixed schema**: 15 tables known at compile time
+//! - **Fixed schema**: 19 tables known at compile time
 //! - **Single writer**: Leverages Raft's serialization (no write-write MVCC needed)
 //! - **Raft-friendly**: Optimized for append-heavy Raft log access patterns
 //! - **Checksummed pages**: Crash safety with XXH3-64 verification

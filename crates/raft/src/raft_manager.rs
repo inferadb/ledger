@@ -1,4 +1,4 @@
-//! Multi-Raft Manager for coordinating multiple independent region groups.
+//! Raft Manager for coordinating multiple independent region groups.
 //!
 //! InferaDB uses a region-per-Raft-group architecture where
 //! each region is an independent Raft consensus group. The `_system` region handles
@@ -7,7 +7,7 @@
 //! ## Architecture
 //!
 //! ```text
-//! MultiRaftManager
+//! RaftManager
 //! ├── _system region (RegionGroup 0)
 //! │   ├── Raft instance
 //! │   ├── RaftLogStore + StateLayer
@@ -30,15 +30,15 @@
 //!
 //! ```no_run
 //! # use std::path::PathBuf;
-//! # use inferadb_ledger_raft::multi_raft::{MultiRaftConfig, MultiRaftManager, RegionConfig};
+//! # use inferadb_ledger_raft::raft_manager::{RaftManagerConfig, RaftManager, RegionConfig};
 //! # use inferadb_ledger_types::Region;
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let config = MultiRaftConfig::builder()
+//! let config = RaftManagerConfig::builder()
 //!     .data_dir(PathBuf::from("/data"))
 //!     .node_id(1u64)
 //!     .local_region(Region::GLOBAL)
 //!     .build();
-//! let manager = MultiRaftManager::new(config);
+//! let manager = RaftManager::new(config);
 //!
 //! // Start the _system region (always required)
 //! let system_config = RegionConfig::system(1u64, "127.0.0.1:50051".to_string());
@@ -67,9 +67,11 @@ use tracing::{debug, info, warn};
 
 use crate::{
     auto_recovery::AutoRecoveryJob,
+    batching::{BatchWriter, BatchWriterConfig, BatchWriterHandle},
     block_compaction::BlockCompactor,
     btree_compaction::BTreeCompactor,
     dek_rewrap::{DekRewrapJob, RewrapProgress},
+    event_writer::EventWriter,
     integrity_scrubber::IntegrityScrubberJob,
     log_storage::{AppliedStateAccessor, RaftLogStore},
     metrics::record_region_node_count,
@@ -77,7 +79,7 @@ use crate::{
     region_router::RegionRouter,
     region_storage::RegionStorageManager,
     ttl_gc::TtlGarbageCollector,
-    types::{LedgerNodeId, LedgerTypeConfig},
+    types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig, RaftPayload},
 };
 
 // ============================================================================
@@ -86,7 +88,7 @@ use crate::{
 
 /// Errors that can occur during multi-raft operations.
 #[derive(Debug, Snafu)]
-pub enum MultiRaftError {
+pub enum RaftManagerError {
     /// Region already exists.
     #[snafu(display("Region {region} already exists"))]
     RegionExists { region: Region },
@@ -122,7 +124,7 @@ pub enum MultiRaftError {
 }
 
 /// Result type for multi-raft operations.
-pub type Result<T> = std::result::Result<T, MultiRaftError>;
+pub type Result<T> = std::result::Result<T, RaftManagerError>;
 
 /// Storage components returned from region opening (state, block archive, raft log store,
 /// block announcements).
@@ -137,9 +139,9 @@ type OpenedRegionStorage = (
 // Configuration
 // ============================================================================
 
-/// Configuration for the Multi-Raft Manager.
+/// Configuration for the Raft Manager.
 #[derive(Debug, Clone, bon::Builder)]
-pub struct MultiRaftConfig {
+pub struct RaftManagerConfig {
     /// Base data directory (regions stored in subdirectories).
     pub data_dir: PathBuf,
     /// This node's ID.
@@ -160,18 +162,10 @@ pub struct MultiRaftConfig {
     pub trace_raft_rpcs: bool,
 }
 
-impl MultiRaftConfig {
-    /// Creates a new configuration.
+impl RaftManagerConfig {
+    /// Creates a new configuration with default timing parameters.
     pub fn new(data_dir: PathBuf, node_id: LedgerNodeId, local_region: Region) -> Self {
-        Self {
-            data_dir,
-            node_id,
-            local_region,
-            heartbeat_interval_ms: 150,
-            election_timeout_min_ms: 300,
-            election_timeout_max_ms: 600,
-            trace_raft_rpcs: true,
-        }
+        Self::builder().data_dir(data_dir).node_id(node_id).local_region(local_region).build()
     }
 }
 
@@ -189,22 +183,23 @@ pub struct RegionConfig {
     /// Whether to start background jobs (GC, compactor).
     #[builder(default = true)]
     pub enable_background_jobs: bool,
+    /// Batch writer configuration. When set, the region starts its own
+    /// batch writer and exposes a `BatchWriterHandle` on `RegionGroup`.
+    pub batch_writer_config: Option<BatchWriterConfig>,
+    /// Event writer for apply-phase audit event persistence.
+    /// When set, events are recorded into the region's `events.db`.
+    pub event_writer: Option<EventWriter<FileBackend>>,
 }
 
 impl RegionConfig {
     /// Creates configuration for the system region.
     pub fn system(node_id: LedgerNodeId, address: String) -> Self {
-        Self {
-            region: Region::GLOBAL,
-            initial_members: vec![(node_id, address)],
-            bootstrap: true,
-            enable_background_jobs: true,
-        }
+        Self::builder().region(Region::GLOBAL).initial_members(vec![(node_id, address)]).build()
     }
 
     /// Creates configuration for a data region.
     pub fn data(region: Region, initial_members: Vec<(LedgerNodeId, String)>) -> Self {
-        Self { region, initial_members, bootstrap: true, enable_background_jobs: true }
+        Self::builder().region(region).initial_members(initial_members).build()
     }
 
     /// Disables background jobs (useful for testing).
@@ -298,6 +293,13 @@ pub struct RegionGroup {
     block_announcements: broadcast::Sender<BlockAnnouncement>,
     /// Background job handles (wrapped in Mutex for mutable access through Arc).
     background_jobs: parking_lot::Mutex<RegionBackgroundJobs>,
+    /// Batch writer handle for coalescing writes (if batch writing is enabled).
+    batch_handle: Option<BatchWriterHandle>,
+    /// Shared state root commitment buffer.
+    ///
+    /// Populated by `apply_to_state_machine` after each block, drained by the
+    /// leader when constructing the next `RaftPayload` for piggybacked verification.
+    commitment_buffer: std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>>,
 }
 
 impl RegionGroup {
@@ -336,6 +338,27 @@ impl RegionGroup {
         &self.block_announcements
     }
 
+    /// Returns the batch writer handle, if batch writing is enabled for this region.
+    #[must_use]
+    pub fn batch_handle(&self) -> Option<&BatchWriterHandle> {
+        self.batch_handle.as_ref()
+    }
+
+    /// Drains all buffered state root commitments.
+    ///
+    /// Called by the leader when constructing `RaftPayload` to piggyback
+    /// commitments from the previous apply batch onto the next entry.
+    pub fn drain_state_root_commitments(&self) -> Vec<crate::types::StateRootCommitment> {
+        std::mem::take(&mut *self.commitment_buffer.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Returns the shared commitment buffer handle.
+    pub fn commitment_buffer(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>> {
+        std::sync::Arc::clone(&self.commitment_buffer)
+    }
+
     /// Checks if this node is the leader for this region.
     pub fn is_leader(&self, node_id: LedgerNodeId) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
@@ -349,7 +372,7 @@ impl RegionGroup {
 }
 
 // ============================================================================
-// Multi-Raft Manager
+// Raft Manager
 // ============================================================================
 
 /// Manager for multiple Raft region groups.
@@ -357,9 +380,9 @@ impl RegionGroup {
 /// Coordinates the lifecycle of multiple independent Raft consensus groups,
 /// each handling a subset of organizations. Uses FileBackend for production storage.
 /// Delegates per-region database lifecycle to [`RegionStorageManager`].
-pub struct MultiRaftManager {
+pub struct RaftManager {
     /// Configuration.
-    config: MultiRaftConfig,
+    config: RaftManagerConfig,
     /// Per-region database storage manager.
     storage_manager: RegionStorageManager,
     /// Active region groups indexed by region ID.
@@ -368,9 +391,9 @@ pub struct MultiRaftManager {
     router: RwLock<Option<Arc<RegionRouter<FileBackend>>>>,
 }
 
-impl MultiRaftManager {
-    /// Creates a new Multi-Raft Manager.
-    pub fn new(config: MultiRaftConfig) -> Self {
+impl RaftManager {
+    /// Creates a new Raft Manager.
+    pub fn new(config: RaftManagerConfig) -> Self {
         let storage_manager = RegionStorageManager::new(config.data_dir.clone());
         Self {
             config,
@@ -382,7 +405,7 @@ impl MultiRaftManager {
 
     /// Returns the configuration.
     #[must_use]
-    pub fn config(&self) -> &MultiRaftConfig {
+    pub fn config(&self) -> &RaftManagerConfig {
         &self.config
     }
 
@@ -401,17 +424,17 @@ impl MultiRaftManager {
     ///
     /// # Errors
     ///
-    /// Returns [`MultiRaftError::RegionNotFound`] if no region with the given ID
+    /// Returns [`RaftManagerError::RegionNotFound`] if no region with the given ID
     /// is currently active.
     pub fn get_region_group(&self, region: Region) -> Result<Arc<RegionGroup>> {
-        self.regions.read().get(&region).cloned().ok_or(MultiRaftError::RegionNotFound { region })
+        self.regions.read().get(&region).cloned().ok_or(RaftManagerError::RegionNotFound { region })
     }
 
     /// Returns the system region (`_system`).
     ///
     /// # Errors
     ///
-    /// Returns [`MultiRaftError::RegionNotFound`] if the system region (ID 0)
+    /// Returns [`RaftManagerError::RegionNotFound`] if the system region (ID 0)
     /// has not been started.
     pub fn system_region(&self) -> Result<Arc<RegionGroup>> {
         self.get_region_group(Region::GLOBAL)
@@ -425,6 +448,57 @@ impl MultiRaftManager {
     /// Checks if a region is active.
     pub fn has_region(&self, region: Region) -> bool {
         self.regions.read().contains_key(&region)
+    }
+
+    /// Registers an externally created region group.
+    ///
+    /// Used by bootstrap code that creates Raft/state resources manually
+    /// (before `start_system_region` can be used). The region group is inserted
+    /// into the manager's registry and the router is initialized if this is
+    /// the system region.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RaftManagerError::RegionExists`] if the region is already active.
+    pub fn register_external_region(
+        &self,
+        region: Region,
+        raft: Arc<Raft<LedgerTypeConfig>>,
+        state: Arc<StateLayer<FileBackend>>,
+        block_archive: Arc<BlockArchive<FileBackend>>,
+        applied_state: AppliedStateAccessor,
+        block_announcements: broadcast::Sender<BlockAnnouncement>,
+    ) -> Result<Arc<RegionGroup>> {
+        if self.has_region(region) {
+            return Err(RaftManagerError::RegionExists { region });
+        }
+
+        let region_group = Arc::new(RegionGroup {
+            region,
+            raft,
+            state: state.clone(),
+            block_archive,
+            applied_state,
+            block_announcements,
+            background_jobs: parking_lot::Mutex::new(RegionBackgroundJobs::none()),
+            batch_handle: None,
+            commitment_buffer: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+
+        {
+            let mut regions = self.regions.write();
+            regions.insert(region, region_group.clone());
+        }
+
+        // Initialize the RegionRouter if this is the system region.
+        if region == Region::GLOBAL {
+            let system_service = Arc::new(SystemOrganizationService::new(state));
+            let router = Arc::new(RegionRouter::new(system_service, self.config.local_region));
+            *self.router.write() = Some(router);
+            info!("RegionRouter initialized with _system organization (external registration)");
+        }
+
+        Ok(region_group)
     }
 
     /// Returns the region router (if initialized).
@@ -472,15 +546,15 @@ impl MultiRaftManager {
     ///
     /// # Errors
     ///
-    /// Returns [`MultiRaftError::Raft`] if `region` is not 0,
-    /// [`MultiRaftError::RegionExists`] if the region is already running,
+    /// Returns [`RaftManagerError::Raft`] if `region` is not 0,
+    /// [`RaftManagerError::RegionExists`] if the region is already running,
     /// or a storage/Raft error if initialization fails.
     pub async fn start_system_region(
         &self,
         region_config: RegionConfig,
     ) -> Result<Arc<RegionGroup>> {
         if region_config.region != Region::GLOBAL {
-            return Err(MultiRaftError::Raft {
+            return Err(RaftManagerError::Raft {
                 region: region_config.region,
                 message: "System region must have region=0".to_string(),
             });
@@ -504,18 +578,18 @@ impl MultiRaftManager {
     ///
     /// # Errors
     ///
-    /// Returns [`MultiRaftError::SystemRegionRequired`] if the system region has
-    /// not been started, [`MultiRaftError::Raft`] if `region` is 0,
-    /// [`MultiRaftError::RegionExists`] if the region is already running,
+    /// Returns [`RaftManagerError::SystemRegionRequired`] if the system region has
+    /// not been started, [`RaftManagerError::Raft`] if `region` is 0,
+    /// [`RaftManagerError::RegionExists`] if the region is already running,
     /// or a storage/Raft error if initialization fails.
     pub async fn start_data_region(&self, region_config: RegionConfig) -> Result<Arc<RegionGroup>> {
         // Verify system region is running
         if !self.has_region(Region::GLOBAL) {
-            return Err(MultiRaftError::SystemRegionRequired);
+            return Err(RaftManagerError::SystemRegionRequired);
         }
 
         if region_config.region == Region::GLOBAL {
-            return Err(MultiRaftError::Raft {
+            return Err(RaftManagerError::Raft {
                 region: Region::GLOBAL,
                 message: "Use start_system_region for region=0".to_string(),
             });
@@ -538,7 +612,7 @@ impl MultiRaftManager {
     ///
     /// # Errors
     ///
-    /// Returns [`MultiRaftError::SystemRegionRequired`] if the system region
+    /// Returns [`RaftManagerError::SystemRegionRequired`] if the system region
     /// has not been started, or a storage/Raft error if initialization fails.
     /// Returns `(group, created)` where `created` is `true` if this call
     /// actually created the region, `false` if it already existed.
@@ -560,21 +634,33 @@ impl MultiRaftManager {
 
         // Verify system region is running
         if !self.has_region(Region::GLOBAL) {
-            return Err(MultiRaftError::SystemRegionRequired);
+            return Err(RaftManagerError::SystemRegionRequired);
         }
 
         // Attempt to start — if a concurrent caller beat us, fall through.
         // Two error variants can indicate concurrency:
-        // - RegionExists: start_region's has_region check saw it
-        // - RegionAlreadyOpen: RegionStorageManager's open_region lock detected it
+        // - RegionExists: start_region's has_region check saw it after map insert
+        // - RegionAlreadyOpen: RegionStorageManager rejected a second opener
         match self.start_region(region_config).await {
             Ok(group) => {
                 info!(region = region.as_str(), "Lazily created region group");
                 Ok((group, true))
             },
-            Err(MultiRaftError::RegionExists { .. } | MultiRaftError::RegionAlreadyOpen { .. }) => {
-                // Concurrent creation succeeded — read from the map
-                Ok((self.get_region_group(region)?, false))
+            Err(
+                RaftManagerError::RegionExists { .. } | RaftManagerError::RegionAlreadyOpen { .. },
+            ) => {
+                // A concurrent caller is creating this region. RegionAlreadyOpen fires
+                // from the storage layer *before* the winner finishes initialization and
+                // inserts into the regions map. Poll briefly for the winner to complete.
+                for _ in 0..50 {
+                    if let Ok(group) = self.get_region_group(region) {
+                        return Ok((group, false));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                // Winner still hasn't finished — report the original error rather than
+                // masking a potential initialization failure.
+                Err(RaftManagerError::RegionExists { region })
             },
             Err(e) => Err(e),
         }
@@ -582,39 +668,52 @@ impl MultiRaftManager {
 
     /// Starts a region group.
     async fn start_region(&self, region_config: RegionConfig) -> Result<Arc<RegionGroup>> {
-        let region = region_config.region;
+        // Destructure config upfront to avoid partial-move issues
+        let RegionConfig {
+            region,
+            initial_members,
+            bootstrap,
+            enable_background_jobs,
+            batch_writer_config,
+            event_writer,
+        } = region_config;
 
-        // Check if region already exists
+        // Check if region already exists (early exit for the common case).
+        // Note: this check-then-insert has a TOCTOU window — concurrent callers
+        // may both pass this check. RegionStorageManager::open_region provides the
+        // true guard (returns AlreadyOpen), and ensure_data_region handles both
+        // RegionExists and RegionAlreadyOpen gracefully.
         if self.has_region(region) {
-            return Err(MultiRaftError::RegionExists { region });
+            return Err(RaftManagerError::RegionExists { region });
         }
 
         let is_protected = region.requires_residency();
 
         // Protected regions enforce minimum in-region node count
-        if is_protected && region_config.initial_members.len() < MIN_NODES_PER_PROTECTED_REGION {
-            return Err(MultiRaftError::InsufficientNodes {
+        if is_protected && initial_members.len() < MIN_NODES_PER_PROTECTED_REGION {
+            return Err(RaftManagerError::InsufficientNodes {
                 region,
                 required: MIN_NODES_PER_PROTECTED_REGION,
-                found: region_config.initial_members.len(),
+                found: initial_members.len(),
             });
         }
 
         // Emit region node count metric
-        record_region_node_count(
-            region.as_str(),
-            region_config.initial_members.len(),
-            is_protected,
-        );
+        record_region_node_count(region.as_str(), initial_members.len(), is_protected);
 
         info!(region = region.as_str(), "Starting region group");
 
+        // Create divergence channel for state root verification.
+        // The sender is passed into RaftLogStore; the receiver drives the handler task.
+        let (divergence_sender, divergence_receiver) = tokio::sync::mpsc::unbounded_channel();
+
         // Open storage via RegionStorageManager (creates directory + databases + RaftLogStore)
         let (state, block_archive, log_store, block_announcements) =
-            self.open_region_storage(region)?;
+            self.open_region_storage(region, event_writer, divergence_sender)?;
 
-        // Get accessor before log_store is consumed
+        // Get accessor and commitment buffer before log_store is consumed by Adaptor
         let applied_state = log_store.accessor();
+        let commitment_buffer = log_store.commitment_buffer();
 
         let network = GrpcRaftNetworkFactory::with_trace_config(self.config.trace_raft_rpcs);
 
@@ -639,7 +738,7 @@ impl MultiRaftManager {
             state_machine,
         )
         .await
-        .map_err(|e| MultiRaftError::Raft {
+        .map_err(|e| RaftManagerError::Raft {
             region,
             message: format!("Failed to create Raft instance: {}", e),
         })?;
@@ -647,12 +746,48 @@ impl MultiRaftManager {
         let raft = Arc::new(raft);
 
         // Bootstrap if configured
-        if region_config.bootstrap && !region_config.initial_members.is_empty() {
-            self.bootstrap_region(&raft, &region_config).await?;
+        if bootstrap && !initial_members.is_empty() {
+            self.bootstrap_region(&raft, region, &initial_members).await?;
         }
 
+        // Create batch writer if configured
+        let batch_handle = if let Some(batch_config) = batch_writer_config {
+            let raft_clone = raft.clone();
+            let buffer_clone = commitment_buffer.clone();
+            let submit_fn = move |requests: Vec<LedgerRequest>| {
+                let raft = raft_clone.clone();
+                let buffer = buffer_clone.clone();
+                Box::pin(async move {
+                    let batch_request = LedgerRequest::BatchWrite { requests };
+                    let commitments =
+                        std::mem::take(&mut *buffer.lock().unwrap_or_else(|e| e.into_inner()));
+                    let result = raft
+                        .client_write(RaftPayload::with_commitments(batch_request, commitments))
+                        .await;
+                    match result {
+                        Ok(response) => match response.data {
+                            LedgerResponse::BatchWrite { responses } => Ok(responses),
+                            other => Ok(vec![other]),
+                        },
+                        Err(e) => Err(format!("Raft error: {}", e)),
+                    }
+                })
+                    as futures::future::BoxFuture<
+                        'static,
+                        std::result::Result<Vec<LedgerResponse>, String>,
+                    >
+            };
+
+            let writer = BatchWriter::new(batch_config, submit_fn, region.to_string());
+            let handle = writer.handle();
+            tokio::spawn(writer.run());
+            Some(handle)
+        } else {
+            None
+        };
+
         // Start background jobs if enabled
-        let background_jobs = if region_config.enable_background_jobs {
+        let background_jobs = if enable_background_jobs {
             self.start_background_jobs(
                 region,
                 raft.clone(),
@@ -664,6 +799,15 @@ impl MultiRaftManager {
             RegionBackgroundJobs::none()
         };
 
+        // Spawn state root divergence handler — halts vaults on mismatch.
+        // Runs alongside AutoRecoveryJob and other background workers.
+        let divergence_handler = crate::state_root_verifier::StateRootDivergenceHandler::new(
+            raft.clone(),
+            divergence_receiver,
+            region.to_string(),
+        );
+        tokio::spawn(divergence_handler.run());
+
         // Create region group
         let region_group = Arc::new(RegionGroup {
             region,
@@ -673,6 +817,8 @@ impl MultiRaftManager {
             applied_state,
             block_announcements,
             background_jobs: parking_lot::Mutex::new(background_jobs),
+            batch_handle,
+            commitment_buffer,
         });
 
         // Register region
@@ -768,13 +914,19 @@ impl MultiRaftManager {
     ///
     /// Delegates database opening to the [`RegionStorageManager`], then creates
     /// higher-level wrappers (`StateLayer`, `BlockArchive`) and the `RaftLogStore`.
-    fn open_region_storage(&self, region: Region) -> Result<OpenedRegionStorage> {
+    /// An optional [`EventWriter`] can be provided for apply-phase audit event persistence.
+    fn open_region_storage(
+        &self,
+        region: Region,
+        event_writer: Option<EventWriter<FileBackend>>,
+        divergence_sender: tokio::sync::mpsc::UnboundedSender<crate::types::StateRootDivergence>,
+    ) -> Result<OpenedRegionStorage> {
         // Open databases via storage manager (creates directory + state.db, blocks.db, events.db)
         let storage = self.storage_manager.open_region(region).map_err(|e| {
             if matches!(e, crate::region_storage::RegionStorageError::AlreadyOpen { .. }) {
-                MultiRaftError::RegionAlreadyOpen { region }
+                RaftManagerError::RegionAlreadyOpen { region }
             } else {
-                MultiRaftError::Storage { region, message: format!("{e}") }
+                RaftManagerError::Storage { region, message: format!("{e}") }
             }
         })?;
 
@@ -788,15 +940,21 @@ impl MultiRaftManager {
 
         // Open Raft log store (uses inferadb-ledger-store storage - handles open/create internally)
         let log_path = self.storage_manager.raft_db_path(region);
-        let log_store = RaftLogStore::<FileBackend>::open(&log_path)
-            .map_err(|e| MultiRaftError::Storage {
+        let mut log_store = RaftLogStore::<FileBackend>::open(&log_path)
+            .map_err(|e| RaftManagerError::Storage {
                 region,
                 message: format!("Failed to open log store: {e}"),
             })?
             .with_state_layer(state.clone())
             .with_block_archive(block_archive.clone())
             .with_region_config(region, self.config.node_id.to_string())
-            .with_block_announcements(block_announcements.clone());
+            .with_block_announcements(block_announcements.clone())
+            .with_divergence_sender(divergence_sender);
+
+        // Wire event writer if provided
+        if let Some(writer) = event_writer {
+            log_store = log_store.with_event_writer(writer);
+        }
 
         Ok((state, block_archive, log_store, block_announcements))
     }
@@ -805,23 +963,24 @@ impl MultiRaftManager {
     async fn bootstrap_region(
         &self,
         raft: &Raft<LedgerTypeConfig>,
-        config: &RegionConfig,
+        region: Region,
+        initial_members: &[(LedgerNodeId, String)],
     ) -> Result<()> {
         use std::collections::BTreeMap;
 
         let mut members: BTreeMap<LedgerNodeId, BasicNode> = BTreeMap::new();
-        for (node_id, addr) in &config.initial_members {
+        for (node_id, addr) in initial_members {
             members.insert(*node_id, BasicNode { addr: addr.clone() });
         }
 
-        raft.initialize(members).await.map_err(|e| MultiRaftError::Raft {
-            region: config.region,
+        raft.initialize(members).await.map_err(|e| RaftManagerError::Raft {
+            region,
             message: format!("Failed to initialize: {}", e),
         })?;
 
         info!(
-            region = config.region.as_str(),
-            members = config.initial_members.len(),
+            region = region.as_str(),
+            members = initial_members.len(),
             "Bootstrapped region cluster"
         );
 
@@ -835,12 +994,12 @@ impl MultiRaftManager {
     ///
     /// # Errors
     ///
-    /// Returns [`MultiRaftError::RegionNotFound`] if no region with the given ID
+    /// Returns [`RaftManagerError::RegionNotFound`] if no region with the given ID
     /// is currently active.
     pub async fn stop_region(&self, region: Region) -> Result<()> {
         let region_group = {
             let mut regions = self.regions.write();
-            regions.remove(&region).ok_or(MultiRaftError::RegionNotFound { region })?
+            regions.remove(&region).ok_or(RaftManagerError::RegionNotFound { region })?
         };
 
         // Abort background jobs first
@@ -874,7 +1033,7 @@ impl MultiRaftManager {
             }
         }
 
-        info!("Multi-Raft Manager shutdown complete");
+        info!("Raft Manager shutdown complete");
     }
 
     /// Gracefully shut down all region groups with leadership handoff.
@@ -919,7 +1078,7 @@ impl MultiRaftManager {
     }
 
     /// Returns statistics about the manager.
-    pub fn stats(&self) -> MultiRaftStats {
+    pub fn stats(&self) -> RaftManagerStats {
         let regions = self.regions.read();
         let mut leader_count = 0;
 
@@ -929,7 +1088,7 @@ impl MultiRaftManager {
             }
         }
 
-        MultiRaftStats {
+        RaftManagerStats {
             total_regions: regions.len(),
             leader_regions: leader_count,
             node_id: self.config.node_id,
@@ -937,9 +1096,9 @@ impl MultiRaftManager {
     }
 }
 
-/// Statistics about the Multi-Raft Manager.
+/// Statistics about the Raft Manager.
 #[derive(Debug, Clone)]
-pub struct MultiRaftStats {
+pub struct RaftManagerStats {
     /// Total number of active regions.
     pub total_regions: usize,
     /// Number of regions where this node is leader.
@@ -959,8 +1118,8 @@ mod tests {
 
     use super::*;
 
-    fn create_test_config(temp_dir: &TestDir) -> MultiRaftConfig {
-        MultiRaftConfig::new(temp_dir.path().to_path_buf(), 1, Region::GLOBAL)
+    fn create_test_config(temp_dir: &TestDir) -> RaftManagerConfig {
+        RaftManagerConfig::new(temp_dir.path().to_path_buf(), 1, Region::GLOBAL)
     }
 
     #[test]
@@ -999,9 +1158,9 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_raft_config_builder() {
+    fn test_raft_manager_config_builder() {
         let temp = TestDir::new();
-        let config = MultiRaftConfig::builder()
+        let config = RaftManagerConfig::builder()
             .data_dir(temp.path().to_path_buf())
             .node_id(42)
             .local_region(Region::GLOBAL)
@@ -1013,9 +1172,9 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_raft_config_builder_custom_timeouts() {
+    fn test_raft_manager_config_builder_custom_timeouts() {
         let temp = TestDir::new();
-        let config = MultiRaftConfig::builder()
+        let config = RaftManagerConfig::builder()
             .data_dir(temp.path().to_path_buf())
             .node_id(1)
             .local_region(Region::GLOBAL)
@@ -1029,14 +1188,14 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_raft_config_builder_matches_new() {
+    fn test_raft_manager_config_builder_matches_new() {
         let temp = TestDir::new();
-        let from_builder = MultiRaftConfig::builder()
+        let from_builder = RaftManagerConfig::builder()
             .data_dir(temp.path().to_path_buf())
             .node_id(1)
             .local_region(Region::GLOBAL)
             .build();
-        let from_new = MultiRaftConfig::new(temp.path().to_path_buf(), 1, Region::GLOBAL);
+        let from_new = RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::GLOBAL);
         assert_eq!(from_builder.node_id, from_new.node_id);
         assert_eq!(from_builder.heartbeat_interval_ms, from_new.heartbeat_interval_ms);
         assert_eq!(from_builder.election_timeout_min_ms, from_new.election_timeout_min_ms);
@@ -1078,7 +1237,7 @@ mod tests {
     fn test_manager_creation() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         assert_eq!(manager.list_regions().len(), 0);
         assert!(!manager.has_region(Region::GLOBAL));
@@ -1088,7 +1247,7 @@ mod tests {
     fn test_manager_stats_empty() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         let stats = manager.stats();
         assert_eq!(stats.total_regions, 0);
@@ -1100,13 +1259,13 @@ mod tests {
     fn test_manager_local_region() {
         let temp = TestDir::new();
         let config =
-            MultiRaftConfig::new(temp.path().to_path_buf(), 1, Region::DE_CENTRAL_FRANKFURT);
-        let manager = MultiRaftManager::new(config);
+            RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::DE_CENTRAL_FRANKFURT);
+        let manager = RaftManager::new(config);
         assert_eq!(manager.local_region(), Region::DE_CENTRAL_FRANKFURT);
     }
 
     #[test]
-    fn test_multi_raft_config_local_region_default_global() {
+    fn test_raft_manager_config_local_region_default_global() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
         assert_eq!(config.local_region, Region::GLOBAL);
@@ -1116,21 +1275,21 @@ mod tests {
     async fn test_system_region_required() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Try to start data region without system region
         let region_config =
             RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
         let result = manager.start_data_region(region_config).await;
 
-        assert!(matches!(result, Err(MultiRaftError::SystemRegionRequired)));
+        assert!(matches!(result, Err(RaftManagerError::SystemRegionRequired)));
     }
 
     #[tokio::test]
     async fn test_start_system_region() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
         let result = manager.start_system_region(region_config).await;
@@ -1147,7 +1306,7 @@ mod tests {
     async fn test_start_multiple_regions() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Start system region
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1167,7 +1326,7 @@ mod tests {
     async fn test_duplicate_region_error() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Start system region
         let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1176,7 +1335,7 @@ mod tests {
         // Try to start again
         let result = manager.start_system_region(region_config).await;
         assert!(
-            matches!(result, Err(MultiRaftError::RegionExists { region }) if region == Region::GLOBAL)
+            matches!(result, Err(RaftManagerError::RegionExists { region }) if region == Region::GLOBAL)
         );
     }
 
@@ -1184,7 +1343,7 @@ mod tests {
     async fn test_stop_region() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Start system region
         let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1202,12 +1361,12 @@ mod tests {
     async fn test_get_region_group() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Try to get non-existent region
         let result = manager.get_region_group(Region::GLOBAL);
         assert!(
-            matches!(result, Err(MultiRaftError::RegionNotFound { region }) if region == Region::GLOBAL)
+            matches!(result, Err(RaftManagerError::RegionNotFound { region }) if region == Region::GLOBAL)
         );
 
         // Start and get
@@ -1230,6 +1389,7 @@ mod tests {
         assert!(jobs.compactor_handle.is_none());
         assert!(jobs.recovery_handle.is_none());
         assert!(jobs.btree_compactor_handle.is_none());
+        assert!(jobs.integrity_scrubber_handle.is_none());
         assert!(jobs.dek_rewrap_handle.is_none());
     }
 
@@ -1241,6 +1401,8 @@ mod tests {
         assert!(jobs.gc_handle.is_none());
         assert!(jobs.compactor_handle.is_none());
         assert!(jobs.recovery_handle.is_none());
+        assert!(jobs.btree_compactor_handle.is_none());
+        assert!(jobs.integrity_scrubber_handle.is_none());
         assert!(jobs.dek_rewrap_handle.is_none());
     }
 
@@ -1248,7 +1410,7 @@ mod tests {
     async fn test_region_with_background_jobs_disabled() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Create config with background jobs disabled
         let mut region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1269,7 +1431,7 @@ mod tests {
     async fn test_region_with_background_jobs_enabled() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Create config with background jobs enabled (default)
         let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1290,7 +1452,7 @@ mod tests {
     async fn test_stop_region_aborts_background_jobs() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Start with background jobs enabled
         let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1316,7 +1478,7 @@ mod tests {
     async fn test_protected_region_rejects_insufficient_nodes() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Start system region first (required for data regions)
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1329,7 +1491,7 @@ mod tests {
             vec![(1, "127.0.0.1:50051".to_string()), (2, "127.0.0.1:50052".to_string())],
         );
         match manager.start_data_region(data_config).await {
-            Err(MultiRaftError::InsufficientNodes { region, required, found }) => {
+            Err(RaftManagerError::InsufficientNodes { region, required, found }) => {
                 assert_eq!(region, Region::IE_EAST_DUBLIN);
                 assert_eq!(required, 3);
                 assert_eq!(found, 2);
@@ -1343,7 +1505,7 @@ mod tests {
     async fn test_protected_region_accepts_sufficient_nodes() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Start system region first
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1359,7 +1521,7 @@ mod tests {
             ],
         );
         // Should pass membership validation (may fail later on Raft bootstrap, which is fine)
-        if let Err(MultiRaftError::InsufficientNodes { .. }) =
+        if let Err(RaftManagerError::InsufficientNodes { .. }) =
             manager.start_data_region(data_config).await
         {
             panic!("Should not reject sufficient nodes with InsufficientNodes");
@@ -1370,7 +1532,7 @@ mod tests {
     async fn test_non_protected_region_accepts_any_member_count() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Start system region first
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1380,7 +1542,7 @@ mod tests {
         // Only 1 member — should pass (no minimum for non-protected)
         let data_config =
             RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
-        if let Err(MultiRaftError::InsufficientNodes { .. }) =
+        if let Err(RaftManagerError::InsufficientNodes { .. }) =
             manager.start_data_region(data_config).await
         {
             panic!("Non-protected region should accept any member count");
@@ -1404,7 +1566,7 @@ mod tests {
     async fn test_ensure_data_region_creates_new() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Start system region first
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1426,7 +1588,7 @@ mod tests {
     async fn test_ensure_data_region_returns_existing() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Start system region and a data region
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1451,27 +1613,27 @@ mod tests {
     async fn test_ensure_data_region_requires_system() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Without system region, ensure_data_region should fail
         let region_config =
             RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
         let result = manager.ensure_data_region(region_config).await;
 
-        assert!(matches!(result, Err(MultiRaftError::SystemRegionRequired)));
+        assert!(matches!(result, Err(RaftManagerError::SystemRegionRequired)));
     }
 
     #[tokio::test]
     async fn test_ensure_data_region_global_returns_system() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = MultiRaftManager::new(config);
+        let manager = RaftManager::new(config);
 
         // Before system region: GLOBAL should return RegionNotFound
         let region_config =
             RegionConfig::data(Region::GLOBAL, vec![(1, "127.0.0.1:50051".to_string())]);
         let result = manager.ensure_data_region(region_config).await;
-        assert!(matches!(result, Err(MultiRaftError::RegionNotFound { .. })));
+        assert!(matches!(result, Err(RaftManagerError::RegionNotFound { .. })));
 
         // After system region: GLOBAL should return the existing system group
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1493,7 +1655,7 @@ mod tests {
         // First "session": create regions
         {
             let config = create_test_config(&temp);
-            let manager = MultiRaftManager::new(config);
+            let manager = RaftManager::new(config);
 
             let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
             manager.start_system_region(system_config).await.expect("start system");
@@ -1509,7 +1671,7 @@ mod tests {
         // Second "session": discover and reopen
         {
             let config = create_test_config(&temp);
-            let manager = MultiRaftManager::new(config);
+            let manager = RaftManager::new(config);
 
             // Discover regions that have existing data on disk
             let existing = manager.storage_manager().discover_existing_regions();
@@ -1536,5 +1698,57 @@ mod tests {
             assert!(manager.has_region(Region::GLOBAL));
             assert!(manager.has_region(Region::US_EAST_VA));
         }
+    }
+
+    /// Verifies that concurrent `ensure_data_region` calls for the same region
+    /// are handled safely via defense-in-depth (RegionStorageManager's AlreadyOpen
+    /// guard + ensure_data_region's error fallthrough).
+    ///
+    /// This exercises the TOCTOU window in `start_region` where two callers can
+    /// both pass `has_region` before either inserts. The storage layer rejects
+    /// the second opener, and `ensure_data_region` treats that as "already exists."
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_ensure_data_region_is_safe() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = Arc::new(RaftManager::new(config));
+
+        // System region must exist first
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let concurrency = 10;
+        let barrier = Arc::new(tokio::sync::Barrier::new(concurrency));
+
+        let mut handles = Vec::new();
+        for _ in 0..concurrency {
+            let mgr = Arc::clone(&manager);
+            let bar = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                // Synchronize so all tasks attempt creation at roughly the same time
+                bar.wait().await;
+                let region_config = RegionConfig::data(
+                    Region::US_EAST_VA,
+                    vec![(1, "127.0.0.1:50051".to_string())],
+                );
+                mgr.ensure_data_region(region_config).await
+            }));
+        }
+
+        let mut created_count = 0;
+        for handle in handles {
+            let result = handle.await.expect("task panicked");
+            let (group, created) = result.expect("ensure_data_region failed");
+            assert_eq!(group.region(), Region::US_EAST_VA);
+            if created {
+                created_count += 1;
+            }
+        }
+
+        // Exactly one caller should have created the region
+        assert_eq!(created_count, 1, "expected exactly 1 creator, got {created_count}");
+        // Region should be registered exactly once
+        assert!(manager.has_region(Region::US_EAST_VA));
+        assert_eq!(manager.list_regions().len(), 2); // GLOBAL + US_EAST_VA
     }
 }

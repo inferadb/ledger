@@ -1,11 +1,12 @@
 //! Multi-region integration tests.
 //!
 //! Tests write forwarding, read consistency, batch writes, and cross-region
-//! operations using the `MultiRegionTestCluster` infrastructure.
+//! operations using the `RegionTestCluster` infrastructure.
 //!
-//! These tests exercise the full gRPC path through `MultiRegionWriteServiceImpl`
-//! and `MultiRegionReadServiceImpl`, validating that organization→region routing,
-//! idempotency, and error handling work correctly across region boundaries.
+//! These tests exercise the full gRPC path through `WriteServiceImpl`
+//! and `ReadServiceImpl` with multi-region routing, validating that
+//! organization→region routing, idempotency, and error handling work
+//! correctly across region boundaries.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
@@ -14,7 +15,7 @@ use std::time::Duration;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
 use crate::common::{
-    MultiRegionTestCluster, create_admin_client, create_read_client, create_write_client,
+    RegionTestCluster, create_admin_client, create_read_client, create_write_client,
 };
 
 // ============================================================================
@@ -144,7 +145,7 @@ async fn read_entity(
 /// Exercises the full write→route→Raft→apply→read path through gRPC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_region_write_and_read() {
-    let cluster = MultiRegionTestCluster::new(1, 2).await;
+    let cluster = RegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
         "all regions should elect leaders"
@@ -172,7 +173,7 @@ async fn test_multi_region_write_and_read() {
 /// are served by the same node.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_region_organization_isolation() {
-    let cluster = MultiRegionTestCluster::new(1, 2).await;
+    let cluster = RegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
         "all regions should elect leaders"
@@ -206,7 +207,7 @@ async fn test_multi_region_organization_isolation() {
 /// Verifies that BatchWrite routes correctly and applies atomically.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_region_batch_write() {
-    let cluster = MultiRegionTestCluster::new(1, 2).await;
+    let cluster = RegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
         "all regions should elect leaders"
@@ -277,7 +278,7 @@ async fn test_multi_region_batch_write() {
 /// Same client_id + idempotency_key should return cached result on retry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_region_write_idempotency() {
-    let cluster = MultiRegionTestCluster::new(1, 2).await;
+    let cluster = RegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
         "all regions should elect leaders"
@@ -337,7 +338,7 @@ async fn test_multi_region_write_idempotency() {
 /// been created, rather than silently dropping them or panicking.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_region_write_nonexistent_organization() {
-    let cluster = MultiRegionTestCluster::new(1, 2).await;
+    let cluster = RegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
         "all regions should elect leaders"
@@ -405,7 +406,7 @@ async fn test_multi_region_write_nonexistent_organization() {
 /// without interfering with each other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_region_concurrent_writes() {
-    let cluster = MultiRegionTestCluster::new(1, 2).await;
+    let cluster = RegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
         "all regions should elect leaders"
@@ -475,9 +476,9 @@ async fn test_multi_region_concurrent_writes() {
 /// forwarding code path is a transparent no-op for local organizations.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_write_forwarding_local_region_all_nodes() {
-    // Single-node cluster with 2 data regions still uses MultiRegionResolver
+    // Single-node cluster with 2 data regions still uses RegionResolverImpl
     // (supports_forwarding=true) so the forwarding code path is exercised.
-    let cluster = MultiRegionTestCluster::new(1, 2).await;
+    let cluster = RegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(15)).await,
         "all regions should elect leaders"
@@ -500,13 +501,13 @@ async fn test_write_forwarding_local_region_all_nodes() {
     assert_eq!(value, Some(b"fwd-val-0".to_vec()));
 }
 
-/// Tests batch write through the forwarding-enabled `MultiRegionWriteService`.
+/// Tests batch write through the forwarding-enabled write service.
 ///
-/// Verifies that `batch_write()` through `MultiRegionWriteService` with the
-/// forwarding-enabled `MultiRegionResolver` works correctly for local regions.
+/// Verifies that `batch_write()` with the forwarding-enabled
+/// `RegionResolverImpl` works correctly for local regions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_batch_write_forwarding_local_region() {
-    let cluster = MultiRegionTestCluster::new(1, 2).await;
+    let cluster = RegionTestCluster::new(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(15)).await,
         "all regions should elect leaders"

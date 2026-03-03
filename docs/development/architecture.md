@@ -83,7 +83,7 @@ Raft consensus via [Openraft](https://github.com/datafuselabs/openraft), gRPC se
 - `LogStorage` - Raft log backed by store
 - `StateMachine` - State machine implementation
 - `BatchProcessor` - Transaction batching
-- `MultiRegionWriteService` - Cross-region write forwarding
+- `WriteServiceImpl` - Write handling with cross-region forwarding
 
 **gRPC services:**
 

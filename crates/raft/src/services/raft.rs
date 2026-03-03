@@ -16,243 +16,49 @@ use inferadb_ledger_types::decode;
 use openraft::{Raft, Vote, raft::AppendEntriesRequest};
 use tonic::{Request, Response, Status};
 
-use crate::types::{LedgerNodeId, LedgerTypeConfig};
+use crate::{
+    raft_manager::RaftManager,
+    types::{LedgerNodeId, LedgerTypeConfig},
+};
 
 /// Handles incoming vote, append-entries, and install-snapshot RPCs from peer Raft nodes.
+///
+/// Routes requests to the correct region's Raft group via the manager.
+/// Defaults to the system region (GLOBAL) when no region is specified.
 pub struct RaftServiceImpl {
-    /// Raft consensus handle for processing vote, append, and snapshot RPCs from peers.
-    raft: Arc<Raft<LedgerTypeConfig>>,
+    manager: Arc<RaftManager>,
 }
 
 impl RaftServiceImpl {
-    /// Creates a new Raft service.
-    pub fn new(raft: Arc<Raft<LedgerTypeConfig>>) -> Self {
-        Self { raft }
-    }
-}
-
-#[tonic::async_trait]
-impl RaftService for RaftServiceImpl {
-    async fn vote(
-        &self,
-        request: Request<RaftVoteRequest>,
-    ) -> Result<Response<RaftVoteResponse>, Status> {
-        let req = request.into_inner();
-
-        let vote =
-            req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
-
-        let raft_vote: Vote<LedgerNodeId> = vote.into();
-        // Use the vote's node_id for the CommittedLeaderId — identifies who committed the log entry
-        let last_log_id = req.last_log_id.map(|id| {
-            openraft::LogId::new(openraft::CommittedLeaderId::new(id.term, vote.node_id), id.index)
-        });
-
-        let vote_request = openraft::raft::VoteRequest { vote: raft_vote, last_log_id };
-
-        let response = self
-            .raft
-            .vote(vote_request)
-            .await
-            .map_err(|e| Status::internal(format!("Vote failed: {}", e)))?;
-
-        Ok(Response::new(RaftVoteResponse {
-            vote: Some((&response.vote).into()),
-            vote_granted: response.vote_granted,
-            last_log_id: response
-                .last_log_id
-                .map(|id| RaftLogId { term: id.leader_id.term, index: id.index }),
-        }))
-    }
-
-    async fn append_entries(
-        &self,
-        request: Request<RaftAppendEntriesRequest>,
-    ) -> Result<Response<RaftAppendEntriesResponse>, Status> {
-        let req = request.into_inner();
-
-        let vote =
-            req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
-
-        let entries: Vec<_> = req.entries.iter().filter_map(|bytes| decode(bytes).ok()).collect();
-
-        let raft_vote: Vote<LedgerNodeId> = vote.into();
-        // Use the vote's node_id (the leader) for the CommittedLeaderId
-        let leader_node_id = vote.node_id;
-        let prev_log_id = req.prev_log_id.map(|id| {
-            openraft::LogId::new(
-                openraft::CommittedLeaderId::new(id.term, leader_node_id),
-                id.index,
-            )
-        });
-        let leader_commit = req.leader_commit.map(|id| {
-            openraft::LogId::new(
-                openraft::CommittedLeaderId::new(id.term, leader_node_id),
-                id.index,
-            )
-        });
-
-        let append_request: AppendEntriesRequest<LedgerTypeConfig> =
-            AppendEntriesRequest { vote: raft_vote, prev_log_id, entries, leader_commit };
-
-        let response = self
-            .raft
-            .append_entries(append_request)
-            .await
-            .map_err(|e| Status::internal(format!("AppendEntries failed: {}", e)))?;
-
-        use openraft::raft::AppendEntriesResponse::*;
-        let (success, conflict, higher_vote) = match response {
-            Success => (true, false, None),
-            Conflict => (false, true, None),
-            HigherVote(v) => (false, false, Some((&v).into())),
-            PartialSuccess(_) => (true, false, None), // Treat partial as success
-        };
-
-        Ok(Response::new(RaftAppendEntriesResponse { success, conflict, vote: higher_vote }))
-    }
-
-    async fn install_snapshot(
-        &self,
-        request: Request<RaftInstallSnapshotRequest>,
-    ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
-        let req = request.into_inner();
-
-        let vote =
-            req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
-
-        let meta =
-            req.meta.as_ref().ok_or_else(|| Status::invalid_argument("Missing meta field"))?;
-
-        // Use leader's node_id from vote for the CommittedLeaderId
-        let leader_node_id = vote.node_id;
-        let last_log_id = meta.last_log_id.as_ref().map(|id| {
-            openraft::LogId::new(
-                openraft::CommittedLeaderId::new(id.term, leader_node_id),
-                id.index,
-            )
-        });
-
-        // Simplified membership conversion — only extracts node addresses
-        let membership_proto = meta
-            .last_membership
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument("Missing last_membership"))?;
-
-        // Convert membership configs - build nodes map
-        use std::collections::BTreeMap;
-
-        use openraft::BasicNode;
-
-        let mut all_nodes: BTreeMap<u64, BasicNode> = BTreeMap::new();
-        for config in &membership_proto.configs {
-            for (node_id, addr) in &config.members {
-                all_nodes.insert(*node_id, BasicNode { addr: addr.clone() });
-            }
-        }
-
-        let voter_ids: std::collections::BTreeSet<u64> = all_nodes.keys().copied().collect();
-        let membership = openraft::Membership::new(vec![voter_ids], all_nodes);
-
-        // Wrap in StoredMembership with the log_id at which this membership was committed
-        let stored_membership = openraft::StoredMembership::new(last_log_id, membership);
-
-        let snapshot_meta = openraft::SnapshotMeta {
-            last_log_id,
-            last_membership: stored_membership,
-            snapshot_id: meta.snapshot_id.clone(),
-        };
-
-        let install_request = openraft::raft::InstallSnapshotRequest {
-            vote: vote.into(),
-            meta: snapshot_meta,
-            offset: req.offset,
-            data: req.data,
-            done: req.done,
-        };
-
-        let response = self
-            .raft
-            .install_snapshot(install_request)
-            .await
-            .map_err(|e| Status::internal(format!("InstallSnapshot failed: {}", e)))?;
-
-        Ok(Response::new(RaftInstallSnapshotResponse { vote: Some((&response.vote).into()) }))
-    }
-
-    async fn trigger_election(
-        &self,
-        request: Request<TriggerElectionRequest>,
-    ) -> Result<Response<TriggerElectionResponse>, Status> {
-        let req = request.into_inner();
-
-        let current_term = {
-            let metrics = self.raft.metrics().borrow().clone();
-            metrics.current_term
-        };
-
-        if req.leader_term < current_term {
-            crate::metrics::record_trigger_election(false);
-            return Err(Status::failed_precondition(format!(
-                "Stale leader term: request term {} < current term {}",
-                req.leader_term, current_term
-            )));
-        }
-
-        self.raft.trigger().elect().await.map_err(|e| {
-            crate::metrics::record_trigger_election(false);
-            Status::internal(format!("Failed to trigger election: {}", e))
-        })?;
-
-        crate::metrics::record_trigger_election(true);
-        Ok(Response::new(TriggerElectionResponse {
-            accepted: true,
-            message: "Election triggered".to_string(),
-        }))
-    }
-}
-
-// ============================================================================
-// Multi-Region Raft Service
-// ============================================================================
-
-use crate::multi_raft::MultiRaftManager;
-
-/// Multi-region Raft service that routes RPCs to the correct region's Raft group.
-///
-/// Extracts `region` from incoming requests and forwards to the corresponding
-/// Raft instance. Defaults to the system Raft group when no region is specified.
-pub struct MultiRegionRaftService {
-    /// Multi-raft manager for region resolution.
-    manager: Arc<MultiRaftManager>,
-}
-
-impl MultiRegionRaftService {
-    /// Creates a new multi-region Raft service.
-    pub fn new(manager: Arc<MultiRaftManager>) -> Self {
+    /// Creates a new Raft service backed by a region-aware manager.
+    pub fn new(manager: Arc<RaftManager>) -> Self {
         Self { manager }
     }
 
-    /// Resolves a proto Region to a Raft instance.
+    /// Resolves a proto Region field to the corresponding Raft instance.
+    ///
+    /// Validates that the region value is a known variant, then looks up the
+    /// region's Raft group. Defaults to GLOBAL when no region is specified.
     fn resolve_region(&self, region: Option<i32>) -> Result<Arc<Raft<LedgerTypeConfig>>, Status> {
-        // Validate that the region value is a known variant (reject garbage values).
         if let Some(value) = region
             && inferadb_ledger_proto::proto::Region::try_from(value).is_err()
         {
             return Err(Status::invalid_argument(format!("unknown region value: {value}")));
         }
-        // All regions currently route to region 0 (system region).
-        // Full region→Raft group routing is implemented in Tasks 5-7.
-        let region = inferadb_ledger_types::Region::GLOBAL;
+
+        let region = region
+            .and_then(|v| inferadb_ledger_proto::proto::Region::try_from(v).ok())
+            .and_then(|p| inferadb_ledger_types::Region::try_from(p).ok())
+            .unwrap_or(inferadb_ledger_types::Region::GLOBAL);
         self.manager
             .get_region_group(region)
-            .map(|s| s.raft().clone())
+            .map(|g| g.raft().clone())
             .map_err(|_| Status::not_found("region Raft group not found"))
     }
 }
 
 #[tonic::async_trait]
-impl RaftService for MultiRegionRaftService {
+impl RaftService for RaftServiceImpl {
     async fn vote(
         &self,
         request: Request<RaftVoteRequest>,
@@ -449,20 +255,17 @@ mod tests {
     use inferadb_ledger_types::Region;
     use tonic::Request;
 
-    use crate::{
-        MultiRaftConfig, MultiRaftManager, RegionConfig,
-        services::raft::{MultiRegionRaftService, RaftServiceImpl},
-    };
+    use crate::{RaftManager, RaftManagerConfig, RegionConfig, services::raft::RaftServiceImpl};
 
     /// Creates a RaftServiceImpl backed by a real single-node Raft instance.
     ///
-    /// Uses MultiRaftManager to bootstrap a single system region. The Raft
+    /// Uses RaftManager to bootstrap a single system region. The Raft
     /// instance runs a full consensus engine in-process with no networking.
-    async fn create_test_service() -> (RaftServiceImpl, Arc<MultiRaftManager>, u64, TestDir) {
+    async fn create_test_service() -> (RaftServiceImpl, Arc<RaftManager>, u64, TestDir) {
         let temp = TestDir::new();
         let node_id = 1u64;
-        let config = MultiRaftConfig::new(temp.path().to_path_buf(), node_id, Region::GLOBAL);
-        let manager = Arc::new(MultiRaftManager::new(config));
+        let config = RaftManagerConfig::new(temp.path().to_path_buf(), node_id, Region::GLOBAL);
+        let manager = Arc::new(RaftManager::new(config));
 
         let region_config =
             RegionConfig::system(node_id, "127.0.0.1:50099".to_string()).without_background_jobs();
@@ -481,45 +284,7 @@ mod tests {
         let metrics = raft.metrics().borrow().clone();
         assert_eq!(metrics.current_leader, Some(node_id), "Single-node failed to become leader");
 
-        let service = RaftServiceImpl::new(raft);
-        (service, manager, node_id, temp)
-    }
-
-    /// Creates a MultiRegionRaftService with system + 1 data region.
-    async fn create_multi_region_service()
-    -> (MultiRegionRaftService, Arc<MultiRaftManager>, u64, TestDir) {
-        let temp = TestDir::new();
-        let node_id = 1u64;
-        let config = MultiRaftConfig::new(temp.path().to_path_buf(), node_id, Region::GLOBAL);
-        let manager = Arc::new(MultiRaftManager::new(config));
-
-        let region_config =
-            RegionConfig::system(node_id, "127.0.0.1:50098".to_string()).without_background_jobs();
-        manager.start_system_region(region_config).await.expect("start system region");
-
-        let data_config =
-            RegionConfig::data(Region::US_EAST_VA, vec![(node_id, "127.0.0.1:50098".to_string())])
-                .without_background_jobs();
-        manager.start_data_region(data_config).await.expect("start data region");
-
-        // Wait for leaders on both regions
-        let start = tokio::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_secs(5) {
-            let sys_ok = manager
-                .get_region_group(Region::GLOBAL)
-                .map(|s| s.raft().metrics().borrow().current_leader == Some(node_id))
-                .unwrap_or(false);
-            let data_ok = manager
-                .get_region_group(Region::US_EAST_VA)
-                .map(|s| s.raft().metrics().borrow().current_leader == Some(node_id))
-                .unwrap_or(false);
-            if sys_ok && data_ok {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-
-        let service = MultiRegionRaftService::new(manager.clone());
+        let service = RaftServiceImpl::new(manager.clone());
         (service, manager, node_id, temp)
     }
 
@@ -550,7 +315,7 @@ mod tests {
     }
 
     /// Returns the current term from the Raft instance via the manager.
-    fn get_term(manager: &MultiRaftManager, region: Region) -> u64 {
+    fn get_term(manager: &RaftManager, region: Region) -> u64 {
         manager
             .get_region_group(region)
             .expect("region exists")
@@ -561,7 +326,7 @@ mod tests {
     }
 
     /// Returns the last applied index from the Raft instance.
-    fn get_applied(manager: &MultiRaftManager, region: Region) -> u64 {
+    fn get_applied(manager: &RaftManager, region: Region) -> u64 {
         manager
             .get_region_group(region)
             .expect("region exists")
@@ -1068,13 +833,13 @@ mod tests {
     }
 
     // ====================================================================
-    // Test: MultiRegionRaftService routing
+    // Test: Region routing in unified RaftServiceImpl
     // ====================================================================
 
     /// Unknown region value → INVALID_ARGUMENT error.
     #[tokio::test]
     async fn test_byzantine_multi_region_invalid_region() {
-        let (service, _mgr, _id, _dir) = create_multi_region_service().await;
+        let (service, _mgr, _id, _dir) = create_test_service().await;
 
         let request = Request::new(RaftAppendEntriesRequest {
             vote: Some(make_vote(1, 999)),
@@ -1092,7 +857,7 @@ mod tests {
     /// Missing region defaults to GLOBAL (system).
     #[tokio::test]
     async fn test_byzantine_multi_region_default_routing() {
-        let (service, _mgr, _id, _dir) = create_multi_region_service().await;
+        let (service, _mgr, _id, _dir) = create_test_service().await;
 
         // Request without region and missing vote → should route to GLOBAL
         // and return InvalidArgument (not NotFound)
@@ -1110,7 +875,7 @@ mod tests {
     /// Malformed messages to a specific data region → still rejected properly.
     #[tokio::test]
     async fn test_byzantine_multi_region_malformed_to_global_region() {
-        let (service, _mgr, _id, _dir) = create_multi_region_service().await;
+        let (service, _mgr, _id, _dir) = create_test_service().await;
 
         let request = Request::new(RaftVoteRequest {
             vote: None,

@@ -5,14 +5,14 @@
 //!
 //! ## Multi-Region Support
 //!
-//! For multi-region deployments, use [`MultiRegionReadService`] and
-//! [`MultiRegionWriteService`] with a [`RegionResolver`] to route requests
-//! to the correct region.
+//! Every service is multi-region capable via [`RegionResolver`], which routes
+//! requests to the correct region based on organization assignment. A
+//! single-region deployment is simply a resolver with one region (GLOBAL).
 //!
 //! ## Request Forwarding
 //!
-//! When an organization is on a remote region, the `ForwardClient` can be used to
-//! proxy requests to the correct node via gRPC.
+//! When an organization is on a remote region, the [`ForwardClient`] proxies
+//! requests to the correct node via gRPC.
 
 mod admin;
 mod discovery;
@@ -22,8 +22,6 @@ mod forward_client;
 mod health;
 pub(crate) mod helpers;
 pub(crate) mod metadata;
-mod multi_region_read;
-mod multi_region_write;
 mod raft;
 mod read;
 pub mod region_resolver;
@@ -35,10 +33,8 @@ pub use discovery::DiscoveryServiceImpl;
 pub use events::EventsServiceImpl;
 pub use forward_client::ForwardClient;
 pub use health::HealthServiceImpl;
-pub use multi_region_read::MultiRegionReadService;
-pub use multi_region_write::MultiRegionWriteService;
-pub use raft::{MultiRegionRaftService, RaftServiceImpl};
+pub use raft::RaftServiceImpl;
 pub use read::ReadServiceImpl;
-pub use region_resolver::{MultiRegionResolver, RegionResolver};
+pub use region_resolver::{RegionResolver, RegionResolverImpl};
 pub use slug_resolver::SlugResolver;
 pub use write::WriteServiceImpl;
