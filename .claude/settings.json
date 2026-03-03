@@ -6,7 +6,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "just check-quick || true"
+            "command": "just fmt-check || true"
+          },
+          {
+            "type": "command",
+            "command": "just clippy || true"
+          },
+          {
+            "type": "command",
+            "command": "just doc-check || true"
           }
         ]
       }
