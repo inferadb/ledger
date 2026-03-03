@@ -349,29 +349,33 @@ let page = client.list_resources(organization_slug, vault_slug, opts).await?;
 use inferadb_ledger_sdk::{Operation, SetCondition};
 
 // Entity operations
-let set = Operation::set_entity("user:123", b"data".to_vec());
-let set_with_ttl = Operation::set_entity_with_ttl(
+let set = Operation::set_entity("user:123", b"data".to_vec(), None, None);
+let set_with_ttl = Operation::set_entity(
     "session:abc",
     b"token".to_vec(),
-    3600, // expires in 1 hour
+    Some(3600), // expires in 1 hour
+    None,
 );
 let delete = Operation::delete_entity("user:old");
 
 // Conditional writes
-let create_only = Operation::set_entity_if(
+let create_only = Operation::set_entity(
     "user:new",
     b"data".to_vec(),
-    SetCondition::NotExists,
+    None,
+    Some(SetCondition::NotExists),
 );
-let update_only = Operation::set_entity_if(
+let update_only = Operation::set_entity(
     "user:123",
     b"updated".to_vec(),
-    SetCondition::MustExist,
+    None,
+    Some(SetCondition::MustExist),
 );
-let cas = Operation::set_entity_if(
+let cas = Operation::set_entity(
     "counter",
     b"11".to_vec(),
-    SetCondition::version(10), // Only if current version is 10
+    None,
+    Some(SetCondition::version(10)), // Only if current version is 10
 );
 
 // Relationship operations
@@ -391,7 +395,7 @@ let delete_rel = Operation::delete_relationship(
 
 ```rust
 let ops = vec![
-    Operation::set_entity("user:123", b"updated".to_vec()),
+    Operation::set_entity("user:123", b"updated".to_vec(), None, None),
     Operation::create_relationship("doc:1", "owner", "user:123"),
 ];
 
@@ -407,12 +411,13 @@ Atomic multi-operation transactions:
 ```rust
 let ops = vec![
     // Create user with unique email constraint
-    Operation::set_entity_if(
+    Operation::set_entity(
         "idx:email:alice@example.com",
         b"user:123".to_vec(),
-        SetCondition::NotExists,
+        None,
+        Some(SetCondition::NotExists),
     ),
-    Operation::set_entity("user:123", user_data),
+    Operation::set_entity("user:123", user_data, None, None),
     // Grant permissions
     Operation::create_relationship("org:acme", "member", "user:123"),
 ];

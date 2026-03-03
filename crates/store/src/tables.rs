@@ -398,26 +398,19 @@ impl Table for VaultHealth {
 /// On-disk representation of a table's metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct TableEntry {
-    /// Table identifier (0-17).
+    /// Table identifier (0-18).
     pub table_id: TableId,
     /// Root page of the B-tree (0 = empty table).
     pub root_page: u64,
-    /// Reserved space for entry count tracking (currently unused).
-    ///
-    /// This field is always written as `0` — entry counts are not tracked.
-    /// It remains in the on-disk format because [`TableEntry::SIZE`] is part
-    /// of the persisted page layout; removing it would require a storage
-    /// format migration.
-    pub entry_count: u64,
 }
 
 impl TableEntry {
     /// Size of a serialized table entry in bytes.
-    pub const SIZE: usize = 1 + 8 + 8; // table_id + root_page + entry_count
+    pub const SIZE: usize = 1 + 8; // table_id + root_page
 
     /// Creates a new empty table entry.
     pub fn empty(table_id: TableId) -> Self {
-        Self { table_id, root_page: 0, entry_count: 0 }
+        Self { table_id, root_page: 0 }
     }
 
     /// Serializes to bytes.
@@ -425,7 +418,6 @@ impl TableEntry {
         let mut buf = [0u8; Self::SIZE];
         buf[0] = self.table_id as u8;
         buf[1..9].copy_from_slice(&self.root_page.to_le_bytes());
-        buf[9..17].copy_from_slice(&self.entry_count.to_le_bytes());
         buf
     }
 
@@ -436,8 +428,7 @@ impl TableEntry {
         }
         let table_id = TableId::from_u8(buf[0])?;
         let root_page = u64::from_le_bytes(buf[1..9].try_into().ok()?);
-        let entry_count = u64::from_le_bytes(buf[9..17].try_into().ok()?);
-        Some(Self { table_id, root_page, entry_count })
+        Some(Self { table_id, root_page })
     }
 }
 
@@ -456,12 +447,11 @@ mod tests {
 
     #[test]
     fn test_table_entry_serialization() {
-        let entry = TableEntry { table_id: TableId::RaftLog, root_page: 12345, entry_count: 999 };
+        let entry = TableEntry { table_id: TableId::RaftLog, root_page: 12345 };
         let bytes = entry.to_bytes();
         let recovered = TableEntry::from_bytes(&bytes).unwrap();
         assert_eq!(entry.table_id, recovered.table_id);
         assert_eq!(entry.root_page, recovered.root_page);
-        assert_eq!(entry.entry_count, recovered.entry_count);
     }
 
     #[test]
@@ -508,10 +498,10 @@ mod tests {
 
     #[test]
     fn test_directory_page_fits_minimum_page_size() {
-        // With COUNT=19 tables, the directory occupies 19 * 17 = 323 bytes.
+        // With COUNT=19 tables, the directory occupies 19 * 9 = 171 bytes.
         // This must fit within the minimum 512-byte page size.
         let directory_size = TableId::COUNT * TableEntry::SIZE;
-        assert_eq!(directory_size, 323);
+        assert_eq!(directory_size, 171);
         assert!(
             directory_size <= 512,
             "directory size {directory_size} exceeds minimum 512-byte page"

@@ -384,11 +384,7 @@ impl<B: StorageBackend> Database<B> {
 
         let mut offset = 2;
         for table_id in TableId::all() {
-            let entry = TableEntry {
-                table_id,
-                root_page: table_roots[table_id as usize],
-                entry_count: 0, // We don't track this currently
-            };
+            let entry = TableEntry { table_id, root_page: table_roots[table_id as usize] };
             let entry_bytes = entry.to_bytes();
             dir_data[offset..offset + TableEntry::SIZE].copy_from_slice(&entry_bytes);
             offset += TableEntry::SIZE;

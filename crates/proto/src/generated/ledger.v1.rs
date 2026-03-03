@@ -2136,9 +2136,10 @@ pub struct GetRewrapStatusResponse {
 /// Forward-only finalization — irreversible by design.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct EraseUserRequest {
-    /// User ID to erase.
-    #[prost(int64, tag = "1")]
-    pub user_id: i64,
+    /// User slug (Snowflake ID) to erase. The server resolves this to an
+    /// internal user ID.
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<UserSlug>,
     /// Identity of the actor requesting erasure (audit trail).
     #[prost(string, tag = "2")]
     pub erased_by: ::prost::alloc::string::String,
@@ -2148,9 +2149,9 @@ pub struct EraseUserRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct EraseUserResponse {
-    /// User ID that was erased.
-    #[prost(int64, tag = "1")]
-    pub user_id: i64,
+    /// User slug that was erased.
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<UserSlug>,
 }
 /// Migrate existing users from flat \_system store to regional directory
 /// structure. Explicit admin action for pre-release data migration.

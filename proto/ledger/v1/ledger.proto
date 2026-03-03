@@ -1970,8 +1970,9 @@ message GetRewrapStatusResponse {
 // Erase a user's PII via crypto-shredding.
 // Forward-only finalization — irreversible by design.
 message EraseUserRequest {
-  // User ID to erase.
-  int64 user_id = 1;
+  // User slug (Snowflake ID) to erase. The server resolves this to an
+  // internal user ID.
+  UserSlug user = 1;
   // Identity of the actor requesting erasure (audit trail).
   string erased_by = 2;
   // Region where the user's PII resides.
@@ -1979,8 +1980,8 @@ message EraseUserRequest {
 }
 
 message EraseUserResponse {
-  // User ID that was erased.
-  int64 user_id = 1;
+  // User slug that was erased.
+  UserSlug user = 1;
 }
 
 // -----------------------------------------------------------------------------

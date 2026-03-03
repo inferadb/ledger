@@ -1519,7 +1519,7 @@ impl AdminService for MockAdminService {
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        Ok(Response::new(proto::EraseUserResponse { user_id: req.user_id }))
+        Ok(Response::new(proto::EraseUserResponse { user: req.user }))
     }
 
     async fn migrate_organization(
@@ -2062,7 +2062,7 @@ mod tests {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
-            let ops = vec![Operation::set_entity("entity:1", b"data".to_vec())];
+            let ops = vec![Operation::set_entity("entity:1", b"data".to_vec(), None, None)];
             let result = client.write(ORG, Some(VAULT), ops).await.unwrap();
 
             assert!(!result.tx_id.is_empty());
@@ -2075,7 +2075,7 @@ mod tests {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
-            let ops = vec![Operation::set_entity("user:abc", b"user data".to_vec())];
+            let ops = vec![Operation::set_entity("user:abc", b"user data".to_vec(), None, None)];
             client.write(ORG, Some(VAULT), ops).await.unwrap();
 
             let value = client.read(ORG, Some(VAULT), "user:abc").await.unwrap();
@@ -2088,9 +2088,9 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let ops = vec![
-                Operation::set_entity("k1", b"v1".to_vec()),
-                Operation::set_entity("k2", b"v2".to_vec()),
-                Operation::set_entity("k3", b"v3".to_vec()),
+                Operation::set_entity("k1", b"v1".to_vec(), None, None),
+                Operation::set_entity("k2", b"v2".to_vec(), None, None),
+                Operation::set_entity("k3", b"v3".to_vec(), None, None),
             ];
             let result = client.write(ORG, Some(VAULT), ops).await.unwrap();
 
@@ -2137,10 +2137,10 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let batches = vec![
-                vec![Operation::set_entity("batch1:a", b"a".to_vec())],
+                vec![Operation::set_entity("batch1:a", b"a".to_vec(), None, None)],
                 vec![
-                    Operation::set_entity("batch2:b", b"b".to_vec()),
-                    Operation::set_entity("batch2:c", b"c".to_vec()),
+                    Operation::set_entity("batch2:b", b"b".to_vec(), None, None),
+                    Operation::set_entity("batch2:c", b"c".to_vec(), None, None),
                 ],
             ];
             let result = client.batch_write(ORG, Some(VAULT), batches).await.unwrap();
@@ -2171,7 +2171,7 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let result = client
-                .set_entity(ORG, Some(VAULT), "entity:1", b"data".to_vec(), None)
+                .set_entity(ORG, Some(VAULT), "entity:1", b"data".to_vec(), None, None)
                 .await
                 .unwrap();
 
@@ -2196,18 +2196,18 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_set_entity_if_convenience() {
+        async fn test_set_entity_with_condition_convenience() {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
             let result = client
-                .set_entity_if(
+                .set_entity(
                     ORG,
                     Some(VAULT),
                     "cond:1",
                     b"value".to_vec(),
-                    crate::SetCondition::NotExists,
                     None,
+                    Some(crate::SetCondition::NotExists),
                 )
                 .await
                 .unwrap();
@@ -2225,7 +2225,7 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let result = client
-                .set_entity(ORG, Some(VAULT), "ttl:1", b"temp".to_vec(), Some(1_700_000_000))
+                .set_entity(ORG, Some(VAULT), "ttl:1", b"temp".to_vec(), Some(1_700_000_000), None)
                 .await
                 .unwrap();
 
@@ -2237,18 +2237,18 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_set_entity_if_with_expiry_convenience() {
+        async fn test_set_entity_with_expiry_and_condition_convenience() {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
             let result = client
-                .set_entity_if(
+                .set_entity(
                     ORG,
                     Some(VAULT),
                     "cond_ttl:1",
                     b"conditional-temp".to_vec(),
-                    crate::SetCondition::NotExists,
                     Some(1_700_000_000),
+                    Some(crate::SetCondition::NotExists),
                 )
                 .await
                 .unwrap();
@@ -2267,13 +2267,13 @@ mod tests {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
-            let ops = vec![Operation::set_entity("key1", b"data".to_vec())];
+            let ops = vec![Operation::set_entity("key1", b"data".to_vec(), None, None)];
             let result = client.write(ORG, Some(VAULT), ops).await.unwrap();
 
             assert_eq!(result.assigned_sequence, 1);
 
             // Second write gets next sequence
-            let ops2 = vec![Operation::set_entity("key2", b"data2".to_vec())];
+            let ops2 = vec![Operation::set_entity("key2", b"data2".to_vec(), None, None)];
             let result2 = client.write(ORG, Some(VAULT), ops2).await.unwrap();
 
             assert_eq!(result2.assigned_sequence, 2);
@@ -2284,7 +2284,7 @@ mod tests {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
-            let batches = vec![vec![Operation::set_entity("bw:1", b"first".to_vec())]];
+            let batches = vec![vec![Operation::set_entity("bw:1", b"first".to_vec(), None, None)]];
             let result = client.batch_write(ORG, Some(VAULT), batches).await.unwrap();
 
             assert_eq!(result.assigned_sequence, 1);
@@ -2297,7 +2297,8 @@ mod tests {
 
             // Each write to the same vault gets incrementing sequences
             for i in 1..=5 {
-                let ops = vec![Operation::set_entity(format!("seq:{i}"), b"data".to_vec())];
+                let ops =
+                    vec![Operation::set_entity(format!("seq:{i}"), b"data".to_vec(), None, None)];
                 let result = client.write(ORG, Some(VAULT), ops).await.unwrap();
                 assert_eq!(result.assigned_sequence, i);
             }
@@ -2352,7 +2353,7 @@ mod tests {
             // First request fails, second succeeds
             server.inject_unavailable(1);
 
-            let ops = vec![Operation::set_entity("retry-write", b"value".to_vec())];
+            let ops = vec![Operation::set_entity("retry-write", b"value".to_vec(), None, None)];
             let result = client.write(ORG, Some(VAULT), ops).await.unwrap();
 
             assert!(!result.tx_id.is_empty());
@@ -2371,14 +2372,16 @@ mod tests {
 
             let handle1 = tokio::spawn(async move {
                 for i in 0..10 {
-                    let ops = vec![Operation::set_entity(format!("v0:k{i}"), b"v0".to_vec())];
+                    let ops =
+                        vec![Operation::set_entity(format!("v0:k{i}"), b"v0".to_vec(), None, None)];
                     client1.write(ORG, Some(VaultSlug::new(0)), ops).await.unwrap();
                 }
             });
 
             let handle2 = tokio::spawn(async move {
                 for i in 0..10 {
-                    let ops = vec![Operation::set_entity(format!("v1:k{i}"), b"v1".to_vec())];
+                    let ops =
+                        vec![Operation::set_entity(format!("v1:k{i}"), b"v1".to_vec(), None, None)];
                     client2.write(ORG, Some(VaultSlug::new(1)), ops).await.unwrap();
                 }
             });
@@ -2632,7 +2635,7 @@ mod tests {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
-            let ops = vec![Operation::set_entity("ns:key", b"value".to_vec())];
+            let ops = vec![Operation::set_entity("ns:key", b"value".to_vec(), None, None)];
             let result = client.write(ORG, None, ops).await.unwrap();
 
             assert!(!result.tx_id.is_empty());
@@ -2649,7 +2652,7 @@ mod tests {
 
             // 1MB value
             let large_value = vec![0u8; 1024 * 1024];
-            let ops = vec![Operation::set_entity("large:key", large_value.clone())];
+            let ops = vec![Operation::set_entity("large:key", large_value.clone(), None, None)];
             client.write(ORG, Some(VAULT), ops).await.unwrap();
 
             let result = client.read(ORG, Some(VAULT), "large:key").await.unwrap();
@@ -2665,8 +2668,8 @@ mod tests {
             let client2 = create_client_with_retry(&server, "client-2", 1).await;
 
             // Both can write (they have independent sequences)
-            let ops1 = vec![Operation::set_entity("c1:key", b"from-c1".to_vec())];
-            let ops2 = vec![Operation::set_entity("c2:key", b"from-c2".to_vec())];
+            let ops1 = vec![Operation::set_entity("c1:key", b"from-c1".to_vec(), None, None)];
+            let ops2 = vec![Operation::set_entity("c2:key", b"from-c2".to_vec(), None, None)];
 
             client1.write(ORG, Some(VAULT), ops1).await.unwrap();
             client2.write(ORG, Some(VAULT), ops2).await.unwrap();
@@ -2728,7 +2731,7 @@ mod tests {
             assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
 
             // Write should also fail
-            let ops = vec![Operation::set_entity("new:key", b"value".to_vec())];
+            let ops = vec![Operation::set_entity("new:key", b"value".to_vec(), None, None)];
             let result = client.write(ORG, Some(VAULT), ops).await;
             assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
         }
@@ -2743,6 +2746,8 @@ mod tests {
                 let ops = vec![Operation::set_entity(
                     format!("key:{i}"),
                     format!("value:{i}").into_bytes(),
+                    None,
+                    None,
                 )];
                 client.write(ORG, Some(VAULT), ops).await.unwrap();
             }
@@ -2754,7 +2759,7 @@ mod tests {
             client.shutdown().await;
 
             // Operations should fail
-            let ops = vec![Operation::set_entity("key:5", b"value".to_vec())];
+            let ops = vec![Operation::set_entity("key:5", b"value".to_vec(), None, None)];
             let result = client.write(ORG, Some(VAULT), ops).await;
             assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
 

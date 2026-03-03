@@ -68,6 +68,8 @@ async fn main() -> Result<()> {
             vec![Operation::set_entity(
                 user_key,
                 serde_json::to_vec(&user_data).expect("serialize"),
+                None,
+                None,
             )],
         )
         .await?;
@@ -107,8 +109,8 @@ async fn main() -> Result<()> {
     // 6. Write multiple entities in a single transaction
     // -------------------------------------------------------------------------
     let operations = vec![
-        Operation::set_entity("user:bob", b"Bob's data".to_vec()),
-        Operation::set_entity("user:charlie", b"Charlie's data".to_vec()),
+        Operation::set_entity("user:bob", b"Bob's data".to_vec(), None, None),
+        Operation::set_entity("user:charlie", b"Charlie's data".to_vec(), None, None),
         Operation::create_relationship("doc:readme", "viewer", "user:alice"),
         Operation::create_relationship("doc:readme", "editor", "user:bob"),
     ];

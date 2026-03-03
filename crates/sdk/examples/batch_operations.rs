@@ -58,9 +58,9 @@ async fn main() -> Result<()> {
             organization,
             Some(vault),
             vec![
-                Operation::set_entity("team:engineering", b"Engineering Team".to_vec()),
-                Operation::set_entity("team:design", b"Design Team".to_vec()),
-                Operation::set_entity("team:product", b"Product Team".to_vec()),
+                Operation::set_entity("team:engineering", b"Engineering Team".to_vec(), None, None),
+                Operation::set_entity("team:design", b"Design Team".to_vec(), None, None),
+                Operation::set_entity("team:product", b"Product Team".to_vec(), None, None),
             ],
         )
         .await?;
@@ -88,6 +88,8 @@ async fn main() -> Result<()> {
                             "role": "engineer"
                         }))
                         .expect("serialize"),
+                        None,
+                        None,
                     ),
                     Operation::set_entity(
                         "user:bob",
@@ -96,6 +98,8 @@ async fn main() -> Result<()> {
                             "role": "designer"
                         }))
                         .expect("serialize"),
+                        None,
+                        None,
                     ),
                 ],
                 // Group 2: Assign users to teams
@@ -125,10 +129,11 @@ async fn main() -> Result<()> {
         .write(
             organization,
             Some(vault),
-            vec![Operation::set_entity_if(
+            vec![Operation::set_entity(
                 "config:settings",
                 b"default_settings".to_vec(),
-                SetCondition::NotExists,
+                None,
+                Some(SetCondition::NotExists),
             )],
         )
         .await?;
@@ -140,10 +145,11 @@ async fn main() -> Result<()> {
         .write(
             organization,
             Some(vault),
-            vec![Operation::set_entity_if(
+            vec![Operation::set_entity(
                 "config:settings",
                 b"updated_settings".to_vec(),
-                SetCondition::MustExist,
+                None,
+                Some(SetCondition::MustExist),
             )],
         )
         .await?;
@@ -172,6 +178,8 @@ async fn main() -> Result<()> {
                         "onboarded_at": chrono::Utc::now().to_rfc3339()
                     }))
                     .expect("serialize"),
+                    None,
+                    None,
                 )],
                 // Step 2: Add to default team
                 vec![Operation::create_relationship("team:product", "member", new_user_id)],

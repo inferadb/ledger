@@ -3791,10 +3791,6 @@ impl AdminService for AdminServiceImpl {
         );
 
         // Validate inputs
-        if req.user_id == 0 {
-            ctx.set_error("InvalidArgument", "user_id must be non-zero");
-            return Err(Status::invalid_argument("user_id must be non-zero"));
-        }
         if req.erased_by.is_empty() {
             ctx.set_error("InvalidArgument", "erased_by must be non-empty");
             return Err(Status::invalid_argument("erased_by must be non-empty"));
@@ -3802,7 +3798,10 @@ impl AdminService for AdminServiceImpl {
 
         let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
 
-        let user_id = inferadb_ledger_types::UserId::new(req.user_id);
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let user_id = slug_resolver.extract_and_resolve_user(&req.user).inspect_err(|status| {
+            ctx.set_error("InvalidArgument", status.message());
+        })?;
 
         let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
         let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
@@ -3849,7 +3848,15 @@ impl AdminService for AdminServiceImpl {
                 }
 
                 ctx.set_success();
-                Ok(Response::new(EraseUserResponse { user_id: erased_id.value() }))
+                let erased_slug =
+                    slug_resolver.resolve_user_slug(erased_id).inspect_err(|status| {
+                        ctx.set_error("InternalError", status.message());
+                    })?;
+                Ok(Response::new(EraseUserResponse {
+                    user: Some(inferadb_ledger_proto::proto::UserSlug {
+                        slug: erased_slug.value(),
+                    }),
+                }))
             },
             LedgerResponse::Error { message } => {
                 ctx.set_error("ErasureFailed", &message);

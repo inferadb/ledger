@@ -53,7 +53,11 @@ async fn main() -> Result<()> {
     let test_value = b"This value can be cryptographically verified".to_vec();
 
     let write_result = client
-        .write(organization, Some(vault), vec![Operation::set_entity(test_key, test_value.clone())])
+        .write(
+            organization,
+            Some(vault),
+            vec![Operation::set_entity(test_key, test_value.clone(), None, None)],
+        )
         .await?;
 
     println!(
@@ -100,7 +104,7 @@ async fn main() -> Result<()> {
         .write(
             organization,
             Some(vault),
-            vec![Operation::set_entity(test_key, b"Updated value".to_vec())],
+            vec![Operation::set_entity(test_key, b"Updated value".to_vec(), None, None)],
         )
         .await?;
 

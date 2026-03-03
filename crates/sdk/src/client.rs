@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use inferadb_ledger_proto::proto;
-use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, Region, UserSlug, VaultSlug};
 use tonic::service::interceptor::InterceptedService;
 
 use crate::{
@@ -211,7 +211,7 @@ pub(crate) fn region_to_proto_i32(region: Region) -> i32 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationInfo {
     /// Organization slug (Snowflake ID).
-    pub slug: u64,
+    pub slug: OrganizationSlug,
     /// Source region for the migration.
     pub source_region: Region,
     /// Target region for the migration.
@@ -224,7 +224,7 @@ pub struct MigrationInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserMigrationInfo {
     /// User slug.
-    pub slug: u64,
+    pub slug: UserSlug,
     /// Source region for the migration.
     pub source_region: Region,
     /// Target region for the migration.
@@ -1585,46 +1585,33 @@ pub enum SetCondition {
 impl Operation {
     /// Creates an operation that sets an entity's key-value pair.
     ///
+    /// # Arguments
+    ///
+    /// * `key` - Entity key.
+    /// * `value` - Entity value.
+    /// * `expires_at` - Optional Unix epoch seconds when the entity expires.
+    /// * `condition` - Optional condition that must be met for the write to succeed.
+    ///
     /// # Example
     ///
     /// ```no_run
-    /// # use inferadb_ledger_sdk::Operation;
-    /// let op = Operation::set_entity("user:123", b"data".to_vec());
+    /// # use inferadb_ledger_sdk::{Operation, SetCondition};
+    /// // Simple set
+    /// let op = Operation::set_entity("user:123", b"data".to_vec(), None, None);
+    ///
+    /// // Set with expiry
+    /// let op = Operation::set_entity("session:abc", b"token".to_vec(), Some(1700000000), None);
+    ///
+    /// // Conditional set (create-if-not-exists)
+    /// let op = Operation::set_entity("lock:xyz", b"owner".to_vec(), None, Some(SetCondition::NotExists));
     /// ```
-    pub fn set_entity(key: impl Into<String>, value: Vec<u8>) -> Self {
-        Operation::SetEntity { key: key.into(), value, expires_at: None, condition: None }
-    }
-
-    /// Creates a set entity operation with expiration.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - Entity key
-    /// * `value` - Entity value
-    /// * `expires_at` - Unix epoch seconds when the entity expires
-    pub fn set_entity_with_expiry(key: impl Into<String>, value: Vec<u8>, expires_at: u64) -> Self {
-        Operation::SetEntity {
-            key: key.into(),
-            value,
-            expires_at: Some(expires_at),
-            condition: None,
-        }
-    }
-
-    /// Creates a conditional set entity operation.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - Entity key
-    /// * `value` - Entity value
-    /// * `condition` - Condition that must be met for the write to succeed
-    pub fn set_entity_if(key: impl Into<String>, value: Vec<u8>, condition: SetCondition) -> Self {
-        Operation::SetEntity {
-            key: key.into(),
-            value,
-            expires_at: None,
-            condition: Some(condition),
-        }
+    pub fn set_entity(
+        key: impl Into<String>,
+        value: Vec<u8>,
+        expires_at: Option<u64>,
+        condition: Option<SetCondition>,
+    ) -> Self {
+        Operation::SetEntity { key: key.into(), value, expires_at, condition }
     }
 
     /// Creates an operation that deletes an entity by key.
@@ -2798,7 +2785,7 @@ impl LedgerClient {
     ///     organization,
     ///     Some(vault),
     ///     vec![
-    ///         Operation::set_entity("user:123", b"data".to_vec()),
+    ///         Operation::set_entity("user:123", b"data".to_vec(), None, None),
     ///         Operation::create_relationship("doc:456", "viewer", "user:123"),
     ///     ],
     /// ).await?;
@@ -3041,7 +3028,7 @@ impl LedgerClient {
     ///     Some(vault),
     ///     vec![
     ///         // First batch: create the user
-    ///         vec![Operation::set_entity("user:123", b"alice".to_vec())],
+    ///         vec![Operation::set_entity("user:123", b"alice".to_vec(), None, None)],
     ///         // Second batch: grant permissions (depends on user existing)
     ///         vec![
     ///             Operation::create_relationship("doc:456", "viewer", "user:123"),
@@ -3211,7 +3198,8 @@ impl LedgerClient {
     // Single-Operation Convenience Methods
     // =============================================================================
 
-    /// Writes a single entity (set), optionally with an expiration timestamp.
+    /// Writes a single entity (set), optionally with expiration and/or a
+    /// condition.
     ///
     /// Convenience wrapper around [`write`](Self::write) for the common case of
     /// setting a single key-value pair. Generates an idempotency key
@@ -3223,30 +3211,29 @@ impl LedgerClient {
     /// * `vault` - Optional vault slug (omit for organization-level entities).
     /// * `key` - The entity key.
     /// * `value` - The entity value.
-    /// * `expires_at` - Optional Unix timestamp (seconds) when the entity expires. Pass `None` for
-    ///   no expiration.
+    /// * `expires_at` - Optional Unix timestamp (seconds) when the entity expires.
+    /// * `condition` - Optional condition for compare-and-swap writes.
     ///
     /// # Errors
     ///
-    /// Returns an error if validation fails or the write fails after retry
-    /// attempts.
+    /// Returns an error if validation fails, the condition is not met, or the
+    /// write fails after retry attempts.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug, SetCondition};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
-    /// // Without expiration:
-    /// let result = client
-    ///     .set_entity(organization, Some(vault), "user:123", b"data".to_vec(), None)
-    ///     .await?;
+    /// // Simple set:
+    /// client.set_entity(organization, Some(vault), "user:123", b"data".to_vec(), None, None).await?;
     ///
     /// // With expiration:
-    /// let result = client
-    ///     .set_entity(organization, Some(vault), "session:abc", b"token".to_vec(), Some(1700000000))
-    ///     .await?;
+    /// client.set_entity(organization, Some(vault), "session:abc", b"token".to_vec(), Some(1700000000), None).await?;
+    ///
+    /// // Conditional (create-if-not-exists):
+    /// client.set_entity(organization, Some(vault), "lock:xyz", b"owner".to_vec(), None, Some(SetCondition::NotExists)).await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -3257,11 +3244,12 @@ impl LedgerClient {
         key: impl Into<String>,
         value: Vec<u8>,
         expires_at: Option<u64>,
+        condition: Option<SetCondition>,
     ) -> Result<WriteSuccess> {
         self.write(
             organization,
             vault,
-            vec![Operation::SetEntity { key: key.into(), value, expires_at, condition: None }],
+            vec![Operation::set_entity(key, value, expires_at, condition)],
         )
         .await
     }
@@ -3300,69 +3288,6 @@ impl LedgerClient {
         key: impl Into<String>,
     ) -> Result<WriteSuccess> {
         self.write(organization, vault, vec![Operation::delete_entity(key)]).await
-    }
-
-    /// Sets a single entity with a conditional write, optionally with an expiration timestamp.
-    ///
-    /// Convenience wrapper around [`write`](Self::write) for conditional
-    /// set operations (compare-and-swap). The write only succeeds if the
-    /// condition is met.
-    ///
-    /// # Arguments
-    ///
-    /// * `organization` - Organization slug (external identifier).
-    /// * `vault` - Optional vault slug (omit for organization-level entities).
-    /// * `key` - The entity key.
-    /// * `value` - The entity value.
-    /// * `condition` - The condition that must be satisfied for the write to succeed.
-    /// * `expires_at` - Optional Unix timestamp (seconds) when the entity expires. Pass `None` for
-    ///   no expiration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if validation fails, the condition is not met, or the
-    /// write fails after retry attempts.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug, SetCondition};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
-    /// let result = client
-    ///     .set_entity_if(
-    ///         organization,
-    ///         Some(vault),
-    ///         "user:123",
-    ///         b"new-data".to_vec(),
-    ///         SetCondition::NotExists,
-    ///         None,
-    ///     )
-    ///     .await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn set_entity_if(
-        &self,
-        organization: OrganizationSlug,
-        vault: Option<VaultSlug>,
-        key: impl Into<String>,
-        value: Vec<u8>,
-        condition: SetCondition,
-        expires_at: Option<u64>,
-    ) -> Result<WriteSuccess> {
-        self.write(
-            organization,
-            vault,
-            vec![Operation::SetEntity {
-                key: key.into(),
-                value,
-                expires_at,
-                condition: Some(condition),
-            }],
-        )
-        .await
     }
 
     // =============================================================================
@@ -3863,7 +3788,7 @@ impl LedgerClient {
                         .into_inner();
 
                     Ok(MigrationInfo {
-                        slug: response.slug.map_or(0, |s| s.slug),
+                        slug: OrganizationSlug::new(response.slug.map_or(0, |s| s.slug)),
                         source_region: region_from_proto_i32(response.source_region)
                             .unwrap_or(Region::GLOBAL),
                         target_region: region_from_proto_i32(response.target_region)
@@ -3938,7 +3863,7 @@ impl LedgerClient {
                         .into_inner();
 
                     Ok(UserMigrationInfo {
-                        slug: response.slug.map_or(0, |s| s.slug),
+                        slug: UserSlug::new(response.slug.map_or(0, |s| s.slug)),
                         source_region: region_from_proto_i32(response.source_region)
                             .unwrap_or(Region::GLOBAL),
                         target_region: region_from_proto_i32(response.target_region)
@@ -3958,13 +3883,13 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
-    /// * `user_id` - Internal user ID to erase.
+    /// * `user` - User slug (Snowflake ID) to erase.
     /// * `erased_by` - Identity of the actor requesting erasure (audit trail).
     /// * `region` - Region where the user's PII resides.
     ///
     /// # Returns
     ///
-    /// Returns the user ID that was erased.
+    /// Returns the user slug that was erased.
     ///
     /// # Errors
     ///
@@ -3974,10 +3899,10 @@ impl LedgerClient {
     /// - Connection fails after retry attempts
     pub async fn erase_user(
         &self,
-        user_id: i64,
+        user: UserSlug,
         erased_by: impl Into<String>,
         region: Region,
-    ) -> Result<i64> {
+    ) -> Result<UserSlug> {
         self.check_shutdown(None)?;
 
         let erased_by = erased_by.into();
@@ -4005,7 +3930,7 @@ impl LedgerClient {
                     );
 
                     let request = proto::EraseUserRequest {
-                        user_id,
+                        user: Some(proto::UserSlug { slug: user.value() }),
                         erased_by: erased_by.clone(),
                         region: region_i32,
                     };
@@ -4013,7 +3938,7 @@ impl LedgerClient {
                     let response =
                         client.erase_user(tonic::Request::new(request)).await?.into_inner();
 
-                    Ok(response.user_id)
+                    Ok(UserSlug::new(response.user.map_or(0, |u| u.slug)))
                 },
             ),
         )
@@ -5602,7 +5527,7 @@ mod tests {
 
     #[test]
     fn test_operation_set_entity() {
-        let op = Operation::set_entity("user:123", b"data".to_vec());
+        let op = Operation::set_entity("user:123", b"data".to_vec(), None, None);
         match op {
             Operation::SetEntity { key, value, expires_at, condition } => {
                 assert_eq!(key, "user:123");
@@ -5616,7 +5541,7 @@ mod tests {
 
     #[test]
     fn test_operation_set_entity_with_expiry() {
-        let op = Operation::set_entity_with_expiry("session:abc", b"token".to_vec(), 1700000000);
+        let op = Operation::set_entity("session:abc", b"token".to_vec(), Some(1700000000), None);
         match op {
             Operation::SetEntity { key, value, expires_at, condition } => {
                 assert_eq!(key, "session:abc");
@@ -5630,7 +5555,12 @@ mod tests {
 
     #[test]
     fn test_operation_set_entity_if_not_exists() {
-        let op = Operation::set_entity_if("lock:xyz", b"owner".to_vec(), SetCondition::NotExists);
+        let op = Operation::set_entity(
+            "lock:xyz",
+            b"owner".to_vec(),
+            None,
+            Some(SetCondition::NotExists),
+        );
         match op {
             Operation::SetEntity { key, condition: Some(SetCondition::NotExists), .. } => {
                 assert_eq!(key, "lock:xyz");
@@ -5641,7 +5571,12 @@ mod tests {
 
     #[test]
     fn test_operation_set_entity_if_version() {
-        let op = Operation::set_entity_if("counter", b"42".to_vec(), SetCondition::Version(100));
+        let op = Operation::set_entity(
+            "counter",
+            b"42".to_vec(),
+            None,
+            Some(SetCondition::Version(100)),
+        );
         match op {
             Operation::SetEntity { condition: Some(SetCondition::Version(v)), .. } => {
                 assert_eq!(v, 100);
@@ -5652,10 +5587,11 @@ mod tests {
 
     #[test]
     fn test_operation_set_entity_if_value_equals() {
-        let op = Operation::set_entity_if(
+        let op = Operation::set_entity(
             "data",
             b"new".to_vec(),
-            SetCondition::ValueEquals(b"old".to_vec()),
+            None,
+            Some(SetCondition::ValueEquals(b"old".to_vec())),
         );
         match op {
             Operation::SetEntity { condition: Some(SetCondition::ValueEquals(v)), .. } => {
@@ -5704,7 +5640,7 @@ mod tests {
 
     #[test]
     fn test_operation_to_proto_set_entity() {
-        let op = Operation::set_entity("key", b"value".to_vec());
+        let op = Operation::set_entity("key", b"value".to_vec(), None, None);
         let proto_op = op.to_proto();
 
         assert!(proto_op.op.is_some());
@@ -5837,7 +5773,7 @@ mod tests {
 
         let client = LedgerClient::new(config).await.expect("client creation");
 
-        let operations = vec![Operation::set_entity("key", b"value".to_vec())];
+        let operations = vec![Operation::set_entity("key", b"value".to_vec(), None, None)];
         let result = client.write(ORG, Some(VaultSlug::new(0)), operations).await;
 
         assert!(result.is_err(), "expected connection error");
@@ -5862,8 +5798,8 @@ mod tests {
 
         // Multiple operations should be grouped in a single write
         let operations = vec![
-            Operation::set_entity("user:1", b"alice".to_vec()),
-            Operation::set_entity("user:2", b"bob".to_vec()),
+            Operation::set_entity("user:1", b"alice".to_vec(), None, None),
+            Operation::set_entity("user:2", b"bob".to_vec(), None, None),
             Operation::create_relationship("doc:1", "viewer", "user:1"),
             Operation::create_relationship("doc:1", "editor", "user:2"),
         ];
@@ -5895,7 +5831,7 @@ mod tests {
 
         let client = LedgerClient::new(config).await.expect("client creation");
 
-        let batches = vec![vec![Operation::set_entity("key", b"value".to_vec())]];
+        let batches = vec![vec![Operation::set_entity("key", b"value".to_vec(), None, None)]];
         let result = client.batch_write(ORG, Some(VaultSlug::new(0)), batches).await;
 
         assert!(result.is_err(), "expected connection error");
@@ -5921,7 +5857,7 @@ mod tests {
         // Atomic transaction with multiple groups
         let batches = vec![
             // First group: create user
-            vec![Operation::set_entity("user:123", b"alice".to_vec())],
+            vec![Operation::set_entity("user:123", b"alice".to_vec(), None, None)],
             // Second group: grant permissions
             vec![
                 Operation::create_relationship("doc:456", "viewer", "user:123"),
@@ -7810,7 +7746,11 @@ mod tests {
         client.shutdown().await;
 
         let result = client
-            .write(ORG, Some(VaultSlug::new(0)), vec![Operation::set_entity("key", vec![1, 2, 3])])
+            .write(
+                ORG,
+                Some(VaultSlug::new(0)),
+                vec![Operation::set_entity("key", vec![1, 2, 3], None, None)],
+            )
             .await;
         assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
     }
@@ -7838,7 +7778,7 @@ mod tests {
             .batch_write(
                 ORG,
                 Some(VaultSlug::new(0)),
-                vec![vec![Operation::set_entity("key", vec![1, 2, 3])]],
+                vec![vec![Operation::set_entity("key", vec![1, 2, 3], None, None)]],
             )
             .await;
         assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
@@ -8095,7 +8035,12 @@ mod tests {
         token.cancel();
 
         let result = client
-            .write_with_token(ORG, None, vec![Operation::set_entity("key", b"val".to_vec())], token)
+            .write_with_token(
+                ORG,
+                None,
+                vec![Operation::set_entity("key", b"val".to_vec(), None, None)],
+                token,
+            )
             .await;
         assert!(matches!(result, Err(crate::error::SdkError::Cancelled)));
     }
@@ -8130,7 +8075,7 @@ mod tests {
         let token = tokio_util::sync::CancellationToken::new();
         token.cancel();
 
-        let ops = vec![vec![Operation::set_entity("key", b"val".to_vec())]];
+        let ops = vec![vec![Operation::set_entity("key", b"val".to_vec(), None, None)]];
         let result = client.batch_write_with_token(ORG, None, ops, token).await;
         assert!(matches!(result, Err(crate::error::SdkError::Cancelled)));
     }
@@ -8239,7 +8184,7 @@ mod tests {
     #[test]
     fn test_operation_validate_set_entity_valid() {
         let config = inferadb_ledger_types::config::ValidationConfig::default();
-        let op = Operation::set_entity("user:123", b"data".to_vec());
+        let op = Operation::set_entity("user:123", b"data".to_vec(), None, None);
         assert!(op.validate(&config).is_ok());
     }
 
@@ -8259,7 +8204,7 @@ mod tests {
     #[test]
     fn test_operation_validate_set_entity_invalid_key_chars() {
         let config = inferadb_ledger_types::config::ValidationConfig::default();
-        let op = Operation::set_entity("user 123", b"data".to_vec());
+        let op = Operation::set_entity("user 123", b"data".to_vec(), None, None);
         assert!(op.validate(&config).is_err());
     }
 
@@ -8269,7 +8214,7 @@ mod tests {
             .max_key_bytes(10)
             .build()
             .unwrap();
-        let op = Operation::set_entity("a".repeat(11), b"data".to_vec());
+        let op = Operation::set_entity("a".repeat(11), b"data".to_vec(), None, None);
         assert!(op.validate(&config).is_err());
     }
 
@@ -8279,7 +8224,7 @@ mod tests {
             .max_value_bytes(4)
             .build()
             .unwrap();
-        let op = Operation::set_entity("key", vec![0u8; 5]);
+        let op = Operation::set_entity("key", vec![0u8; 5], None, None);
         assert!(op.validate(&config).is_err());
     }
 
@@ -8342,7 +8287,7 @@ mod tests {
 
     #[test]
     fn test_estimated_size_set_entity() {
-        let op = Operation::set_entity("key", b"value".to_vec());
+        let op = Operation::set_entity("key", b"value".to_vec(), None, None);
         assert_eq!(op.estimated_size_bytes(), 3 + 5); // "key" + "value"
     }
 
@@ -8747,13 +8692,13 @@ mod tests {
     #[test]
     fn test_migration_info_construction() {
         let info = MigrationInfo {
-            slug: 42,
+            slug: OrganizationSlug::new(42),
             source_region: Region::US_EAST_VA,
             target_region: Region::IE_EAST_DUBLIN,
             status: OrganizationStatus::Migrating,
         };
 
-        assert_eq!(info.slug, 42);
+        assert_eq!(info.slug, OrganizationSlug::new(42));
         assert_eq!(info.source_region, Region::US_EAST_VA);
         assert_eq!(info.target_region, Region::IE_EAST_DUBLIN);
         assert_eq!(info.status, OrganizationStatus::Migrating);

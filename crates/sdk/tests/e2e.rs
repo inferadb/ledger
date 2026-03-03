@@ -170,7 +170,7 @@ async fn test_write_read_cycle() {
     let (ns_id, vault) = setup_test_org_vault(&client).await;
 
     // Write an entity
-    let ops = vec![Operation::set_entity("user:alice", b"Alice Data".to_vec())];
+    let ops = vec![Operation::set_entity("user:alice", b"Alice Data".to_vec(), None, None)];
     let write_result = client.write(ns_id, Some(vault), ops).await.expect("write should succeed");
 
     assert!(!write_result.tx_id.is_empty(), "should have tx_id");
@@ -195,7 +195,7 @@ async fn test_multiple_writes_reads() {
     for i in 0..5 {
         let key = format!("item:{}", i);
         let value = format!("value-{}", i).into_bytes();
-        let ops = vec![Operation::set_entity(&key, value)];
+        let ops = vec![Operation::set_entity(&key, value, None, None)];
         client.write(ns_id, Some(vault), ops).await.expect("write should succeed");
     }
 
@@ -220,7 +220,7 @@ async fn test_batch_read() {
     for i in 0..3 {
         let key = format!("batch:{}", i);
         let value = format!("batch-value-{}", i).into_bytes();
-        let ops = vec![Operation::set_entity(&key, value)];
+        let ops = vec![Operation::set_entity(&key, value, None, None)];
         client.write(ns_id, Some(vault), ops).await.expect("write should succeed");
     }
 
@@ -264,7 +264,7 @@ async fn test_write_replication_to_followers() {
     let (ns_id, vault) = setup_test_org_vault(&leader_client).await;
 
     // Write through the leader
-    let ops = vec![Operation::set_entity("repl:key", b"replicated-data".to_vec())];
+    let ops = vec![Operation::set_entity("repl:key", b"replicated-data".to_vec(), None, None)];
     let result = leader_client.write(ns_id, Some(vault), ops).await.expect("write should succeed");
     assert!(result.block_height > 0);
 
@@ -309,7 +309,8 @@ async fn test_three_node_write_replication() {
     let (ns_id, vault) = setup_test_org_vault(&client).await;
 
     // Write through the leader
-    let ops = vec![Operation::set_entity("replicated:key", b"replicated-data".to_vec())];
+    let ops =
+        vec![Operation::set_entity("replicated:key", b"replicated-data".to_vec(), None, None)];
     client.write(ns_id, Some(vault), ops).await.expect("write should succeed");
 
     // Wait for replication
@@ -344,13 +345,13 @@ async fn test_multiple_client_sessions() {
     let (ns_id, vault) = setup_test_org_vault(&client1).await;
 
     // First session writes
-    let ops1 = vec![Operation::set_entity("session:key1", b"from-session-1".to_vec())];
+    let ops1 = vec![Operation::set_entity("session:key1", b"from-session-1".to_vec(), None, None)];
     let first_result = client1.write(ns_id, Some(vault), ops1).await.expect("first write");
 
     // Second independent session
     let client2 = create_sdk_client(&endpoints, "session-2").await;
 
-    let ops2 = vec![Operation::set_entity("session:key2", b"from-session-2".to_vec())];
+    let ops2 = vec![Operation::set_entity("session:key2", b"from-session-2".to_vec(), None, None)];
     let second_result = client2.write(ns_id, Some(vault), ops2).await.expect("second write");
 
     // Both writes should succeed with unique tx_ids
@@ -404,7 +405,7 @@ async fn test_data_persistence_across_sessions() {
         for i in 0..5 {
             let key = format!("persist:{}", i);
             let value = format!("data-{}", i).into_bytes();
-            let ops = vec![Operation::set_entity(&key, value)];
+            let ops = vec![Operation::set_entity(&key, value, None, None)];
             client.write(ns_id, Some(vault), ops).await.expect("write should succeed");
         }
     } // Client dropped
@@ -423,7 +424,7 @@ async fn test_data_persistence_across_sessions() {
         // Write additional data from new session
         let key = "persist:5";
         let value = b"data-5".to_vec();
-        let ops = vec![Operation::set_entity(key, value.clone())];
+        let ops = vec![Operation::set_entity(key, value.clone(), None, None)];
         let result = client.write(ns_id, Some(vault), ops).await.expect("write from new session");
         assert!(!result.tx_id.is_empty(), "should have tx_id");
 

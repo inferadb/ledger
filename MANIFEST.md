@@ -932,7 +932,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Key Types/Functions**:
 - `LedgerClient::new(config) -> Result<Self>`: Create client
 - Data ops: `read()`, `write()`, `batch_read()`, `batch_write()` (with `_with_token` variants for cancellation) — all accept `organization: OrganizationSlug, vault: Option<VaultSlug>`
-- Convenience ops: `set_entity(org, vault, key, value, expires_at)`, `set_entity_if(org, vault, key, value, condition, expires_at)`, `get_entity()`, `delete_entity()` — optional TTL on set operations
+- Convenience ops: `set_entity(org, vault, key, value, expires_at, condition)`, `get_entity()`, `delete_entity()` — optional TTL and condition on set operations
 - `SetCondition::from_expected(expected: Option<impl Into<Vec<u8>>>) -> Self`: Convenience constructor — `None` maps to `MustNotExist`, `Some(value)` maps to `MustEqual(value)`
 - Relationship ops: `check_permission()`, `create_relationship()`, `delete_relationship()`
 - Admin ops: `create_organization()`, `create_vault()` (returns `VaultInfo` with `vault: VaultSlug`), `list_vaults()`
