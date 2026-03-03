@@ -28,8 +28,8 @@ mod shutdown;
 use std::{io::IsTerminal, net::SocketAddr};
 
 use clap::Parser;
-use config::{Cli, CliCommand, Config, ConfigAction, LogFormat, OtelTransport};
-use inferadb_ledger_raft::otel::{self, OtelConfig};
+use config::{Cli, CliCommand, Config, ConfigAction, LogFormat};
+use inferadb_ledger_raft::otel;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -197,17 +197,7 @@ fn init_otel(config: &Config) -> Result<(), ServerError> {
         return Ok(());
     }
 
-    // Convert server config to raft crate's OtelConfig
-    let raft_otel_config = OtelConfig {
-        enabled: otel_config.enabled,
-        endpoint: otel_config.endpoint.clone().unwrap_or_default(),
-        use_grpc: matches!(otel_config.transport, OtelTransport::Grpc),
-        timeout_ms: otel_config.timeout_ms,
-        shutdown_timeout_ms: otel_config.shutdown_timeout_ms,
-        trace_raft_rpcs: otel_config.trace_raft_rpcs,
-    };
-
-    otel::init_otel(&raft_otel_config).map_err(|e| {
+    otel::init_otel(otel_config).map_err(|e| {
         ServerError::Server(Box::new(std::io::Error::other(format!(
             "Failed to initialize OTEL: {}",
             e

@@ -13,12 +13,13 @@
 //! # Example
 //!
 //! ```no_run
-//! use inferadb_ledger_raft::otel::{init_otel, shutdown_otel, OtelConfig};
+//! use inferadb_ledger_types::config::OtelConfig;
+//! use inferadb_ledger_raft::otel::{init_otel, shutdown_otel};
 //!
 //! // At server startup
 //! let config = OtelConfig {
 //!     enabled: true,
-//!     endpoint: "http://localhost:4317".to_string(),
+//!     endpoint: Some("http://localhost:4317".to_string()),
 //!     ..Default::default()
 //! };
 //! init_otel(&config).expect("Failed to initialize OTEL");
@@ -30,6 +31,7 @@
 use std::{sync::OnceLock, time::Duration};
 
 use inferadb_ledger_types::Region;
+pub use inferadb_ledger_types::config::OtelConfig;
 use opentelemetry::{
     Context, KeyValue, global,
     trace::{SpanKind, TraceContextExt, Tracer, TracerProvider as _},
@@ -39,38 +41,6 @@ use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
 
 /// Global tracer provider, initialized once at server startup.
 static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
-
-/// Configuration for OpenTelemetry/OTLP export.
-///
-/// This mirrors the server config but is decoupled for use in the raft crate.
-#[derive(Debug, Clone)]
-pub struct OtelConfig {
-    /// Whether OTLP export is enabled.
-    pub enabled: bool,
-    /// OTLP endpoint URL (e.g., "http://localhost:4317" for gRPC).
-    pub endpoint: String,
-    /// Whether to use gRPC (true) or HTTP (false) transport.
-    pub use_grpc: bool,
-    /// Export timeout in milliseconds.
-    pub timeout_ms: u64,
-    /// Graceful shutdown timeout in milliseconds.
-    pub shutdown_timeout_ms: u64,
-    /// Whether to propagate trace context in Raft RPCs.
-    pub trace_raft_rpcs: bool,
-}
-
-impl Default for OtelConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            endpoint: String::new(),
-            use_grpc: true,
-            timeout_ms: 10000,
-            shutdown_timeout_ms: 15000,
-            trace_raft_rpcs: true,
-        }
-    }
-}
 
 /// Error type for OTEL initialization.
 #[derive(Debug)]
@@ -110,15 +80,13 @@ impl std::error::Error for OtelInitError {}
 /// # Example
 ///
 /// ```no_run
-/// use inferadb_ledger_raft::otel::{init_otel, OtelConfig};
+/// use inferadb_ledger_types::config::OtelConfig;
+/// use inferadb_ledger_raft::otel::init_otel;
 ///
 /// let config = OtelConfig {
 ///     enabled: true,
-///     endpoint: "http://localhost:4317".to_string(),
-///     use_grpc: true,
-///     timeout_ms: 10000,
-///     shutdown_timeout_ms: 15000,
-///     trace_raft_rpcs: true,
+///     endpoint: Some("http://localhost:4317".to_string()),
+///     ..Default::default()
 /// };
 /// init_otel(&config).expect("Failed to initialize OTEL");
 /// ```
@@ -136,13 +104,13 @@ pub fn init_otel(config: &OtelConfig) -> Result<(), OtelInitError> {
 
     // Build the span exporter (gRPC only for now - HTTP requires additional features)
     // Note: HTTP transport requires the http-proto feature which we don't enable
-    if !config.use_grpc {
+    if !config.use_grpc() {
         tracing::warn!("HTTP transport requested but only gRPC is supported; using gRPC");
     }
 
     let exporter = SpanExporter::builder()
         .with_tonic()
-        .with_endpoint(&config.endpoint)
+        .with_endpoint(config.endpoint_or_default())
         .with_timeout(timeout)
         .build()
         .map_err(|e| OtelInitError::ExporterBuild(e.to_string()))?;
@@ -171,8 +139,8 @@ pub fn init_otel(config: &OtelConfig) -> Result<(), OtelInitError> {
     global::set_tracer_provider(provider);
 
     tracing::info!(
-        endpoint = %config.endpoint,
-        transport = if config.use_grpc { "grpc" } else { "http" },
+        endpoint = %config.endpoint_or_default(),
+        transport = if config.use_grpc() { "grpc" } else { "http" },
         "OTEL tracer provider initialized"
     );
 
@@ -476,8 +444,8 @@ mod tests {
     fn test_otel_config_default() {
         let config = OtelConfig::default();
         assert!(!config.enabled);
-        assert!(config.endpoint.is_empty());
-        assert!(config.use_grpc);
+        assert!(config.endpoint.is_none());
+        assert!(config.use_grpc());
         assert_eq!(config.timeout_ms, 10000);
         assert_eq!(config.shutdown_timeout_ms, 15000);
     }

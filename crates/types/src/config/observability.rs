@@ -1,9 +1,185 @@
-//! Hot key detection, audit logging, and metrics cardinality configuration.
+//! Hot key detection, audit logging, metrics cardinality, and OpenTelemetry configuration.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::ConfigError;
+
+// =========================================================================
+// OtelTransport
+// =========================================================================
+
+/// Transport protocol for OTLP trace export.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum OtelTransport {
+    /// gRPC transport (default, recommended for high-throughput).
+    #[default]
+    Grpc,
+    /// HTTP transport (for environments where gRPC is blocked).
+    Http,
+}
+
+// =========================================================================
+// OtelConfig
+// =========================================================================
+
+/// Default batch size for span export (512 spans).
+const fn default_otel_batch_size() -> usize {
+    512
+}
+
+/// Default batch interval in milliseconds (5000ms).
+const fn default_otel_batch_interval_ms() -> u64 {
+    5000
+}
+
+/// Default export timeout in milliseconds (10000ms).
+const fn default_otel_timeout_ms() -> u64 {
+    10000
+}
+
+/// Default shutdown timeout in milliseconds (15000ms).
+const fn default_otel_shutdown_timeout_ms() -> u64 {
+    15000
+}
+
+/// Default trace Raft RPCs setting (true).
+const fn default_trace_raft_rpcs() -> bool {
+    true
+}
+
+/// Configuration for OpenTelemetry/OTLP trace export.
+///
+/// Enables exporting request logs as OpenTelemetry traces to observability
+/// backends such as Jaeger, Honeycomb, or Datadog via the OTLP protocol.
+///
+/// # Environment Variables
+///
+/// ```bash
+/// INFERADB__LEDGER__LOGGING__OTEL__ENABLED=true
+/// INFERADB__LEDGER__LOGGING__OTEL__ENDPOINT=http://localhost:4317
+/// INFERADB__LEDGER__LOGGING__OTEL__TRANSPORT=grpc
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, bon::Builder)]
+#[builder(derive(Debug))]
+pub struct OtelConfig {
+    /// Whether OTLP export is enabled. Default: false.
+    #[serde(default)]
+    #[builder(default)]
+    pub enabled: bool,
+
+    /// OTLP endpoint URL (e.g., "http://localhost:4317" for gRPC).
+    #[serde(default)]
+    pub endpoint: Option<String>,
+
+    /// Transport protocol. Default: gRPC.
+    #[serde(default)]
+    #[builder(default)]
+    pub transport: OtelTransport,
+
+    /// Batch size (flush when reached). Default: 512 spans.
+    #[serde(default = "default_otel_batch_size")]
+    #[builder(default = default_otel_batch_size())]
+    pub batch_size: usize,
+
+    /// Batch interval in milliseconds (flush when elapsed). Default: 5000ms.
+    #[serde(default = "default_otel_batch_interval_ms")]
+    #[builder(default = default_otel_batch_interval_ms())]
+    pub batch_interval_ms: u64,
+
+    /// Export timeout in milliseconds. Default: 10000ms.
+    #[serde(default = "default_otel_timeout_ms")]
+    #[builder(default = default_otel_timeout_ms())]
+    pub timeout_ms: u64,
+
+    /// Graceful shutdown timeout in milliseconds. Default: 15000ms.
+    #[serde(default = "default_otel_shutdown_timeout_ms")]
+    #[builder(default = default_otel_shutdown_timeout_ms())]
+    pub shutdown_timeout_ms: u64,
+
+    /// Whether to propagate trace context in Raft RPCs. Default: true.
+    ///
+    /// When enabled, trace context is injected into AppendEntries, Vote, and
+    /// InstallSnapshot RPCs, enabling end-to-end distributed tracing across
+    /// the Raft cluster. Disable for performance-critical deployments where
+    /// the ~100 bytes overhead per RPC is unacceptable.
+    #[serde(default = "default_trace_raft_rpcs")]
+    #[builder(default = default_trace_raft_rpcs())]
+    pub trace_raft_rpcs: bool,
+}
+
+impl Default for OtelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: None,
+            transport: OtelTransport::default(),
+            batch_size: default_otel_batch_size(),
+            batch_interval_ms: default_otel_batch_interval_ms(),
+            timeout_ms: default_otel_timeout_ms(),
+            shutdown_timeout_ms: default_otel_shutdown_timeout_ms(),
+            trace_raft_rpcs: default_trace_raft_rpcs(),
+        }
+    }
+}
+
+impl OtelConfig {
+    /// Returns `true` if gRPC transport is configured.
+    pub fn use_grpc(&self) -> bool {
+        matches!(self.transport, OtelTransport::Grpc)
+    }
+
+    /// Returns the endpoint URL, or an empty string if not set.
+    pub fn endpoint_or_default(&self) -> &str {
+        self.endpoint.as_deref().unwrap_or("")
+    }
+
+    /// Creates a configuration with test-suitable values (OTEL disabled).
+    pub fn for_test() -> Self {
+        Self::default()
+    }
+
+    /// Validates OTEL configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if OTEL is enabled without an endpoint,
+    /// or if batch/timeout values are zero.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.enabled && self.endpoint.is_none() {
+            return Err(ConfigError::Validation {
+                message: "logging.otel.endpoint is required when OTEL is enabled".to_string(),
+            });
+        }
+
+        if self.batch_size == 0 {
+            return Err(ConfigError::Validation {
+                message: "logging.otel.batch_size must be positive".to_string(),
+            });
+        }
+
+        if self.batch_interval_ms == 0 {
+            return Err(ConfigError::Validation {
+                message: "logging.otel.batch_interval_ms must be positive".to_string(),
+            });
+        }
+
+        if self.timeout_ms == 0 {
+            return Err(ConfigError::Validation {
+                message: "logging.otel.timeout_ms must be positive".to_string(),
+            });
+        }
+
+        if self.shutdown_timeout_ms == 0 {
+            return Err(ConfigError::Validation {
+                message: "logging.otel.shutdown_timeout_ms must be positive".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
 
 // =========================================================================
 // HotKeyConfig

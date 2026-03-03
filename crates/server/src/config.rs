@@ -158,157 +158,7 @@ impl LogSamplingConfig {
     }
 }
 
-/// Transport protocol for OTLP trace export.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum OtelTransport {
-    /// gRPC transport (default, recommended for high-throughput).
-    #[default]
-    Grpc,
-    /// HTTP transport (for environments where gRPC is blocked).
-    Http,
-}
-
-/// Configuration for OpenTelemetry/OTLP trace export.
-///
-/// Enables exporting request logs as OpenTelemetry traces to observability
-/// backends like Jaeger, Tempo, or Honeycomb.
-///
-/// # Environment Variables
-///
-/// ```bash
-/// INFERADB__LEDGER__LOGGING__OTEL__ENABLED=true
-/// INFERADB__LEDGER__LOGGING__OTEL__ENDPOINT=http://localhost:4317
-/// INFERADB__LEDGER__LOGGING__OTEL__TRANSPORT=grpc
-/// ```
-#[derive(Debug, Clone, Deserialize, JsonSchema, bon::Builder)]
-#[builder(derive(Debug))]
-pub struct OtelConfig {
-    /// Whether OTLP export is enabled. Default: false.
-    #[serde(default)]
-    #[builder(default)]
-    pub enabled: bool,
-
-    /// OTLP endpoint URL (e.g., "http://localhost:4317" for gRPC).
-    #[serde(default)]
-    pub endpoint: Option<String>,
-
-    /// Transport protocol. Default: gRPC.
-    #[serde(default)]
-    #[builder(default)]
-    #[allow(dead_code)] // used in OTEL tracer provider initialization
-    pub transport: OtelTransport,
-
-    /// Batch size (flush when reached). Default: 512 spans.
-    #[serde(default = "default_otel_batch_size")]
-    #[builder(default = default_otel_batch_size())]
-    pub batch_size: usize,
-
-    /// Batch interval in milliseconds (flush when elapsed). Default: 5000ms.
-    #[serde(default = "default_otel_batch_interval_ms")]
-    #[builder(default = default_otel_batch_interval_ms())]
-    pub batch_interval_ms: u64,
-
-    /// Export timeout in milliseconds. Default: 10000ms.
-    #[serde(default = "default_otel_timeout_ms")]
-    #[builder(default = default_otel_timeout_ms())]
-    pub timeout_ms: u64,
-
-    /// Graceful shutdown timeout in milliseconds. Default: 15000ms.
-    #[serde(default = "default_otel_shutdown_timeout_ms")]
-    #[builder(default = default_otel_shutdown_timeout_ms())]
-    pub shutdown_timeout_ms: u64,
-
-    /// Whether to propagate trace context in Raft RPCs. Default: true.
-    ///
-    /// When enabled, trace context is injected into AppendEntries, Vote, and
-    /// InstallSnapshot RPCs, enabling end-to-end distributed tracing across
-    /// the Raft cluster. Disable for performance-critical deployments where
-    /// the ~100 bytes overhead per RPC is unacceptable.
-    #[serde(default = "default_trace_raft_rpcs")]
-    #[builder(default = default_trace_raft_rpcs())]
-    #[allow(dead_code)] // used in Raft network for trace context injection
-    pub trace_raft_rpcs: bool,
-}
-
-impl Default for OtelConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            endpoint: None,
-            transport: OtelTransport::default(),
-            batch_size: default_otel_batch_size(),
-            batch_interval_ms: default_otel_batch_interval_ms(),
-            timeout_ms: default_otel_timeout_ms(),
-            shutdown_timeout_ms: default_otel_shutdown_timeout_ms(),
-            trace_raft_rpcs: default_trace_raft_rpcs(),
-        }
-    }
-}
-
-impl OtelConfig {
-    /// Creates a configuration with test-suitable values (OTEL disabled).
-    pub fn for_test() -> Self {
-        Self::default()
-    }
-
-    /// Validates OTEL configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError`] if OTEL is enabled without an endpoint,
-    /// or if batch/timeout values are zero.
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.enabled && self.endpoint.is_none() {
-            return Err(ConfigError::Validation {
-                message: "logging.otel.endpoint is required when OTEL is enabled".to_string(),
-            });
-        }
-
-        if self.batch_size == 0 {
-            return Err(ConfigError::Validation {
-                message: "logging.otel.batch_size must be positive".to_string(),
-            });
-        }
-
-        if self.batch_interval_ms == 0 {
-            return Err(ConfigError::Validation {
-                message: "logging.otel.batch_interval_ms must be positive".to_string(),
-            });
-        }
-
-        if self.timeout_ms == 0 {
-            return Err(ConfigError::Validation {
-                message: "logging.otel.timeout_ms must be positive".to_string(),
-            });
-        }
-
-        if self.shutdown_timeout_ms == 0 {
-            return Err(ConfigError::Validation {
-                message: "logging.otel.shutdown_timeout_ms must be positive".to_string(),
-            });
-        }
-
-        Ok(())
-    }
-}
-
-fn default_otel_batch_size() -> usize {
-    512
-}
-fn default_otel_batch_interval_ms() -> u64 {
-    5000
-}
-fn default_otel_timeout_ms() -> u64 {
-    10000
-}
-fn default_otel_shutdown_timeout_ms() -> u64 {
-    15000
-}
-
-fn default_trace_raft_rpcs() -> bool {
-    true
-}
+pub use inferadb_ledger_types::config::OtelConfig;
 
 /// Configuration for request logging.
 ///
@@ -351,7 +201,8 @@ impl LoggingConfig {
     /// is invalid.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.sampling.validate()?;
-        self.otel.validate()
+        self.otel.validate()?;
+        Ok(())
     }
 }
 
@@ -962,6 +813,8 @@ pub fn generate_runtime_config_schema() -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
+    use inferadb_ledger_types::config::OtelTransport;
+
     use super::*;
 
     #[test]
