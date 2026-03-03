@@ -148,21 +148,13 @@ impl<'a> BatchReadBuilder<'a, HasKeys> {
     /// exhausted, the client has been shut down, or the cancellation token
     /// is triggered.
     pub async fn execute(self) -> Result<Vec<(String, Option<Vec<u8>>)>> {
-        match (&self.consistency, &self.cancellation) {
-            (ReadConsistency::Eventual, Some(token)) => {
-                self.client
-                    .batch_read_with_token(self.organization, self.vault, self.keys, token.clone())
-                    .await
-            },
-            (ReadConsistency::Eventual, None) => {
-                self.client.batch_read(self.organization, self.vault, self.keys).await
-            },
-            (ReadConsistency::Linearizable, _) => {
-                // batch_read_consistent doesn't have a _with_token variant;
-                // client-level cancellation still applies.
-                self.client.batch_read_consistent(self.organization, self.vault, self.keys).await
-            },
-        }
+        let consistency = match self.consistency {
+            ReadConsistency::Eventual => None,
+            ReadConsistency::Linearizable => Some(ReadConsistency::Linearizable),
+        };
+        self.client
+            .batch_read(self.organization, self.vault, self.keys, consistency, self.cancellation)
+            .await
     }
 }
 

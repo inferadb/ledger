@@ -1827,8 +1827,8 @@ impl SetCondition {
 /// **Client-level** — [`shutdown()`](Self::shutdown) cancels all in-flight
 /// requests and rejects new ones with `SdkError::Shutdown`.
 ///
-/// **Per-request** — Methods like [`read_with_token`](Self::read_with_token)
-/// and [`write_with_token`](Self::write_with_token) accept a
+/// **Per-request** — Methods like [`read`](Self::read) and
+/// [`write`](Self::write) accept an optional
 /// [`CancellationToken`](tokio_util::sync::CancellationToken) that cancels
 /// a single request with `SdkError::Cancelled`.
 ///
@@ -2091,7 +2091,7 @@ impl LedgerClient {
     /// });
     ///
     /// // This read will be cancelled if it takes longer than 100ms
-    /// let result = client.read_with_token(organization, None, "key", token).await;
+    /// let result = client.read(organization, None, "key", None, Some(token)).await;
     /// # Ok(())
     /// # }
     /// ```
@@ -2276,17 +2276,19 @@ impl LedgerClient {
     // Read Operations
     // =========================================================================
 
-    /// Reads a value by key with eventual consistency.
+    /// Reads a value by key.
     ///
-    /// Uses `EVENTUAL` consistency level, which reads from any replica for
-    /// lowest latency. The value may be slightly stale if a write was just
-    /// committed.
+    /// By default uses `EVENTUAL` consistency, which reads from any replica
+    /// for lowest latency. Pass `Some(ReadConsistency::Linearizable)` for
+    /// strong consistency reads served from the leader.
     ///
     /// # Arguments
     ///
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Optional vault slug (omit for organization-level entities).
     /// * `key` - The key to read.
+    /// * `consistency` - Optional consistency level (`None` = eventual).
+    /// * `token` - Optional per-request cancellation token.
     ///
     /// # Returns
     ///
@@ -2294,20 +2296,22 @@ impl LedgerClient {
     ///
     /// # Errors
     ///
-    /// Returns an error if the read fails after retry attempts are exhausted.
+    /// Returns an error if the read fails after retry attempts are exhausted,
+    /// the client has been shut down, or the cancellation token is triggered.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, ReadConsistency, VaultSlug};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
-    /// // Read an organization-level entity
-    /// let value = client.read(organization, None, "user:123").await?;
+    /// // Eventual consistency read (default)
+    /// let value = client.read(organization, None, "user:123", None, None).await?;
     ///
-    /// // Read a vault-level entity
-    /// let value = client.read(organization, Some(vault), "key").await?;
+    /// // Linearizable consistency read
+    /// let value = client.read(organization, Some(vault), "key",
+    ///     Some(ReadConsistency::Linearizable), None).await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -2316,237 +2320,31 @@ impl LedgerClient {
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         key: impl Into<String>,
+        consistency: Option<ReadConsistency>,
+        token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Option<Vec<u8>>> {
-        self.read_internal(organization, vault, key.into(), ReadConsistency::Eventual, None).await
-    }
-
-    /// Reads a value by key with linearizable (strong) consistency.
-    ///
-    /// Uses `LINEARIZABLE` consistency level, which reads from the leader to
-    /// guarantee the latest committed value. Has higher latency than eventual
-    /// consistency.
-    ///
-    /// # Arguments
-    ///
-    /// * `organization` - Organization slug (external identifier).
-    /// * `vault` - Optional vault slug (omit for organization-level entities).
-    /// * `key` - The key to read.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(Some(value))` if the key exists, `Ok(None)` if not found.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the read fails after retry attempts are exhausted.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
-    /// // Read with strong consistency guarantee
-    /// let value = client.read_consistent(organization, Some(vault), "key").await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn read_consistent(
-        &self,
-        organization: OrganizationSlug,
-        vault: Option<VaultSlug>,
-        key: impl Into<String>,
-    ) -> Result<Option<Vec<u8>>> {
-        self.read_internal(organization, vault, key.into(), ReadConsistency::Linearizable, None)
-            .await
-    }
-
-    /// Reads a value by key with a per-request cancellation token.
-    ///
-    /// Like [`read`](Self::read) but accepts a [`CancellationToken`] that can
-    /// cancel this specific request without shutting down the client. Returns
-    /// `SdkError::Cancelled` if the token is cancelled before the RPC completes.
-    ///
-    /// # Errors
-    ///
-    /// Returns `SdkError::Cancelled` if the token is cancelled.
-    /// Returns `SdkError::Shutdown` if the client has been shut down.
-    /// Returns `SdkError::Rpc` if the read fails after retry attempts.
-    ///
-    /// [`CancellationToken`]: tokio_util::sync::CancellationToken
-    pub async fn read_with_token(
-        &self,
-        organization: OrganizationSlug,
-        vault: Option<VaultSlug>,
-        key: impl Into<String>,
-        token: tokio_util::sync::CancellationToken,
-    ) -> Result<Option<Vec<u8>>> {
-        self.read_internal(organization, vault, key.into(), ReadConsistency::Eventual, Some(&token))
-            .await
-    }
-
-    /// Reads a value by key with the specified consistency level.
-    ///
-    /// Combines the behavior of [`read`](Self::read) and
-    /// [`read_consistent`](Self::read_consistent) into a single method that
-    /// accepts a [`ReadConsistency`] parameter. Useful in generic code that
-    /// determines consistency at runtime.
-    ///
-    /// # Arguments
-    ///
-    /// * `organization` - Organization slug (external identifier).
-    /// * `vault` - Optional vault slug (omit for organization-level entities).
-    /// * `key` - The key to read.
-    /// * `consistency` - The consistency level for this read.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(Some(value))` if the key exists, `Ok(None)` if not found.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the read fails after retry attempts are exhausted.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug, ReadConsistency};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
-    /// let consistency = ReadConsistency::Linearizable;
-    /// let value = client
-    ///     .read_with_consistency(organization, Some(vault), "key", consistency)
-    ///     .await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn read_with_consistency(
-        &self,
-        organization: OrganizationSlug,
-        vault: Option<VaultSlug>,
-        key: impl Into<String>,
-        consistency: ReadConsistency,
-    ) -> Result<Option<Vec<u8>>> {
-        self.read_internal(organization, vault, key.into(), consistency, None).await
-    }
-
-    /// Reads a value by key with the specified consistency level and a
-    /// per-request cancellation token.
-    ///
-    /// Combines [`read_with_consistency`](Self::read_with_consistency) with
-    /// per-request cancellation. Returns `SdkError::Cancelled` if the token
-    /// is cancelled before the RPC completes.
-    ///
-    /// # Errors
-    ///
-    /// Returns `SdkError::Cancelled` if the token is cancelled.
-    /// Returns `SdkError::Shutdown` if the client has been shut down.
-    /// Returns `SdkError::Rpc` if the read fails after retry attempts.
-    ///
-    /// [`CancellationToken`]: tokio_util::sync::CancellationToken
-    pub async fn read_with_consistency_and_token(
-        &self,
-        organization: OrganizationSlug,
-        vault: Option<VaultSlug>,
-        key: impl Into<String>,
-        consistency: ReadConsistency,
-        token: tokio_util::sync::CancellationToken,
-    ) -> Result<Option<Vec<u8>>> {
-        self.read_internal(organization, vault, key.into(), consistency, Some(&token)).await
-    }
-
-    /// Writes a transaction with a per-request cancellation token.
-    ///
-    /// Like [`write`](Self::write) but accepts a [`CancellationToken`] that can
-    /// cancel this specific request. Note that cancellation is best-effort:
-    /// the server may still commit the transaction if the cancellation races
-    /// with the Raft commit.
-    ///
-    /// # Errors
-    ///
-    /// Returns `SdkError::Cancelled` if the token is cancelled.
-    /// Returns `SdkError::Shutdown` if the client has been shut down.
-    /// Returns `SdkError::Rpc` if the write fails after retry attempts.
-    /// Returns `SdkError::Validation` if client-side validation fails.
-    ///
-    /// [`CancellationToken`]: tokio_util::sync::CancellationToken
-    pub async fn write_with_token(
-        &self,
-        organization: OrganizationSlug,
-        vault: Option<VaultSlug>,
-        operations: Vec<Operation>,
-        token: tokio_util::sync::CancellationToken,
-    ) -> Result<WriteSuccess> {
-        self.check_shutdown(Some(&token))?;
-
-        let idempotency_key = uuid::Uuid::new_v4();
-
-        self.execute_write(organization, vault, &operations, idempotency_key, Some(&token)).await
-    }
-
-    /// Batch read with a per-request cancellation token.
-    ///
-    /// Like [`batch_read`](Self::batch_read) but accepts a cancellation token.
-    ///
-    /// # Errors
-    ///
-    /// Returns `SdkError::Cancelled` if the token is cancelled.
-    /// Returns `SdkError::Shutdown` if the client has been shut down.
-    /// Returns `SdkError::Rpc` if the batch read fails after retry attempts.
-    pub async fn batch_read_with_token(
-        &self,
-        organization: OrganizationSlug,
-        vault: Option<VaultSlug>,
-        keys: impl IntoIterator<Item = impl Into<String>>,
-        token: tokio_util::sync::CancellationToken,
-    ) -> Result<Vec<(String, Option<Vec<u8>>)>> {
-        self.batch_read_internal(
+        self.read_internal(
             organization,
             vault,
-            keys.into_iter().map(Into::into).collect(),
-            ReadConsistency::Eventual,
-            Some(&token),
+            key.into(),
+            consistency.unwrap_or(ReadConsistency::Eventual),
+            token.as_ref(),
         )
         .await
-    }
-
-    /// Batch write with a per-request cancellation token.
-    ///
-    /// Like [`batch_write`](Self::batch_write) but accepts a cancellation token.
-    /// Cancellation is best-effort — the server may still commit.
-    ///
-    /// # Errors
-    ///
-    /// Returns `SdkError::Cancelled` if the token is cancelled.
-    /// Returns `SdkError::Shutdown` if the client has been shut down.
-    /// Returns `SdkError::Rpc` if the batch write fails after retry attempts.
-    /// Returns `SdkError::Validation` if client-side validation fails.
-    pub async fn batch_write_with_token(
-        &self,
-        organization: OrganizationSlug,
-        vault: Option<VaultSlug>,
-        batches: Vec<Vec<Operation>>,
-        token: tokio_util::sync::CancellationToken,
-    ) -> Result<WriteSuccess> {
-        self.check_shutdown(Some(&token))?;
-
-        let idempotency_key = uuid::Uuid::new_v4();
-
-        self.execute_batch_write(organization, vault, &batches, idempotency_key, Some(&token)).await
     }
 
     /// Batch read multiple keys in a single RPC call.
     ///
     /// Amortizes network overhead across multiple reads for higher throughput.
-    /// All reads share the same organization, vault, and consistency level (EVENTUAL).
+    /// All reads share the same organization, vault, and consistency level.
     ///
     /// # Arguments
     ///
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Optional vault slug (omit for organization-level entities).
     /// * `keys` - The keys to read (max 1000).
+    /// * `consistency` - Optional consistency level (`None` = eventual).
+    /// * `token` - Optional per-request cancellation token.
     ///
     /// # Returns
     ///
@@ -2555,7 +2353,9 @@ impl LedgerClient {
     ///
     /// # Errors
     ///
-    /// Returns an error if the batch read fails after retry attempts.
+    /// Returns an error if the batch read fails after retry attempts are
+    /// exhausted, the client has been shut down, or the cancellation token
+    /// is triggered.
     ///
     /// # Example
     ///
@@ -2568,6 +2368,8 @@ impl LedgerClient {
     ///     organization,
     ///     Some(vault),
     ///     vec!["key1", "key2", "key3"],
+    ///     None,
+    ///     None,
     /// ).await?;
     ///
     /// for (key, value) in results {
@@ -2584,48 +2386,15 @@ impl LedgerClient {
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         keys: impl IntoIterator<Item = impl Into<String>>,
+        consistency: Option<ReadConsistency>,
+        token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Vec<(String, Option<Vec<u8>>)>> {
         self.batch_read_internal(
             organization,
             vault,
             keys.into_iter().map(Into::into).collect(),
-            ReadConsistency::Eventual,
-            None,
-        )
-        .await
-    }
-
-    /// Batch read multiple keys with linearizable consistency.
-    ///
-    /// Like [`batch_read`](Self::batch_read) but with strong consistency guarantees.
-    /// All reads are served from the leader.
-    ///
-    /// # Arguments
-    ///
-    /// * `organization` - Organization slug (external identifier).
-    /// * `vault` - Optional vault slug (omit for organization-level entities).
-    /// * `keys` - The keys to read (max 1000).
-    ///
-    /// # Returns
-    ///
-    /// Returns a vector of `(key, Option<value>)` pairs in the same order as
-    /// the input keys. Missing keys have `None` values.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the batch read fails after retry attempts.
-    pub async fn batch_read_consistent(
-        &self,
-        organization: OrganizationSlug,
-        vault: Option<VaultSlug>,
-        keys: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Result<Vec<(String, Option<Vec<u8>>)>> {
-        self.batch_read_internal(
-            organization,
-            vault,
-            keys.into_iter().map(Into::into).collect(),
-            ReadConsistency::Linearizable,
-            None,
+            consistency.unwrap_or(ReadConsistency::Eventual),
+            token.as_ref(),
         )
         .await
     }
@@ -2761,6 +2530,7 @@ impl LedgerClient {
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Optional vault slug (required for relationships).
     /// * `operations` - The operations to apply atomically.
+    /// * `token` - Optional per-request cancellation token.
     ///
     /// # Returns
     ///
@@ -2773,6 +2543,7 @@ impl LedgerClient {
     /// - Connection fails after retry attempts
     /// - A conditional write (CAS) condition fails
     /// - An idempotency key is reused with different payload
+    /// - The client has been shut down or the cancellation token is triggered
     ///
     /// # Example
     ///
@@ -2788,6 +2559,7 @@ impl LedgerClient {
     ///         Operation::set_entity("user:123", b"data".to_vec(), None, None),
     ///         Operation::create_relationship("doc:456", "viewer", "user:123"),
     ///     ],
+    ///     None,
     /// ).await?;
     ///
     /// println!("Committed at block {} with sequence {}", result.block_height, result.assigned_sequence);
@@ -2799,14 +2571,15 @@ impl LedgerClient {
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         operations: Vec<Operation>,
+        token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<WriteSuccess> {
-        self.check_shutdown(None)?;
+        self.check_shutdown(token.as_ref())?;
 
         // Generate UUID idempotency key once for this request
         // The same key is reused across all retry attempts
         let idempotency_key = uuid::Uuid::new_v4();
 
-        self.execute_write(organization, vault, &operations, idempotency_key, None).await
+        self.execute_write(organization, vault, &operations, idempotency_key, token.as_ref()).await
     }
 
     /// Executes a single write attempt with retry for transient errors.
@@ -2995,6 +2768,8 @@ impl LedgerClient {
     /// * `vault` - Optional vault slug (required for relationships).
     /// * `batches` - Groups of operations to apply atomically. Each inner `Vec<Operation>` is a
     ///   logical group processed in order.
+    /// * `token` - Optional per-request cancellation token. If `None`, the client-level
+    ///   cancellation token is used.
     ///
     /// # Returns
     ///
@@ -3035,6 +2810,7 @@ impl LedgerClient {
     ///             Operation::create_relationship("folder:789", "editor", "user:123"),
     ///         ],
     ///     ],
+    ///     None,
     /// ).await?;
     ///
     /// println!("Batch committed at block {} with sequence {}", result.block_height, result.assigned_sequence);
@@ -3046,14 +2822,16 @@ impl LedgerClient {
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         batches: Vec<Vec<Operation>>,
+        token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<WriteSuccess> {
-        self.check_shutdown(None)?;
+        self.check_shutdown(token.as_ref())?;
 
         // Generate UUID idempotency key once for this request
         // The same key is reused across all retry attempts
         let idempotency_key = uuid::Uuid::new_v4();
 
-        self.execute_batch_write(organization, vault, &batches, idempotency_key, None).await
+        self.execute_batch_write(organization, vault, &batches, idempotency_key, token.as_ref())
+            .await
     }
 
     /// Executes a single batch write attempt with retry for transient errors.
@@ -3250,6 +3028,7 @@ impl LedgerClient {
             organization,
             vault,
             vec![Operation::set_entity(key, value, expires_at, condition)],
+            None,
         )
         .await
     }
@@ -3287,7 +3066,7 @@ impl LedgerClient {
         vault: Option<VaultSlug>,
         key: impl Into<String>,
     ) -> Result<WriteSuccess> {
-        self.write(organization, vault, vec![Operation::delete_entity(key)]).await
+        self.write(organization, vault, vec![Operation::delete_entity(key)], None).await
     }
 
     // =============================================================================
@@ -5429,12 +5208,12 @@ mod tests {
 
         let client = LedgerClient::new(config).await.expect("client creation");
 
-        let result = client.read(ORG, Some(VaultSlug::new(0)), "test-key").await;
+        let result = client.read(ORG, Some(VaultSlug::new(0)), "test-key", None, None).await;
         assert!(result.is_err(), "expected connection error");
     }
 
     #[tokio::test]
-    async fn test_read_consistent_returns_error_on_connection_failure() {
+    async fn test_read_with_linearizable_consistency_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://127.0.0.1:59998"]))
             .client_id("test-client")
@@ -5450,7 +5229,15 @@ mod tests {
 
         let client = LedgerClient::new(config).await.expect("client creation");
 
-        let result = client.read_consistent(ORG, Some(VaultSlug::new(0)), "test-key").await;
+        let result = client
+            .read(
+                ORG,
+                Some(VaultSlug::new(0)),
+                "test-key",
+                Some(ReadConsistency::Linearizable),
+                None,
+            )
+            .await;
         assert!(result.is_err(), "expected connection error");
     }
 
@@ -5471,13 +5258,14 @@ mod tests {
 
         let client = LedgerClient::new(config).await.expect("client creation");
 
-        let result =
-            client.batch_read(ORG, Some(VaultSlug::new(0)), vec!["key1", "key2", "key3"]).await;
+        let result = client
+            .batch_read(ORG, Some(VaultSlug::new(0)), vec!["key1", "key2", "key3"], None, None)
+            .await;
         assert!(result.is_err(), "expected connection error");
     }
 
     #[tokio::test]
-    async fn test_batch_read_consistent_returns_error_on_connection_failure() {
+    async fn test_batch_read_with_linearizable_consistency_returns_error_on_connection_failure() {
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://127.0.0.1:59996"]))
             .client_id("test-client")
@@ -5493,8 +5281,15 @@ mod tests {
 
         let client = LedgerClient::new(config).await.expect("client creation");
 
-        let result =
-            client.batch_read_consistent(ORG, Some(VaultSlug::new(0)), vec!["key1", "key2"]).await;
+        let result = client
+            .batch_read(
+                ORG,
+                Some(VaultSlug::new(0)),
+                vec!["key1", "key2"],
+                Some(ReadConsistency::Linearizable),
+                None,
+            )
+            .await;
         assert!(result.is_err(), "expected connection error");
     }
 
@@ -5517,7 +5312,7 @@ mod tests {
         let client = LedgerClient::new(config).await.expect("client creation");
 
         // This tests the API signature - None for vault should work
-        let result = client.read(ORG, None, "user:123").await;
+        let result = client.read(ORG, None, "user:123", None, None).await;
         assert!(result.is_err(), "expected connection error");
     }
 
@@ -5774,7 +5569,7 @@ mod tests {
         let client = LedgerClient::new(config).await.expect("client creation");
 
         let operations = vec![Operation::set_entity("key", b"value".to_vec(), None, None)];
-        let result = client.write(ORG, Some(VaultSlug::new(0)), operations).await;
+        let result = client.write(ORG, Some(VaultSlug::new(0)), operations, None).await;
 
         assert!(result.is_err(), "expected connection error");
     }
@@ -5804,7 +5599,7 @@ mod tests {
             Operation::create_relationship("doc:1", "editor", "user:2"),
         ];
 
-        let result = client.write(ORG, Some(VaultSlug::new(0)), operations).await;
+        let result = client.write(ORG, Some(VaultSlug::new(0)), operations, None).await;
 
         // Should fail due to connection (not due to multiple ops)
         assert!(result.is_err());
@@ -5832,7 +5627,7 @@ mod tests {
         let client = LedgerClient::new(config).await.expect("client creation");
 
         let batches = vec![vec![Operation::set_entity("key", b"value".to_vec(), None, None)]];
-        let result = client.batch_write(ORG, Some(VaultSlug::new(0)), batches).await;
+        let result = client.batch_write(ORG, Some(VaultSlug::new(0)), batches, None).await;
 
         assert!(result.is_err(), "expected connection error");
     }
@@ -5865,7 +5660,7 @@ mod tests {
             ],
         ];
 
-        let result = client.batch_write(ORG, Some(VaultSlug::new(0)), batches).await;
+        let result = client.batch_write(ORG, Some(VaultSlug::new(0)), batches, None).await;
 
         // Should fail due to connection (not due to batch structure)
         assert!(result.is_err());
@@ -7722,7 +7517,7 @@ mod tests {
         client.shutdown().await;
 
         // All operations should return Shutdown error
-        let result = client.read(ORG, Some(VaultSlug::new(0)), "key").await;
+        let result = client.read(ORG, Some(VaultSlug::new(0)), "key", None, None).await;
         assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
     }
 
@@ -7750,6 +7545,7 @@ mod tests {
                 ORG,
                 Some(VaultSlug::new(0)),
                 vec![Operation::set_entity("key", vec![1, 2, 3], None, None)],
+                None,
             )
             .await;
         assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
@@ -7779,6 +7575,7 @@ mod tests {
                 ORG,
                 Some(VaultSlug::new(0)),
                 vec![vec![Operation::set_entity("key", vec![1, 2, 3], None, None)]],
+                None,
             )
             .await;
         assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
@@ -7804,7 +7601,13 @@ mod tests {
         client.shutdown().await;
 
         let result = client
-            .batch_read(ORG, Some(VaultSlug::new(0)), vec!["key1".to_string(), "key2".to_string()])
+            .batch_read(
+                ORG,
+                Some(VaultSlug::new(0)),
+                vec!["key1".to_string(), "key2".to_string()],
+                None,
+                None,
+            )
             .await;
         assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
     }
@@ -8005,7 +7808,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_with_token_pre_cancelled() {
+    async fn test_read_with_pre_cancelled_token() {
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
@@ -8017,12 +7820,12 @@ mod tests {
         let token = tokio_util::sync::CancellationToken::new();
         token.cancel();
 
-        let result = client.read_with_token(ORG, None, "key", token).await;
+        let result = client.read(ORG, None, "key", None, Some(token)).await;
         assert!(matches!(result, Err(crate::error::SdkError::Cancelled)));
     }
 
     #[tokio::test]
-    async fn test_write_with_token_pre_cancelled() {
+    async fn test_write_with_pre_cancelled_token() {
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
@@ -8035,18 +7838,18 @@ mod tests {
         token.cancel();
 
         let result = client
-            .write_with_token(
+            .write(
                 ORG,
                 None,
                 vec![Operation::set_entity("key", b"val".to_vec(), None, None)],
-                token,
+                Some(token),
             )
             .await;
         assert!(matches!(result, Err(crate::error::SdkError::Cancelled)));
     }
 
     #[tokio::test]
-    async fn test_batch_read_with_token_pre_cancelled() {
+    async fn test_batch_read_with_pre_cancelled_token() {
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
@@ -8058,12 +7861,12 @@ mod tests {
         let token = tokio_util::sync::CancellationToken::new();
         token.cancel();
 
-        let result = client.batch_read_with_token(ORG, None, vec!["key1", "key2"], token).await;
+        let result = client.batch_read(ORG, None, vec!["key1", "key2"], None, Some(token)).await;
         assert!(matches!(result, Err(crate::error::SdkError::Cancelled)));
     }
 
     #[tokio::test]
-    async fn test_batch_write_with_token_pre_cancelled() {
+    async fn test_batch_write_with_pre_cancelled_token() {
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
@@ -8076,7 +7879,7 @@ mod tests {
         token.cancel();
 
         let ops = vec![vec![Operation::set_entity("key", b"val".to_vec(), None, None)]];
-        let result = client.batch_write_with_token(ORG, None, ops, token).await;
+        let result = client.batch_write(ORG, None, ops, Some(token)).await;
         assert!(matches!(result, Err(crate::error::SdkError::Cancelled)));
     }
 
@@ -8096,7 +7899,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_with_token_returns_cancelled_during_backoff() {
+    async fn test_read_with_cancellation_token_returns_cancelled_during_backoff() {
         // Set many retries with long backoff so cancellation fires during backoff
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://localhost:50051"]))
@@ -8123,7 +7926,7 @@ mod tests {
         });
 
         let start = std::time::Instant::now();
-        let result = client.read_with_token(ORG, None, "key", token).await;
+        let result = client.read(ORG, None, "key", None, Some(token)).await;
         let elapsed = start.elapsed();
 
         // Should be cancelled during the backoff sleep
@@ -8161,7 +7964,7 @@ mod tests {
         });
 
         let start = std::time::Instant::now();
-        let result = client.read(ORG, None, "key").await;
+        let result = client.read(ORG, None, "key", None, None).await;
         let elapsed = start.elapsed();
 
         // Should receive either Shutdown or Cancelled (from the client cancellation token)

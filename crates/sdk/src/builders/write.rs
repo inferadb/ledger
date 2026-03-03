@@ -222,14 +222,7 @@ impl<'a> WriteBuilder<'a, HasOps> {
     /// exhausted, the client has been shut down, a CAS condition is not met,
     /// or the cancellation token is triggered.
     pub async fn execute(self) -> Result<WriteSuccess> {
-        match self.cancellation {
-            Some(token) => {
-                self.client
-                    .write_with_token(self.organization, self.vault, self.operations, token)
-                    .await
-            },
-            None => self.client.write(self.organization, self.vault, self.operations).await,
-        }
+        self.client.write(self.organization, self.vault, self.operations, self.cancellation).await
     }
 }
 

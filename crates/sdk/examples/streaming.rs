@@ -74,6 +74,7 @@ async fn main() -> Result<()> {
                     writer_ns,
                     Some(writer_vault),
                     vec![Operation::set_entity(&key, value.into_bytes(), None, None)],
+                    None,
                 )
                 .await
             {

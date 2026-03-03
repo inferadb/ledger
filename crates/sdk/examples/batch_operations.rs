@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
                 Operation::set_entity("team:design", b"Design Team".to_vec(), None, None),
                 Operation::set_entity("team:product", b"Product Team".to_vec(), None, None),
             ],
+            None,
         )
         .await?;
 
@@ -114,6 +115,7 @@ async fn main() -> Result<()> {
                     Operation::create_relationship("doc:roadmap", "editor", "user:alice"),
                 ],
             ],
+            None,
         )
         .await?;
 
@@ -135,6 +137,7 @@ async fn main() -> Result<()> {
                 None,
                 Some(SetCondition::NotExists),
             )],
+            None,
         )
         .await?;
 
@@ -151,6 +154,7 @@ async fn main() -> Result<()> {
                 None,
                 Some(SetCondition::MustExist),
             )],
+            None,
         )
         .await?;
 
@@ -189,6 +193,7 @@ async fn main() -> Result<()> {
                     Operation::create_relationship("folder:product", "viewer", new_user_id),
                 ],
             ],
+            None,
         )
         .await?;
 
@@ -202,7 +207,7 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     println!("\n=== Verification ===");
 
-    let value = client.read(organization, Some(vault), new_user_id).await?;
+    let value = client.read(organization, Some(vault), new_user_id, None, None).await?;
 
     if let Some(bytes) = value {
         let user: serde_json::Value = serde_json::from_slice(&bytes).expect("deserialize");

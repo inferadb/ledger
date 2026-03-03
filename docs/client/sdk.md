@@ -27,12 +27,12 @@ async fn main() -> inferadb_ledger_sdk::Result<()> {
     let client = LedgerClient::new(config).await?;
 
     // Write an entity
-    let ops = vec![Operation::set_entity("user:123", b"data".to_vec())];
-    let result = client.write(organization_slug, None, ops).await?;
+    let ops = vec![Operation::set_entity("user:123", b"data".to_vec(), None, None)];
+    let result = client.write(organization_slug, None, ops, None).await?;
     println!("Committed at block {}", result.block_height);
 
     // Read it back
-    let value = client.read(organization_slug, None, "user:123").await?;
+    let value = client.read(organization_slug, None, "user:123", None, None).await?;
     println!("Value: {:?}", value);
 
     Ok(())
@@ -232,19 +232,21 @@ After shutdown:
 ### Single Read
 
 ```rust
-// Read from organization (entity)
-let value = client.read(organization_slug, None, "user:123").await?;
+// Read from organization (entity) with eventual consistency
+let value = client.read(organization_slug, None, "user:123", None, None).await?;
 
 // Read from vault (relationship context)
-let value = client.read(organization_slug, Some(vault_slug), "key").await?;
-```
+let value = client.read(organization_slug, Some(vault_slug), "key", None, None).await?;
 
-### Consistent Read
+// Read with linearizable consistency (always from leader)
+let value = client.read(
+    organization_slug, None, "user:123",
+    Some(ReadConsistency::Linearizable), None,
+).await?;
 
-For linearizable reads (always from leader):
-
-```rust
-let value = client.read_consistent(organization_slug, None, "user:123").await?;
+// Read with a cancellation token
+let token = tokio_util::sync::CancellationToken::new();
+let value = client.read(organization_slug, None, "key", None, Some(token)).await?;
 ```
 
 ### Batch Read
@@ -253,7 +255,7 @@ Read multiple keys efficiently:
 
 ```rust
 let keys = vec!["user:1".into(), "user:2".into(), "user:3".into()];
-let results = client.batch_read(organization_slug, None, keys).await?;
+let results = client.batch_read(organization_slug, None, keys, None, None).await?;
 
 for (key, value) in results {
     match value {
@@ -261,6 +263,12 @@ for (key, value) in results {
         None => println!("{}: not found", key),
     }
 }
+
+// Batch read with linearizable consistency
+let results = client.batch_read(
+    organization_slug, None, keys,
+    Some(ReadConsistency::Linearizable), None,
+).await?;
 ```
 
 ### Verified Read
@@ -399,7 +407,7 @@ let ops = vec![
     Operation::create_relationship("doc:1", "owner", "user:123"),
 ];
 
-let result = client.write(organization_slug, Some(vault_slug), ops).await?;
+let result = client.write(organization_slug, Some(vault_slug), ops, None).await?;
 println!("Transaction ID: {}", result.tx_id);
 println!("Block height: {}", result.block_height);
 ```
@@ -422,7 +430,7 @@ let ops = vec![
     Operation::create_relationship("org:acme", "member", "user:123"),
 ];
 
-let result = client.batch_write(organization_slug, Some(vault_slug), ops).await?;
+let result = client.batch_write(organization_slug, Some(vault_slug), ops, None).await?;
 ```
 
 If any conditional operation fails, the entire batch is rejected atomically.
@@ -579,7 +587,7 @@ async fn handle_errors(client: &LedgerClient) -> Result<()> {
 use inferadb_ledger_sdk::SdkError;
 use tonic::Code;
 
-match client.write(ns, vault, ops).await {
+match client.write(ns, vault, ops, None).await {
     Ok(result) => {
         println!("Committed: {}", result.tx_id);
     }

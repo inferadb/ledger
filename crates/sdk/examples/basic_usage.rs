@@ -71,6 +71,7 @@ async fn main() -> Result<()> {
                 None,
                 None,
             )],
+            None,
         )
         .await?;
 
@@ -82,7 +83,7 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     // 4. Read the value back with eventual consistency (fast)
     // -------------------------------------------------------------------------
-    let value = client.read(organization, Some(vault), user_key).await?;
+    let value = client.read(organization, Some(vault), user_key, None, None).await?;
 
     match value {
         Some(bytes) => {
@@ -95,7 +96,15 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     // 5. Read with linearizable consistency (strong, reads from leader)
     // -------------------------------------------------------------------------
-    let value = client.read_consistent(organization, Some(vault), user_key).await?;
+    let value = client
+        .read(
+            organization,
+            Some(vault),
+            user_key,
+            Some(inferadb_ledger_sdk::ReadConsistency::Linearizable),
+            None,
+        )
+        .await?;
 
     match value {
         Some(bytes) => {
@@ -115,14 +124,14 @@ async fn main() -> Result<()> {
         Operation::create_relationship("doc:readme", "editor", "user:bob"),
     ];
 
-    let result = client.write(organization, Some(vault), operations).await?;
+    let result = client.write(organization, Some(vault), operations, None).await?;
     println!("Multi-entity write at block {}, tx: {}", result.block_height, result.tx_id);
 
     // -------------------------------------------------------------------------
     // 7. Batch read multiple keys
     // -------------------------------------------------------------------------
     let keys = vec!["user:alice", "user:bob", "user:charlie", "user:nonexistent"];
-    let results = client.batch_read(organization, Some(vault), keys).await?;
+    let results = client.batch_read(organization, Some(vault), keys, None, None).await?;
 
     println!("Batch read results:");
     for (key, value) in results {

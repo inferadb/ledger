@@ -57,6 +57,7 @@ async fn main() -> Result<()> {
             organization,
             Some(vault),
             vec![Operation::set_entity(test_key, test_value.clone(), None, None)],
+            None,
         )
         .await?;
 
@@ -105,6 +106,7 @@ async fn main() -> Result<()> {
             organization,
             Some(vault),
             vec![Operation::set_entity(test_key, b"Updated value".to_vec(), None, None)],
+            None,
         )
         .await?;
 
