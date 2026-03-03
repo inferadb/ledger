@@ -28,7 +28,7 @@ use inferadb_ledger_proto::proto::{
     admin_service_server::AdminService,
 };
 use inferadb_ledger_state::{BlockArchive, StateLayer, system::SystemOrganizationService};
-use inferadb_ledger_store::{Database, FileBackend};
+use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
     ALL_REGIONS, OrganizationId as DomainOrganizationId,
     OrganizationSlug as DomainOrganizationSlug, VaultEntry, VaultId as DomainVaultId, VaultSlug,
@@ -39,7 +39,6 @@ use inferadb_ledger_types::{
 };
 use openraft::{BasicNode, Raft};
 use sha2::{Digest, Sha256};
-use tempfile::TempDir;
 use tonic::{Request, Response, Status};
 
 use crate::{
@@ -729,6 +728,16 @@ impl AdminService for AdminServiceImpl {
                 let state_root = state.compute_state_root(vault_id).unwrap_or(ZERO_HASH);
 
                 // Build genesis block header (height 0)
+                let genesis_entry = VaultEntry {
+                    organization: organization_id,
+                    vault: vault_id,
+                    vault_height: 0,
+                    previous_vault_hash: ZERO_HASH,
+                    transactions: vec![],
+                    tx_merkle_root: ZERO_HASH,
+                    state_root,
+                };
+                let genesis_hash = inferadb_ledger_types::vault_entry_hash(&genesis_entry);
                 let organization = slug_resolver.resolve_slug(organization_id)?;
                 let genesis = BlockHeader {
                     height: 0,
@@ -746,6 +755,7 @@ impl AdminService for AdminServiceImpl {
                     leader_id: Some(NodeId { id: leader_id.to_string() }),
                     term: metrics.current_term,
                     committed_index: result.log_id.index,
+                    block_hash: Some(Hash { value: genesis_hash.to_vec() }),
                 };
 
                 Ok(Response::new(CreateVaultResponse {
@@ -1151,31 +1161,18 @@ impl AdminService for AdminServiceImpl {
             };
 
             for (org_id, v_id, expected_height) in &vault_heights {
-                // Create temporary state for replay verification using temp directory
-                let temp_dir = match TempDir::new() {
-                    Ok(d) => d,
+                // Create temporary state for replay verification
+                let (_temp_dir, temp_state) = match super::helpers::create_replay_context() {
+                    Ok(ctx_pair) => ctx_pair,
                     Err(e) => {
                         issues.push(IntegrityIssue {
                             block_height: 0,
                             issue_type: "internal_error".to_string(),
-                            description: format!("Failed to create temp dir: {:?}", e),
+                            description: e.message().to_string(),
                         });
                         continue;
                     },
                 };
-                let temp_db =
-                    match Database::<FileBackend>::create(temp_dir.path().join("verify.db")) {
-                        Ok(db) => Arc::new(db),
-                        Err(e) => {
-                            issues.push(IntegrityIssue {
-                                block_height: 0,
-                                issue_type: "internal_error".to_string(),
-                                description: format!("Failed to create temp db: {:?}", e),
-                            });
-                            continue;
-                        },
-                    };
-                let temp_state = StateLayer::new(temp_db);
 
                 let mut last_vault_hash: Option<[u8; 32]> = None;
 
@@ -2716,8 +2713,8 @@ impl AdminService for AdminServiceImpl {
                 };
 
                 let backup_type = match meta.backup_type {
-                    crate::backup::BackupType::Full => 0,
-                    crate::backup::BackupType::Incremental => 1,
+                    crate::backup::BackupType::Full => 1,
+                    crate::backup::BackupType::Incremental => 2,
                 };
 
                 BackupInfo {

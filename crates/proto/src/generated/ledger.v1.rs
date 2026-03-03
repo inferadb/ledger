@@ -172,6 +172,11 @@ pub struct BlockHeader {
     pub term: u64,
     #[prost(uint64, tag = "10")]
     pub committed_index: u64,
+    /// Server-computed hash of this block header. Allows clients to verify
+    /// chain continuity (curr.previous_hash == prev.block_hash) without
+    /// recomputing the hash, which requires internal IDs not exposed via API.
+    #[prost(message, optional, tag = "11")]
+    pub block_hash: ::core::option::Option<Hash>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Block {
@@ -2706,10 +2711,12 @@ impl VaultHealthProto {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum BackupType {
+    /// Unspecified backup type.
+    Unspecified = 0,
     /// Full backup containing all database pages.
-    Full = 0,
+    Full = 1,
     /// Incremental backup containing only pages changed since the base backup.
-    Incremental = 1,
+    Incremental = 2,
 }
 impl BackupType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -2718,6 +2725,7 @@ impl BackupType {
     /// (if the ProtoBuf definition does not change) and safe for programmatic use.
     pub fn as_str_name(&self) -> &'static str {
         match self {
+            Self::Unspecified => "BACKUP_TYPE_UNSPECIFIED",
             Self::Full => "BACKUP_TYPE_FULL",
             Self::Incremental => "BACKUP_TYPE_INCREMENTAL",
         }
@@ -2725,6 +2733,7 @@ impl BackupType {
     /// Creates an enum from field names used in the ProtoBuf definition.
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
+            "BACKUP_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
             "BACKUP_TYPE_FULL" => Some(Self::Full),
             "BACKUP_TYPE_INCREMENTAL" => Some(Self::Incremental),
             _ => None,
@@ -2838,6 +2847,9 @@ pub enum EventEmissionPath {
     /// Deterministic, Raft-replicated — identical on all nodes.
     EmissionPathApplyPhase = 1,
     /// Node-local, best-effort — exists only on the handling node.
+    /// The domain-side representation includes the originating node_id,
+    /// which is stored as a top-level AuditEvent field rather than in
+    /// this enum to keep proto enums value-only.
     EmissionPathHandlerPhase = 2,
 }
 impl EventEmissionPath {
@@ -4991,7 +5003,7 @@ pub mod admin_service_client {
         }
         /// Simulate vault divergence for testing.
         /// Forces a vault into the Diverged state without actual state corruption.
-        /// Only available when the server is built with the "test-utils" feature.
+        /// Intended for testing and debugging; available in all builds.
         pub async fn simulate_divergence(
             &mut self,
             request: impl tonic::IntoRequest<super::SimulateDivergenceRequest>,
@@ -5544,7 +5556,7 @@ pub mod admin_service_server {
         >;
         /// Simulate vault divergence for testing.
         /// Forces a vault into the Diverged state without actual state corruption.
-        /// Only available when the server is built with the "test-utils" feature.
+        /// Intended for testing and debugging; available in all builds.
         async fn simulate_divergence(
             &self,
             request: tonic::Request<super::SimulateDivergenceRequest>,

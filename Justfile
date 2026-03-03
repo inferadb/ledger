@@ -74,7 +74,7 @@ test-recovery-ff:
 
 # Run full test suite including stress/scale tests
 test-all:
-    cargo +{{rust}} test --workspace
+    cargo +{{rust}} test --workspace -- --include-ignored
 
 # Run property tests with high iteration count (default: 10000)
 test-proptest cases="10000":

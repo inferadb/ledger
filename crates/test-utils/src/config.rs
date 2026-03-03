@@ -21,27 +21,3 @@ pub fn test_batch_config() -> BatchConfig {
         coalesce_enabled: false,
     }
 }
-
-/// Rate limiting configuration for tests.
-///
-/// Lightweight struct for test utilities since the production
-/// `RateLimitConfig` is in the types crate.
-#[derive(Debug, Clone, bon::Builder)]
-pub struct TestRateLimitConfig {
-    /// Maximum concurrent requests.
-    #[builder(default = 100)]
-    pub max_concurrent: usize,
-    /// Request timeout in seconds.
-    #[builder(default = 30)]
-    pub timeout_secs: u64,
-}
-
-/// Returns a default rate limit configuration suitable for tests.
-///
-/// Uses permissive values to avoid test flakiness:
-/// - `max_concurrent`: 100 (high concurrency for parallel tests)
-/// - `timeout_secs`: 30 (generous timeout)
-#[must_use]
-pub fn test_rate_limit_config() -> TestRateLimitConfig {
-    TestRateLimitConfig::builder().build()
-}

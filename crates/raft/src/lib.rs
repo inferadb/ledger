@@ -53,8 +53,6 @@ pub mod backup;
 #[doc(hidden)]
 pub mod batching;
 #[doc(hidden)]
-pub mod cardinality;
-#[doc(hidden)]
 pub mod deadline;
 #[doc(hidden)]
 pub mod dek_rewrap;
@@ -100,8 +98,6 @@ pub mod resource_metrics;
 pub mod runtime_config;
 #[doc(hidden)]
 pub mod services;
-#[doc(hidden)]
-pub mod vip_cache;
 
 #[doc(hidden)]
 pub mod auto_recovery;
@@ -155,8 +151,6 @@ pub use auto_recovery::AutoRecoveryJob;
 pub use backup::{BackupJob, BackupManager};
 #[doc(hidden)]
 pub use block_compaction::BlockCompactor;
-#[doc(hidden)]
-pub use cardinality::CardinalityBudget;
 #[doc(hidden)]
 pub use events_gc::EventsGarbageCollector;
 #[doc(hidden)]

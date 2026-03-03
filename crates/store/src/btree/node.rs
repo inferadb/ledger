@@ -554,20 +554,23 @@ impl<'a> BranchNode<'a> {
         self.page.dirty = true;
     }
 
-    /// Returns the child page for a given key by scanning separator keys.
+    /// Returns the child page for a given key using binary search on separator keys.
     pub fn child_for_key(&self, key: &[u8]) -> PageId {
         let count = self.cell_count() as usize;
 
-        // Linear scan through separator keys
-        for i in 0..count {
-            let sep_key = self.key(i);
-            if key < sep_key {
-                return self.child(i);
+        // Binary search: find first separator > key
+        let mut lo = 0;
+        let mut hi = count;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.key(mid) <= key {
+                lo = mid + 1;
+            } else {
+                hi = mid;
             }
         }
 
-        // Key is >= all separators, go to rightmost child
-        self.rightmost_child()
+        if lo < count { self.child(lo) } else { self.rightmost_child() }
     }
 
     /// Calculates the space needed for a separator entry.

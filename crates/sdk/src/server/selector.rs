@@ -218,20 +218,6 @@ impl ServerSelector {
         }
     }
 
-    /// Returns statistics about tracked servers.
-    #[must_use]
-    pub fn stats(&self) -> SelectorStats {
-        let total = self.latencies.len();
-        let reliable = self.latencies.iter().filter(|entry| entry.is_reliable()).count();
-        let unhealthy = self.unhealthy.read().len();
-
-        SelectorStats {
-            total_tracked: total,
-            reliable_tracked: reliable,
-            unhealthy_count: unhealthy,
-        }
-    }
-
     /// Clears all latency data.
     ///
     /// Useful for testing or when the server topology changes significantly.
@@ -239,17 +225,24 @@ impl ServerSelector {
         self.latencies.clear();
         self.unhealthy.write().clear();
     }
+
+    /// Returns statistics about tracked servers (test-only).
+    #[cfg(test)]
+    fn stats(&self) -> SelectorStats {
+        SelectorStats {
+            total_tracked: self.latencies.len(),
+            reliable_tracked: self.latencies.iter().filter(|entry| entry.is_reliable()).count(),
+            unhealthy_count: self.unhealthy.read().len(),
+        }
+    }
 }
 
-/// Statistics about the server selector state.
-#[derive(Debug, Clone, Copy)]
-pub struct SelectorStats {
-    /// Total number of servers with latency data.
-    pub total_tracked: usize,
-    /// Number of servers with reliable latency data.
-    pub reliable_tracked: usize,
-    /// Number of servers marked unhealthy.
-    pub unhealthy_count: usize,
+/// Test-only statistics about the server selector state.
+#[cfg(test)]
+struct SelectorStats {
+    total_tracked: usize,
+    reliable_tracked: usize,
+    unhealthy_count: usize,
 }
 
 #[cfg(test)]

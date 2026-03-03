@@ -197,6 +197,10 @@ message BlockHeader {
   NodeId leader_id = 8;
   uint64 term = 9;
   uint64 committed_index = 10;
+  // Server-computed hash of this block header. Allows clients to verify
+  // chain continuity (curr.previous_hash == prev.block_hash) without
+  // recomputing the hash, which requires internal IDs not exposed via API.
+  Hash block_hash = 11;
 }
 
 message Block {
@@ -857,7 +861,7 @@ service AdminService {
 
   // Simulate vault divergence for testing.
   // Forces a vault into the Diverged state without actual state corruption.
-  // Only available when the server is built with the "test-utils" feature.
+  // Intended for testing and debugging; available in all builds.
   rpc SimulateDivergence(SimulateDivergenceRequest) returns (SimulateDivergenceResponse);
 
   // Force a garbage collection cycle for expired entities.
@@ -1253,10 +1257,12 @@ message GetConfigResponse {
 
 // Backup type indicator.
 enum BackupType {
+  // Unspecified backup type.
+  BACKUP_TYPE_UNSPECIFIED = 0;
   // Full backup containing all database pages.
-  BACKUP_TYPE_FULL = 0;
+  BACKUP_TYPE_FULL = 1;
   // Incremental backup containing only pages changed since the base backup.
-  BACKUP_TYPE_INCREMENTAL = 1;
+  BACKUP_TYPE_INCREMENTAL = 2;
 }
 
 // Create a consistent backup of region state.
@@ -1458,6 +1464,9 @@ enum EventEmissionPath {
   // Deterministic, Raft-replicated — identical on all nodes.
   EMISSION_PATH_APPLY_PHASE = 1;
   // Node-local, best-effort — exists only on the handling node.
+  // The domain-side representation includes the originating node_id,
+  // which is stored as a top-level AuditEvent field rather than in
+  // this enum to keep proto enums value-only.
   EMISSION_PATH_HANDLER_PHASE = 2;
 }
 

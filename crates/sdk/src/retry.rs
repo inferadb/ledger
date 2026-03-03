@@ -1,12 +1,10 @@
-//! Retry logic with exponential backoff.
+//! Retry logic with exponential backoff and cancellation support.
 //!
-//! Provides retry wrappers with configurable backoff policies.
-//! Uses the `backon` crate for declarative retries and a manual retry loop
-//! with cancellation support for production use.
+//! Provides retry wrappers with configurable backoff policies, circuit breaker
+//! integration, per-attempt history tracking, and cooperative cancellation.
 
 use std::{future::Future, time::Duration};
 
-use backon::{ExponentialBuilder, Retryable};
 use rand::RngExt;
 
 use crate::{
@@ -16,21 +14,9 @@ use crate::{
 
 /// Executes an async operation with retry using exponential backoff.
 ///
-/// The operation will be retried according to the provided [`RetryPolicy`] if
-/// it fails with a retryable error (as determined by [`SdkError::is_retryable`]).
-///
-/// # Retry Strategy
-///
-/// - **Exponential backoff**: `initial_backoff * multiplier^(attempt-1)`
-/// - **Jitter**: ±`jitter` randomness applied to prevent thundering herd
-/// - **Cap**: Backoff capped at `max_backoff`
-/// - **Termination**: After `max_attempts` failed attempts
-///
-/// # Non-Retryable Errors
-///
-/// If the operation fails with a non-retryable error (e.g., `INVALID_ARGUMENT`,
-/// `PERMISSION_DENIED`, `IdempotencyKeyReused`), the error is returned immediately without
-/// retry.
+/// Convenience wrapper around [`with_retry_cancellable`] that uses a
+/// never-cancelled token and no connection pool. Use `with_retry_cancellable`
+/// directly when you need cancellation support or circuit breaker integration.
 ///
 /// # Errors
 ///
@@ -57,81 +43,8 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
-    match policy.total_timeout {
-        Some(timeout) => {
-            match tokio::time::timeout(timeout, with_retry_inner(policy, operation)).await {
-                Ok(result) => result,
-                Err(_elapsed) => Err(SdkError::Timeout { duration_ms: timeout.as_millis() as u64 }),
-            }
-        },
-        None => with_retry_inner(policy, operation).await,
-    }
-}
-
-/// Inner retry loop for [`with_retry`].
-///
-/// Contains the full backon-based retry logic. Extracted so `with_retry` can
-/// wrap it in `tokio::time::timeout` when `total_timeout` is configured.
-async fn with_retry_inner<F, Fut, T>(policy: &RetryPolicy, operation: F) -> Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
-    // Build exponential backoff with policy parameters.
-    // Note: backon's max_times is the number of retries, not total attempts.
-    // If max_attempts is 3, we want 2 retries (initial + 2 retries = 3 attempts).
-    let max_retries = policy.max_attempts.saturating_sub(1) as usize;
-
-    let backoff = ExponentialBuilder::new()
-        .with_min_delay(policy.initial_backoff)
-        .with_max_delay(policy.max_backoff)
-        .with_factor(policy.multiplier as f32)
-        .with_max_times(max_retries);
-
-    // Track attempt count for error reporting
-    let attempt_count = std::sync::atomic::AtomicU32::new(0);
-    let last_error_msg = std::sync::Mutex::new(String::new());
-    let jitter_factor = policy.jitter;
-
-    operation
-        .retry(backoff)
-        .sleep(tokio::time::sleep)
-        // Only retry if error is retryable
-        .when(|e: &SdkError| e.is_retryable())
-        // Apply jitter and log retry attempts
-        .notify(|err: &SdkError, dur: Duration| {
-            let attempt = attempt_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-
-            // Apply jitter: ±jitter_factor randomness
-            let jittered_dur = apply_jitter(dur, jitter_factor);
-
-            tracing::debug!(
-                attempt = attempt,
-                backoff_ms = jittered_dur.as_millis() as u64,
-                error = %err,
-                "retrying after backoff"
-            );
-
-            // Store last error message for potential RetryExhausted
-            if let Ok(mut msg) = last_error_msg.lock() {
-                *msg = err.to_string();
-            }
-        })
-        .await
-        .map_err(|e| {
-            // If we exhausted retries, wrap in RetryExhausted
-            // Otherwise, return the original error (non-retryable)
-            if e.is_retryable() {
-                let attempts = attempt_count.load(std::sync::atomic::Ordering::SeqCst) + 1;
-                SdkError::RetryExhausted {
-                    attempts,
-                    last_error: e.to_string(),
-                    attempt_history: Vec::new(),
-                }
-            } else {
-                e
-            }
-        })
+    let token = tokio_util::sync::CancellationToken::new();
+    with_retry_cancellable(policy, &token, None, "unknown", operation).await
 }
 
 /// Executes an async operation with retry and cancellation support.
@@ -318,7 +231,7 @@ where
 ///
 /// Jitter adds randomness in the range `[dur * (1 - factor), dur * (1 + factor)]`
 /// to prevent thundering herd when multiple clients retry simultaneously.
-fn apply_jitter(dur: Duration, factor: f64) -> Duration {
+pub(crate) fn apply_jitter(dur: Duration, factor: f64) -> Duration {
     if factor <= 0.0 {
         return dur;
     }

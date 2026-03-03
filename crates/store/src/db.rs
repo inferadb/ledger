@@ -903,24 +903,23 @@ impl<B: StorageBackend> Database<B> {
         }
     }
 
-    /// Writes a page to the backend.
-    fn write_page_to_backend(&self, page: &Page) -> Result<()> {
-        let mut page = page.clone();
-        page.update_checksum();
-
-        let backend = self.backend.write();
-        backend.write_page(page.id, &page.data)?;
-        Ok(())
-    }
-
     /// Flushes all dirty pages to disk (without sync).
+    ///
+    /// Updates each page's checksum in the cache before writing, ensuring
+    /// consistency between the cached and on-disk versions.
     ///
     /// Caller is responsible for calling sync() afterward if durability is needed.
     fn flush_pages(&self) -> Result<()> {
         let dirty_pages = self.cache.dirty_pages();
+        let backend = self.backend.write();
 
-        for page in &dirty_pages {
-            self.write_page_to_backend(page)?;
+        for mut page in dirty_pages {
+            // Update checksum in the cache so it matches the on-disk version
+            self.cache.update_checksum(page.id);
+
+            // Compute checksum on the clone used for writing
+            page.update_checksum();
+            backend.write_page(page.id, &page.data)?;
             self.cache.mark_clean(page.id);
         }
 

@@ -143,6 +143,7 @@ pub fn generate_write_proof(
     }
 
     // Build block header from vault entry
+    let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
     let block_header = proto::BlockHeader {
         height: entry.vault_height,
         organization: Some(proto::OrganizationSlug {
@@ -159,6 +160,7 @@ pub fn generate_write_proof(
         leader_id: Some(proto::NodeId { id: block.leader_id.clone() }),
         term: block.term,
         committed_index: block.committed_index,
+        block_hash: Some(proto::Hash { value: block_hash.to_vec() }),
     };
 
     // Generate transaction proof

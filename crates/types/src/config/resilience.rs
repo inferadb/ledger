@@ -47,6 +47,11 @@ fn default_backpressure_threshold() -> u64 {
 /// 3. **Global backpressure** — throttles all requests when Raft consensus is saturated.
 ///    `backpressure_threshold` is the pending proposal count above which requests are rejected.
 ///
+/// Fields are `pub` for serde deserialization and test ergonomics.
+/// Prefer [`RateLimitConfig::builder()`] for programmatic construction
+/// (it enforces positive-value constraints). After deserialization,
+/// call [`validate()`](Self::validate) to check invariants.
+///
 /// # Example
 ///
 /// ```no_run
@@ -211,12 +216,17 @@ const MIN_PRE_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 /// Controls how the server shuts down when receiving a termination signal.
 /// The shutdown sequence is:
 ///
-/// 1. Mark readiness probe as failing (stops new traffic from load balancer)
-/// 2. Wait `pre_stop_delay_secs` for K8s to remove pod from endpoints
-/// 3. Wait `grace_period_secs` for load balancer to drain existing connections
-/// 4. Wait up to `drain_timeout_secs` for in-flight requests to complete
-/// 5. Run pre-shutdown tasks (snapshots, Raft shutdown) with `pre_shutdown_timeout_secs` limit
-/// 6. Signal the gRPC server to stop
+/// 1. Mark readiness probe as failing (stops new traffic from load balancer).
+/// 2. Wait `pre_stop_delay_secs` for K8s to remove pod from endpoints.
+/// 3. Wait `grace_period_secs` for load balancer to drain existing connections.
+/// 4. Wait up to `drain_timeout_secs` for in-flight requests to complete.
+/// 5. Run pre-shutdown tasks (snapshots, Raft shutdown) with `pre_shutdown_timeout_secs` limit.
+/// 6. Signal the gRPC server to stop.
+///
+/// Fields are `pub` for serde deserialization and test ergonomics.
+/// Prefer [`ShutdownConfig::builder()`] for programmatic construction
+/// (it enforces minimum-value constraints). After deserialization,
+/// call [`validate()`](Self::validate) to check invariants.
 ///
 /// # Example
 ///
@@ -382,6 +392,9 @@ fn default_max_raft_lag() -> u64 {
 /// an independent timeout to prevent a slow dependency from blocking
 /// the entire health probe.
 ///
+/// Fields are `pub` for serde deserialization and test ergonomics.
+/// After deserialization, call [`validate()`](Self::validate) to check invariants.
+///
 /// # Example
 ///
 /// ```no_run
@@ -494,6 +507,11 @@ const fn default_max_relationship_string_bytes() -> usize {
 /// Controls maximum sizes for entity keys, values, organization names,
 /// relationship strings, and batch limits. Applied at both the gRPC
 /// service boundary and in SDK operation constructors.
+///
+/// Fields are `pub` for serde deserialization and test ergonomics.
+/// Prefer [`ValidationConfig::builder()`] for programmatic construction
+/// (it enforces non-zero constraints). After deserialization, call
+/// [`validate()`](Self::validate) to check invariants.
 ///
 /// # Example
 ///

@@ -215,6 +215,16 @@ impl PageCache {
         }
     }
 
+    /// Updates the checksum of a cached page in place.
+    ///
+    /// Called before flushing to ensure the cached page's checksum
+    /// matches the on-disk version.
+    pub fn update_checksum(&self, page_id: PageId) {
+        if let Some(entry) = self.pages.write().get_mut(&page_id) {
+            entry.page.update_checksum();
+        }
+    }
+
     /// Returns cache statistics.
     pub fn stats(&self) -> CacheStats {
         let pages = self.pages.read();

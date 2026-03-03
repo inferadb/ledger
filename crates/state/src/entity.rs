@@ -188,31 +188,17 @@ impl EntityStore {
         vault: VaultId,
         bucket_id: u8,
     ) -> Result<Vec<Entity>> {
-        let _prefix = bucket_prefix(vault, bucket_id);
+        let start = bucket_prefix(vault, bucket_id).to_vec();
+        let end = if bucket_id < 255 {
+            bucket_prefix(vault, bucket_id + 1).to_vec()
+        } else {
+            vault_prefix(VaultId::new(vault.value() + 1)).to_vec()
+        };
+
+        let iter = txn.range::<tables::Entities>(Some(&start), Some(&end)).context(StorageSnafu)?;
+
         let mut entities = Vec::new();
-
-        let iter = txn.iter::<tables::Entities>().context(StorageSnafu)?;
-
-        for (key_bytes, value) in iter {
-            if key_bytes.len() < 9 {
-                continue;
-            }
-
-            let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-            if key_vault_id < vault.value() {
-                continue;
-            }
-            if key_vault_id > vault.value() {
-                break;
-            }
-
-            if key_bytes[8] < bucket_id {
-                continue;
-            }
-            if key_bytes[8] > bucket_id {
-                break;
-            }
-
+        for (_key_bytes, value) in iter {
             let entity = decode(&value).context(CodecSnafu)?;
             entities.push(entity);
         }

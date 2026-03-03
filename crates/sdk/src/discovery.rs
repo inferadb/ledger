@@ -217,13 +217,7 @@ impl DiscoveryService {
             let mut client = Self::create_discovery_client(channel, compression);
 
             let request = proto::GetPeersRequest { max_peers };
-            let response = client.get_peers(request).await.map_err(|status| SdkError::Rpc {
-                code: status.code(),
-                message: status.message().to_owned(),
-                request_id: None,
-                trace_id: None,
-                error_details: None,
-            })?;
+            let response = client.get_peers(request).await.map_err(SdkError::from)?;
 
             let inner = response.into_inner();
             let peers = inner.peers.into_iter().map(PeerInfo::from_proto).collect();

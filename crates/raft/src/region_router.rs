@@ -157,9 +157,6 @@ pub struct RouterConfig {
     /// Connection timeout for region connections.
     #[builder(default = Duration::from_secs(5))]
     pub connect_timeout: Duration,
-    /// Maximum retry attempts for connection.
-    #[builder(default = 3)]
-    pub max_retries: u32,
     /// Base port for region gRPC services.
     #[builder(default = 50051)]
     pub grpc_port: u16,
@@ -167,12 +164,7 @@ pub struct RouterConfig {
 
 impl Default for RouterConfig {
     fn default() -> Self {
-        Self {
-            cache_ttl: Duration::from_secs(60),
-            connect_timeout: Duration::from_secs(5),
-            max_retries: 3,
-            grpc_port: 50051,
-        }
+        Self::builder().build()
     }
 }
 
@@ -564,7 +556,6 @@ mod tests {
         let config = RouterConfig::default();
         assert_eq!(config.cache_ttl, Duration::from_secs(60));
         assert_eq!(config.connect_timeout, Duration::from_secs(5));
-        assert_eq!(config.max_retries, 3);
     }
 
     #[test]
@@ -572,7 +563,6 @@ mod tests {
         let config = RouterConfig::builder().build();
         assert_eq!(config.cache_ttl, Duration::from_secs(60));
         assert_eq!(config.connect_timeout, Duration::from_secs(5));
-        assert_eq!(config.max_retries, 3);
         assert_eq!(config.grpc_port, 50051);
     }
 
@@ -581,12 +571,10 @@ mod tests {
         let config = RouterConfig::builder()
             .cache_ttl(Duration::from_secs(120))
             .connect_timeout(Duration::from_secs(10))
-            .max_retries(5)
             .grpc_port(9090)
             .build();
         assert_eq!(config.cache_ttl, Duration::from_secs(120));
         assert_eq!(config.connect_timeout, Duration::from_secs(10));
-        assert_eq!(config.max_retries, 5);
         assert_eq!(config.grpc_port, 9090);
     }
 
@@ -596,7 +584,6 @@ mod tests {
         let from_default = RouterConfig::default();
         assert_eq!(from_builder.cache_ttl, from_default.cache_ttl);
         assert_eq!(from_builder.connect_timeout, from_default.connect_timeout);
-        assert_eq!(from_builder.max_retries, from_default.max_retries);
         assert_eq!(from_builder.grpc_port, from_default.grpc_port);
     }
 

@@ -87,7 +87,7 @@ pub(crate) fn error_details_from_code(code: tonic::Code) -> proto::ErrorDetails 
             (ErrorCode::AppAlreadyCommitted, false, "Operation already succeeded; no retry needed")
         },
         tonic::Code::ResourceExhausted => {
-            (ErrorCode::AppInternal, true, "Reduce request rate or wait before retrying")
+            (ErrorCode::AppQuotaExceeded, true, "Reduce request rate or wait before retrying")
         },
         tonic::Code::FailedPrecondition => (
             ErrorCode::AppPreconditionFailed,

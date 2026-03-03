@@ -98,6 +98,7 @@ tracing-opentelemetry = "0.32"
 # Configuration
 clap = { version = "4", features = ["derive", "env"] }
 humantime = "2"
+humantime-serde = "1"
 
 # File locking
 fs2 = "0.4"

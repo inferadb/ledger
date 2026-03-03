@@ -52,25 +52,15 @@ pub enum BootstrapDecision {
 }
 
 /// Errors that can occur during bootstrap coordination.
-#[derive(Debug)]
+#[derive(Debug, snafu::Snafu)]
 pub enum CoordinatorError {
     /// Bootstrap coordination timed out waiting for peers.
-    Timeout(String),
-    /// Configuration validation failed (reserved for future use).
-    #[allow(dead_code)] // reserved for configuration errors
-    Config(String),
+    #[snafu(display("bootstrap timeout: {message}"))]
+    Timeout {
+        /// Error description.
+        message: String,
+    },
 }
-
-impl std::fmt::Display for CoordinatorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Timeout(msg) => write!(f, "bootstrap timeout: {msg}"),
-            Self::Config(msg) => write!(f, "configuration error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for CoordinatorError {}
 
 /// Coordinate bootstrap decision with discovered peers.
 ///
@@ -123,11 +113,13 @@ pub async fn coordinate_bootstrap(
                 decision = "timeout",
                 "Bootstrap coordination timed out waiting for peers"
             );
-            return Err(CoordinatorError::Timeout(format!(
-                "did not discover {} peers within {}s",
-                config.bootstrap_expect(),
-                config.peers_timeout_secs
-            )));
+            return Err(CoordinatorError::Timeout {
+                message: format!(
+                    "did not discover {} peers within {}s",
+                    config.bootstrap_expect(),
+                    config.peers_timeout_secs
+                ),
+            });
         }
 
         // Resolve peer addresses from discovery
@@ -260,11 +252,8 @@ mod tests {
 
     #[test]
     fn test_coordinator_error_display() {
-        let timeout_err = CoordinatorError::Timeout("test timeout".to_string());
+        let timeout_err = CoordinatorError::Timeout { message: "test timeout".to_string() };
         assert_eq!(timeout_err.to_string(), "bootstrap timeout: test timeout");
-
-        let config_err = CoordinatorError::Config("test config".to_string());
-        assert_eq!(config_err.to_string(), "configuration error: test config");
     }
 
     #[test]
@@ -387,9 +376,9 @@ mod tests {
 
         // Should timeout since no peers are discoverable
         match result {
-            Err(CoordinatorError::Timeout(msg)) => {
-                assert!(msg.contains("did not discover"));
-                assert!(msg.contains("3 peers"));
+            Err(CoordinatorError::Timeout { message }) => {
+                assert!(message.contains("did not discover"));
+                assert!(message.contains("3 peers"));
             },
             other => panic!("Expected Timeout error, got: {:?}", other),
         }

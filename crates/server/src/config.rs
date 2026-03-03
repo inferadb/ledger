@@ -310,97 +310,6 @@ fn default_trace_raft_rpcs() -> bool {
     true
 }
 
-/// Configuration for dynamic VIP organization discovery.
-///
-/// VIP organizations receive elevated sampling rates. VIP status can be configured
-/// statically via `vip_organizations` list or dynamically discovered from the
-/// `_system` organization metadata.
-///
-/// # Environment Variables
-///
-/// ```bash
-/// INFERADB__LEDGER__LOGGING__VIP__DISCOVERY_ENABLED=true
-/// INFERADB__LEDGER__LOGGING__VIP__CACHE_TTL_SECS=60
-/// INFERADB__LEDGER__LOGGING__VIP__TAG_NAME=vip
-/// ```
-#[derive(Debug, Clone, Deserialize, JsonSchema, bon::Builder)]
-#[builder(derive(Debug))]
-pub struct VipConfig {
-    /// Whether dynamic VIP discovery from `_system` is enabled. Default: true.
-    ///
-    /// When enabled, the system queries `_system` organization for entities with
-    /// keys matching `vip:organization:{organization_id}` to determine VIP status.
-    #[serde(default = "default_vip_discovery_enabled")]
-    #[builder(default = default_vip_discovery_enabled())]
-    #[allow(dead_code)] // used by VipCache for dynamic discovery
-    pub discovery_enabled: bool,
-
-    /// Cache TTL for VIP status lookups, in seconds. Default: 60.
-    ///
-    /// VIP status is cached locally to avoid querying `_system` on every request.
-    /// The cache is refreshed asynchronously after TTL expires.
-    #[serde(default = "default_vip_cache_ttl_secs")]
-    #[builder(default = default_vip_cache_ttl_secs())]
-    pub cache_ttl_secs: u64,
-
-    /// Name of the metadata tag used to mark VIP organizations. Default: "vip".
-    ///
-    /// VIP tags are stored as entities in `_system` with key format
-    /// `{tag_name}:organization:{organization_id}`.
-    #[serde(default = "default_vip_tag_name")]
-    #[builder(default = default_vip_tag_name())]
-    pub tag_name: String,
-}
-
-impl Default for VipConfig {
-    fn default() -> Self {
-        Self {
-            discovery_enabled: default_vip_discovery_enabled(),
-            cache_ttl_secs: default_vip_cache_ttl_secs(),
-            tag_name: default_vip_tag_name(),
-        }
-    }
-}
-
-impl VipConfig {
-    /// Creates a configuration with test-suitable values (discovery disabled).
-    pub fn for_test() -> Self {
-        Self { discovery_enabled: false, cache_ttl_secs: 60, tag_name: "vip".to_string() }
-    }
-
-    /// Validates VIP configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError`] if `cache_ttl_secs` is zero or `tag_name`
-    /// is empty.
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.cache_ttl_secs == 0 {
-            return Err(ConfigError::Validation {
-                message: "logging.vip.cache_ttl_secs must be positive".to_string(),
-            });
-        }
-
-        if self.tag_name.is_empty() {
-            return Err(ConfigError::Validation {
-                message: "logging.vip.tag_name cannot be empty".to_string(),
-            });
-        }
-
-        Ok(())
-    }
-}
-
-fn default_vip_discovery_enabled() -> bool {
-    true
-}
-fn default_vip_cache_ttl_secs() -> u64 {
-    60
-}
-fn default_vip_tag_name() -> String {
-    "vip".to_string()
-}
-
 /// Configuration for request logging.
 ///
 /// Provides comprehensive request-level logging with 50+ contextual
@@ -411,35 +320,16 @@ fn default_vip_tag_name() -> String {
 /// Configures via environment variables with the `INFERADB__LEDGER__LOGGING__` prefix:
 ///
 /// ```bash
-/// INFERADB__LEDGER__LOGGING__ENABLED=true
 /// INFERADB__LEDGER__LOGGING__SAMPLING__WRITE_RATE=0.1
-/// INFERADB__LEDGER__LOGGING__VIP_ORGANIZATIONS=1,2,3
+/// INFERADB__LEDGER__LOGGING__OTEL__ENDPOINT=http://localhost:4317
 /// ```
-#[derive(Debug, Clone, Deserialize, JsonSchema, bon::Builder)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, bon::Builder)]
 #[builder(derive(Debug))]
 pub struct LoggingConfig {
-    /// Whether request logging is enabled. Default: true.
-    #[serde(default = "default_logging_enabled")]
-    #[builder(default = default_logging_enabled())]
-    #[allow(dead_code)] // reserved for when logging can be disabled
-    pub enabled: bool,
-
     /// Sampling configuration for request logging.
     #[serde(default)]
     #[builder(default)]
     pub sampling: LogSamplingConfig,
-
-    /// List of VIP organization IDs with elevated sampling rates.
-    /// These are static overrides that always receive VIP treatment.
-    #[serde(default)]
-    #[builder(default)]
-    #[allow(dead_code)] // used by VipCache for static VIP override
-    pub vip_organizations: Vec<u64>,
-
-    /// Dynamic VIP organization discovery configuration.
-    #[serde(default)]
-    #[builder(default)]
-    pub vip: VipConfig,
 
     /// OpenTelemetry/OTLP export configuration.
     #[serde(default)]
@@ -447,28 +337,10 @@ pub struct LoggingConfig {
     pub otel: OtelConfig,
 }
 
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_logging_enabled(),
-            sampling: LogSamplingConfig::default(),
-            vip_organizations: Vec::new(),
-            vip: VipConfig::default(),
-            otel: OtelConfig::default(),
-        }
-    }
-}
-
 impl LoggingConfig {
     /// Creates a configuration with test-suitable values (all sampling enabled).
     pub fn for_test() -> Self {
-        Self {
-            enabled: true,
-            sampling: LogSamplingConfig::for_test(),
-            vip_organizations: Vec::new(),
-            vip: VipConfig::for_test(),
-            otel: OtelConfig::for_test(),
-        }
+        Self { sampling: LogSamplingConfig::for_test(), otel: OtelConfig::for_test() }
     }
 
     /// Validates logging configuration.
@@ -479,7 +351,6 @@ impl LoggingConfig {
     /// is invalid.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.sampling.validate()?;
-        self.vip.validate()?;
         self.otel.validate()
     }
 }
@@ -508,9 +379,6 @@ fn default_slow_threshold_write_ms() -> f64 {
 }
 fn default_slow_threshold_admin_ms() -> f64 {
     1000.0
-}
-fn default_logging_enabled() -> bool {
-    true
 }
 
 /// Log output format.
@@ -1432,16 +1300,13 @@ mod tests {
     #[test]
     fn test_logging_config_defaults() {
         let config = LoggingConfig::default();
-        assert!(config.enabled);
-        assert!(config.vip_organizations.is_empty());
         // Sampling defaults are covered by sampling config tests
+        assert!((config.sampling.read_rate - 0.01).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_logging_config_for_test() {
         let config = LoggingConfig::for_test();
-        assert!(config.enabled);
-        assert!(config.vip_organizations.is_empty());
         // Test config samples everything
         assert!((config.sampling.read_rate - 1.0).abs() < f64::EPSILON);
         assert!((config.sampling.write_rate - 1.0).abs() < f64::EPSILON);
@@ -1464,7 +1329,6 @@ mod tests {
     #[test]
     fn test_config_includes_logging() {
         let config = Config::default();
-        assert!(config.logging.enabled);
         assert!(config.validate().is_ok());
     }
 
@@ -1475,7 +1339,6 @@ mod tests {
         let config = Config::for_test(1, 50051, data_dir);
 
         // for_test uses LoggingConfig::for_test() which samples everything
-        assert!(config.logging.enabled);
         assert!((config.logging.sampling.read_rate - 1.0).abs() < f64::EPSILON);
         assert!((config.logging.sampling.write_rate - 1.0).abs() < f64::EPSILON);
     }
@@ -1520,15 +1383,9 @@ mod tests {
     #[test]
     fn test_logging_config_builder() {
         let sampling = LogSamplingConfig::builder().read_rate(0.05).build();
-        let config = LoggingConfig::builder()
-            .enabled(false)
-            .sampling(sampling)
-            .vip_organizations(vec![1, 2, 3])
-            .build();
+        let config = LoggingConfig::builder().sampling(sampling).build();
 
-        assert!(!config.enabled);
         assert!((config.sampling.read_rate - 0.05).abs() < f64::EPSILON);
-        assert_eq!(config.vip_organizations, vec![1, 2, 3]);
     }
 
     // === OTEL Config Tests ===
@@ -1657,67 +1514,6 @@ mod tests {
     }
 
     // === VIP Config Tests ===
-
-    #[test]
-    fn test_vip_config_defaults() {
-        let config = VipConfig::default();
-        assert!(config.discovery_enabled);
-        assert_eq!(config.cache_ttl_secs, 60);
-        assert_eq!(config.tag_name, "vip");
-    }
-
-    #[test]
-    fn test_vip_config_for_test() {
-        let config = VipConfig::for_test();
-        assert!(!config.discovery_enabled);
-        assert_eq!(config.cache_ttl_secs, 60);
-        assert_eq!(config.tag_name, "vip");
-    }
-
-    #[test]
-    fn test_vip_config_validate_cache_ttl() {
-        let config = VipConfig { cache_ttl_secs: 0, ..VipConfig::default() };
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("cache_ttl_secs"));
-    }
-
-    #[test]
-    fn test_vip_config_validate_tag_name() {
-        let config = VipConfig { tag_name: String::new(), ..VipConfig::default() };
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("tag_name"));
-    }
-
-    #[test]
-    fn test_vip_config_builder() {
-        let config = VipConfig::builder()
-            .discovery_enabled(false)
-            .cache_ttl_secs(120)
-            .tag_name("priority".to_string())
-            .build();
-
-        assert!(!config.discovery_enabled);
-        assert_eq!(config.cache_ttl_secs, 120);
-        assert_eq!(config.tag_name, "priority");
-    }
-
-    #[test]
-    fn test_logging_config_includes_vip() {
-        let config = LoggingConfig::default();
-        assert!(config.vip.discovery_enabled);
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_logging_config_validate_includes_vip() {
-        // Invalid VIP config should fail validation
-        let config = LoggingConfig {
-            vip: VipConfig { cache_ttl_secs: 0, ..VipConfig::default() },
-            ..LoggingConfig::default()
-        };
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("cache_ttl_secs"));
-    }
 
     // =========================================================================
     // Schema & example generation tests

@@ -6,6 +6,8 @@
 //!
 //! Indexes are NOT Merkleized (no per-write amplification).
 
+use std::collections::BTreeSet;
+
 use inferadb_ledger_store::{ReadTransaction, StorageBackend, WriteTransaction, tables};
 use inferadb_ledger_types::{VaultId, decode, encode};
 use snafu::{ResultExt, Snafu};
@@ -35,16 +37,16 @@ pub enum IndexError {
 /// Result type for index operations.
 pub type Result<T> = std::result::Result<T, IndexError>;
 
-/// Index entry for object index: list of subjects.
+/// Index entry for object index: set of subjects.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct SubjectSet {
-    subjects: Vec<String>,
+    subjects: BTreeSet<String>,
 }
 
-/// Index entry for subject index: list of (resource, relation) pairs.
+/// Index entry for subject index: set of (resource, relation) pairs.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct ResourceRelationSet {
-    pairs: Vec<(String, String)>,
+    pairs: BTreeSet<(String, String)>,
 }
 
 /// Dual index manager for relationship queries.
@@ -84,14 +86,11 @@ impl IndexManager {
         let storage_key = encode_storage_key(vault, &local_key);
 
         let mut set: SubjectSet = match txn.get::<tables::ObjIndex>(&storage_key) {
-            Ok(Some(data)) => decode(&data).unwrap_or_default(),
-            _ => SubjectSet::default(),
+            Ok(Some(data)) => decode(&data).context(CodecSnafu)?,
+            Ok(None) | Err(_) => SubjectSet::default(),
         };
 
-        let subject_str = subject.to_string();
-        if !set.subjects.contains(&subject_str) {
-            set.subjects.push(subject_str);
-        }
+        set.subjects.insert(subject.to_string());
 
         let encoded = encode(&set).context(CodecSnafu)?;
 
@@ -119,15 +118,15 @@ impl IndexManager {
         let storage_key = encode_storage_key(vault, &local_key);
 
         let existing_set: Option<SubjectSet> = match txn.get::<tables::ObjIndex>(&storage_key) {
-            Ok(Some(data)) => Some(decode(&data).unwrap_or_default()),
-            _ => None,
+            Ok(Some(data)) => Some(decode(&data).context(CodecSnafu)?),
+            Ok(None) | Err(_) => None,
         };
 
         let Some(mut set) = existing_set else {
             return Ok(());
         };
 
-        set.subjects.retain(|s| s != subject);
+        set.subjects.remove(subject);
 
         if set.subjects.is_empty() {
             let _ = txn.delete::<tables::ObjIndex>(&storage_key);
@@ -162,14 +161,11 @@ impl IndexManager {
         let storage_key = encode_storage_key(vault, &local_key);
 
         let mut set: ResourceRelationSet = match txn.get::<tables::SubjIndex>(&storage_key) {
-            Ok(Some(data)) => decode(&data).unwrap_or_default(),
-            _ => ResourceRelationSet::default(),
+            Ok(Some(data)) => decode(&data).context(CodecSnafu)?,
+            Ok(None) | Err(_) => ResourceRelationSet::default(),
         };
 
-        let pair = (resource.to_string(), relation.to_string());
-        if !set.pairs.contains(&pair) {
-            set.pairs.push(pair);
-        }
+        set.pairs.insert((resource.to_string(), relation.to_string()));
 
         let encoded = encode(&set).context(CodecSnafu)?;
 
@@ -198,8 +194,8 @@ impl IndexManager {
 
         let existing_set: Option<ResourceRelationSet> =
             match txn.get::<tables::SubjIndex>(&storage_key) {
-                Ok(Some(data)) => Some(decode(&data).unwrap_or_default()),
-                _ => None,
+                Ok(Some(data)) => Some(decode(&data).context(CodecSnafu)?),
+                Ok(None) | Err(_) => None,
             };
 
         let Some(mut set) = existing_set else {
@@ -207,7 +203,7 @@ impl IndexManager {
         };
 
         let pair = (resource.to_string(), relation.to_string());
-        set.pairs.retain(|p| p != &pair);
+        set.pairs.remove(&pair);
 
         if set.pairs.is_empty() {
             let _ = txn.delete::<tables::SubjIndex>(&storage_key);
@@ -241,7 +237,7 @@ impl IndexManager {
         match data {
             Some(bytes) => {
                 let set: SubjectSet = decode(&bytes).context(CodecSnafu)?;
-                Ok(set.subjects)
+                Ok(set.subjects.into_iter().collect())
             },
             None => Ok(Vec::new()),
         }
@@ -267,7 +263,7 @@ impl IndexManager {
         match data {
             Some(bytes) => {
                 let set: ResourceRelationSet = decode(&bytes).context(CodecSnafu)?;
-                Ok(set.pairs)
+                Ok(set.pairs.into_iter().collect())
             },
             None => Ok(Vec::new()),
         }

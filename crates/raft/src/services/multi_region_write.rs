@@ -134,11 +134,6 @@ impl MultiRegionWriteService {
         super::helpers::record_hot_keys(self.hot_key_detector.as_ref(), vault, operations);
     }
 
-    /// Computes a hash of operations for idempotency payload comparison.
-    fn hash_operations(operations: &[Operation]) -> Vec<u8> {
-        super::helpers::hash_operations(operations)
-    }
-
     /// Generates block header and transaction proof for a committed write.
     fn generate_write_proof(
         &self,
@@ -372,7 +367,7 @@ impl WriteService for MultiRegionWriteService {
         }
 
         // Compute request hash for payload comparison
-        let request_hash = seahash::hash(&Self::hash_operations(&req.operations));
+        let request_hash = seahash::hash(&super::helpers::hash_operations(&req.operations));
 
         // Record span fields
         tracing::Span::current().record("client_id", &client_id);
@@ -715,7 +710,7 @@ impl WriteService for MultiRegionWriteService {
         let batch_size = all_operations.len();
 
         // Compute request hash for payload comparison
-        let request_hash = seahash::hash(&Self::hash_operations(&all_operations));
+        let request_hash = seahash::hash(&super::helpers::hash_operations(&all_operations));
 
         // Record span fields
         tracing::Span::current().record("client_id", &client_id);

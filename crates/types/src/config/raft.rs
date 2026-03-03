@@ -36,21 +36,21 @@ pub struct RaftConfig {
     /// Must be less than `election_timeout_min / 2` per Raft specification
     /// to prevent spurious leader elections.
     #[serde(default = "default_heartbeat_interval")]
-    #[serde(with = "super::humantime_serde")]
+    #[serde(with = "humantime_serde")]
     #[schemars(with = "String")]
     pub heartbeat_interval: Duration,
     /// Election timeout range (min).
     ///
     /// Must be less than `election_timeout_max`.
     #[serde(default = "default_election_timeout_min")]
-    #[serde(with = "super::humantime_serde")]
+    #[serde(with = "humantime_serde")]
     #[schemars(with = "String")]
     pub election_timeout_min: Duration,
     /// Election timeout range (max).
     ///
     /// Must be greater than `election_timeout_min`.
     #[serde(default = "default_election_timeout_max")]
-    #[serde(with = "super::humantime_serde")]
+    #[serde(with = "humantime_serde")]
     #[schemars(with = "String")]
     pub election_timeout_max: Duration,
     /// Maximum entries per append_entries RPC.
@@ -68,7 +68,7 @@ pub struct RaftConfig {
     /// If a gRPC deadline is present and shorter, the deadline takes precedence.
     /// Must be >= 1s.
     #[serde(default = "default_proposal_timeout")]
-    #[serde(with = "super::humantime_serde")]
+    #[serde(with = "humantime_serde")]
     #[schemars(with = "String")]
     pub proposal_timeout: Duration,
 }
@@ -219,7 +219,7 @@ pub struct BatchConfig {
     pub max_batch_size: usize,
     /// Maximum wait time before flushing a partial batch.
     #[serde(default = "default_batch_timeout")]
-    #[serde(with = "super::humantime_serde")]
+    #[serde(with = "humantime_serde")]
     #[schemars(with = "String")]
     pub batch_timeout: Duration,
     /// Enable batch coalescing for higher throughput.

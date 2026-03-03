@@ -245,7 +245,6 @@ pub struct SpanAttributes {
     pub is_leader: Option<bool>,
     pub raft_term: Option<u64>,
     pub region: Option<Region>,
-    pub is_vip: Option<bool>,
 
     // Operation fields (write)
     pub operations_count: Option<usize>,
@@ -327,7 +326,6 @@ impl SpanAttributes {
         push_attr!("is_leader", self.is_leader, |v| v);
         push_attr!("raft_term", self.raft_term, |v| v as i64);
         push_attr!("region", self.region, |v| v.as_str().to_string());
-        push_attr!("is_vip", self.is_vip, |v| v);
 
         // Operation fields (write)
         push_attr!("operations_count", self.operations_count, |v| v as i64);

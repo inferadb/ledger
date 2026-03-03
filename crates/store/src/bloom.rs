@@ -11,7 +11,7 @@
 //! - For m=2048, k=5, n=100: FPR ≈ 0.7%
 //!
 //! The filter uses double hashing: h_i(x) = h1(x) + i * h2(x) mod m,
-//! where h1 and h2 are derived from a single 128-bit SipHash.
+//! where h1 and h2 are independent xxh3 hashes with distinct seeds.
 
 /// Size of the bloom filter in bytes.
 pub const BLOOM_FILTER_SIZE: usize = 256;
@@ -91,26 +91,13 @@ impl BloomFilter {
         self.bits.iter().all(|&b| b == 0)
     }
 
-    /// Computes a double-hash pair from a key using FNV-1a-inspired mixing.
+    /// Computes a double-hash pair from a key using xxh3 with independent seeds.
     ///
-    /// Runs two independent hash passes over the key bytes, each seeded with
-    /// a different FNV offset basis, producing two 64-bit hash values.
+    /// Uses two xxh3 passes with distinct seeds to produce genuinely independent
+    /// hash values for the Kirsch-Mitzenmacher double-hashing construction.
     fn hash_pair(key: &[u8]) -> (u64, u64) {
-        // FNV-1a inspired mixing with two independent seeds.
-        // Seed 1 (h1): standard FNV offset basis
-        let mut h1: u64 = 0xcbf2_9ce4_8422_2325;
-        for &b in key {
-            h1 ^= b as u64;
-            h1 = h1.wrapping_mul(0x0100_0000_01b3);
-        }
-
-        // Seed 2 (h2): different offset basis for independence
-        let mut h2: u64 = 0x6c62_272e_07bb_0142;
-        for &b in key {
-            h2 ^= b as u64;
-            h2 = h2.wrapping_mul(0x0100_0000_01b3);
-        }
-
+        let h1 = xxhash_rust::xxh3::xxh3_64_with_seed(key, 0);
+        let h2 = xxhash_rust::xxh3::xxh3_64_with_seed(key, 0x9E37_79B9_7F4A_7C15);
         (h1, h2)
     }
 

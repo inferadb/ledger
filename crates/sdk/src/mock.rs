@@ -613,6 +613,7 @@ impl ReadService for MockReadService {
             leader_id: Some(proto::NodeId { id: "mock-node".to_string() }),
             term: 1,
             committed_index: block_height,
+            block_hash: Some(proto::Hash { value: vec![0u8; 32] }),
         };
 
         // Create a simple merkle proof (single element tree)
@@ -689,6 +690,7 @@ impl ReadService for MockReadService {
                 leader_id: Some(proto::NodeId { id: "mock-node".to_string() }),
                 term: 1,
                 committed_index: req.height,
+                block_hash: Some(proto::Hash { value: vec![0u8; 32] }),
             }),
             transactions: vec![],
         };
@@ -719,6 +721,7 @@ impl ReadService for MockReadService {
                     leader_id: Some(proto::NodeId { id: "mock-node".to_string() }),
                     term: 1,
                     committed_index: height,
+                    block_hash: Some(proto::Hash { value: vec![0u8; 32] }),
                 }),
                 transactions: vec![],
             })
@@ -1246,6 +1249,7 @@ impl AdminService for MockAdminService {
                 leader_id: Some(proto::NodeId { id: "mock-node".to_string() }),
                 term: 1,
                 committed_index: 0,
+                block_hash: Some(proto::Hash { value: vec![0u8; 32] }),
             }),
         }))
     }

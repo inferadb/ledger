@@ -21,10 +21,7 @@ use inferadb_ledger_proto::proto::{
     ListResourcesResponse, ReadConsistency, ReadRequest, ReadResponse, VerifiedReadRequest,
     VerifiedReadResponse, WatchBlocksRequest, read_service_server::ReadService,
 };
-use inferadb_ledger_state::StateLayer;
-use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{OrganizationId, VaultId};
-use tempfile::TempDir;
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument, warn};
@@ -141,13 +138,7 @@ impl MultiRegionReadService {
         }
 
         // Create temporary state layer for replay
-        let temp_dir = TempDir::new()
-            .map_err(|e| Status::internal(format!("Failed to create temp dir: {}", e)))?;
-        let temp_db = Arc::new(
-            Database::<FileBackend>::create(temp_dir.path().join("replay.db"))
-                .map_err(|e| Status::internal(format!("Failed to create temp db: {}", e)))?,
-        );
-        let temp_state = StateLayer::new(temp_db);
+        let (_temp_dir, temp_state) = super::helpers::create_replay_context()?;
 
         // Track block timestamp for expiration check
         let mut block_timestamp = chrono::Utc::now();

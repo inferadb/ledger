@@ -29,7 +29,7 @@ use crate::{
 
 /// Configuration for the batch writer.
 #[derive(Debug, Clone, bon::Builder)]
-pub struct BatchConfig {
+pub struct BatchWriterConfig {
     /// Maximum number of writes to batch together.
     #[builder(default = 100)]
     pub max_batch_size: usize,
@@ -51,14 +51,9 @@ pub struct BatchConfig {
     pub eager_commit: bool,
 }
 
-impl Default for BatchConfig {
+impl Default for BatchWriterConfig {
     fn default() -> Self {
-        Self {
-            max_batch_size: 100,
-            batch_timeout: Duration::from_millis(2),
-            tick_interval: Duration::from_micros(500),
-            eager_commit: true,
-        }
+        Self::builder().build()
     }
 }
 
@@ -147,7 +142,7 @@ impl BatchState {
     /// 1. Batch size reached max_batch_size
     /// 2. Batch timeout elapsed since first pending write
     /// 3. Eager commit enabled AND queue has drained (no new writes since last tick)
-    fn should_flush(&self, config: &BatchConfig) -> bool {
+    fn should_flush(&self, config: &BatchWriterConfig) -> bool {
         // Always flush if we hit max batch size
         if self.pending.len() >= config.max_batch_size {
             return true;
@@ -183,7 +178,7 @@ impl BatchState {
 #[derive(Clone)]
 pub struct BatchWriterHandle {
     state: Arc<Mutex<BatchState>>,
-    config: BatchConfig,
+    config: BatchWriterConfig,
 }
 
 impl BatchWriterHandle {
@@ -228,7 +223,7 @@ where
         + 'static,
 {
     state: Arc<Mutex<BatchState>>,
-    config: BatchConfig,
+    config: BatchWriterConfig,
     /// Function to submit batched requests to Raft.
     submit_fn: F,
     /// Region identifier for metric labels.
@@ -245,7 +240,7 @@ where
         + 'static,
 {
     /// Creates a new batch writer.
-    pub fn new(config: BatchConfig, submit_fn: F, region: impl Into<String>) -> Self {
+    pub fn new(config: BatchWriterConfig, submit_fn: F, region: impl Into<String>) -> Self {
         Self {
             state: Arc::new(Mutex::new(BatchState::new())),
             config,
@@ -393,7 +388,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_writer_handle() {
-        let config = BatchConfig {
+        let config = BatchWriterConfig {
             max_batch_size: 10,
             batch_timeout: Duration::from_millis(100),
             tick_interval: Duration::from_millis(10),
@@ -450,7 +445,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_flushes_on_size() {
-        let config = BatchConfig {
+        let config = BatchWriterConfig {
             max_batch_size: 3,
             batch_timeout: Duration::from_secs(10), // Long timeout
             tick_interval: Duration::from_millis(1),
@@ -498,7 +493,7 @@ mod tests {
 
     #[test]
     fn test_batch_state() {
-        let config = BatchConfig {
+        let config = BatchWriterConfig {
             max_batch_size: 2,
             batch_timeout: Duration::from_millis(10),
             tick_interval: Duration::from_millis(1),
@@ -541,14 +536,14 @@ mod tests {
     /// last tick, we should flush immediately rather than waiting for timeout.
     #[test]
     fn test_eager_commit_detection() {
-        let config_eager = BatchConfig {
+        let config_eager = BatchWriterConfig {
             max_batch_size: 10,
             batch_timeout: Duration::from_secs(10), // Long timeout
             tick_interval: Duration::from_millis(1),
             eager_commit: true,
         };
 
-        let config_no_eager = BatchConfig {
+        let config_no_eager = BatchWriterConfig {
             max_batch_size: 10,
             batch_timeout: Duration::from_secs(10), // Long timeout
             tick_interval: Duration::from_millis(1),
@@ -599,7 +594,7 @@ mod tests {
     /// Test that eager commit metrics are recorded correctly.
     #[tokio::test]
     async fn test_eager_commit_flushes_quickly() {
-        let config = BatchConfig {
+        let config = BatchWriterConfig {
             max_batch_size: 100,                    // High limit
             batch_timeout: Duration::from_secs(10), // Very long timeout
             tick_interval: Duration::from_millis(5),
@@ -656,8 +651,8 @@ mod tests {
     #[test]
     fn test_batch_config_builder_with_defaults() {
         // builder().build() should produce the same result as Default::default()
-        let from_builder = BatchConfig::builder().build();
-        let from_default = BatchConfig::default();
+        let from_builder = BatchWriterConfig::builder().build();
+        let from_default = BatchWriterConfig::default();
 
         assert_eq!(from_builder.max_batch_size, from_default.max_batch_size);
         assert_eq!(from_builder.batch_timeout, from_default.batch_timeout);
@@ -667,7 +662,7 @@ mod tests {
 
     #[test]
     fn test_batch_config_builder_custom_values() {
-        let config = BatchConfig::builder()
+        let config = BatchWriterConfig::builder()
             .max_batch_size(500)
             .batch_timeout(Duration::from_millis(50))
             .tick_interval(Duration::from_millis(10))
@@ -683,7 +678,7 @@ mod tests {
     #[test]
     fn test_batch_config_builder_partial_override() {
         // Only override some fields, rest should use defaults
-        let config = BatchConfig::builder().max_batch_size(200).eager_commit(false).build();
+        let config = BatchWriterConfig::builder().max_batch_size(200).eager_commit(false).build();
 
         assert_eq!(config.max_batch_size, 200);
         assert_eq!(config.batch_timeout, Duration::from_millis(2)); // default

@@ -11,7 +11,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use inferadb_ledger_store::{
-    CompactionStats, Database, DatabaseStats, StorageBackend, WriteTransaction, tables,
+    CompactionStats, Database, DatabaseStats, StorageBackend, Table, WriteTransaction, tables,
 };
 use inferadb_ledger_types::{
     Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus, decode, encode,
@@ -22,7 +22,7 @@ use snafu::{ResultExt, Snafu};
 use crate::{
     bucket::{BucketRootBuilder, NUM_BUCKETS, VaultCommitment},
     indexes::{IndexError, IndexManager},
-    keys::{bucket_prefix, encode_storage_key},
+    keys::encode_storage_key,
 };
 
 /// Errors returned by [`StateLayer`] operations.
@@ -422,88 +422,12 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Returns [`StateError::Store`] if any storage operation (iteration, delete,
     /// or commit) fails.
     pub fn clear_vault(&self, vault: VaultId) -> Result<()> {
-        use crate::keys::vault_prefix;
-
         let mut txn = self.db.write().context(StoreSnafu)?;
-        let prefix = vault_prefix(vault);
 
-        // Delete all entities for this vault
-        let mut keys_to_delete = Vec::new();
-        for (key_bytes, _) in txn.iter::<tables::Entities>().context(StoreSnafu)? {
-            // Check we're still in the same vault
-            if key_bytes.len() < 8 {
-                break;
-            }
-            let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-            if key_vault_id < vault.value() {
-                continue;
-            }
-            if key_vault_id != vault.value() {
-                break;
-            }
-            keys_to_delete.push(key_bytes);
-        }
-
-        for key in keys_to_delete {
-            txn.delete::<tables::Entities>(&key).context(StoreSnafu)?;
-        }
-
-        // Delete all relationships for this vault
-        let mut keys_to_delete = Vec::new();
-        for (key_bytes, _) in txn.iter::<tables::Relationships>().context(StoreSnafu)? {
-            if key_bytes.len() < 8 {
-                break;
-            }
-            let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-            if key_vault_id < vault.value() {
-                continue;
-            }
-            if key_vault_id != vault.value() {
-                break;
-            }
-            keys_to_delete.push(key_bytes);
-        }
-
-        for key in keys_to_delete {
-            txn.delete::<tables::Relationships>(&key).context(StoreSnafu)?;
-        }
-
-        // Clear indexes
-        let mut keys_to_delete = Vec::new();
-        for (key_bytes, _) in txn.iter::<tables::ObjIndex>().context(StoreSnafu)? {
-            if key_bytes.len() < 8 {
-                break;
-            }
-            if key_bytes[..8] < prefix[..] {
-                continue;
-            }
-            if key_bytes[..8] != prefix[..] {
-                break;
-            }
-            keys_to_delete.push(key_bytes);
-        }
-
-        for key in keys_to_delete {
-            txn.delete::<tables::ObjIndex>(&key).context(StoreSnafu)?;
-        }
-
-        let mut keys_to_delete = Vec::new();
-        for (key_bytes, _) in txn.iter::<tables::SubjIndex>().context(StoreSnafu)? {
-            if key_bytes.len() < 8 {
-                break;
-            }
-            if key_bytes[..8] < prefix[..] {
-                continue;
-            }
-            if key_bytes[..8] != prefix[..] {
-                break;
-            }
-            keys_to_delete.push(key_bytes);
-        }
-
-        for key in keys_to_delete {
-            txn.delete::<tables::SubjIndex>(&key).context(StoreSnafu)?;
-        }
+        delete_vault_keys::<B, tables::Entities>(&mut txn, vault)?;
+        delete_vault_keys::<B, tables::Relationships>(&mut txn, vault)?;
+        delete_vault_keys::<B, tables::ObjIndex>(&mut txn, vault)?;
+        delete_vault_keys::<B, tables::SubjIndex>(&mut txn, vault)?;
 
         txn.commit().context(StoreSnafu)?;
 
@@ -588,42 +512,32 @@ impl<B: StorageBackend> StateLayer<B> {
             }
         };
 
-        // Compute bucket roots outside the commitment lock
+        // Single vault-scoped range scan distributing entities to dirty bucket builders
         let txn = self.db.read().context(StoreSnafu)?;
-        let mut bucket_roots: Vec<(u8, Hash)> = Vec::with_capacity(dirty_buckets.len());
+        let mut builders: HashMap<u8, BucketRootBuilder> =
+            dirty_buckets.iter().map(|&b| (b, BucketRootBuilder::new(b))).collect();
 
-        for bucket in dirty_buckets {
-            let _prefix = bucket_prefix(vault, bucket);
-            let mut builder = BucketRootBuilder::new(bucket);
+        let vault_start = crate::keys::vault_prefix(vault).to_vec();
+        let vault_end = crate::keys::vault_prefix(VaultId::new(vault.value() + 1)).to_vec();
+        let iter = txn
+            .range::<tables::Entities>(Some(&vault_start), Some(&vault_end))
+            .context(StoreSnafu)?;
 
-            // Scan all entities in this bucket
-            for (key_bytes, value) in txn.iter::<tables::Entities>().context(StoreSnafu)? {
-                // Check we're still in the same vault
-                if key_bytes.len() < 9 {
-                    continue;
-                }
-                let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-                if key_vault_id < vault.value() {
-                    continue;
-                }
-                if key_vault_id > vault.value() {
-                    break;
-                }
-
-                // Check bucket
-                if key_bytes[8] < bucket {
-                    continue;
-                }
-                if key_bytes[8] > bucket {
-                    break;
-                }
-
+        for (key_bytes, value) in iter {
+            if key_bytes.len() < 9 {
+                continue;
+            }
+            let bucket = key_bytes[8];
+            if let Some(builder) = builders.get_mut(&bucket) {
                 let entity: Entity = decode(&value).context(CodecSnafu)?;
                 builder.add_entity(&entity);
             }
-
-            bucket_roots.push((bucket, builder.finalize()));
         }
+
+        let bucket_roots: Vec<(u8, Hash)> = dirty_buckets
+            .into_iter()
+            .filter_map(|b| builders.remove(&b).map(|builder| (b, builder.finalize())))
+            .collect();
 
         // Update commitment with computed bucket roots (brief write lock)
         Ok(self.with_commitment(vault, |commitment| {
@@ -873,6 +787,38 @@ impl<B: StorageBackend> Clone for StateLayer<B> {
             vault_commitments: RwLock::new(HashMap::new()), // Each clone starts fresh
         }
     }
+}
+
+/// Deletes all keys in a table that belong to the given vault.
+///
+/// Keys are sorted lexicographically with the 8-byte vault prefix first,
+/// so the scan skips keys from earlier vaults and terminates as soon as
+/// a key from a later vault is reached.
+fn delete_vault_keys<B: StorageBackend, T: Table<KeyType = Vec<u8>>>(
+    txn: &mut WriteTransaction<'_, B>,
+    vault: VaultId,
+) -> Result<()> {
+    let prefix = crate::keys::vault_prefix(vault);
+    let mut keys_to_delete = Vec::new();
+
+    for (key_bytes, _) in txn.iter::<T>().context(StoreSnafu)? {
+        if key_bytes.len() < 8 {
+            break;
+        }
+        if key_bytes[..8] < prefix[..] {
+            continue;
+        }
+        if key_bytes[..8] != prefix[..] {
+            break;
+        }
+        keys_to_delete.push(key_bytes);
+    }
+
+    for key in keys_to_delete {
+        txn.delete::<T>(&key).context(StoreSnafu)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -249,7 +249,10 @@ where
                             })));
                         },
                         Poll::Ready(None) => {
-                            // Stream ended - attempt reconnection
+                            // Stream ended (clean EOF) — treated as disconnect.
+                            // For long-lived event streams, a clean server-side
+                            // close is indistinguishable from a network drop, so
+                            // we always attempt reconnection.
                             if self.reconnect_attempt < self.retry_policy.max_attempts {
                                 self.reconnect_attempt += 1;
                                 let backoff = self.backoff_duration();
@@ -343,25 +346,7 @@ where
     }
 }
 
-/// Applies jitter to a duration.
-///
-/// Jitter is applied as ±factor randomness, e.g., 100ms with 0.25 jitter
-/// produces a value in the range [75ms, 125ms].
-fn apply_jitter(duration: Duration, factor: f64) -> Duration {
-    // Clamp factor to [0.0, 1.0]
-    let factor = factor.clamp(0.0, 1.0);
-
-    if factor == 0.0 {
-        return duration;
-    }
-
-    let base = duration.as_secs_f64();
-    let min = base * (1.0 - factor);
-    let max = base * (1.0 + factor);
-
-    let jittered = rand::RngExt::random_range(&mut rand::rng(), min..=max);
-    Duration::from_secs_f64(jittered)
-}
+use crate::retry::apply_jitter;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]

@@ -1026,6 +1026,11 @@ pub struct BlockHeader {
     pub term: u64,
     /// Raft committed index.
     pub committed_index: u64,
+    /// Server-computed hash of this block header.
+    ///
+    /// Used by [`ChainProof::verify`] to check chain continuity without
+    /// recomputing the hash (which requires internal IDs not exposed via API).
+    pub block_hash: Vec<u8>,
 }
 
 impl BlockHeader {
@@ -1046,6 +1051,7 @@ impl BlockHeader {
             leader_id: proto.leader_id.map(|n| n.id).unwrap_or_default(),
             term: proto.term,
             committed_index: proto.committed_index,
+            block_hash: proto.block_hash.map(|h| h.value).unwrap_or_default(),
         }
     }
 }
@@ -1068,18 +1074,18 @@ impl ChainProof {
 
     /// Verifies the chain of blocks links correctly.
     ///
-    /// Checks that each block's previous_hash matches the hash of the preceding block.
+    /// Checks that each block's `previous_hash` matches the server-provided
+    /// `block_hash` of the preceding block header.
     ///
     /// # Arguments
     ///
-    /// * `trusted_header_hash` - Hash of the block at trusted_height (client already has this).
+    /// * `trusted_header_hash` - Hash of the block at `trusted_height` that the client already
+    ///   trusts.
     ///
     /// # Returns
     ///
-    /// `true` if all previous_hash links are valid.
+    /// `true` if all `previous_hash` links chain correctly.
     pub fn verify(&self, trusted_header_hash: &[u8]) -> bool {
-        use sha2::{Digest, Sha256};
-
         if self.headers.is_empty() {
             return true;
         }
@@ -1089,22 +1095,13 @@ impl ChainProof {
             return false;
         }
 
-        // Each subsequent header should link to the previous one
+        // Each subsequent header's previous_hash must match the
+        // server-provided block_hash of the preceding header.
         for i in 1..self.headers.len() {
             let prev = &self.headers[i - 1];
             let curr = &self.headers[i];
 
-            // Compute hash of previous header
-            // Note: This is a simplified hash - real implementation would hash the canonical
-            // encoding
-            let mut hasher = Sha256::new();
-            hasher.update(&prev.previous_hash);
-            hasher.update(&prev.tx_merkle_root);
-            hasher.update(&prev.state_root);
-            hasher.update(prev.height.to_le_bytes());
-            let prev_hash = hasher.finalize().to_vec();
-
-            if curr.previous_hash != prev_hash {
+            if prev.block_hash.is_empty() || curr.previous_hash != prev.block_hash {
                 return false;
             }
         }
@@ -1468,7 +1465,7 @@ impl ListResourcesOpts {
 /// let result = client.verified_read(organization, Some(vault), "key", VerifyOpts::new()).await?;
 /// if let Some(verified) = result {
 ///     // Verify the proof is valid
-///     assert!(verified.verify()?);
+///     verified.verify()?;
 ///     println!("Verified value: {:?}", verified.value);
 /// }
 /// # Ok(())
@@ -1514,7 +1511,7 @@ impl VerifiedValue {
     ///
     /// Returns `SdkError::ProofVerification` if the Merkle proof does not
     /// match the block header's state root.
-    pub fn verify(&self) -> Result<bool> {
+    pub fn verify(&self) -> Result<()> {
         // Verify the Merkle proof against the block header's state root
         if !self.merkle_proof.verify(&self.block_header.state_root) {
             return Err(error::SdkError::ProofVerification {
@@ -1522,10 +1519,7 @@ impl VerifiedValue {
             });
         }
 
-        // If we have a chain proof, that would be verified by the caller
-        // with their trusted header hash (we don't have it here)
-
-        Ok(true)
+        Ok(())
     }
 }
 
@@ -6786,6 +6780,7 @@ mod tests {
             leader_id: Some(proto::NodeId { id: "node-1".to_string() }),
             term: 5,
             committed_index: 99,
+            block_hash: Some(proto::Hash { value: vec![10; 32] }),
         };
 
         let header = BlockHeader::from_proto(proto_header);
@@ -6816,6 +6811,7 @@ mod tests {
             leader_id: None,
             term: 0,
             committed_index: 0,
+            block_hash: None,
         };
 
         let header = BlockHeader::from_proto(proto_header);
@@ -6846,6 +6842,7 @@ mod tests {
                     leader_id: None,
                     term: 1,
                     committed_index: 100,
+                    block_hash: None,
                 },
                 proto::BlockHeader {
                     height: 102,
@@ -6858,6 +6855,7 @@ mod tests {
                     leader_id: None,
                     term: 1,
                     committed_index: 101,
+                    block_hash: None,
                 },
             ],
         };
@@ -6889,6 +6887,7 @@ mod tests {
                 leader_id: String::new(),
                 term: 1,
                 committed_index: 100,
+                block_hash: vec![],
             }],
         };
         let trusted_hash = vec![1, 2, 3, 4];
@@ -6909,9 +6908,120 @@ mod tests {
                 leader_id: String::new(),
                 term: 1,
                 committed_index: 100,
+                block_hash: vec![],
             }],
         };
         let trusted_hash = vec![1, 2, 3, 4];
+        assert!(!chain.verify(&trusted_hash));
+    }
+
+    #[test]
+    fn test_chain_proof_verify_multi_header_server_hash() {
+        // Build a two-header chain where header[1].previous_hash matches
+        // header[0].block_hash (provided by server).
+        let block_hash_0 = vec![42; 32]; // Simulated server-computed hash
+
+        let header0 = BlockHeader {
+            height: 100,
+            organization: ORG,
+            vault: VaultSlug::new(1),
+            previous_hash: vec![0; 32],
+            tx_merkle_root: vec![1; 32],
+            state_root: vec![2; 32],
+            timestamp: None,
+            leader_id: String::new(),
+            term: 1,
+            committed_index: 99,
+            block_hash: block_hash_0.clone(),
+        };
+
+        let header1 = BlockHeader {
+            height: 101,
+            organization: ORG,
+            vault: VaultSlug::new(1),
+            previous_hash: block_hash_0, // Links to header0.block_hash
+            tx_merkle_root: vec![3; 32],
+            state_root: vec![4; 32],
+            timestamp: None,
+            leader_id: String::new(),
+            term: 1,
+            committed_index: 100,
+            block_hash: vec![99; 32],
+        };
+
+        let chain = ChainProof { headers: vec![header0, header1] };
+        let trusted_hash = vec![0; 32]; // header[0].previous_hash
+        assert!(chain.verify(&trusted_hash));
+    }
+
+    #[test]
+    fn test_chain_proof_verify_multi_header_wrong_hash_fails() {
+        let header0 = BlockHeader {
+            height: 100,
+            organization: ORG,
+            vault: VaultSlug::new(1),
+            previous_hash: vec![0; 32],
+            tx_merkle_root: vec![1; 32],
+            state_root: vec![2; 32],
+            timestamp: None,
+            leader_id: String::new(),
+            term: 1,
+            committed_index: 99,
+            block_hash: vec![42; 32],
+        };
+
+        let header1 = BlockHeader {
+            height: 101,
+            organization: ORG,
+            vault: VaultSlug::new(1),
+            previous_hash: vec![0xFF; 32], // Wrong — doesn't match header0.block_hash
+            tx_merkle_root: vec![3; 32],
+            state_root: vec![4; 32],
+            timestamp: None,
+            leader_id: String::new(),
+            term: 1,
+            committed_index: 100,
+            block_hash: vec![99; 32],
+        };
+
+        let chain = ChainProof { headers: vec![header0, header1] };
+        let trusted_hash = vec![0; 32];
+        assert!(!chain.verify(&trusted_hash));
+    }
+
+    #[test]
+    fn test_chain_proof_verify_empty_block_hash_fails() {
+        // If server didn't provide block_hash, verification should fail
+        let header0 = BlockHeader {
+            height: 100,
+            organization: ORG,
+            vault: VaultSlug::new(1),
+            previous_hash: vec![0; 32],
+            tx_merkle_root: vec![1; 32],
+            state_root: vec![2; 32],
+            timestamp: None,
+            leader_id: String::new(),
+            term: 1,
+            committed_index: 99,
+            block_hash: vec![], // Empty — server didn't provide
+        };
+
+        let header1 = BlockHeader {
+            height: 101,
+            organization: ORG,
+            vault: VaultSlug::new(1),
+            previous_hash: vec![], // Matches empty block_hash, but should still fail
+            tx_merkle_root: vec![3; 32],
+            state_root: vec![4; 32],
+            timestamp: None,
+            leader_id: String::new(),
+            term: 1,
+            committed_index: 100,
+            block_hash: vec![],
+        };
+
+        let chain = ChainProof { headers: vec![header0, header1] };
+        let trusted_hash = vec![0; 32];
         assert!(!chain.verify(&trusted_hash));
     }
 
@@ -6963,6 +7073,7 @@ mod tests {
                 leader_id: None,
                 term: 1,
                 committed_index: 99,
+                block_hash: None,
             }),
             merkle_proof: Some(proto::MerkleProof {
                 leaf_hash: Some(proto::Hash { value: vec![4; 32] }),
@@ -7018,6 +7129,7 @@ mod tests {
                 leader_id: None,
                 term: 1,
                 committed_index: 99,
+                block_hash: None,
             }),
             merkle_proof: None, // Missing
             chain_proof: None,
@@ -7045,6 +7157,7 @@ mod tests {
                 leader_id: String::new(),
                 term: 1,
                 committed_index: 99,
+                block_hash: vec![],
             },
             merkle_proof: MerkleProof {
                 leaf_hash: state_root, // Single element tree: leaf == root
@@ -7053,9 +7166,7 @@ mod tests {
             chain_proof: None,
         };
 
-        let result = verified.verify();
-        assert!(result.is_ok());
-        assert!(result.unwrap());
+        assert!(verified.verify().is_ok());
     }
 
     #[test]
@@ -7075,6 +7186,7 @@ mod tests {
                 leader_id: String::new(),
                 term: 1,
                 committed_index: 99,
+                block_hash: vec![],
             },
             merkle_proof: MerkleProof {
                 leaf_hash: vec![5, 6, 7, 8], // Different hash!

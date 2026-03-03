@@ -18,7 +18,6 @@ use inferadb_ledger_types::{
     OrganizationId, OrganizationSlug, SetCondition, VaultId, VaultSlug, config::ValidationConfig,
 };
 use openraft::Raft;
-use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -26,7 +25,7 @@ use uuid::Uuid;
 use super::forward_client::{ForwardClient, LeaderChannelCache};
 pub(crate) use super::metadata::{response_with_correlation, status_with_correlation};
 use crate::{
-    batching::{BatchConfig, BatchError, BatchWriter, BatchWriterHandle},
+    batching::{BatchError, BatchWriter, BatchWriterConfig, BatchWriterHandle},
     error::classify_raft_error,
     idempotency::IdempotencyCache,
     log_storage::AppliedStateAccessor,
@@ -75,12 +74,6 @@ pub struct WriteServiceImpl {
     /// proposals for improved throughput.
     #[builder(default)]
     batch_handle: Option<BatchWriterHandle>,
-    /// Mutex to serialize Raft proposals (fallback when batching disabled).
-    ///
-    /// Used for BatchWriteRequest which bypasses the batch writer, or
-    /// when batch_handle is None.
-    #[builder(default = Arc::new(Mutex::new(())))]
-    proposal_mutex: Arc<Mutex<()>>,
     /// Sampler for log tail sampling.
     #[builder(default)]
     sampler: Option<Sampler>,
@@ -124,30 +117,24 @@ impl WriteServiceImpl {
     pub fn new_with_batching(
         raft: Arc<Raft<LedgerTypeConfig>>,
         idempotency: Arc<IdempotencyCache>,
-        config: BatchConfig,
+        config: BatchWriterConfig,
     ) -> (Self, impl std::future::Future<Output = ()> + Send + 'static) {
         let raft_clone = raft.clone();
-        let proposal_mutex = Arc::new(Mutex::new(()));
-        let mutex_clone = proposal_mutex.clone();
 
         // Create the submit function that wraps requests into BatchWrite
         let submit_fn = move |requests: Vec<LedgerRequest>| {
             let raft = raft_clone.clone();
-            let mutex = mutex_clone.clone();
 
             Box::pin(async move {
                 // Wrap multiple requests into a single BatchWrite
                 let batch_request = LedgerRequest::BatchWrite { requests };
 
-                // Acquire mutex and submit to Raft
-                let _guard = mutex.lock().await;
                 let result = raft
                     .client_write(RaftPayload {
                         request: batch_request,
                         proposed_at: chrono::Utc::now(),
                     })
                     .await;
-                drop(_guard);
 
                 match result {
                     Ok(response) => {
@@ -177,7 +164,6 @@ impl WriteServiceImpl {
             rate_limiter: None,
             applied_state: None,
             batch_handle: Some(handle),
-            proposal_mutex,
             sampler: None,
             node_id: None,
             hot_key_detector: None,
@@ -196,7 +182,7 @@ impl WriteServiceImpl {
         raft: Arc<Raft<LedgerTypeConfig>>,
         idempotency: Arc<IdempotencyCache>,
         block_archive: Arc<BlockArchive<FileBackend>>,
-        config: BatchConfig,
+        config: BatchWriterConfig,
     ) -> (Self, impl std::future::Future<Output = ()> + Send + 'static) {
         let (mut service, run_future) = Self::new_with_batching(raft, idempotency, config);
         service.block_archive = Some(block_archive);
@@ -412,11 +398,6 @@ impl WriteServiceImpl {
                 Op::ExpireEntity(ee) => ee.key.len(),
             })
             .sum()
-    }
-
-    /// Computes a hash of operations for idempotency payload comparison.
-    fn hash_operations(operations: &[inferadb_ledger_proto::proto::Operation]) -> Vec<u8> {
-        super::helpers::hash_operations(operations)
     }
 
     /// Generates block header and transaction proof for a committed write.
@@ -639,7 +620,7 @@ impl WriteService for WriteServiceImpl {
         }
 
         // Compute request hash for payload comparison (detects key reuse with different payload)
-        let request_hash = seahash::hash(&Self::hash_operations(&req.operations));
+        let request_hash = seahash::hash(&super::helpers::hash_operations(&req.operations));
 
         // Populate logging context with request metadata
         ctx.set_client_info(&client_id, 0, None);
@@ -863,8 +844,7 @@ impl WriteService for WriteServiceImpl {
             }
         } else {
             ctx.set_batch_info(false, 1);
-            // Fallback: direct Raft proposal with mutex serialization
-            let _guard = self.proposal_mutex.lock().await;
+            // Fallback: direct Raft proposal (OpenRaft serializes internally)
             match tokio::time::timeout(
                 timeout,
                 self.raft.client_write(RaftPayload {
@@ -874,12 +854,8 @@ impl WriteService for WriteServiceImpl {
             )
             .await
             {
-                Ok(Ok(result)) => {
-                    drop(_guard);
-                    result.data
-                },
+                Ok(Ok(result)) => result.data,
                 Ok(Err(e)) => {
-                    drop(_guard);
                     ctx.end_raft_timer();
                     ctx.set_error("RaftError", &e.to_string());
                     metrics::record_write(false, ctx.elapsed_secs());
@@ -890,7 +866,6 @@ impl WriteService for WriteServiceImpl {
                     ));
                 },
                 Err(_elapsed) => {
-                    drop(_guard);
                     ctx.end_raft_timer();
                     ctx.set_error("ProposalTimeout", "Raft proposal timed out");
                     metrics::record_write(false, ctx.elapsed_secs());
@@ -1162,7 +1137,7 @@ impl WriteService for WriteServiceImpl {
         let batch_size = all_operations.len();
 
         // Compute request hash for payload comparison (detects key reuse with different payload)
-        let request_hash = seahash::hash(&Self::hash_operations(&all_operations));
+        let request_hash = seahash::hash(&super::helpers::hash_operations(&all_operations));
 
         // Populate write operation fields
         let operation_types = Self::extract_operation_types(&all_operations);
@@ -1340,10 +1315,11 @@ impl WriteService for WriteServiceImpl {
         let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
         let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
-        // Submit to Raft (serialized to prevent concurrent proposal race condition)
+        // Submit to Raft — OpenRaft serializes proposals internally via the Raft log,
+        // so we don't need an external mutex. Removing it enables concurrent proposals
+        // to pipeline through the Raft layer.
         metrics::record_raft_proposal();
         ctx.start_raft_timer();
-        let _guard = self.proposal_mutex.lock().await;
         let response = match tokio::time::timeout(
             timeout,
             self.raft.client_write(RaftPayload {
@@ -1353,12 +1329,8 @@ impl WriteService for WriteServiceImpl {
         )
         .await
         {
-            Ok(Ok(result)) => {
-                drop(_guard);
-                result.data
-            },
+            Ok(Ok(result)) => result.data,
             Ok(Err(e)) => {
-                drop(_guard);
                 ctx.end_raft_timer();
                 ctx.set_error("RaftError", &e.to_string());
                 metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
@@ -1369,7 +1341,6 @@ impl WriteService for WriteServiceImpl {
                 ));
             },
             Err(_elapsed) => {
-                drop(_guard);
                 ctx.end_raft_timer();
                 ctx.set_error("ProposalTimeout", "Raft proposal timed out");
                 metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());

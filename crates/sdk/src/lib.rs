@@ -70,7 +70,6 @@ mod config;
 mod connection;
 mod discovery;
 mod error;
-mod idempotency;
 mod metrics;
 pub mod mock;
 mod retry;
@@ -104,8 +103,7 @@ pub use inferadb_ledger_types::{
 pub use metrics::{ConnectionEvent, MetricsSdkMetrics, NoopSdkMetrics, SdkMetrics};
 pub use retry::{with_retry, with_retry_cancellable};
 pub use server::{
-    DnsConfig, FileConfig, ResolvedServer, SelectorStats, ServerResolver, ServerSelector,
-    ServerSource,
+    DnsConfig, FileConfig, ResolvedServer, ServerResolver, ServerSelector, ServerSource,
 };
 pub use streaming::{HeightTracker, PositionTracker, ReconnectingStream};
 pub use tracing::TraceConfig;

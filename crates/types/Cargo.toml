@@ -40,7 +40,7 @@ rand.workspace = true
 
 # Utilities
 chrono.workspace = true
-humantime.workspace = true
+humantime-serde.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -15,7 +15,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use inferadb_ledger_state::StateLayer;
@@ -49,6 +49,8 @@ pub struct RewrapProgress {
     pub complete: AtomicBool,
     /// Target RMK version being re-wrapped to.
     pub target_version: AtomicU64,
+    /// Wall-clock start time as milliseconds since UNIX epoch.
+    started_at_millis: AtomicU64,
 }
 
 impl RewrapProgress {
@@ -60,7 +62,13 @@ impl RewrapProgress {
             pages_rewrapped: AtomicU64::new(0),
             complete: AtomicBool::new(true), // No rotation in progress
             target_version: AtomicU64::new(0),
+            started_at_millis: AtomicU64::new(0),
         }
+    }
+
+    /// Returns current time as milliseconds since UNIX epoch.
+    fn now_millis() -> u64 {
+        SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
     }
 
     /// Resets progress for a new rotation cycle.
@@ -69,6 +77,7 @@ impl RewrapProgress {
         self.total_pages.store(total_pages, Ordering::Release);
         self.next_page_id.store(0, Ordering::Release);
         self.pages_rewrapped.store(0, Ordering::Release);
+        self.started_at_millis.store(Self::now_millis(), Ordering::Release);
         self.complete.store(false, Ordering::Release);
     }
 
@@ -77,19 +86,25 @@ impl RewrapProgress {
         self.complete.store(true, Ordering::Release);
     }
 
-    /// Returns estimated remaining seconds based on pages processed so far.
+    /// Returns estimated remaining seconds based on pages processed and elapsed time.
     pub fn estimated_remaining_secs(&self) -> u64 {
         let total = self.total_pages.load(Ordering::Acquire);
         let processed = self.next_page_id.load(Ordering::Acquire);
+        let started_at = self.started_at_millis.load(Ordering::Acquire);
 
-        if processed == 0 || total == 0 {
+        if processed == 0 || total == 0 || started_at == 0 {
             return 0;
         }
 
-        // Simple linear estimate — no history, just proportional
+        let elapsed_ms = Self::now_millis().saturating_sub(started_at);
+        if elapsed_ms == 0 {
+            return 0;
+        }
+
         let remaining = total.saturating_sub(processed);
-        // We don't track elapsed time, so return 0 (caller can compute from metrics)
-        remaining / processed.max(1)
+        // rate = processed / elapsed_ms, ETA = remaining / rate = remaining * elapsed_ms /
+        // processed
+        remaining.saturating_mul(elapsed_ms) / (processed * 1000)
     }
 }
 
@@ -294,22 +309,43 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrap_progress_estimated_remaining() {
+    fn test_rewrap_progress_estimated_remaining_no_progress() {
         let progress = RewrapProgress::new();
         progress.start_rotation(2, 1000);
 
         // No progress yet — 0
         assert_eq!(progress.estimated_remaining_secs(), 0);
+    }
 
-        // Half done
+    #[test]
+    fn test_rewrap_progress_estimated_remaining_uses_elapsed_time() {
+        let progress = RewrapProgress::new();
+
+        // Simulate a rotation that started 10 seconds ago with 500 of 1000 pages done.
+        let ten_secs_ago = RewrapProgress::now_millis() - 10_000;
+        progress.total_pages.store(1000, Ordering::Release);
         progress.next_page_id.store(500, Ordering::Release);
-        let est = progress.estimated_remaining_secs();
-        assert_eq!(est, 1); // 500 remaining / 500 processed = 1
+        progress.started_at_millis.store(ten_secs_ago, Ordering::Release);
+        progress.complete.store(false, Ordering::Release);
 
-        // Almost done
-        progress.next_page_id.store(999, Ordering::Release);
+        // Rate = 500 pages / 10s = 50 pages/s, remaining = 500, ETA = 500/50 = 10s
         let est = progress.estimated_remaining_secs();
-        assert_eq!(est, 0); // 1 remaining / 999 processed ≈ 0
+        assert_eq!(est, 10);
+    }
+
+    #[test]
+    fn test_rewrap_progress_estimated_remaining_almost_done() {
+        let progress = RewrapProgress::new();
+
+        let five_secs_ago = RewrapProgress::now_millis() - 5_000;
+        progress.total_pages.store(1000, Ordering::Release);
+        progress.next_page_id.store(999, Ordering::Release);
+        progress.started_at_millis.store(five_secs_ago, Ordering::Release);
+        progress.complete.store(false, Ordering::Release);
+
+        // Rate = 999 pages / 5s, remaining = 1, ETA ≈ 0s
+        let est = progress.estimated_remaining_secs();
+        assert_eq!(est, 0);
     }
 
     #[test]

@@ -513,9 +513,6 @@ pub struct RequestContext {
     raft_term: Option<u64>,
     region: Option<Region>,
 
-    // VIP status (for canonical log line field)
-    is_vip: Option<bool>,
-
     // Operation-specific (write)
     operations_count: Option<usize>,
     operation_types: Option<Vec<&'static str>>,
@@ -597,7 +594,6 @@ impl RequestContext {
             is_leader: None,
             raft_term: None,
             region: None,
-            is_vip: None,
             operations_count: None,
             operation_types: None,
             include_tx_proof: None,
@@ -740,14 +736,6 @@ impl RequestContext {
     /// Sets the region ID.
     pub fn set_region(&mut self, region: Region) {
         self.region = Some(region);
-    }
-
-    /// Sets the VIP status for this request's organization.
-    ///
-    /// This field indicates whether the organization received elevated
-    /// sampling rates due to VIP status.
-    pub fn set_is_vip(&mut self, is_vip: bool) {
-        self.is_vip = Some(is_vip);
     }
 
     // =========================================================================
@@ -1169,7 +1157,6 @@ impl RequestContext {
             is_leader = self.is_leader,
             raft_term = self.raft_term,
             region = self.region.map(|r| r.as_str()),
-            is_vip = self.is_vip,
             operations_count = self.operations_count,
             operation_types = ?self.operation_types,
             include_tx_proof = self.include_tx_proof,
@@ -1227,7 +1214,6 @@ impl RequestContext {
                 is_leader: self.is_leader,
                 raft_term: self.raft_term,
                 region: self.region,
-                is_vip: self.is_vip,
                 operations_count: self.operations_count,
                 idempotency_hit: self.idempotency_hit,
                 batch_coalesced: self.batch_coalesced,
@@ -2453,43 +2439,6 @@ mod tests {
         assert!(matches!(ctx.admin_action, Some("delete_vault")));
 
         ctx.suppress_emission();
-    }
-
-    // === VIP Status Tests ===
-
-    #[test]
-    fn test_set_is_vip_true() {
-        let mut ctx = RequestContext::new("WriteService", "write");
-        ctx.set_is_vip(true);
-
-        assert_eq!(ctx.is_vip, Some(true));
-
-        ctx.suppress_emission();
-    }
-
-    #[test]
-    fn test_set_is_vip_false() {
-        let mut ctx = RequestContext::new("WriteService", "write");
-        ctx.set_is_vip(false);
-
-        assert_eq!(ctx.is_vip, Some(false));
-
-        ctx.suppress_emission();
-    }
-
-    #[test]
-    fn test_is_vip_in_json_output() {
-        let (_, events) = with_json_capturing_subscriber(|| {
-            let mut ctx = RequestContext::new("WriteService", "write");
-            ctx.set_organization(42);
-            ctx.set_is_vip(true);
-            ctx.set_success();
-        });
-
-        assert!(!events.is_empty(), "Expected at least one event");
-        let json: serde_json::Value = serde_json::from_str(&events[0]).unwrap_or_default();
-        assert_eq!(json["is_vip"], serde_json::Value::Bool(true));
-        assert_eq!(json["organization"], serde_json::Value::Number(42.into()));
     }
 
     // === Trace Context Tests ===

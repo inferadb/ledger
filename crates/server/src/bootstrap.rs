@@ -3,7 +3,6 @@
 //! Provides functions to:
 //! - Resume from persisted Raft state (existing node restart)
 //! - Bootstrap a new cluster (single-node or coordinated multi-node)
-//! - Join an existing cluster by contacting the leader
 
 use std::{
     collections::BTreeMap,
@@ -12,9 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use inferadb_ledger_proto::proto::{
-    BlockAnnouncement, JoinClusterRequest, admin_service_client::AdminServiceClient,
-};
+use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_raft::{
     AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, EventsGarbageCollector,
     GrpcRaftNetworkFactory, IntegrityScrubberJob, LearnerRefreshJob, LedgerNodeId, LedgerServer,
@@ -29,55 +26,64 @@ use inferadb_ledger_state::{
 use inferadb_ledger_store::FileBackend;
 use openraft::{BasicNode, Raft, storage::Adaptor};
 use tokio::sync::broadcast;
-use tonic::transport::Channel;
-use tracing::info;
 
 use crate::{
     config::Config,
     coordinator::{BootstrapDecision, coordinate_bootstrap},
-    discovery::resolve_bootstrap_peers,
 };
 
 /// Errors during cluster bootstrap, including database, Raft, and coordination failures.
-#[derive(Debug)]
+#[derive(Debug, snafu::Snafu)]
 pub enum BootstrapError {
     /// Failed to open database.
-    Database(String),
+    #[snafu(display("database error: {message}"))]
+    Database {
+        /// Error description.
+        message: String,
+    },
     /// Failed to create Raft storage.
-    Storage(String),
+    #[snafu(display("storage error: {message}"))]
+    Storage {
+        /// Error description.
+        message: String,
+    },
     /// Failed to create Raft instance.
-    Raft(String),
+    #[snafu(display("raft error: {message}"))]
+    Raft {
+        /// Error description.
+        message: String,
+    },
     /// Failed to initialize cluster.
-    Initialize(String),
-    /// Failed to join existing cluster.
-    Join(String),
+    #[snafu(display("initialization error: {message}"))]
+    Initialize {
+        /// Error description.
+        message: String,
+    },
     /// Failed to resolve or generate node ID.
-    NodeId(String),
+    #[snafu(display("node id error: {message}"))]
+    NodeId {
+        /// Error description.
+        message: String,
+    },
     /// Bootstrap coordination timed out waiting for peers.
-    Timeout(String),
+    #[snafu(display("bootstrap timeout: {message}"))]
+    Timeout {
+        /// Error description.
+        message: String,
+    },
     /// Configuration validation failed.
-    Config(String),
+    #[snafu(display("configuration error: {message}"))]
+    Config {
+        /// Error description.
+        message: String,
+    },
     /// gRPC server failed to start.
-    Server(String),
+    #[snafu(display("server error: {message}"))]
+    Server {
+        /// Error description.
+        message: String,
+    },
 }
-
-impl std::fmt::Display for BootstrapError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BootstrapError::Database(msg) => write!(f, "database error: {}", msg),
-            BootstrapError::Storage(msg) => write!(f, "storage error: {}", msg),
-            BootstrapError::Raft(msg) => write!(f, "raft error: {}", msg),
-            BootstrapError::Initialize(msg) => write!(f, "initialization error: {}", msg),
-            BootstrapError::Join(msg) => write!(f, "join error: {}", msg),
-            BootstrapError::NodeId(msg) => write!(f, "node id error: {}", msg),
-            BootstrapError::Timeout(msg) => write!(f, "bootstrap timeout: {}", msg),
-            BootstrapError::Config(msg) => write!(f, "configuration error: {}", msg),
-            BootstrapError::Server(msg) => write!(f, "server error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for BootstrapError {}
 
 /// Holds ownership of all node resources after a successful bootstrap.
 ///
@@ -158,23 +164,27 @@ pub async fn bootstrap_node(
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<BootstrappedNode, BootstrapError> {
     // Validate bootstrap configuration
-    config.validate().map_err(|e| BootstrapError::Config(e.to_string()))?;
+    config.validate().map_err(|e| BootstrapError::Config { message: e.to_string() })?;
 
     // Resolve the effective node ID (manual or auto-generated Snowflake ID)
-    let node_id = config.node_id(data_dir).map_err(|e| BootstrapError::NodeId(e.to_string()))?;
+    let node_id =
+        config.node_id(data_dir).map_err(|e| BootstrapError::NodeId { message: e.to_string() })?;
 
-    std::fs::create_dir_all(data_dir)
-        .map_err(|e| BootstrapError::Database(format!("failed to create data dir: {}", e)))?;
+    std::fs::create_dir_all(data_dir).map_err(|e| BootstrapError::Database {
+        message: format!("failed to create data dir: {e}"),
+    })?;
 
     // Detect legacy flat layout (state.db in data_dir root). Per-region layout
     // places databases under global/ and regions/{name}/.
     let storage_manager = inferadb_ledger_raft::RegionStorageManager::new(data_dir.to_path_buf());
-    storage_manager.detect_legacy_layout().map_err(|e| BootstrapError::Database(e.to_string()))?;
+    storage_manager
+        .detect_legacy_layout()
+        .map_err(|e| BootstrapError::Database { message: e.to_string() })?;
 
     // Open GLOBAL region databases (state.db, blocks.db, events.db under global/)
     let region_storage = storage_manager
         .open_region(inferadb_ledger_types::Region::GLOBAL)
-        .map_err(|e| BootstrapError::Database(e.to_string()))?;
+        .map_err(|e| BootstrapError::Database { message: e.to_string() })?;
 
     // Wrap raw databases in domain-specific types
     // StateLayer is internally thread-safe via MVCC — no external lock needed
@@ -193,7 +203,7 @@ pub async fn bootstrap_node(
 
     let log_path = storage_manager.raft_db_path(inferadb_ledger_types::Region::GLOBAL);
     let log_store = RaftLogStore::open(&log_path)
-        .map_err(|e| BootstrapError::Storage(format!("failed to open log store: {}", e)))?
+        .map_err(|e| BootstrapError::Storage { message: format!("failed to open log store: {e}") })?
         .with_state_layer(state.clone())
         .with_block_archive(block_archive.clone())
         .with_region_config(inferadb_ledger_types::Region::GLOBAL, node_id.to_string())
@@ -240,7 +250,7 @@ pub async fn bootstrap_node(
         state_machine,
     )
     .await
-    .map_err(|e| BootstrapError::Raft(format!("failed to create raft: {}", e)))?;
+    .map_err(|e| BootstrapError::Raft { message: format!("failed to create raft: {e}") })?;
 
     let raft = Arc::new(raft);
 
@@ -262,8 +272,8 @@ pub async fn bootstrap_node(
                     warm_url,
                     tiered_config.multipart_threshold_bytes,
                 )
-                .map_err(|e| {
-                    BootstrapError::Config(format!("failed to create warm storage backend: {e}"))
+                .map_err(|e| BootstrapError::Config {
+                    message: format!("failed to create warm storage backend: {e}"),
                 })?,
             );
             Some(Arc::new(TieredSnapshotManager::new_with_warm(hot, warm, tiered_config)))
@@ -282,8 +292,8 @@ pub async fn bootstrap_node(
         .backup
         .as_ref()
         .map(|backup_config| {
-            BackupManager::new(backup_config).map(Arc::new).map_err(|e| {
-                BootstrapError::Config(format!("failed to create backup manager: {e}"))
+            BackupManager::new(backup_config).map(Arc::new).map_err(|e| BootstrapError::Config {
+                message: format!("failed to create backup manager: {e}"),
             })
         })
         .transpose()?;
@@ -335,9 +345,9 @@ pub async fn bootstrap_node(
             // Server exited early — likely a bind failure
             let result =
                 server_handle.await.unwrap_or_else(|e| Err(format!("server task panicked: {e}")));
-            return Err(BootstrapError::Server(
-                result.err().unwrap_or_else(|| "server exited unexpectedly".to_string()),
-            ));
+            return Err(BootstrapError::Server {
+                message: result.err().unwrap_or_else(|| "server exited unexpectedly".to_string()),
+            });
         }
         if tokio::net::TcpStream::connect(server_addr).await.is_ok() {
             tcp_ready = true;
@@ -347,10 +357,9 @@ pub async fn bootstrap_node(
     }
     if !tcp_ready {
         server_handle.abort();
-        return Err(BootstrapError::Server(format!(
-            "server did not accept TCP connections on {} within 5s",
-            server_addr
-        )));
+        return Err(BootstrapError::Server {
+            message: format!("server did not accept TCP connections on {server_addr} within 5s"),
+        });
     }
 
     // Determine whether to bootstrap based on existing state and bootstrap_expect.
@@ -376,7 +385,7 @@ pub async fn bootstrap_node(
 
             let decision = coordinate_bootstrap(node_id, &my_address, config)
                 .await
-                .map_err(|e| BootstrapError::Timeout(e.to_string()))?;
+                .map_err(|e| BootstrapError::Timeout { message: e.to_string() })?;
 
             match decision {
                 BootstrapDecision::Bootstrap { initial_members } => {
@@ -616,7 +625,7 @@ pub async fn bootstrap_node(
 
 /// Bootstraps a new single-node cluster with this node as the initial member.
 ///
-/// Additional nodes join dynamically via `join_cluster()` using discovery.
+/// Additional nodes can join dynamically via discovery.
 async fn bootstrap_cluster(
     raft: &Raft<LedgerTypeConfig>,
     node_id: u64,
@@ -625,9 +634,9 @@ async fn bootstrap_cluster(
     let mut members: BTreeMap<LedgerNodeId, BasicNode> = BTreeMap::new();
     members.insert(node_id, BasicNode { addr: listen_addr.to_string() });
 
-    raft.initialize(members)
-        .await
-        .map_err(|e| BootstrapError::Initialize(format!("failed to initialize: {}", e)))?;
+    raft.initialize(members).await.map_err(|e| BootstrapError::Initialize {
+        message: format!("failed to initialize: {e}"),
+    })?;
 
     tracing::info!(node_id = node_id, "Bootstrapped new single-node cluster");
 
@@ -653,9 +662,9 @@ async fn bootstrap_cluster_multi(
     }
 
     let member_ids: Vec<u64> = initial_members.iter().map(|(id, _)| *id).collect();
-    raft.initialize(members)
-        .await
-        .map_err(|e| BootstrapError::Initialize(format!("failed to initialize: {}", e)))?;
+    raft.initialize(members).await.map_err(|e| BootstrapError::Initialize {
+        message: format!("failed to initialize: {e}"),
+    })?;
 
     tracing::info!(members = ?member_ids, "Bootstrapped new multi-node cluster");
 
@@ -686,10 +695,9 @@ async fn wait_for_cluster_join(
 
     loop {
         if start.elapsed() > timeout {
-            return Err(BootstrapError::Timeout(format!(
-                "timed out waiting to join cluster after {}s",
-                timeout.as_secs()
-            )));
+            return Err(BootstrapError::Timeout {
+                message: format!("timed out waiting to join cluster after {}s", timeout.as_secs()),
+            });
         }
 
         let metrics = raft.metrics().borrow().clone();
@@ -730,103 +738,6 @@ async fn wait_for_cluster_join(
 /// - Node ID resolution fails
 /// - No peers are discoverable via DNS or cache
 /// - All join attempts to discovered peers fail
-#[allow(dead_code)] // reserved for join-cluster mode
-pub async fn join_cluster(
-    config: &Config,
-    data_dir: &std::path::Path,
-) -> Result<(), BootstrapError> {
-    let node_id = config.node_id(data_dir).map_err(|e| BootstrapError::NodeId(e.to_string()))?;
-
-    let peer_addresses = resolve_bootstrap_peers(config).await;
-
-    if peer_addresses.is_empty() {
-        return Err(BootstrapError::Join("No peers available (checked cache and DNS)".to_string()));
-    }
-
-    info!(peer_count = peer_addresses.len(), "Resolved bootstrap peers for cluster join");
-
-    let my_address = config.listen_addr.to_string();
-
-    for peer_addr in &peer_addresses {
-        if let Err(e) = try_join_via_peer(node_id, &my_address, *peer_addr).await {
-            tracing::warn!(peer_addr = %peer_addr, error = %e, "Join attempt failed");
-            continue;
-        }
-        return Ok(());
-    }
-
-    Err(BootstrapError::Join("Failed to join cluster via any discovered peer".to_string()))
-}
-
-/// Attempts to join the cluster via a specific peer address.
-async fn try_join_via_peer(
-    node_id: u64,
-    my_address: &str,
-    peer_addr: SocketAddr,
-) -> Result<(), String> {
-    tracing::info!(peer_addr = %peer_addr, "Attempting to join cluster via peer");
-
-    let endpoint = Channel::from_shared(format!("http://{}", peer_addr))
-        .map_err(|e| format!("Invalid peer address: {}", e))?
-        .connect_timeout(Duration::from_secs(5));
-
-    let channel = endpoint.connect().await.map_err(|e| format!("Failed to connect: {}", e))?;
-
-    let mut client = AdminServiceClient::new(channel);
-
-    let request = JoinClusterRequest { node_id, address: my_address.to_string() };
-
-    let response =
-        client.join_cluster(request).await.map_err(|e| format!("Join RPC failed: {}", e))?;
-
-    let resp = response.into_inner();
-    if resp.success {
-        tracing::info!(node_id, "Successfully joined cluster");
-        return Ok(());
-    }
-
-    // If not leader, try the leader address if provided
-    if !resp.leader_address.is_empty() {
-        tracing::info!(leader_addr = %resp.leader_address, "Peer redirected to leader");
-
-        let leader_addr: SocketAddr =
-            resp.leader_address.parse().map_err(|e| format!("Invalid leader address: {}", e))?;
-
-        return try_join_via_leader(node_id, my_address, leader_addr).await;
-    }
-
-    Err(format!("Join request rejected: {}", resp.message))
-}
-
-/// Follows a redirect to join via the leader.
-async fn try_join_via_leader(
-    node_id: u64,
-    my_address: &str,
-    leader_addr: SocketAddr,
-) -> Result<(), String> {
-    let endpoint = Channel::from_shared(format!("http://{}", leader_addr))
-        .map_err(|e| format!("Invalid leader address: {}", e))?
-        .connect_timeout(Duration::from_secs(5));
-
-    let leader_channel =
-        endpoint.connect().await.map_err(|e| format!("Failed to connect to leader: {}", e))?;
-
-    let mut leader_client = AdminServiceClient::new(leader_channel);
-    let leader_request = JoinClusterRequest { node_id, address: my_address.to_string() };
-
-    let leader_response = leader_client
-        .join_cluster(leader_request)
-        .await
-        .map_err(|e| format!("Leader join RPC failed: {}", e))?;
-
-    if leader_response.into_inner().success {
-        tracing::info!(node_id, "Successfully joined cluster via leader");
-        return Ok(());
-    }
-
-    Err("Leader rejected join request".to_string())
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {

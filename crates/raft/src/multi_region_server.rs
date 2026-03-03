@@ -3,6 +3,15 @@
 //! This module provides a server that supports multi-region deployments,
 //! routing requests to the appropriate region based on organization.
 //!
+//! ## Status
+//!
+//! Not used by the production binary (`inferadb-ledger-server`). The standard
+//! single-region [`LedgerServer`] is the production entry point. This module
+//! exists for integration tests and as the foundation for future multi-region
+//! support.
+//!
+//! [`LedgerServer`]: crate::LedgerServer
+//!
 //! ## Architecture
 //!
 //! ```text

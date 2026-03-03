@@ -548,6 +548,7 @@ pub fn vault_entry_to_proto_block(
         .collect();
 
     // Build block header
+    let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
     let header = proto::BlockHeader {
         height: entry.vault_height,
         organization: Some(proto::OrganizationSlug { slug: entry.organization.value() as u64 }),
@@ -562,6 +563,7 @@ pub fn vault_entry_to_proto_block(
         leader_id: Some(proto::NodeId { id: region_block.leader_id.clone() }),
         term: region_block.term,
         committed_index: region_block.committed_index,
+        block_hash: Some(proto::Hash { value: block_hash.to_vec() }),
     };
 
     proto::Block { header: Some(header), transactions }

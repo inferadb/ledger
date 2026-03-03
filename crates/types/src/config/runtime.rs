@@ -241,32 +241,17 @@ impl RuntimeConfig {
 
     /// Computes the list of top-level section names that differ.
     ///
-    /// Returns human-readable strings like `"rate_limit"` for backward
-    /// compatibility with existing callers.
+    /// Derives section names from [`detailed_diff`](Self::detailed_diff) so
+    /// new fields are automatically included without manual enumeration.
     #[must_use]
     pub fn diff(&self, other: &RuntimeConfig) -> Vec<String> {
-        let mut changes = Vec::new();
-        if self.rate_limit != other.rate_limit {
-            changes.push("rate_limit".to_string());
-        }
-        if self.hot_key != other.hot_key {
-            changes.push("hot_key".to_string());
-        }
-        if self.compaction != other.compaction {
-            changes.push("compaction".to_string());
-        }
-        if self.validation != other.validation {
-            changes.push("validation".to_string());
-        }
-        if self.integrity != other.integrity {
-            changes.push("integrity".to_string());
-        }
-        if self.metrics_cardinality != other.metrics_cardinality {
-            changes.push("metrics_cardinality".to_string());
-        }
-        if self.events != other.events {
-            changes.push("events".to_string());
-        }
-        changes
+        let changes = self.detailed_diff(other);
+        let sections: Vec<String> = changes
+            .iter()
+            .filter_map(|c| c.field.split('.').next().map(String::from))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        sections
     }
 }

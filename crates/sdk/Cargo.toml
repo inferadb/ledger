@@ -23,9 +23,6 @@ tonic = { workspace = true }
 prost = { workspace = true }
 tower = { workspace = true }
 
-# Retry with backoff
-backon = "1.2"
-
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -47,6 +44,9 @@ dashmap = { workspace = true }
 
 # Metrics facade
 metrics = { workspace = true }
+
+# Encoding
+base64 = { workspace = true }
 
 # Utilities
 tracing = { workspace = true }

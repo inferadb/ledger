@@ -46,7 +46,7 @@ pub struct StorageConfig {
     pub hot_cache_snapshots: usize,
     /// Interval between automatic snapshots.
     #[serde(default = "default_snapshot_interval")]
-    #[serde(with = "super::humantime_serde")]
+    #[serde(with = "humantime_serde")]
     #[schemars(with = "String")]
     pub snapshot_interval: Duration,
     /// Zstd compression level for snapshots (1-22, 3 recommended).

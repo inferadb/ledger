@@ -440,11 +440,13 @@ impl CertificateData {
                 // Convert DER to PEM by base64 encoding and adding headers
                 use std::io::Write;
 
-                let base64 = base64_encode(der);
+                use base64::Engine;
+
+                let encoded = base64::engine::general_purpose::STANDARD.encode(der);
                 let mut pem = Vec::new();
                 writeln!(pem, "-----BEGIN CERTIFICATE-----").ok();
-                // Write in 64-character lines
-                for chunk in base64.as_bytes().chunks(64) {
+                // Write in 64-character lines per PEM spec (RFC 7468)
+                for chunk in encoded.as_bytes().chunks(64) {
                     pem.extend_from_slice(chunk);
                     pem.push(b'\n');
                 }
@@ -453,41 +455,6 @@ impl CertificateData {
             },
         }
     }
-}
-
-/// Base64 encoding for DER to PEM conversion.
-fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut result = String::new();
-    let mut i = 0;
-
-    while i < data.len() {
-        let b0 = data[i];
-        let b1 = data.get(i + 1).copied().unwrap_or(0);
-        let b2 = data.get(i + 2).copied().unwrap_or(0);
-
-        let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
-
-        result.push(ALPHABET[(n >> 18) as usize & 0x3F] as char);
-        result.push(ALPHABET[(n >> 12) as usize & 0x3F] as char);
-
-        if i + 1 < data.len() {
-            result.push(ALPHABET[(n >> 6) as usize & 0x3F] as char);
-        } else {
-            result.push('=');
-        }
-
-        if i + 2 < data.len() {
-            result.push(ALPHABET[n as usize & 0x3F] as char);
-        } else {
-            result.push('=');
-        }
-
-        i += 3;
-    }
-
-    result
 }
 
 #[bon]
@@ -1058,18 +1025,15 @@ mod tests {
     }
 
     #[test]
-    fn test_base64_encode_basic() {
-        // Test base64 encoding
-        let data = b"Hello, World!";
-        let encoded = base64_encode(data);
-        assert_eq!(encoded, "SGVsbG8sIFdvcmxkIQ==");
-    }
-
-    #[test]
-    fn test_base64_encode_empty() {
-        let data = b"";
-        let encoded = base64_encode(data);
-        assert_eq!(encoded, "");
+    fn test_der_to_pem_roundtrip() {
+        // Verify DER → PEM conversion produces valid base64 content
+        let der_data = b"Hello, World!";
+        let cert = CertificateData::Der(der_data.to_vec());
+        let pem = cert.to_pem();
+        let pem_str = String::from_utf8(pem).unwrap();
+        assert!(pem_str.contains("-----BEGIN CERTIFICATE-----"));
+        assert!(pem_str.contains("SGVsbG8sIFdvcmxkIQ=="));
+        assert!(pem_str.contains("-----END CERTIFICATE-----"));
     }
 
     #[test]

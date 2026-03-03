@@ -39,7 +39,7 @@
 //! matters because `free_space()` (the gap between `free_start` and `free_end`)
 //! does not account for dead cell data left by deletions.
 
-use super::node::{BranchNode, BranchNodeRef, LeafNode, LeafNodeRef, NODE_HEADER_SIZE};
+use super::node::{BranchNode, LeafNode, LeafNodeRef, NODE_HEADER_SIZE};
 use crate::{
     bloom::BLOOM_FILTER_SIZE,
     error::{Error, PageId, Result},
@@ -83,7 +83,8 @@ pub struct BranchSplitResult {
 /// # Errors
 ///
 /// Returns an error if the page data is corrupted or the page type is invalid.
-pub fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitResult> {
+#[cfg(test)]
+fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitResult> {
     // Collect all entries and the original's next-leaf pointer before init() zeros it
     let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let old_next_leaf: PageId;
@@ -352,26 +353,6 @@ pub fn split_branch(original: &mut Page, new_page: &mut Page) -> Result<BranchSp
     }
 
     Ok(BranchSplitResult { new_page_id: new_page.id, separator_key })
-}
-
-/// Checks if a leaf node needs splitting based on remaining free space.
-///
-/// # Errors
-///
-/// Returns an error if the page type is not a B-tree leaf.
-pub fn leaf_needs_split(page: &Page, key: &[u8], value: &[u8]) -> Result<bool> {
-    let node = LeafNodeRef::from_page(page)?;
-    Ok(!node.can_insert(key, value))
-}
-
-/// Checks if a branch node needs splitting.
-///
-/// # Errors
-///
-/// Returns an error if the page type is not a B-tree branch.
-pub fn branch_needs_split(page: &Page, key: &[u8]) -> Result<bool> {
-    let node = BranchNodeRef::from_page(page)?;
-    Ok(!node.can_insert(key))
 }
 
 /// Merges two leaf nodes by moving all entries from `right` into `left`.

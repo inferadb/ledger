@@ -10,14 +10,8 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-# Builder pattern
-bon.workspace = true
-
 # File system
 tempfile.workspace = true
-
-# Async runtime (for assert_eventually)
-tokio = { workspace = true, features = ["time", "sync"] }
 
 # Time utilities
 chrono.workspace = true
@@ -29,8 +23,6 @@ inferadb-ledger-types = { workspace = true }
 proptest = { workspace = true }
 
 [dev-dependencies]
-# For testing the test utilities themselves
-tokio = { workspace = true, features = ["full", "test-util"] }
 postcard.workspace = true
 
 [lints]

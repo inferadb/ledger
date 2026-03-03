@@ -6,7 +6,10 @@
 use std::sync::Arc;
 
 use inferadb_ledger_proto::proto;
+use inferadb_ledger_state::StateLayer;
+use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{OrganizationId, VaultId, config::ValidationConfig, validation};
+use tempfile::TempDir;
 use tonic::Status;
 use tracing::warn;
 
@@ -233,4 +236,23 @@ pub(crate) fn hash_operations(operations: &[proto::Operation]) -> Vec<u8> {
         }
     }
     bytes
+}
+
+/// Creates a temporary `StateLayer` for historical block replay.
+///
+/// Returns the temp directory (whose lifetime keeps the temp files alive),
+/// and a fresh `StateLayer` backed by an empty database.
+///
+/// # Errors
+///
+/// Returns `tonic::Status::internal` if temp dir or database creation fails.
+pub(crate) fn create_replay_context() -> Result<(TempDir, StateLayer<FileBackend>), Status> {
+    let temp_dir =
+        TempDir::new().map_err(|e| Status::internal(format!("Failed to create temp dir: {e}")))?;
+    let temp_db = Arc::new(
+        Database::<FileBackend>::create(temp_dir.path().join("replay.db"))
+            .map_err(|e| Status::internal(format!("Failed to create temp db: {e}")))?,
+    );
+    let temp_state = StateLayer::new(temp_db);
+    Ok((temp_dir, temp_state))
 }

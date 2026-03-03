@@ -402,7 +402,12 @@ pub struct TableEntry {
     pub table_id: TableId,
     /// Root page of the B-tree (0 = empty table).
     pub root_page: u64,
-    /// Number of entries in the table.
+    /// Reserved space for entry count tracking (currently unused).
+    ///
+    /// This field is always written as `0` — entry counts are not tracked.
+    /// It remains in the on-disk format because [`TableEntry::SIZE`] is part
+    /// of the persisted page layout; removing it would require a storage
+    /// format migration.
     pub entry_count: u64,
 }
 

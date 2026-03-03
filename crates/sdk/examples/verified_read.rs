@@ -78,8 +78,7 @@ async fn main() -> Result<()> {
 
             // Verify the Merkle proof client-side
             match verified.verify() {
-                Ok(true) => println!("✓ Merkle proof verified successfully!"),
-                Ok(false) => println!("✗ Merkle proof verification failed"),
+                Ok(()) => println!("✓ Merkle proof verified successfully!"),
                 Err(e) => println!("✗ Verification error: {}", e),
             }
 
@@ -122,8 +121,7 @@ async fn main() -> Result<()> {
 
             // Verify this historical proof
             match verified.verify() {
-                Ok(true) => println!("✓ Historical proof verified!"),
-                Ok(false) => println!("✗ Historical proof verification failed"),
+                Ok(()) => println!("✓ Historical proof verified!"),
                 Err(e) => println!("✗ Verification error: {}", e),
             }
         },

@@ -27,10 +27,9 @@ use inferadb_ledger_proto::{
     },
 };
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
-use inferadb_ledger_store::{Database, FileBackend};
+use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{OrganizationId, OrganizationSlug, VaultId, VaultSlug};
 use openraft::Raft;
-use tempfile::TempDir;
 use tokio::sync::broadcast;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
@@ -75,14 +74,6 @@ pub struct ReadServiceImpl {
     /// Sampler for log tail sampling.
     #[builder(default)]
     sampler: Option<Sampler>,
-    /// Handler-phase event handle for recording denial events.
-    ///
-    /// Currently unused — reserved for future read-path denial events
-    /// (e.g., rate limiting on reads). Present for API consistency with
-    /// `WriteServiceImpl` and `AdminServiceImpl`.
-    #[builder(default)]
-    #[allow(dead_code)]
-    event_handle: Option<crate::event_writer::EventHandle<inferadb_ledger_store::FileBackend>>,
     /// Maximum Raft log lag before forwarding reads to the leader.
     ///
     /// When a follower's `last_log_index - last_applied > max_read_forward_lag`,
@@ -214,6 +205,7 @@ impl ReadServiceImpl {
         })?;
 
         // Build proto block header
+        let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
         Some(inferadb_ledger_proto::proto::BlockHeader {
             height: entry.vault_height,
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
@@ -246,6 +238,7 @@ impl ReadServiceImpl {
             }),
             term: region_block.term,
             committed_index: region_block.committed_index,
+            block_hash: Some(inferadb_ledger_proto::proto::Hash { value: block_hash.to_vec() }),
         })
     }
 
@@ -990,26 +983,14 @@ impl ReadService for ReadServiceImpl {
         ctx.start_storage_timer();
 
         // Create temporary state layer for replay using temp directory
-        let temp_dir = match TempDir::new() {
-            Ok(d) => d,
-            Err(e) => {
+        let (_temp_dir, temp_state) = match super::helpers::create_replay_context() {
+            Ok(ctx_pair) => ctx_pair,
+            Err(status) => {
                 ctx.end_storage_timer();
-                let msg = format!("Failed to create temp dir: {}", e);
-                ctx.set_error("internal", &msg);
-                return Err(Status::internal(msg));
+                ctx.set_error("internal", status.message());
+                return Err(status);
             },
         };
-
-        let temp_db = match Database::<FileBackend>::create(temp_dir.path().join("replay.db")) {
-            Ok(db) => Arc::new(db),
-            Err(e) => {
-                ctx.end_storage_timer();
-                let msg = format!("Failed to create temp db: {}", e);
-                ctx.set_error("internal", &msg);
-                return Err(Status::internal(msg));
-            },
-        };
-        let temp_state = StateLayer::new(temp_db);
 
         // Track block timestamp for expiration check
         let mut block_timestamp = chrono::Utc::now();

@@ -28,6 +28,34 @@ use crate::{
     page::Page,
 };
 
+/// Inserts a separator key into a branch node with left/right child pointers.
+///
+/// Finds the correct insertion position via linear scan, inserts the separator
+/// with `left_child` as its child pointer, then updates the adjacent pointer
+/// to `right_child` (either as rightmost or at `insert_idx + 1`).
+fn insert_separator_into_branch(
+    branch: &mut BranchNode<'_>,
+    key: &[u8],
+    left_child: PageId,
+    right_child: PageId,
+) -> Result<()> {
+    let count = branch.cell_count() as usize;
+    let mut insert_idx = count;
+    for i in 0..count {
+        if key < branch.key(i) {
+            insert_idx = i;
+            break;
+        }
+    }
+    branch.insert(insert_idx, key, left_child)?;
+    if insert_idx == count {
+        branch.set_rightmost_child(right_child);
+    } else {
+        branch.set_child(insert_idx + 1, right_child);
+    }
+    Ok(())
+}
+
 /// Trait for providing page operations to the B-tree.
 ///
 /// This abstraction allows the B-tree to work with different page providers:
@@ -322,32 +350,12 @@ impl<P: PageProvider> BTree<P> {
                     let mut branch = BranchNode::from_page(&mut page)?;
 
                     if branch.can_insert(&sep_key) {
-                        let count = branch.cell_count() as usize;
-                        let mut insert_idx = count;
-                        for i in 0..count {
-                            if sep_key.as_slice() < branch.key(i) {
-                                insert_idx = i;
-                                break;
-                            }
-                        }
-
-                        // Insert the separator with the original child (left half) as left child.
-                        // Then update the next child pointer to be new_child (right half).
-                        if insert_idx == count {
-                            // Inserting at end: original child (left half) becomes left child of
-                            // sep, new_child (right half) becomes new
-                            // rightmost
-                            branch.insert(insert_idx, &sep_key, child_page_id)?;
-                            branch.set_rightmost_child(new_child);
-                        } else {
-                            // Inserting in middle:
-                            // - Insert separator with original child (left half) as its child
-                            // - After shift, the old cell at insert_idx moved to insert_idx+1
-                            // - Update that cell's child to be new_child (right half)
-                            branch.insert(insert_idx, &sep_key, child_page_id)?;
-                            branch.set_child(insert_idx + 1, new_child);
-                        }
-
+                        insert_separator_into_branch(
+                            &mut branch,
+                            &sep_key,
+                            child_page_id,
+                            new_child,
+                        )?;
                         drop(branch);
                         self.provider.write_page(page);
                         Ok((None, old_value))
@@ -440,42 +448,10 @@ impl<P: PageProvider> BTree<P> {
 
         if insert_into_left {
             let mut branch = BranchNode::from_page(page)?;
-            let count = branch.cell_count() as usize;
-            let mut insert_idx = count;
-            for i in 0..count {
-                if key < branch.key(i) {
-                    insert_idx = i;
-                    break;
-                }
-            }
-
-            // Insert with original child (left half) as the left child of separator
-            if insert_idx == count {
-                branch.insert(insert_idx, key, original_child)?;
-                branch.set_rightmost_child(right_child);
-            } else {
-                branch.insert(insert_idx, key, original_child)?;
-                branch.set_child(insert_idx + 1, right_child);
-            }
+            insert_separator_into_branch(&mut branch, key, original_child, right_child)?;
         } else {
             let mut branch = BranchNode::from_page(&mut new_page)?;
-            let count = branch.cell_count() as usize;
-            let mut insert_idx = count;
-            for i in 0..count {
-                if key < branch.key(i) {
-                    insert_idx = i;
-                    break;
-                }
-            }
-
-            // Insert with original child (left half) as the left child of separator
-            if insert_idx == count {
-                branch.insert(insert_idx, key, original_child)?;
-                branch.set_rightmost_child(right_child);
-            } else {
-                branch.insert(insert_idx, key, original_child)?;
-                branch.set_child(insert_idx + 1, right_child);
-            }
+            insert_separator_into_branch(&mut branch, key, original_child, right_child)?;
         }
 
         self.provider.write_page(page.clone());
@@ -715,23 +691,25 @@ impl<P: PageProvider> BTree<P> {
                 Vec::new()
             };
 
-            let next_leaf_ref = LeafNodeRef::from_page(&next_page)?;
-            let next_first_key = if next_leaf_ref.cell_count() > 0 {
-                next_leaf_ref.key(0).to_vec()
+            let (parent_id, _) = self.find_parent_of_leaf(current_id, &current_first_key)?;
+
+            // Check if next_id is a sibling (child of the same parent) by scanning
+            // the parent's branch children — O(branch_size) instead of O(depth).
+            let next_is_sibling = if parent_id != 0 {
+                let mut parent_page = self.provider.read_page(parent_id)?;
+                let branch = BranchNode::from_page(&mut parent_page)?;
+                let count = branch.cell_count() as usize;
+                (0..count).any(|i| branch.child(i) == next_id)
+                    || branch.rightmost_child() == next_id
             } else {
-                Vec::new()
+                false
             };
 
-            let current_parent = self.find_parent_of_leaf(current_id, &current_first_key)?;
-            let next_parent = self.find_parent_of_leaf(next_id, &next_first_key)?;
-
-            if current_parent.0 != next_parent.0 {
+            if !next_is_sibling {
                 // Different parents — skip merge, advance
                 current_id = next_id;
                 continue;
             }
-
-            let parent_id = current_parent.0;
 
             // Perform the merge: move all entries from next into current
             let mut current_page = current_page;
@@ -790,56 +768,6 @@ impl<P: PageProvider> BTree<P> {
         }
 
         Ok(stats)
-    }
-
-    /// Collects (leaf_page_id, parent_page_id, child_index_in_parent) for all leaves.
-    ///
-    /// `parent_page_id` is 0 for the root when the root is a leaf.
-    /// `child_index_in_parent` is the index of the child pointer in the parent
-    /// branch that leads to this leaf. For rightmost children, the index is
-    /// set to the branch's cell_count (one past the last separator).
-    ///
-    /// This method performs a full DFS traversal of the tree — O(N) page reads.
-    /// It is retained as a diagnostic utility (e.g., for metrics and
-    /// fragmentation analysis) but is no longer used during compaction.
-    pub fn collect_leaf_info(&self) -> Result<Vec<(PageId, PageId, usize)>> {
-        let mut result = Vec::new();
-        self.collect_leaf_info_recursive(self.root_page, 0, 0, &mut result)?;
-        Ok(result)
-    }
-
-    fn collect_leaf_info_recursive(
-        &self,
-        page_id: PageId,
-        parent_id: PageId,
-        child_idx: usize,
-        result: &mut Vec<(PageId, PageId, usize)>,
-    ) -> Result<()> {
-        let page = self.provider.read_page(page_id)?;
-        match page.page_type()? {
-            PageType::BTreeLeaf => {
-                result.push((page_id, parent_id, child_idx));
-            },
-            PageType::BTreeBranch => {
-                let mut page = page;
-                let branch = BranchNode::from_page(&mut page)?;
-                let count = branch.cell_count() as usize;
-
-                // Visit each child
-                for i in 0..count {
-                    let child = branch.child(i);
-                    self.collect_leaf_info_recursive(child, page_id, i, result)?;
-                }
-
-                // Visit rightmost child
-                let rightmost = branch.rightmost_child();
-                self.collect_leaf_info_recursive(rightmost, page_id, count, result)?;
-            },
-            pt => {
-                return Err(Error::PageTypeMismatch { expected: PageType::BTreeLeaf, found: pt });
-            },
-        }
-        Ok(())
     }
 
     /// Finds the separator index in a parent branch that separates left_id from right_id.

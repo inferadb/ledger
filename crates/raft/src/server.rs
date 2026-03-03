@@ -25,7 +25,7 @@ use tower::ServiceBuilder;
 
 use crate::{
     api_version::{ApiVersionLayer, api_version_interceptor},
-    batching::BatchConfig,
+    batching::BatchWriterConfig,
     graceful_shutdown::ConnectionTrackingLayer,
     idempotency::IdempotencyCache,
     log_storage::AppliedStateAccessor,
@@ -168,7 +168,7 @@ impl LedgerServer {
         // Server-level batching coalesces individual Write RPCs into single Raft
         // proposals. This improves throughput when clients can't or don't use
         // BatchWrite RPC.
-        let batch_config = BatchConfig::default();
+        let batch_config = BatchWriterConfig::default();
         let write_service = if let Some(archive) = &self.block_archive {
             let (service, task) = WriteServiceImpl::with_block_archive_and_batching(
                 self.raft.clone(),
@@ -392,8 +392,13 @@ impl LedgerServer {
     /// Attaches backup support (backup manager + snapshot manager).
     ///
     /// Enables `CreateBackup`, `ListBackups`, and `RestoreBackup` RPCs on the
-    /// admin service. Done post-construction because bon type-state builders
-    /// don't support conditional field setting.
+    /// admin service.
+    ///
+    /// This uses a two-phase init pattern rather than a builder field because
+    /// backup support is conditional — the `BackupManager` requires a running
+    /// Raft node and state layer that aren't available at builder construction
+    /// time. When backup is not attached, the admin service returns
+    /// `UNIMPLEMENTED` for backup RPCs.
     #[must_use]
     pub fn with_backup(
         mut self,

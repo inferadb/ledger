@@ -24,4 +24,4 @@ mod resolver;
 mod selector;
 
 pub use resolver::{DnsConfig, FileConfig, ResolvedServer, ServerResolver, ServerSource};
-pub use selector::{SelectorStats, ServerSelector};
+pub use selector::ServerSelector;
