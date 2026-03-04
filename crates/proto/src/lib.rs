@@ -35,6 +35,7 @@ pub mod proto {
 #[cfg(not(use_pregenerated_proto))]
 pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("ledger_v1_descriptor");
 
+/// Serialized `FileDescriptorSet` for gRPC reflection (pre-generated for crates.io).
 #[cfg(use_pregenerated_proto)]
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/ledger_v1_descriptor.bin");
 
