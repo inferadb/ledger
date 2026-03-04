@@ -26,7 +26,7 @@
 //!
 //! // When called within an instrumented span, trace context is automatically propagated
 //! tracing::info_span!("my_operation").in_scope(|| async {
-//!     client.read(organization, None, "key").await
+//!     client.read(organization, None, "key", None, None).await
 //! }).await?;
 //! # Ok(())
 //! # }

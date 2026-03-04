@@ -2127,7 +2127,7 @@ impl LedgerClient {
     /// let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     ///
     /// // Perform operations...
-    /// client.write(organization, Some(vault), operations).await?;
+    /// client.write(organization, Some(vault), operations, None).await?;
     ///
     /// // Graceful shutdown before application exit
     /// client.shutdown().await;

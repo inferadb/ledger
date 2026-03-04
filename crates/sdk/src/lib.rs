@@ -29,11 +29,11 @@
 //!     # let organization = OrganizationSlug::new(1);
 //!
 //!     // Read operations
-//!     let value = client.read(organization, None, "user:123").await?;
+//!     let value = client.read(organization, None, "user:123", None, None).await?;
 //!
 //!     // Write operations with automatic idempotency
-//!     let operations = vec![Operation::set_entity("user:123", b"data".to_vec())];
-//!     let result = client.write(organization, None, operations).await?;
+//!     let operations = vec![Operation::set_entity("user:123", b"data".to_vec(), None, None)];
+//!     let result = client.write(organization, None, operations, None).await?;
 //!     println!("Committed at block {} with sequence {}", result.block_height, result.assigned_sequence);
 //!
 //!     Ok(())
