@@ -536,7 +536,7 @@ jobs:
 
           # Update inter-crate dependency versions to use exact prerelease version
           # (semver ranges like ^0.1.0 don't match prereleases)
-          for crate in inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-proto inferadb-ledger-raft inferadb-ledger-sdk; do
+          for crate in inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-proto inferadb-ledger-raft inferadb-ledger-services inferadb-ledger-sdk; do
             sed -i "s/\(${crate} = { version = \)\"[^\"]*\"/\1\"=${VERSION}\"/" Cargo.toml
           done
 
