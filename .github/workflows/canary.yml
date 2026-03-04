@@ -474,12 +474,46 @@ jobs:
       - name: Publish crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          for crate in inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-proto inferadb-ledger-raft inferadb-ledger-sdk; do
+          # Strip build metadata for crates.io (e.g., 0.1.0-dev.20260201.123+abc1234 → 0.1.0-dev.20260201.123)
+          CRATE_VERSION="${VERSION%+*}"
+
+          # Wait for a crate version to appear in the crates.io index.
+          # Polls every 10s for up to 5 minutes before failing.
+          wait_for_crate() {
+            local crate="$1"
+            local version="$2"
+            local max_attempts=30
+            local attempt=0
+
+            echo "Waiting for ${crate}@${version} to be indexed on crates.io..."
+            while [ $attempt -lt $max_attempts ]; do
+              if cargo search "${crate}" --limit 1 2>/dev/null | grep -q "^${crate} = \"${version}\""; then
+                echo "${crate}@${version} is now available"
+                return 0
+              fi
+              attempt=$((attempt + 1))
+              echo "  Attempt ${attempt}/${max_attempts} — not yet indexed, retrying in 10s..."
+              sleep 10
+            done
+
+            echo "ERROR: Timed out waiting for ${crate}@${version} to be indexed after $((max_attempts * 10))s"
+            return 1
+          }
+
+          CRATES=(inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-proto inferadb-ledger-raft inferadb-ledger-sdk)
+          LAST_INDEX=$(( ${#CRATES[@]} - 1 ))
+
+          for i in "${!CRATES[@]}"; do
+            crate="${CRATES[$i]}"
             echo "Publishing ${crate}..."
             cargo publish -p "${crate}" --token "$CARGO_REGISTRY_TOKEN" --allow-dirty
-            echo "Waiting for crates.io to index..."
-            sleep 45
+
+            # Wait for indexing before publishing the next crate (skip for last crate)
+            if [ "$i" -lt "$LAST_INDEX" ]; then
+              wait_for_crate "${crate}" "${CRATE_VERSION}"
+            fi
           done
 
   # Clean up old canary releases to avoid clutter
