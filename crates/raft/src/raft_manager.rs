@@ -273,6 +273,12 @@ impl RegionBackgroundJobs {
     }
 }
 
+impl Drop for RegionBackgroundJobs {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
+
 /// A single region group with its own Raft instance and storage.
 ///
 /// Each RegionGroup is a complete, isolated Raft cluster member for one region.
@@ -457,6 +463,11 @@ impl RaftManager {
     /// into the manager's registry and the router is initialized if this is
     /// the system region.
     ///
+    /// The `commitment_buffer` must be extracted from the [`RaftLogStore`] via
+    /// [`RaftLogStore::commitment_buffer()`] before `Adaptor::new()` consumes
+    /// the store. This ensures state root commitments flow from the apply path
+    /// to the proposal path.
+    ///
     /// # Errors
     ///
     /// Returns [`RaftManagerError::RegionExists`] if the region is already active.
@@ -468,6 +479,7 @@ impl RaftManager {
         block_archive: Arc<BlockArchive<FileBackend>>,
         applied_state: AppliedStateAccessor,
         block_announcements: broadcast::Sender<BlockAnnouncement>,
+        commitment_buffer: std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>>,
     ) -> Result<Arc<RegionGroup>> {
         if self.has_region(region) {
             return Err(RaftManagerError::RegionExists { region });
@@ -482,7 +494,7 @@ impl RaftManager {
             block_announcements,
             background_jobs: parking_lot::Mutex::new(RegionBackgroundJobs::none()),
             batch_handle: None,
-            commitment_buffer: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            commitment_buffer,
         });
 
         {

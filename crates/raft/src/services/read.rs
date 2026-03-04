@@ -874,6 +874,20 @@ impl ReadService for ReadServiceImpl {
         let vault = req.vault.as_ref().map_or(0, |v| v.slug);
         ctx.set_target(organization, vault);
 
+        // Verified reads require linearizable consistency (leader-only).
+        // should_forward_to_leader handles lagging followers, but a caught-up
+        // follower would still serve locally without this check — returning
+        // merkle proofs against potentially stale state.
+        if !Self::is_leader_for(&region) {
+            ctx.set_error(
+                "consistency_error",
+                "Verified reads require leader; this node is not the leader",
+            );
+            return Err(Status::failed_precondition(
+                "Verified reads require linearizable consistency; this node is not the leader",
+            ));
+        }
+
         // Check vault health - diverged vaults cannot be read
         let health = region.applied_state.vault_health(organization_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {

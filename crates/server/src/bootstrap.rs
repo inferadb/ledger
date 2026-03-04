@@ -213,8 +213,9 @@ pub async fn bootstrap_node(
     // Determine bootstrap behavior before log_store is consumed by Adaptor
     let is_initialized = log_store.is_initialized();
 
-    // Get accessor before log_store is consumed by Adaptor
+    // Get accessor and commitment buffer before log_store is consumed by Adaptor
     let applied_state_accessor = log_store.accessor();
+    let commitment_buffer = log_store.commitment_buffer();
 
     let network = GrpcRaftNetworkFactory::with_trace_config(config.logging.otel.trace_raft_rpcs);
     let raft_config = if let Some(ref rc) = config.raft {
@@ -318,6 +319,7 @@ pub async fn bootstrap_node(
             block_archive.clone(),
             applied_state_accessor.clone(),
             block_announcements,
+            commitment_buffer,
         )
         .map_err(|e| BootstrapError::Raft {
             message: format!("failed to register system region: {e}"),
