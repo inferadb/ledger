@@ -26,6 +26,17 @@ use inferadb_ledger_proto::proto::{
     TransferLeadershipResponse, UpdateConfigRequest, UpdateConfigResponse,
     UserSlug as ProtoUserSlug, VaultHealthProto, VaultSlug as ProtoVaultSlug,
 };
+use inferadb_ledger_raft::{
+    error::{ServiceError, classify_raft_error},
+    event_writer::HandlerPhaseEmitter,
+    log_storage::{AppliedStateAccessor, VaultHealthStatus},
+    logging::{OperationType, RequestContext, Sampler},
+    metrics, trace_context,
+    types::{
+        BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
+        RaftPayload, SystemRequest,
+    },
+};
 use inferadb_ledger_state::{BlockArchive, StateLayer, system::SystemOrganizationService};
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
@@ -40,19 +51,7 @@ use openraft::{BasicNode, Raft};
 use sha2::{Digest, Sha256};
 use tonic::{Request, Response, Status};
 
-use crate::{
-    error::{ServiceError, classify_raft_error},
-    event_writer::HandlerPhaseEmitter,
-    log_storage::{AppliedStateAccessor, VaultHealthStatus},
-    logging::{OperationType, RequestContext, Sampler},
-    metrics,
-    services::slug_resolver::SlugResolver,
-    trace_context,
-    types::{
-        BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
-        RaftPayload, SystemRequest,
-    },
-};
+use super::slug_resolver::SlugResolver;
 
 /// Handles organization and vault lifecycle, cluster membership, snapshots, and runtime
 /// configuration via Raft consensus.
@@ -86,34 +85,35 @@ pub struct AdminService {
     proposal_timeout: Duration,
     /// Runtime configuration handle for hot-reloadable settings.
     #[builder(default)]
-    runtime_config: Option<crate::runtime_config::RuntimeConfigHandle>,
+    runtime_config: Option<inferadb_ledger_raft::runtime_config::RuntimeConfigHandle>,
     /// Rate limiter for propagating config changes.
     #[builder(default)]
-    rate_limiter: Option<Arc<crate::rate_limit::RateLimiter>>,
+    rate_limiter: Option<Arc<inferadb_ledger_raft::rate_limit::RateLimiter>>,
     /// Hot key detector for propagating config changes.
     #[builder(default)]
-    hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
+    hot_key_detector: Option<Arc<inferadb_ledger_raft::hot_key_detector::HotKeyDetector>>,
     /// Backup manager for backup and restore operations.
     #[builder(default)]
-    backup_manager: Option<Arc<crate::backup::BackupManager>>,
+    backup_manager: Option<Arc<inferadb_ledger_raft::backup::BackupManager>>,
     /// Snapshot manager for reading Raft snapshots during backup.
     #[builder(default)]
     snapshot_manager: Option<Arc<inferadb_ledger_state::SnapshotManager>>,
     /// Handler-phase event handle for recording denial events.
     #[builder(default)]
-    event_handle: Option<crate::event_writer::EventHandle<inferadb_ledger_store::FileBackend>>,
+    event_handle:
+        Option<inferadb_ledger_raft::event_writer::EventHandle<inferadb_ledger_store::FileBackend>>,
     /// Health state for drain-phase write rejection.
     #[builder(default)]
-    health_state: Option<crate::graceful_shutdown::HealthState>,
+    health_state: Option<inferadb_ledger_raft::graceful_shutdown::HealthState>,
     /// Lock to prevent concurrent leader transfer attempts.
     #[builder(default = Arc::new(std::sync::atomic::AtomicBool::new(false)))]
     transfer_lock: Arc<std::sync::atomic::AtomicBool>,
     /// Shared DEK re-wrapping progress (read by `GetRewrapStatus`).
     #[builder(default)]
-    rewrap_progress: Option<Arc<crate::dek_rewrap::RewrapProgress>>,
+    rewrap_progress: Option<Arc<inferadb_ledger_raft::dek_rewrap::RewrapProgress>>,
     /// Raft manager for lazy region provisioning.
     #[builder(default)]
-    raft_manager: Option<Arc<crate::raft_manager::RaftManager>>,
+    raft_manager: Option<Arc<inferadb_ledger_raft::raft_manager::RaftManager>>,
 }
 
 impl AdminService {
@@ -135,9 +135,9 @@ impl AdminService {
     #[must_use]
     pub fn with_runtime_config(
         mut self,
-        handle: crate::runtime_config::RuntimeConfigHandle,
-        rate_limiter: Option<Arc<crate::rate_limit::RateLimiter>>,
-        hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
+        handle: inferadb_ledger_raft::runtime_config::RuntimeConfigHandle,
+        rate_limiter: Option<Arc<inferadb_ledger_raft::rate_limit::RateLimiter>>,
+        hot_key_detector: Option<Arc<inferadb_ledger_raft::hot_key_detector::HotKeyDetector>>,
     ) -> Self {
         self.runtime_config = Some(handle);
         self.rate_limiter = rate_limiter;
@@ -149,7 +149,7 @@ impl AdminService {
     #[must_use]
     pub fn with_backup(
         mut self,
-        backup_manager: Arc<crate::backup::BackupManager>,
+        backup_manager: Arc<inferadb_ledger_raft::backup::BackupManager>,
         snapshot_manager: Arc<inferadb_ledger_state::SnapshotManager>,
     ) -> Self {
         self.backup_manager = Some(backup_manager);
@@ -161,7 +161,7 @@ impl AdminService {
     #[must_use]
     pub fn with_event_handle(
         mut self,
-        handle: crate::event_writer::EventHandle<inferadb_ledger_store::FileBackend>,
+        handle: inferadb_ledger_raft::event_writer::EventHandle<inferadb_ledger_store::FileBackend>,
     ) -> Self {
         self.event_handle = Some(handle);
         self
@@ -171,7 +171,7 @@ impl AdminService {
     #[must_use]
     pub fn with_health_state(
         mut self,
-        health_state: crate::graceful_shutdown::HealthState,
+        health_state: inferadb_ledger_raft::graceful_shutdown::HealthState,
     ) -> Self {
         self.health_state = Some(health_state);
         self
@@ -179,7 +179,10 @@ impl AdminService {
 
     /// Attaches the Raft manager for lazy region provisioning.
     #[must_use]
-    pub fn with_raft_manager(mut self, manager: Arc<crate::raft_manager::RaftManager>) -> Self {
+    pub fn with_raft_manager(
+        mut self,
+        manager: Arc<inferadb_ledger_raft::raft_manager::RaftManager>,
+    ) -> Self {
         self.raft_manager = Some(manager);
         self
     }
@@ -202,7 +205,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         request: Request<CreateOrganizationRequest>,
     ) -> Result<Response<CreateOrganizationResponse>, Status> {
         // Reject requests with insufficient remaining deadline
-        crate::deadline::check_near_deadline(&request)?;
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
@@ -307,8 +310,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             LedgerRequest::CreateOrganization { name: req.name, slug, region, tier };
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
-        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+        let grpc_deadline =
+            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout =
+            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         ctx.start_raft_timer();
         let result = match tokio::time::timeout(
@@ -328,7 +333,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             },
             Err(_elapsed) => {
                 ctx.end_raft_timer();
-                crate::metrics::record_raft_proposal_timeout();
+                inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
                 ctx.set_error("Timeout", "Raft proposal timed out");
                 return Err(Status::deadline_exceeded(format!(
                     "Raft proposal timed out after {}ms",
@@ -375,7 +380,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         request: Request<DeleteOrganizationRequest>,
     ) -> Result<Response<DeleteOrganizationResponse>, Status> {
         // Reject requests with insufficient remaining deadline
-        crate::deadline::check_near_deadline(&request)?;
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
@@ -417,8 +422,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let ledger_request = LedgerRequest::DeleteOrganization { organization: organization_id };
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
-        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+        let grpc_deadline =
+            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout =
+            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         ctx.start_raft_timer();
         let result = match tokio::time::timeout(
@@ -438,7 +445,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             },
             Err(_elapsed) => {
                 ctx.end_raft_timer();
-                crate::metrics::record_raft_proposal_timeout();
+                inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
                 ctx.set_error("Timeout", "Raft proposal timed out");
                 return Err(Status::deadline_exceeded(format!(
                     "Raft proposal timed out after {}ms",
@@ -608,7 +615,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         request: Request<CreateVaultRequest>,
     ) -> Result<Response<CreateVaultResponse>, Status> {
         // Reject requests with insufficient remaining deadline
-        crate::deadline::check_near_deadline(&request)?;
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
@@ -669,8 +676,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         };
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
-        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+        let grpc_deadline =
+            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout =
+            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         ctx.start_raft_timer();
         let result = match tokio::time::timeout(
@@ -690,7 +699,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             },
             Err(_elapsed) => {
                 ctx.end_raft_timer();
-                crate::metrics::record_raft_proposal_timeout();
+                inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
                 ctx.set_error("Timeout", "Raft proposal timed out");
                 return Err(Status::deadline_exceeded(format!(
                     "Raft proposal timed out after {}ms",
@@ -769,7 +778,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         request: Request<DeleteVaultRequest>,
     ) -> Result<Response<DeleteVaultResponse>, Status> {
         // Reject requests with insufficient remaining deadline
-        crate::deadline::check_near_deadline(&request)?;
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
@@ -818,8 +827,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             LedgerRequest::DeleteVault { organization: organization_id, vault: vault_id };
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
-        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+        let grpc_deadline =
+            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout =
+            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         ctx.start_raft_timer();
         let result = match tokio::time::timeout(
@@ -839,7 +850,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             },
             Err(_elapsed) => {
                 ctx.end_raft_timer();
-                crate::metrics::record_raft_proposal_timeout();
+                inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
                 ctx.set_error("Timeout", "Raft proposal timed out");
                 return Err(Status::deadline_exceeded(format!(
                     "Raft proposal timed out after {}ms",
@@ -1331,16 +1342,17 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                     detail: format!("{} issues found", issues.len()),
                 }
             };
-            let mut emitter = crate::event_writer::HandlerPhaseEmitter::for_organization(
-                EventAction::IntegrityChecked,
-                org_id,
-                organization_slug_val,
-                node_id,
-            )
-            .detail("issues_found", &issues.len().to_string())
-            .detail("full_check", &req.full_check.to_string())
-            .trace_id(&trace_ctx.trace_id)
-            .outcome(outcome);
+            let mut emitter =
+                inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
+                    EventAction::IntegrityChecked,
+                    org_id,
+                    organization_slug_val,
+                    node_id,
+                )
+                .detail("issues_found", &issues.len().to_string())
+                .detail("full_check", &req.full_check.to_string())
+                .trace_id(&trace_ctx.trace_id)
+                .outcome(outcome);
             if let Some(ref v) = req.vault {
                 emitter = emitter.vault(VaultSlug::new(v.slug));
             }
@@ -2056,7 +2068,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             // Emit VaultRecovered handler-phase event (failed recovery)
             if let Some(node_id) = self.node_id {
                 self.record_handler_event(
-                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                         EventAction::VaultRecovered,
                         organization_id,
                         Some(DomainOrganizationSlug::new(organization_slug_val)),
@@ -2106,7 +2118,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             // Emit VaultRecovered handler-phase event (successful recovery)
             if let Some(node_id) = self.node_id {
                 self.record_handler_event(
-                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                         EventAction::VaultRecovered,
                         organization_id,
                         Some(DomainOrganizationSlug::new(organization_slug_val)),
@@ -2626,7 +2638,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         ctx.set_block_height(meta.region_height);
         ctx.set_success();
 
-        crate::backup::record_backup_created(meta.region_height, meta.size_bytes);
+        inferadb_ledger_raft::backup::record_backup_created(meta.region_height, meta.size_bytes);
 
         // Emit BackupCreated handler-phase event
         if let Some(node_id) = self.node_id {
@@ -2675,8 +2687,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 };
 
                 let backup_type = match meta.backup_type {
-                    crate::backup::BackupType::Full => 1,
-                    crate::backup::BackupType::Incremental => 2,
+                    inferadb_ledger_raft::backup::BackupType::Full => 1,
+                    inferadb_ledger_raft::backup::BackupType::Incremental => 2,
                 };
 
                 BackupInfo {
@@ -2857,12 +2869,12 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
         let target = if req.target_node_id == 0 { None } else { Some(req.target_node_id) };
 
-        let config = crate::leader_transfer::LeaderTransferConfig::builder()
+        let config = inferadb_ledger_raft::leader_transfer::LeaderTransferConfig::builder()
             .timeout(std::time::Duration::from_millis(u64::from(timeout_ms)))
             .build();
 
         let start = std::time::Instant::now();
-        let result = crate::leader_transfer::transfer_leadership(
+        let result = inferadb_ledger_raft::leader_transfer::transfer_leadership(
             &self.raft,
             target,
             &self.transfer_lock,
@@ -2886,20 +2898,20 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 metrics::record_leader_transfer(false, latency);
                 ctx.set_error("LeaderTransferError", &e.to_string());
                 let status = match &e {
-                    crate::leader_transfer::LeaderTransferError::NotLeader
-                    | crate::leader_transfer::LeaderTransferError::NoTarget
-                    | crate::leader_transfer::LeaderTransferError::TargetRejected { .. } => {
+                    inferadb_ledger_raft::leader_transfer::LeaderTransferError::NotLeader
+                    | inferadb_ledger_raft::leader_transfer::LeaderTransferError::NoTarget
+                    | inferadb_ledger_raft::leader_transfer::LeaderTransferError::TargetRejected { .. } => {
                         Status::failed_precondition(e.to_string())
                     },
-                    crate::leader_transfer::LeaderTransferError::TransferInProgress => {
+                    inferadb_ledger_raft::leader_transfer::LeaderTransferError::TransferInProgress => {
                         Status::aborted(e.to_string())
                     },
-                    crate::leader_transfer::LeaderTransferError::ReplicationTimeout
-                    | crate::leader_transfer::LeaderTransferError::Timeout { .. } => {
+                    inferadb_ledger_raft::leader_transfer::LeaderTransferError::ReplicationTimeout
+                    | inferadb_ledger_raft::leader_transfer::LeaderTransferError::Timeout { .. } => {
                         Status::deadline_exceeded(e.to_string())
                     },
-                    crate::leader_transfer::LeaderTransferError::Connection { .. }
-                    | crate::leader_transfer::LeaderTransferError::Rpc { .. } => {
+                    inferadb_ledger_raft::leader_transfer::LeaderTransferError::Connection { .. }
+                    | inferadb_ledger_raft::leader_transfer::LeaderTransferError::Rpc { .. } => {
                         Status::internal(e.to_string())
                     },
                 };
@@ -2916,7 +2928,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         &self,
         request: Request<RotateBlindingKeyRequest>,
     ) -> Result<Response<RotateBlindingKeyResponse>, Status> {
-        crate::deadline::check_near_deadline(&request)?;
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
@@ -2982,8 +2994,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let payload = RaftPayload::new(ledger_request);
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
-        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+        let grpc_deadline =
+            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout =
+            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
         let result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
 
         let response = match result {
@@ -3116,7 +3130,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         request: Request<MigrateOrganizationRequest>,
     ) -> Result<Response<MigrateOrganizationResponse>, Status> {
         // Reject requests with insufficient remaining deadline
-        crate::deadline::check_near_deadline(&request)?;
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
@@ -3270,8 +3284,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         };
 
         // Compute effective timeout
-        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+        let grpc_deadline =
+            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout =
+            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         ctx.start_raft_timer();
         let result = match tokio::time::timeout(
@@ -3291,7 +3307,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             },
             Err(_elapsed) => {
                 ctx.end_raft_timer();
-                crate::metrics::record_raft_proposal_timeout();
+                inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
                 ctx.set_error("Timeout", "Raft proposal timed out");
                 return Err(Status::deadline_exceeded(format!(
                     "Raft proposal timed out after {}ms",
@@ -3388,7 +3404,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         request: Request<MigrateUserRegionRequest>,
     ) -> Result<Response<MigrateUserRegionResponse>, Status> {
         // Reject requests with insufficient remaining deadline
-        crate::deadline::check_near_deadline(&request)?;
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
@@ -3553,8 +3569,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         };
 
         // Compute effective timeout
-        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+        let grpc_deadline =
+            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout =
+            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         ctx.start_raft_timer();
         match tokio::time::timeout(timeout, self.raft.client_write(RaftPayload::new(saga_request)))
@@ -3570,7 +3588,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             },
             Err(_elapsed) => {
                 ctx.end_raft_timer();
-                crate::metrics::record_raft_proposal_timeout();
+                inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
                 ctx.set_error("Timeout", "Raft proposal timed out");
                 return Err(Status::deadline_exceeded(format!(
                     "Raft proposal timed out after {}ms",
@@ -3597,7 +3615,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         &self,
         request: Request<RotateRegionKeyRequest>,
     ) -> Result<Response<RotateRegionKeyResponse>, Status> {
-        crate::deadline::check_near_deadline(&request)?;
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
@@ -3713,7 +3731,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         &self,
         request: Request<EraseUserRequest>,
     ) -> Result<Response<EraseUserResponse>, Status> {
-        crate::deadline::check_near_deadline(&request)?;
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
@@ -3750,8 +3768,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             ctx.set_error("InvalidArgument", status.message());
         })?;
 
-        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+        let grpc_deadline =
+            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout =
+            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         // Propose erasure through Raft
         let ledger_request = LedgerRequest::System(SystemRequest::EraseUser {
@@ -3827,7 +3847,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         &self,
         request: Request<MigrateExistingUsersRequest>,
     ) -> Result<Response<MigrateExistingUsersResponse>, Status> {
-        crate::deadline::check_near_deadline(&request)?;
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         let start = std::time::Instant::now();
@@ -3965,8 +3985,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         }
 
         // Propose migration through Raft.
-        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+        let grpc_deadline =
+            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout =
+            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         let ledger_request = LedgerRequest::System(SystemRequest::MigrateExistingUsers { entries });
         let payload = RaftPayload::new(ledger_request);
@@ -4035,7 +4057,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         &self,
         request: Request<ProvisionRegionRequest>,
     ) -> Result<Response<ProvisionRegionResponse>, Status> {
-        crate::deadline::check_near_deadline(&request)?;
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         let start = std::time::Instant::now();
@@ -4077,7 +4099,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             Status::failed_precondition("Node ID not configured for region provisioning")
         })?;
         let addr = self.listen_addr.to_string();
-        let region_config = crate::raft_manager::RegionConfig::data(region, vec![(node_id, addr)]);
+        let region_config =
+            inferadb_ledger_raft::raft_manager::RegionConfig::data(region, vec![(node_id, addr)]);
         let (_group, created) = manager.ensure_data_region(region_config).await.map_err(|e| {
             ctx.set_error("Internal", &format!("{e}"));
             Status::internal(format!("Failed to provision region {}: {e}", region.as_str()))

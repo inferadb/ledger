@@ -1,10 +1,10 @@
-//! Raft consensus and gRPC services for InferaDB Ledger.
+//! Raft consensus infrastructure for InferaDB Ledger.
 //!
 //! This crate provides:
 //! - OpenRaft integration with inferadb-ledger-store log storage
 //! - Combined RaftStorage implementation (log + state machine)
-//! - gRPC services (Read, Write, Admin, Health, Discovery)
 //! - Inter-node Raft network transport
+//! - Transaction batching, rate limiting, and background jobs
 //!
 //! # Public API
 //!
@@ -42,12 +42,10 @@ pub mod trace_context;
 
 // ---------------------------------------------------------------------------
 // Server-internal modules — implementation details hidden from `cargo doc`.
-// These are `pub` so the server crate can access them, but `#[doc(hidden)]`
-// keeps the documentation focused on SDK-facing types.
+// These are `pub` so the server/services crates can access them, but
+// `#[doc(hidden)]` keeps the documentation focused on SDK-facing types.
 // ---------------------------------------------------------------------------
 
-#[doc(hidden)]
-pub mod api_version;
 #[doc(hidden)]
 pub mod backup;
 #[doc(hidden)]
@@ -81,21 +79,15 @@ pub mod otel;
 #[doc(hidden)]
 pub mod pagination;
 #[doc(hidden)]
-pub mod peer_maintenance;
-#[doc(hidden)]
 pub mod peer_tracker;
 #[doc(hidden)]
 pub mod proof;
-#[doc(hidden)]
-pub mod proto_compat;
 #[doc(hidden)]
 pub mod raft_manager;
 #[doc(hidden)]
 pub mod resource_metrics;
 #[doc(hidden)]
 pub mod runtime_config;
-#[doc(hidden)]
-pub mod services;
 
 #[doc(hidden)]
 pub mod auto_recovery;
@@ -122,8 +114,6 @@ pub mod region_storage;
 #[doc(hidden)]
 pub mod saga_orchestrator;
 #[doc(hidden)]
-pub mod server;
-#[doc(hidden)]
 pub mod snapshot;
 #[doc(hidden)]
 pub mod state_root_verifier;
@@ -131,10 +121,6 @@ pub mod state_root_verifier;
 pub mod ttl_gc;
 #[doc(hidden)]
 pub mod types;
-
-// ---------------------------------------------------------------------------
-// Public API — consumed by SDK
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Server infrastructure re-exports — consumed by the server crate for
@@ -179,8 +165,6 @@ pub use resource_metrics::ResourceMetricsCollector;
 pub use runtime_config::RuntimeConfigHandle;
 #[doc(hidden)]
 pub use saga_orchestrator::SagaOrchestrator;
-#[doc(hidden)]
-pub use server::LedgerServer;
 #[doc(hidden)]
 pub use ttl_gc::TtlGarbageCollector;
 #[doc(hidden)]

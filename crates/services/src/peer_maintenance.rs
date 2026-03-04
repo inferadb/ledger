@@ -7,8 +7,8 @@
 //! ## Usage
 //!
 //! ```no_run
-//! # use inferadb_ledger_raft::peer_maintenance::PeerMaintenance;
-//! # fn example(discovery_service: std::sync::Arc<inferadb_ledger_raft::services::DiscoveryService>) {
+//! # use inferadb_ledger_services::peer_maintenance::PeerMaintenance;
+//! # fn example(discovery_service: std::sync::Arc<inferadb_ledger_services::services::DiscoveryService>) {
 //! let maintenance = PeerMaintenance::builder().discovery(discovery_service).build();
 //! let handle = maintenance.start();
 //! // ... later ...

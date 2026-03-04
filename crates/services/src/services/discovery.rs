@@ -16,15 +16,14 @@ use inferadb_ledger_proto::proto::{
     OrganizationSlug, PeerInfo, Region as ProtoRegion,
     system_discovery_service_server::SystemDiscoveryService,
 };
+use inferadb_ledger_raft::{
+    log_storage::AppliedStateAccessor, peer_tracker::PeerTracker, types::LedgerTypeConfig,
+};
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
 use openraft::Raft;
 use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
-
-use crate::{
-    log_storage::AppliedStateAccessor, peer_tracker::PeerTracker, types::LedgerTypeConfig,
-};
 
 // =============================================================================
 // IP Address Validation
@@ -177,7 +176,7 @@ pub struct DiscoveryService {
     peer_tracker: RwLock<PeerTracker>,
     /// This node's ID for voter/learner checks (optional for backward compatibility).
     #[builder(default)]
-    node_id: Option<crate::types::LedgerNodeId>,
+    node_id: Option<inferadb_ledger_raft::types::LedgerNodeId>,
     /// Timestamp of last state update (for learner staleness checks).
     #[builder(default = RwLock::new(std::time::Instant::now()))]
     last_state_update: RwLock<std::time::Instant>,

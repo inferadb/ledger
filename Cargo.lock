@@ -1597,6 +1597,7 @@ dependencies = [
  "hyper-util",
  "inferadb-ledger-proto",
  "inferadb-ledger-raft",
+ "inferadb-ledger-services",
  "inferadb-ledger-state",
  "inferadb-ledger-store",
  "inferadb-ledger-test-utils",
@@ -1617,6 +1618,41 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "turmoil",
+ "uuid",
+]
+
+[[package]]
+name = "inferadb-ledger-services"
+version = "0.1.0"
+dependencies = [
+ "bon",
+ "chrono",
+ "futures",
+ "inferadb-ledger-proto",
+ "inferadb-ledger-raft",
+ "inferadb-ledger-state",
+ "inferadb-ledger-store",
+ "inferadb-ledger-test-utils",
+ "inferadb-ledger-types",
+ "openraft",
+ "parking_lot",
+ "proptest",
+ "prost",
+ "prost-types",
+ "rand 0.10.0",
+ "seahash",
+ "serde_json",
+ "sha2",
+ "snafu",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-reflection",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

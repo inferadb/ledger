@@ -24,6 +24,7 @@ inferadb-ledger-types.workspace = true
 inferadb-ledger-proto.workspace = true
 inferadb-ledger-state.workspace = true
 inferadb-ledger-raft.workspace = true
+inferadb-ledger-services.workspace = true
 
 # Raft consensus
 openraft.workspace = true

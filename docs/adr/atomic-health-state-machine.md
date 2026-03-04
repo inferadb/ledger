@@ -128,5 +128,5 @@ One-way transitions prevent a class of race conditions:
 ## References
 
 - `crates/raft/src/graceful_shutdown.rs` — `HealthState`, `NodePhase`, transition methods, 32 tests
-- `crates/raft/src/services/health.rs` — Three-probe pattern using `phase()` on every check
+- `crates/services/src/services/health.rs` — Three-probe pattern using `phase()` on every check
 - `crates/raft/src/runtime_config.rs` — `ArcSwap` used for multi-field config (contrast: different use case)

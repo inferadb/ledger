@@ -12,14 +12,13 @@ use inferadb_ledger_proto::proto::{
     RaftInstallSnapshotResponse, RaftLogId, RaftVoteRequest, RaftVoteResponse,
     TriggerElectionRequest, TriggerElectionResponse,
 };
-use inferadb_ledger_types::decode;
-use openraft::{Raft, Vote, raft::AppendEntriesRequest};
-use tonic::{Request, Response, Status};
-
-use crate::{
+use inferadb_ledger_raft::{
     raft_manager::RaftManager,
     types::{LedgerNodeId, LedgerTypeConfig},
 };
+use inferadb_ledger_types::decode;
+use openraft::{Raft, Vote, raft::AppendEntriesRequest};
+use tonic::{Request, Response, Status};
 
 /// Handles incoming vote, append-entries, and install-snapshot RPCs from peer Raft nodes.
 ///
@@ -217,7 +216,7 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         };
 
         if req.leader_term < current_term {
-            crate::metrics::record_trigger_election(false);
+            inferadb_ledger_raft::metrics::record_trigger_election(false);
             return Err(Status::failed_precondition(format!(
                 "Stale leader term: request term {} < current term {}",
                 req.leader_term, current_term
@@ -225,11 +224,11 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         }
 
         raft.trigger().elect().await.map_err(|e| {
-            crate::metrics::record_trigger_election(false);
+            inferadb_ledger_raft::metrics::record_trigger_election(false);
             Status::internal(format!("Failed to trigger election: {}", e))
         })?;
 
-        crate::metrics::record_trigger_election(true);
+        inferadb_ledger_raft::metrics::record_trigger_election(true);
         Ok(Response::new(TriggerElectionResponse {
             accepted: true,
             message: "Election triggered".to_string(),
@@ -251,11 +250,12 @@ mod tests {
         RaftMembershipConfig, RaftSnapshotMeta, RaftVote, RaftVoteRequest,
         raft_service_server::RaftService as RaftServiceProto,
     };
+    use inferadb_ledger_raft::{RaftManager, RaftManagerConfig, RegionConfig};
     use inferadb_ledger_test_utils::TestDir;
     use inferadb_ledger_types::Region;
     use tonic::Request;
 
-    use crate::{RaftManager, RaftManagerConfig, RegionConfig, services::raft::RaftService};
+    use super::RaftService;
 
     /// Creates a RaftService backed by a real single-node Raft instance.
     ///

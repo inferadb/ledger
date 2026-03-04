@@ -26,14 +26,7 @@
 use std::sync::Arc;
 
 use inferadb_ledger_proto::proto::BlockAnnouncement;
-use inferadb_ledger_state::{BlockArchive, StateLayer};
-use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::{OrganizationId, Region};
-use openraft::Raft;
-use tokio::sync::broadcast;
-use tonic::Status;
-
-use crate::{
+use inferadb_ledger_raft::{
     batching::BatchWriterHandle,
     log_storage::AppliedStateAccessor,
     metrics,
@@ -41,6 +34,12 @@ use crate::{
     region_router::{RegionRouter, RoutingInfo},
     types::LedgerTypeConfig,
 };
+use inferadb_ledger_state::{BlockArchive, StateLayer};
+use inferadb_ledger_store::FileBackend;
+use inferadb_ledger_types::{OrganizationId, Region};
+use openraft::Raft;
+use tokio::sync::broadcast;
+use tonic::Status;
 
 /// Resolved region context for handling a request locally.
 ///
@@ -64,8 +63,9 @@ pub struct RegionContext {
     ///
     /// When present, the proposal path drains this buffer and attaches
     /// commitments to the next `RaftPayload` for follower verification.
-    pub commitment_buffer:
-        Option<std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>>>,
+    pub commitment_buffer: Option<
+        std::sync::Arc<std::sync::Mutex<Vec<inferadb_ledger_raft::types::StateRootCommitment>>>,
+    >,
 }
 
 /// Information for forwarding a request to a remote region.
@@ -165,7 +165,7 @@ pub trait RegionResolver: Send + Sync {
 ///
 /// Used by the multi-region resolver where every region group provides its own
 /// block announcement channel.
-fn region_context_from(region: &crate::raft_manager::RegionGroup) -> RegionContext {
+fn region_context_from(region: &inferadb_ledger_raft::raft_manager::RegionGroup) -> RegionContext {
     RegionContext {
         raft: region.raft().clone(),
         state: region.state().clone(),
@@ -245,12 +245,16 @@ impl RegionResolver for RegionResolverService {
             self.router().ok_or_else(|| Status::unavailable("Region router not initialized"))?;
 
         let routing = router.get_routing(organization).map_err(|e| match e {
-            crate::region_router::RoutingError::OrganizationNotFound { .. } => Status::not_found(
-                format!("Organization {} not found in routing table", organization),
-            ),
-            crate::region_router::RoutingError::OrganizationUnavailable { status, .. } => {
-                Status::unavailable(format!("Organization {} is {:?}", organization, status))
+            inferadb_ledger_raft::region_router::RoutingError::OrganizationNotFound { .. } => {
+                Status::not_found(format!(
+                    "Organization {} not found in routing table",
+                    organization
+                ))
             },
+            inferadb_ledger_raft::region_router::RoutingError::OrganizationUnavailable {
+                status,
+                ..
+            } => Status::unavailable(format!("Organization {} is {:?}", organization, status)),
             _ => Status::internal(format!("Routing error: {}", e)),
         })?;
 
@@ -421,9 +425,8 @@ mod tests {
         // Verify the accessor exists and returns the manager's local_region.
         // Full integration test requires async Raft setup; here we test the
         // type-level wiring.
+        use inferadb_ledger_raft::raft_manager::{RaftManager, RaftManagerConfig};
         use inferadb_ledger_test_utils::TestDir;
-
-        use crate::raft_manager::{RaftManager, RaftManagerConfig};
 
         let temp = TestDir::new();
         let config =
@@ -436,9 +439,8 @@ mod tests {
 
     #[test]
     fn test_multi_region_resolver_supports_forwarding() {
+        use inferadb_ledger_raft::raft_manager::{RaftManager, RaftManagerConfig};
         use inferadb_ledger_test_utils::TestDir;
-
-        use crate::raft_manager::{RaftManager, RaftManagerConfig};
 
         let temp = TestDir::new();
         let config = RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::GLOBAL);

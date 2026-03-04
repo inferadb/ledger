@@ -13,7 +13,7 @@
 //! ```no_run
 //! # use inferadb_ledger_raft::log_storage::AppliedStateAccessor;
 //! # fn example(applied_state: &AppliedStateAccessor) -> Result<(), tonic::Status> {
-//! use inferadb_ledger_raft::services::slug_resolver::SlugResolver;
+//! use inferadb_ledger_services::services::slug_resolver::SlugResolver;
 //!
 //! let resolver = SlugResolver::new(applied_state.clone());
 //! // resolver.extract_and_resolve(&request.organization)?;
@@ -23,12 +23,11 @@
 //! ```
 
 use inferadb_ledger_proto::proto;
+use inferadb_ledger_raft::log_storage::AppliedStateAccessor;
 use inferadb_ledger_types::{
     OrganizationId, OrganizationSlug, UserId, UserSlug, VaultId, VaultSlug,
 };
 use tonic::Status;
-
-use crate::log_storage::AppliedStateAccessor;
 
 /// Resolves external slugs to internal IDs at gRPC service boundaries.
 ///
@@ -269,10 +268,10 @@ impl SlugResolver {
 mod tests {
     use std::sync::Arc;
 
+    use inferadb_ledger_raft::log_storage::AppliedState;
     use parking_lot::RwLock;
 
     use super::*;
-    use crate::log_storage::AppliedState;
 
     fn make_resolver(slug_entries: &[(u64, i64)]) -> SlugResolver {
         make_resolver_with_vaults(slug_entries, &[])

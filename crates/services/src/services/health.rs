@@ -10,17 +10,17 @@ use std::sync::{
 };
 
 use inferadb_ledger_proto::proto::{HealthCheckRequest, HealthCheckResponse, HealthStatus};
+use inferadb_ledger_raft::{
+    dependency_health::DependencyHealthChecker,
+    log_storage::{AppliedStateAccessor, VaultHealthStatus},
+    types::LedgerTypeConfig,
+};
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
 use openraft::Raft;
 use tonic::{Request, Response, Status};
 
-use crate::{
-    dependency_health::DependencyHealthChecker,
-    log_storage::{AppliedStateAccessor, VaultHealthStatus},
-    services::slug_resolver::SlugResolver,
-    types::LedgerTypeConfig,
-};
+use super::slug_resolver::SlugResolver;
 
 /// Health check service with three-probe Kubernetes support and dependency validation.
 ///
@@ -39,7 +39,7 @@ pub struct HealthService {
     /// Accessor for applied state (vault heights, health).
     applied_state: AppliedStateAccessor,
     /// Shared node health state for lifecycle probes.
-    health_state: crate::graceful_shutdown::HealthState,
+    health_state: inferadb_ledger_raft::graceful_shutdown::HealthState,
     /// Last observed Raft term for leader election detection.
     last_observed_term: AtomicU64,
     /// Dependency health checker for disk/peer/raft-lag validation.
@@ -52,7 +52,7 @@ impl HealthService {
         raft: Arc<Raft<LedgerTypeConfig>>,
         state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
-        health_state: crate::graceful_shutdown::HealthState,
+        health_state: inferadb_ledger_raft::graceful_shutdown::HealthState,
     ) -> Self {
         Self {
             raft,
@@ -153,14 +153,14 @@ impl inferadb_ledger_proto::proto::health_service_server::HealthService for Heal
 
         // Emit SLI metrics: quorum status and leader election detection
         let has_quorum = metrics.current_leader.is_some();
-        crate::metrics::set_cluster_quorum_status(has_quorum);
+        inferadb_ledger_raft::metrics::set_cluster_quorum_status(has_quorum);
 
         // Detect leader elections by observing Raft term changes
         let prev_term = self.last_observed_term.swap(metrics.current_term, Ordering::Relaxed);
         if prev_term > 0 && metrics.current_term > prev_term {
             // Term increased — a leader election occurred (possibly multiple)
             for _ in 0..(metrics.current_term - prev_term) {
-                crate::metrics::record_leader_election();
+                inferadb_ledger_raft::metrics::record_leader_election();
             }
         }
 
@@ -201,7 +201,7 @@ impl inferadb_ledger_proto::proto::health_service_server::HealthService for Heal
         // Determine health status based on node phase, Raft state, and dependencies
         let phase = self.health_state.phase();
         let (status, message) = match phase {
-            crate::graceful_shutdown::NodePhase::Starting => {
+            inferadb_ledger_raft::graceful_shutdown::NodePhase::Starting => {
                 // Run startup validation if checker is available
                 if let Some(checker) = &self.dependency_checker {
                     let startup_health = checker.check_startup();
@@ -218,13 +218,13 @@ impl inferadb_ledger_proto::proto::health_service_server::HealthService for Heal
                 }
                 (HealthStatus::Degraded, "Node is starting up")
             },
-            crate::graceful_shutdown::NodePhase::Draining => {
+            inferadb_ledger_raft::graceful_shutdown::NodePhase::Draining => {
                 (HealthStatus::Unavailable, "Node is draining — not accepting new writes")
             },
-            crate::graceful_shutdown::NodePhase::ShuttingDown => {
+            inferadb_ledger_raft::graceful_shutdown::NodePhase::ShuttingDown => {
                 (HealthStatus::Unavailable, "Node is shutting down")
             },
-            crate::graceful_shutdown::NodePhase::Ready => {
+            inferadb_ledger_raft::graceful_shutdown::NodePhase::Ready => {
                 if !deps_healthy {
                     (HealthStatus::Degraded, "Dependencies unhealthy")
                 } else if metrics.current_leader.is_some() {

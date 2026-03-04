@@ -25,6 +25,15 @@ use inferadb_ledger_proto::{
         VerifiedReadRequest, VerifiedReadResponse, WatchBlocksRequest,
     },
 };
+use inferadb_ledger_raft::{
+    log_storage::{AppliedStateAccessor, VaultHealthStatus},
+    logging::{OperationType, RequestContext, Sampler},
+    metrics,
+    pagination::{PageToken, PageTokenCodec},
+    raft_manager::RaftManager,
+    trace_context,
+    types::LedgerNodeId,
+};
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{OrganizationId, VaultId, VaultSlug};
@@ -32,20 +41,11 @@ use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
 
-use crate::{
-    log_storage::{AppliedStateAccessor, VaultHealthStatus},
-    logging::{OperationType, RequestContext, Sampler},
-    metrics,
-    pagination::{PageToken, PageTokenCodec},
-    raft_manager::RaftManager,
-    services::{
-        ForwardClient,
-        forward_client::LeaderChannelCache,
-        region_resolver::{RegionContext, RegionResolver, RemoteRegionInfo, ResolveResult},
-        slug_resolver::SlugResolver,
-    },
-    trace_context,
-    types::LedgerNodeId,
+use super::{
+    ForwardClient,
+    forward_client::LeaderChannelCache,
+    region_resolver::{RegionContext, RegionResolver, RemoteRegionInfo, ResolveResult},
+    slug_resolver::SlugResolver,
 };
 
 /// Handles read operations including verified reads, entity/relationship listing, and block
@@ -509,7 +509,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 let source_region =
                     self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
                 let forward_start = std::time::Instant::now();
-                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let deadline =
+                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
                 let mut client = self.get_forward_client(&remote).await?;
                 let result = client.forward_read(req, Some(&trace_ctx), deadline).await;
                 metrics::record_cross_region_forward(
@@ -528,7 +529,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Forward to leader if this follower is lagging behind
         if let Some(mut client) = self.should_forward_to_leader(&region)? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("read");
             return client.forward_read(req, Some(&trace_ctx), deadline).await;
         }
@@ -653,7 +655,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 let source_region =
                     self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
                 let forward_start = std::time::Instant::now();
-                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let deadline =
+                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
                 let mut client = self.get_forward_client(&remote).await?;
                 let result = client.forward_batch_read(req, Some(&trace_ctx), deadline).await;
                 metrics::record_cross_region_forward(
@@ -672,7 +675,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Forward to leader if this follower is lagging behind
         if let Some(mut client) = self.should_forward_to_leader(&region)? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("batch_read");
             return client.forward_batch_read(req, Some(&trace_ctx), deadline).await;
         }
@@ -822,7 +826,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 let source_region =
                     self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
                 let forward_start = std::time::Instant::now();
-                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let deadline =
+                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
                 let mut client = self.get_forward_client(&remote).await?;
                 let result = client.forward_verified_read(req, Some(&trace_ctx), deadline).await;
                 metrics::record_cross_region_forward(
@@ -841,7 +846,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Forward to leader if this follower is lagging behind
         if let Some(mut client) = self.should_forward_to_leader(&region)? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("verified_read");
             return client.forward_verified_read(req, Some(&trace_ctx), deadline).await;
         }
@@ -998,7 +1004,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 let source_region =
                     self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
                 let forward_start = std::time::Instant::now();
-                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let deadline =
+                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
                 let mut client = self.get_forward_client(&remote).await?;
                 let result = client.forward_historical_read(req, Some(&trace_ctx), deadline).await;
                 metrics::record_cross_region_forward(
@@ -1017,7 +1024,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Forward to leader if this follower is lagging behind
         if let Some(mut client) = self.should_forward_to_leader(&region)? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("historical_read");
             return client.forward_historical_read(req, Some(&trace_ctx), deadline).await;
         }
@@ -1238,7 +1246,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 let source_region =
                     self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
                 let forward_start = std::time::Instant::now();
-                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let deadline =
+                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
                 let mut client = self.get_forward_client(&remote).await?;
                 let resp = client.forward_watch_blocks(req, Some(&trace_ctx), deadline).await?;
                 metrics::record_cross_region_forward(
@@ -1257,7 +1266,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Forward to leader if this follower is lagging behind
         if let Some(mut client) = self.should_forward_to_leader(&region)? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("watch_blocks");
             let resp = client.forward_watch_blocks(req, Some(&trace_ctx), deadline).await?;
             return Ok(Response::new(Box::pin(resp.into_inner()) as Self::WatchBlocksStream));
@@ -1376,7 +1386,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 let source_region =
                     self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
                 let forward_start = std::time::Instant::now();
-                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let deadline =
+                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
                 let mut client = self.get_forward_client(&remote).await?;
                 let result = client.forward_get_block(req, Some(&trace_ctx), deadline).await;
                 metrics::record_cross_region_forward(
@@ -1395,7 +1406,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Forward to leader if this follower is lagging behind
         if let Some(mut client) = self.should_forward_to_leader(&region)? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("get_block");
             return client.forward_get_block(req, Some(&trace_ctx), deadline).await;
         }
@@ -1453,7 +1465,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 let source_region =
                     self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
                 let forward_start = std::time::Instant::now();
-                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let deadline =
+                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
                 let mut client = self.get_forward_client(&remote).await?;
                 let result = client.forward_get_block_range(req, Some(&trace_ctx), deadline).await;
                 metrics::record_cross_region_forward(
@@ -1472,7 +1485,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Forward to leader if this follower is lagging behind
         if let Some(mut client) = self.should_forward_to_leader(&region)? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("get_block_range");
             return client.forward_get_block_range(req, Some(&trace_ctx), deadline).await;
         }
@@ -1543,7 +1557,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 let source_region =
                     self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
                 let forward_start = std::time::Instant::now();
-                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let deadline =
+                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
                 let mut client = self.get_forward_client(&remote).await?;
                 let result = client.forward_get_tip(req, Some(&trace_ctx), deadline).await;
                 metrics::record_cross_region_forward(
@@ -1562,7 +1577,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Forward to leader if this follower is lagging behind
         if let Some(mut client) = self.should_forward_to_leader(&region)? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("get_tip");
             return client.forward_get_tip(req, Some(&trace_ctx), deadline).await;
         }
@@ -1617,7 +1633,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 let source_region =
                     self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
                 let forward_start = std::time::Instant::now();
-                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let deadline =
+                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
                 let mut client = self.get_forward_client(&remote).await?;
                 let result = client.forward_get_client_state(req, Some(&trace_ctx), deadline).await;
                 metrics::record_cross_region_forward(
@@ -1636,7 +1653,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Forward to leader if this follower is lagging behind
         if let Some(mut client) = self.should_forward_to_leader(&region)? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("get_client_state");
             return client.forward_get_client_state(req, Some(&trace_ctx), deadline).await;
         }
@@ -1674,7 +1692,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 let source_region =
                     self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
                 let forward_start = std::time::Instant::now();
-                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let deadline =
+                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
                 let mut client = self.get_forward_client(&remote).await?;
                 let result =
                     client.forward_list_relationships(req, Some(&trace_ctx), deadline).await;
@@ -1694,7 +1713,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Forward to leader if this follower is lagging behind
         if let Some(mut client) = self.should_forward_to_leader(&region)? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("list_relationships");
             return client.forward_list_relationships(req, Some(&trace_ctx), deadline).await;
         }
@@ -1830,7 +1850,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 let source_region =
                     self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
                 let forward_start = std::time::Instant::now();
-                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let deadline =
+                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
                 let mut client = self.get_forward_client(&remote).await?;
                 let result = client.forward_list_resources(req, Some(&trace_ctx), deadline).await;
                 metrics::record_cross_region_forward(
@@ -1849,7 +1870,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Forward to leader if this follower is lagging behind
         if let Some(mut client) = self.should_forward_to_leader(&region)? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("list_resources");
             return client.forward_list_resources(req, Some(&trace_ctx), deadline).await;
         }
@@ -1945,7 +1967,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 let source_region =
                     self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
                 let forward_start = std::time::Instant::now();
-                let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+                let deadline =
+                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
                 let mut client = self.get_forward_client(&remote).await?;
                 let result = client.forward_list_entities(req, Some(&trace_ctx), deadline).await;
                 metrics::record_cross_region_forward(
@@ -1964,7 +1987,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Forward to leader if this follower is lagging behind
         if let Some(mut client) = self.should_forward_to_leader(&region)? {
-            let deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("list_entities");
             return client.forward_list_entities(req, Some(&trace_ctx), deadline).await;
         }

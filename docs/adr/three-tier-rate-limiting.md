@@ -109,6 +109,6 @@ Per-client and per-organization buckets are stored in `HashMap` protected by `pa
 
 - `crates/raft/src/rate_limit.rs` — `RateLimiter`, `TokenBucket`, three-tier check logic
 - `crates/types/src/config.rs` — `RateLimitConfig` with defaults and validation
-- `crates/raft/src/services/write.rs` — `check_rate_limit()` integration, `RESOURCE_EXHAUSTED` mapping
+- `crates/services/src/services/write.rs` — `check_rate_limit()` integration, `RESOURCE_EXHAUSTED` mapping
 - `crates/raft/src/runtime_config.rs` — `AtomicU64`-based runtime reconfiguration
 - `DESIGN.md` §Write Path — "Rate limit check (3-tier: backpressure, organization, client)"

@@ -1406,17 +1406,17 @@ Key design decisions and their rationale:
 | DESIGN.md Section | Primary Source Files                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------ |
 | Block Structure   | `crates/types/src/types.rs`                                                          |
-| Write Path        | `crates/raft/src/services/write.rs`                                                  |
-| Read Path         | `crates/raft/src/services/read.rs`                                                   |
+| Write Path        | `crates/services/src/services/write.rs`                                                  |
+| Read Path         | `crates/services/src/services/read.rs`                                                   |
 | State Layer       | `crates/state/src/state.rs`                                                          |
 | Storage Backend   | `crates/store/src/db.rs`, `crates/store/src/tables.rs`                               |
 | Region Router     | `crates/raft/src/region_router.rs`                                                   |
-| Region Resolver   | `crates/raft/src/services/region_resolver.rs`                                        |
+| Region Resolver   | `crates/services/src/services/region_resolver.rs`                                        |
 | Raft Consensus    | `crates/raft/src/raft_manager.rs`, `crates/raft/src/raft_network.rs`                 |
 | ID Generation     | `crates/types/src/types.rs` (`define_id!` macro)                                     |
 | Key Encoding      | `crates/state/src/keys.rs`                                                           |
 | Batching          | `crates/raft/src/batching.rs`                                                        |
-| Health Checks     | `crates/raft/src/services/health.rs`, `crates/raft/src/dependency_health.rs`         |
+| Health Checks     | `crates/services/src/services/health.rs`, `crates/raft/src/dependency_health.rs`         |
 | Graceful Shutdown | `crates/raft/src/graceful_shutdown.rs`                                               |
 | Metrics           | `crates/raft/src/metrics.rs`                                                         |
 | Snapshots         | `crates/state/src/snapshot.rs`                                                       |

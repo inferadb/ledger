@@ -16,6 +16,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::Utc;
 use inferadb_ledger_proto::proto;
+use inferadb_ledger_raft::{
+    event_writer::IngestionRateLimiter,
+    log_storage::AppliedStateAccessor,
+    metrics,
+    pagination::{EventPageToken, PageTokenCodec},
+};
 use inferadb_ledger_state::{EventStore, EventsDatabase};
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
@@ -25,13 +31,7 @@ use inferadb_ledger_types::{
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use crate::{
-    event_writer::IngestionRateLimiter,
-    log_storage::AppliedStateAccessor,
-    metrics,
-    pagination::{EventPageToken, PageTokenCodec},
-    services::slug_resolver::SlugResolver,
-};
+use super::slug_resolver::SlugResolver;
 
 /// Default limit for `ListEvents` when the request specifies 0.
 const DEFAULT_LIMIT: usize = 100;
@@ -738,6 +738,10 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use inferadb_ledger_proto::proto::events_service_server::EventsService as EventsServiceProto;
+    use inferadb_ledger_raft::{
+        event_writer::IngestionRateLimiter,
+        log_storage::{AppliedState, AppliedStateAccessor},
+    };
     use inferadb_ledger_state::EventsDatabase;
     use inferadb_ledger_store::InMemoryBackend;
     use inferadb_ledger_types::{
@@ -750,10 +754,6 @@ mod tests {
     use parking_lot::RwLock;
 
     use super::*;
-    use crate::{
-        event_writer::IngestionRateLimiter,
-        log_storage::{AppliedState, AppliedStateAccessor},
-    };
 
     fn make_test_service() -> EventsService<InMemoryBackend> {
         let events_db = EventsDatabase::open_in_memory().expect("open");

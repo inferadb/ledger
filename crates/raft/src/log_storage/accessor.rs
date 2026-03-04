@@ -264,7 +264,7 @@ impl AppliedStateAccessor {
     }
 
     /// Creates an accessor from a pre-built state (for testing).
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn new_for_test(state: Arc<RwLock<AppliedState>>) -> Self {
         Self { state }
     }

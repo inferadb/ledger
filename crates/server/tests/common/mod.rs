@@ -38,8 +38,9 @@ pub fn allocate_ports(count: u16) -> u16 {
 
 use inferadb_ledger_proto::proto::{JoinClusterRequest, admin_service_client::AdminServiceClient};
 use inferadb_ledger_raft::{
-    LedgerServer, LedgerTypeConfig, RaftManager, RaftManagerConfig, RegionConfig, RegionGroup,
+    LedgerTypeConfig, RaftManager, RaftManagerConfig, RegionConfig, RegionGroup,
 };
+use inferadb_ledger_services::LedgerServer;
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_test_utils::TestDir;

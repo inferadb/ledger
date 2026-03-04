@@ -1,0 +1,64 @@
+[package]
+name = "inferadb-ledger-services"
+description = "gRPC services and server assembly for InferaDB Ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Internal
+inferadb-ledger-types.workspace = true
+inferadb-ledger-proto.workspace = true
+inferadb-ledger-state.workspace = true
+inferadb-ledger-store.workspace = true
+inferadb-ledger-raft.workspace = true
+
+# gRPC
+tonic.workspace = true
+tonic-prost.workspace = true
+tonic-reflection.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+tower.workspace = true
+
+# Async
+tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
+
+# Concurrency
+parking_lot.workspace = true
+
+# Builder pattern
+bon.workspace = true
+
+# Crypto
+sha2.workspace = true
+seahash.workspace = true
+rand.workspace = true
+
+# Utilities
+chrono.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+tempfile.workspace = true
+
+# Raft (for type bounds in service signatures)
+openraft.workspace = true
+
+# Serialization (used by proto_compat, runtime_config)
+serde_json.workspace = true
+
+# Error handling
+snafu.workspace = true
+
+[dev-dependencies]
+inferadb-ledger-test-utils.workspace = true
+tracing-subscriber.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

@@ -6,14 +6,13 @@
 use std::sync::Arc;
 
 use inferadb_ledger_proto::proto;
+use inferadb_ledger_raft::{graceful_shutdown::HealthState, metrics, rate_limit::RateLimiter};
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{OrganizationId, VaultId, config::ValidationConfig, validation};
 use tempfile::TempDir;
 use tonic::Status;
 use tracing::warn;
-
-use crate::{graceful_shutdown::HealthState, metrics, rate_limit::RateLimiter};
 
 /// Rejects the request if the node is draining (not accepting new proposals).
 ///
@@ -151,7 +150,7 @@ pub(crate) fn validate_operations(
 /// to the hot key detector. This runs after rate limiting but before
 /// Raft proposal, tracking all non-duplicate, non-rate-limited accesses.
 pub(crate) fn record_hot_keys(
-    hot_key_detector: Option<&Arc<crate::hot_key_detector::HotKeyDetector>>,
+    hot_key_detector: Option<&Arc<inferadb_ledger_raft::hot_key_detector::HotKeyDetector>>,
     vault: VaultId,
     operations: &[proto::Operation],
 ) {

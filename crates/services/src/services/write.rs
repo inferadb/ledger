@@ -12,17 +12,7 @@ use inferadb_ledger_proto::proto::{
     BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, TxId, WriteError, WriteErrorCode,
     WriteRequest, WriteResponse, WriteSuccess,
 };
-use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::{
-    OrganizationId, OrganizationSlug, SetCondition, VaultId, VaultSlug, config::ValidationConfig,
-};
-use tonic::{Request, Response, Status};
-use tracing::{debug, warn};
-use uuid::Uuid;
-
-use super::forward_client::{ForwardClient, LeaderChannelCache};
-pub(crate) use super::metadata::{response_with_correlation, status_with_correlation};
-use crate::{
+use inferadb_ledger_raft::{
     batching::BatchError,
     error::classify_raft_error,
     idempotency::IdempotencyCache,
@@ -31,12 +21,22 @@ use crate::{
     proof::{self, ProofError},
     raft_manager::RaftManager,
     rate_limit::RateLimiter,
-    services::{
-        region_resolver::{RegionContext, RegionResolver, RemoteRegionInfo, ResolveResult},
-        slug_resolver::SlugResolver,
-    },
     trace_context,
     types::{LedgerRequest, LedgerResponse, RaftPayload},
+};
+use inferadb_ledger_store::FileBackend;
+use inferadb_ledger_types::{
+    OrganizationId, OrganizationSlug, SetCondition, VaultId, VaultSlug, config::ValidationConfig,
+};
+use tonic::{Request, Response, Status};
+use tracing::{debug, warn};
+use uuid::Uuid;
+
+pub(crate) use super::metadata::{response_with_correlation, status_with_correlation};
+use super::{
+    forward_client::{ForwardClient, LeaderChannelCache},
+    region_resolver::{RegionContext, RegionResolver, RemoteRegionInfo, ResolveResult},
+    slug_resolver::SlugResolver,
 };
 
 /// Classifies a batch writer error into the appropriate `tonic::Status`.
@@ -77,7 +77,7 @@ pub struct WriteService {
     node_id: Option<u64>,
     /// Hot key detector for identifying frequently accessed keys.
     #[builder(default)]
-    hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
+    hot_key_detector: Option<Arc<inferadb_ledger_raft::hot_key_detector::HotKeyDetector>>,
     /// Input validation configuration for request field limits.
     #[builder(default = Arc::new(ValidationConfig::default()))]
     validation_config: Arc<ValidationConfig>,
@@ -88,7 +88,7 @@ pub struct WriteService {
     proposal_timeout: Duration,
     /// Handler-phase event handle for recording denial events.
     #[builder(default)]
-    event_handle: Option<crate::event_writer::EventHandle<FileBackend>>,
+    event_handle: Option<inferadb_ledger_raft::event_writer::EventHandle<FileBackend>>,
     /// Cached leader channel for write forwarding.
     ///
     /// Shared across requests to avoid creating a new TCP+HTTP/2 connection
@@ -97,7 +97,7 @@ pub struct WriteService {
     leader_channel_cache: LeaderChannelCache,
     /// Health state for drain-phase write rejection.
     #[builder(default)]
-    health_state: Option<crate::graceful_shutdown::HealthState>,
+    health_state: Option<inferadb_ledger_raft::graceful_shutdown::HealthState>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -113,7 +113,7 @@ impl WriteService {
     #[must_use]
     pub fn with_hot_key_detector(
         mut self,
-        detector: Arc<crate::hot_key_detector::HotKeyDetector>,
+        detector: Arc<inferadb_ledger_raft::hot_key_detector::HotKeyDetector>,
     ) -> Self {
         self.hot_key_detector = Some(detector);
         self
@@ -137,7 +137,7 @@ impl WriteService {
     #[must_use]
     pub fn with_event_handle(
         mut self,
-        handle: crate::event_writer::EventHandle<FileBackend>,
+        handle: inferadb_ledger_raft::event_writer::EventHandle<FileBackend>,
     ) -> Self {
         self.event_handle = Some(handle);
         self
@@ -147,7 +147,7 @@ impl WriteService {
     #[must_use]
     pub fn with_health_state(
         mut self,
-        health_state: crate::graceful_shutdown::HealthState,
+        health_state: inferadb_ledger_raft::graceful_shutdown::HealthState,
     ) -> Self {
         self.health_state = Some(health_state);
         self
@@ -484,7 +484,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         request: Request<WriteRequest>,
     ) -> Result<Response<WriteResponse>, Status> {
         // Reject requests with insufficient remaining deadline
-        crate::deadline::check_near_deadline(&request)?;
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
@@ -514,7 +514,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             // Pre-flight: validation on originating node
             if let Err(status) = self.validate_operations(&req.operations) {
                 self.record_handler_event(
-                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                         inferadb_ledger_types::events::EventAction::RequestValidationFailed,
                         organization_id,
                         req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
@@ -533,7 +533,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             // Pre-flight: rate limit on originating node
             if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
                 self.record_handler_event(
-                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                         inferadb_ledger_types::events::EventAction::RequestRateLimited,
                         organization_id,
                         req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
@@ -559,7 +559,8 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 "Forwarding write to remote region"
             );
             let forward_start = std::time::Instant::now();
-            let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let grpc_deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             let mut client = self.get_forward_client(&remote).await?;
             let result = client.forward_write(req, Some(&trace_ctx), grpc_deadline).await;
             metrics::record_cross_region_forward(
@@ -578,7 +579,8 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
 
         // Forward to within-region leader if this node is a follower
         if let Some(mut client) = self.forward_client_if_follower(&region)? {
-            let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let grpc_deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             return client.forward_write(req, Some(&trace_ctx), grpc_deadline).await;
         }
 
@@ -610,7 +612,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         // Validate all operations before any processing
         if let Err(status) = self.validate_operations(&req.operations) {
             self.record_handler_event(
-                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::RequestValidationFailed,
                     organization_id,
                     req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
@@ -641,7 +643,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         ctx.set_bytes_written(Self::estimate_operations_bytes(&req.operations));
 
         // Check idempotency cache for duplicate
-        use crate::idempotency::IdempotencyCheckResult;
+        use inferadb_ledger_raft::idempotency::IdempotencyCheckResult;
         match self.idempotency.check(
             organization_id,
             vault_id,
@@ -699,7 +701,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 // Moka miss — check replicated state for cross-failover dedup
                 ctx.set_idempotency_hit(false);
                 {
-                    use crate::log_storage::IdempotencyCheckResult as ReplicatedCheck;
+                    use inferadb_ledger_raft::log_storage::IdempotencyCheckResult as ReplicatedCheck;
                     match region.applied_state.client_idempotency_check(
                         organization_id,
                         vault_id,
@@ -769,7 +771,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
             ctx.set_rate_limited();
             self.record_handler_event(
-                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::RequestRateLimited,
                     organization_id,
                     req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
@@ -802,8 +804,10 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         )?;
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
-        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+        let grpc_deadline =
+            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout =
+            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         // Submit to Raft via batch writer (if available for this region) or direct proposal
         metrics::record_raft_proposal();
@@ -1028,7 +1032,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         request: Request<BatchWriteRequest>,
     ) -> Result<Response<BatchWriteResponse>, Status> {
         // Reject requests with insufficient remaining deadline
-        crate::deadline::check_near_deadline(&request)?;
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
@@ -1062,7 +1066,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             // Pre-flight: validation on originating node
             if let Err(status) = self.validate_operations(&all_operations) {
                 self.record_handler_event(
-                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                         inferadb_ledger_types::events::EventAction::RequestValidationFailed,
                         organization_id,
                         req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
@@ -1081,7 +1085,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             // Pre-flight: rate limit on originating node
             if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
                 self.record_handler_event(
-                    crate::event_writer::HandlerPhaseEmitter::for_organization(
+                    inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                         inferadb_ledger_types::events::EventAction::RequestRateLimited,
                         organization_id,
                         req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
@@ -1108,7 +1112,8 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 "Forwarding batch_write to remote region"
             );
             let forward_start = std::time::Instant::now();
-            let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let grpc_deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             let mut client = self.get_forward_client(&remote).await?;
             let result = client.forward_batch_write(req, Some(&trace_ctx), grpc_deadline).await;
             metrics::record_cross_region_forward(
@@ -1127,7 +1132,8 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
 
         // Forward to within-region leader if this node is a follower
         if let Some(mut client) = self.forward_client_if_follower(&region)? {
-            let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
+            let grpc_deadline =
+                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             return client.forward_batch_write(req, Some(&trace_ctx), grpc_deadline).await;
         }
 
@@ -1169,7 +1175,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         // Validate all operations before any processing
         if let Err(status) = self.validate_operations(&all_operations) {
             self.record_handler_event(
-                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::RequestValidationFailed,
                     organization_id,
                     req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
@@ -1198,7 +1204,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         ctx.set_bytes_written(Self::estimate_operations_bytes(&all_operations));
 
         // Check idempotency cache for duplicate
-        use crate::idempotency::IdempotencyCheckResult;
+        use inferadb_ledger_raft::idempotency::IdempotencyCheckResult;
         match self.idempotency.check(
             organization_id,
             vault_id,
@@ -1260,7 +1266,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 // Moka miss — check replicated state for cross-failover dedup
                 ctx.set_idempotency_hit(false);
                 {
-                    use crate::log_storage::IdempotencyCheckResult as ReplicatedCheck;
+                    use inferadb_ledger_raft::log_storage::IdempotencyCheckResult as ReplicatedCheck;
                     match region.applied_state.client_idempotency_check(
                         organization_id,
                         vault_id,
@@ -1330,7 +1336,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
             ctx.set_rate_limited();
             self.record_handler_event(
-                crate::event_writer::HandlerPhaseEmitter::for_organization(
+                inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                     inferadb_ledger_types::events::EventAction::RequestRateLimited,
                     organization_id,
                     req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
@@ -1364,8 +1370,10 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         )?;
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
-        let grpc_deadline = crate::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout = crate::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+        let grpc_deadline =
+            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
+        let timeout =
+            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
         // Submit to Raft — batch_write always uses direct proposal (not batch writer)
         metrics::record_raft_proposal();

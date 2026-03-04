@@ -76,7 +76,7 @@ TLS is supported for transport encryption (defense in depth) but not enforced fo
 
 ## References
 
-- `crates/raft/src/server.rs` — Server setup with no auth middleware; only `api_version_interceptor`
+- `crates/services/src/server.rs` — Server setup with no auth middleware; only `api_version_interceptor`
 - `crates/types/src/types.rs` — `Transaction.actor` field for audit attribution
 - `crates/server/src/config.rs` — Default localhost binding, no auth configuration options
 - `docs/operations/security.md` — Network trust model documentation

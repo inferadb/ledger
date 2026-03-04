@@ -684,7 +684,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 ## Crate: `inferadb-ledger-raft`
 
-- **Purpose**: Raft consensus integration with openraft, gRPC services, batching, rate limiting, multi-region support, and 40+ production features.
+- **Purpose**: Raft consensus infrastructure with openraft, batching, rate limiting, background jobs, and 30+ production features. gRPC services live in `inferadb-ledger-services`.
 - **Dependencies**: `types`, `store`, `state`, `proto`, `openraft`, `tonic`
 - **Quality Rating**: ★★★★☆
 
@@ -694,7 +694,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Public API surface (2 stable modules: `metrics`, `trace_context`; remaining modules including `snapshot` are `#[doc(hidden)]`)
 - **Key Types/Functions**:
-- Re-exports: `LedgerServer`, `LedgerTypeConfig`, `LedgerNodeId`, `RaftLogStore`, `RateLimiter`, `HotKeyDetector`, `GracefulShutdown`, `EventsGarbageCollector`, `SagaOrchestrator`, `OrphanCleanupJob`, `IntegrityScrubberJob`, etc.
+- Re-exports: `LedgerTypeConfig`, `LedgerNodeId`, `RaftLogStore`, `RateLimiter`, `HotKeyDetector`, `GracefulShutdown`, `EventsGarbageCollector`, `SagaOrchestrator`, `OrphanCleanupJob`, `IntegrityScrubberJob`, etc. (`LedgerServer` moved to `inferadb-ledger-services`)
 - Note: `LedgerRequest` is NOT re-exported (access via `types::LedgerRequest`). `RaftPayload` is NOT re-exported either (access via `log_storage` internals). `RaftPayload` wraps `LedgerRequest` with `proposed_at` for deterministic timestamps.
 - 30+ `#[doc(hidden)] pub mod` declarations for server-internal infrastructure (includes `event_writer`, `events_gc`, `snapshot`, `leader_transfer`)
 - **Insights**: Phase 2 Task 2 cleaned up public API. 2 stable modules + many doc-hidden modules. `leader_transfer` module added for graceful leadership handoff. Excellent encapsulation.
@@ -742,7 +742,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - Unit tests: config defaults, custom config, guard reset, concurrent lock prevention, error display
 - **Insights**: Composes transfer from openraft primitives (no built-in `transfer_leader()` API). Accepts _any_ new leader (not just requested target) — pragmatic for "stop being leader before shutdown." Concurrency guard shared between AdminService RPC and GracefulShutdown.
 
-#### `server.rs`
+#### `server.rs` (in `inferadb-ledger-services`)
 
 - **Purpose**: LedgerServer builder with all gRPC services and Raft integration
 - **Key Types/Functions**:
@@ -778,7 +778,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `is_leadership_error(msg: &str) -> bool`: Detects leadership errors for UNAVAILABLE
 - **Insights**: Comprehensive error classification across multiple domains. Clients can retry UNAVAILABLE (leadership change), not FAILED_PRECONDITION.
 
-### Service Layer
+### Service Layer (in `inferadb-ledger-services`)
 
 #### `services/admin.rs`
 
@@ -875,7 +875,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `runtime_config.rs`: Hot-reload via UpdateConfig RPC + ArcSwap
 - `backup.rs`: Snapshot-based backups with S3/GCS/Azure
 - `auto_recovery.rs`: Automatic divergence recovery
-- `api_version.rs`: API version negotiation
+- `api_version.rs`: API version negotiation (in `inferadb-ledger-services`)
 - `deadline.rs`: Request deadline propagation
 - `dependency_health.rs`: Disk/Raft/peer health checks
 
@@ -889,13 +889,13 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `integrity_scrubber.rs`: Page CRC verification — runs on all nodes (not leader-only), wraps sync I/O in `spawn_blocking`, watchdog integration, configurable via `IntegrityConfig`
 - `learner_refresh.rs`: Read replica refresh
 - `orphan_cleanup.rs`: Orphaned membership cleanup — leader-only, correct organization-scoped vault listing, paginated user iteration, `tokio::task::yield_now()` between orgs for I/O throttling, watchdog/metrics integration, configurable via `CleanupConfig`
-- `peer_maintenance.rs`: Peer health checks
+- `peer_maintenance.rs`: Peer health checks (in `inferadb-ledger-services`)
 
 #### Advanced Features
 
 - `raft_manager.rs`: `RaftManager` orchestration — manages multiple `RegionGroup` instances, each with its own Raft, state, and block archive. `RaftManagerConfig`, `RaftManagerError`, `RaftManagerStats` types. Supports `start_system_region()`, `start_data_region()`, `register_external_region()`, `get_region_group()`. Every `LedgerServer` is inherently multi-region capable (single-region is simply one GLOBAL region)
 - `raft_network.rs`: gRPC-based Raft transport
-- `proto_compat.rs`: Orphan rule workarounds (`organization_status_to_proto`)
+- `proto_compat.rs`: Orphan rule workarounds (`organization_status_to_proto`) (in `inferadb-ledger-services`)
 - `trace_context.rs`: W3C Trace Context
 - `logging.rs`: Canonical log lines (vault field, `set_target(organization, vault)`)
 - `proof.rs`: Merkle proof generation (accepts `vault_slug: Option<VaultSlug>` parameter)

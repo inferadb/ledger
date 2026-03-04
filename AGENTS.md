@@ -107,13 +107,15 @@ cargo +1.92 clippy --all-targets -- -D warnings
 ```
 gRPC Services: ReadService | WriteService | AdminService | HealthService
        ↓
-inferadb-ledger-raft    — Raft consensus, log storage, batching, idempotency
+inferadb-ledger-services — gRPC service implementations, server assembly
        ↓
-inferadb-ledger-state   — Entity/Relationship stores, state roots, indexes
+inferadb-ledger-raft     — Raft consensus, log storage, batching, idempotency
        ↓
-inferadb-ledger-store   — B+ tree engine, pages, transactions, backends
+inferadb-ledger-state    — Entity/Relationship stores, state roots, indexes
        ↓
-inferadb-ledger-types   — Hash primitives, Merkle proofs, config, errors
+inferadb-ledger-store    — B+ tree engine, pages, transactions, backends
+       ↓
+inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors
 ```
 
 **Crates:**
@@ -121,7 +123,8 @@ inferadb-ledger-types   — Hash primitives, Merkle proofs, config, errors
 - `types` — SHA-256/seahash, merkle tree, snafu errors
 - `store` — B+ tree engine, page management, memory/file backends
 - `state` — Domain state, entity/relationship CRUD, state root computation
-- `raft` — openraft integration, gRPC services, transaction batching
+- `raft` — openraft integration, transaction batching, background jobs
+- `services` — gRPC service implementations, server assembly
 - `server` — Binary, bootstrap, config, node ID generation
 
 **Key types:**

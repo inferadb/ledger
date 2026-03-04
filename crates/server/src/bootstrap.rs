@@ -14,11 +14,12 @@ use std::{
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_raft::{
     AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, EventsGarbageCollector,
-    GrpcRaftNetworkFactory, IntegrityScrubberJob, LearnerRefreshJob, LedgerNodeId, LedgerServer,
+    GrpcRaftNetworkFactory, IntegrityScrubberJob, LearnerRefreshJob, LedgerNodeId,
     LedgerTypeConfig, OrphanCleanupJob, RaftLogStore, RaftManager, RaftManagerConfig,
     ResourceMetricsCollector, RuntimeConfigHandle, SagaOrchestrator, TtlGarbageCollector,
     event_writer::{EventHandle, EventWriter},
 };
+use inferadb_ledger_services::LedgerServer;
 use inferadb_ledger_state::{
     BlockArchive, LocalBackend, ObjectStorageBackend, SnapshotManager, StateLayer,
     TieredSnapshotManager,

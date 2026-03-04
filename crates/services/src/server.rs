@@ -16,16 +16,16 @@ use inferadb_ledger_proto::proto::{
     system_discovery_service_server::SystemDiscoveryServiceServer,
     write_service_server::WriteServiceServer,
 };
+use inferadb_ledger_raft::{
+    graceful_shutdown::ConnectionTrackingLayer, idempotency::IdempotencyCache,
+    raft_manager::RaftManager, rate_limit::RateLimiter,
+};
 use inferadb_ledger_store::FileBackend;
 use tonic::transport::Server;
 use tower::ServiceBuilder;
 
 use crate::{
     api_version::{ApiVersionLayer, api_version_interceptor},
-    graceful_shutdown::ConnectionTrackingLayer,
-    idempotency::IdempotencyCache,
-    raft_manager::RaftManager,
-    rate_limit::RateLimiter,
     services::{
         AdminService, DiscoveryService, EventsService, HealthService, RaftService, ReadService,
         RegionResolver, RegionResolverService, WriteService,
@@ -63,10 +63,10 @@ pub struct LedgerServer {
     organization_rate_limiter: Option<Arc<RateLimiter>>,
     /// Hot key detector for identifying frequently accessed keys (optional).
     #[builder(default)]
-    hot_key_detector: Option<Arc<crate::hot_key_detector::HotKeyDetector>>,
+    hot_key_detector: Option<Arc<inferadb_ledger_raft::hot_key_detector::HotKeyDetector>>,
     /// Node health state for three-probe health checking.
     #[builder(default)]
-    health_state: crate::graceful_shutdown::HealthState,
+    health_state: inferadb_ledger_raft::graceful_shutdown::HealthState,
     /// Shutdown signal receiver. When `true` is sent, the server stops.
     #[builder(default)]
     shutdown_rx: Option<tokio::sync::watch::Receiver<bool>>,
@@ -81,10 +81,10 @@ pub struct LedgerServer {
     /// When provided, the `AdminService` exposes `UpdateConfig`/`GetConfig`
     /// RPCs that atomically swap the live config via `ArcSwap`.
     #[builder(default)]
-    runtime_config: Option<crate::runtime_config::RuntimeConfigHandle>,
+    runtime_config: Option<inferadb_ledger_raft::runtime_config::RuntimeConfigHandle>,
     /// Backup manager for `CreateBackup`/`ListBackups`/`RestoreBackup` RPCs.
     #[builder(default)]
-    backup_manager: Option<Arc<crate::backup::BackupManager>>,
+    backup_manager: Option<Arc<inferadb_ledger_raft::backup::BackupManager>>,
     /// Snapshot manager for backup creation and restore operations.
     #[builder(default)]
     snapshot_manager: Option<Arc<inferadb_ledger_state::SnapshotManager>>,
@@ -107,7 +107,7 @@ pub struct LedgerServer {
     events_db: Option<inferadb_ledger_state::EventsDatabase<FileBackend>>,
     /// Handler-phase event handle for recording denial and admin events.
     #[builder(default)]
-    event_handle: Option<crate::event_writer::EventHandle<FileBackend>>,
+    event_handle: Option<inferadb_ledger_raft::event_writer::EventHandle<FileBackend>>,
     /// Geographic region this node belongs to.
     ///
     /// Included in discovery responses so peers know this node's region.
@@ -233,7 +233,7 @@ impl LedgerServer {
         // Attach dependency health checker if data_dir is provided
         let health_service = if let Some(data_dir) = self.data_dir {
             let config = self.health_check_config.unwrap_or_default();
-            let checker = crate::dependency_health::DependencyHealthChecker::new(
+            let checker = inferadb_ledger_raft::dependency_health::DependencyHealthChecker::new(
                 system.raft().clone(),
                 data_dir,
                 config,
@@ -291,22 +291,27 @@ impl LedgerServer {
             // Extract ingestion fields from EventHandle when available.
             // The EventHandle carries the event config and node_id needed
             // for IngestEvents validation and handler-phase event emission.
-            let (event_config, node_id, ingestion_rate_limiter) =
-                if let Some(ref handle) = self.event_handle {
-                    let rate_limit = handle.config().ingestion.ingest_rate_limit_per_source;
-                    (
-                        Some(Arc::clone(handle.config_arc())),
-                        Some(handle.node_id()),
-                        Some(Arc::new(crate::event_writer::IngestionRateLimiter::new(rate_limit))),
-                    )
-                } else {
-                    (None, None, None)
-                };
+            let (event_config, node_id, ingestion_rate_limiter) = if let Some(ref handle) =
+                self.event_handle
+            {
+                let rate_limit = handle.config().ingestion.ingest_rate_limit_per_source;
+                (
+                    Some(Arc::clone(handle.config_arc())),
+                    Some(handle.node_id()),
+                    Some(Arc::new(inferadb_ledger_raft::event_writer::IngestionRateLimiter::new(
+                        rate_limit,
+                    ))),
+                )
+            } else {
+                (None, None, None)
+            };
 
             let events_service = EventsService::builder()
                 .events_db(events_db)
                 .applied_state(system.applied_state().clone())
-                .page_token_codec(crate::pagination::PageTokenCodec::with_random_key())
+                .page_token_codec(
+                    inferadb_ledger_raft::pagination::PageTokenCodec::with_random_key(),
+                )
                 .maybe_event_config(event_config)
                 .maybe_node_id(node_id)
                 .maybe_ingestion_rate_limiter(ingestion_rate_limiter)
@@ -350,7 +355,7 @@ impl LedgerServer {
     #[must_use]
     pub fn with_backup(
         mut self,
-        backup_manager: Arc<crate::backup::BackupManager>,
+        backup_manager: Arc<inferadb_ledger_raft::backup::BackupManager>,
         snapshot_manager: Arc<inferadb_ledger_state::SnapshotManager>,
     ) -> Self {
         self.backup_manager = Some(backup_manager);

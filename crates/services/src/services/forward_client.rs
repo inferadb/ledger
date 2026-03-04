@@ -8,7 +8,7 @@
 //!
 //! ```no_run
 //! # use std::net::SocketAddr;
-//! # use inferadb_ledger_raft::services::ForwardClient;
+//! # use inferadb_ledger_services::services::ForwardClient;
 //! # use inferadb_ledger_raft::region_router::RegionConnection;
 //! # use inferadb_ledger_types::Region;
 //! # use inferadb_ledger_proto::proto::ReadRequest;
@@ -40,14 +40,13 @@ use inferadb_ledger_proto::proto::{
     WatchBlocksRequest, WriteRequest, WriteResponse, read_service_client::ReadServiceClient,
     write_service_client::WriteServiceClient,
 };
-use inferadb_ledger_types::Region;
-use tonic::{Request, Response, Status, transport::Channel};
-use tracing::{debug, warn};
-
-use crate::{
+use inferadb_ledger_raft::{
     region_router::RegionConnection,
     trace_context::{self, TraceContext},
 };
+use inferadb_ledger_types::Region;
+use tonic::{Request, Response, Status, transport::Channel};
+use tracing::{debug, warn};
 
 /// Default timeout for forwarded requests.
 const DEFAULT_FORWARD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -103,7 +102,10 @@ impl ForwardClient {
         grpc_deadline: Option<Duration>,
     ) -> Request<T> {
         let mut req = Request::new(message);
-        let timeout = crate::deadline::forwarding_timeout(grpc_deadline, DEFAULT_FORWARD_TIMEOUT);
+        let timeout = inferadb_ledger_raft::deadline::forwarding_timeout(
+            grpc_deadline,
+            DEFAULT_FORWARD_TIMEOUT,
+        );
         req.set_timeout(timeout);
         if let Some(ctx) = trace_ctx {
             let child = ctx.child();

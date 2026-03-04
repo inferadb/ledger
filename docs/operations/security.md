@@ -211,7 +211,7 @@ Ledger uses Raft (a crash-fault-tolerant protocol) for consensus. While Raft ass
 - Stale-term messages are silently dropped per the Raft protocol
 - Multi-region routing validates region existence before forwarding
 
-These properties are verified by 22 Byzantine fault tests in `crates/raft/src/services/raft.rs`.
+These properties are verified by 22 Byzantine fault tests in `crates/services/src/services/raft.rs`.
 
 ### Security Boundaries
 

@@ -138,7 +138,7 @@ This is negligible compared to typical Raft node memory (multi-GB for page cache
 ## References
 
 - `crates/raft/src/idempotency.rs` — `IdempotencyCache`, `IdempotencyKey`, `CachedResult`
-- `crates/raft/src/services/write.rs` — `hash_operations()`, idempotency check before Raft proposal
+- `crates/services/src/services/write.rs` — `hash_operations()`, idempotency check before Raft proposal
 - `docs/adr/server-assigned-sequences.md` — Context for server-assigned idempotency model
 - `Cargo.toml` — `moka = { version = "0.12", features = ["sync"] }`
 - O'Neil, O'Neil, Gerber, "The LRU-K Page Replacement Algorithm For Database Disk Buffering" (1993) — LRU limitations

@@ -6,6 +6,7 @@ members = [
     "crates/state",
     "crates/proto",
     "crates/raft",
+    "crates/services",
     "crates/server",
     "crates/sdk",
     "crates/test-utils",
@@ -130,6 +131,7 @@ inferadb-ledger-store = { version = "0.1.0", path = "crates/store" }
 inferadb-ledger-state = { version = "0.1.0", path = "crates/state" }
 inferadb-ledger-proto = { version = "0.1.0", path = "crates/proto" }
 inferadb-ledger-raft = { version = "0.1.0", path = "crates/raft" }
+inferadb-ledger-services = { version = "0.1.0", path = "crates/services" }
 inferadb-ledger-server = { path = "crates/server" }
 inferadb-ledger-sdk = { version = "0.1.0", path = "crates/sdk" }
 inferadb-ledger-test-utils = { path = "crates/test-utils" }

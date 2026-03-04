@@ -46,7 +46,7 @@ string old_field = 5 [deprecated = true]; // Removed in API v2
 
 When bumping the API version:
 
-1. Update `CURRENT_API_VERSION` in `crates/raft/src/api_version.rs`
+1. Update `CURRENT_API_VERSION` in `crates/services/src/api_version.rs`
 2. Update `API_VERSION_VALUE` in `crates/sdk/src/tracing.rs`
 3. Update the `api_version_header_value` static string in `api_version.rs`
 4. Update this document's compatibility matrix
