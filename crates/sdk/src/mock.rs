@@ -2189,7 +2189,7 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let result = client
-                .set_entity(ORG, Some(VAULT), "entity:1", b"data".to_vec(), None, None)
+                .set_entity(ORG, Some(VAULT), "entity:1", b"data".to_vec(), None, None, None)
                 .await
                 .unwrap();
 
@@ -2210,7 +2210,7 @@ mod tests {
                 client.read(ORG, Some(VAULT), "to_delete", None, None).await.unwrap().is_some()
             );
 
-            client.delete_entity(ORG, Some(VAULT), "to_delete").await.unwrap();
+            client.delete_entity(ORG, Some(VAULT), "to_delete", None).await.unwrap();
 
             assert_eq!(client.read(ORG, Some(VAULT), "to_delete", None, None).await.unwrap(), None);
         }
@@ -2228,6 +2228,7 @@ mod tests {
                     b"value".to_vec(),
                     None,
                     Some(crate::SetCondition::NotExists),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -2245,7 +2246,15 @@ mod tests {
             let client = create_client_for_mock(&server).await;
 
             let result = client
-                .set_entity(ORG, Some(VAULT), "ttl:1", b"temp".to_vec(), Some(1_700_000_000), None)
+                .set_entity(
+                    ORG,
+                    Some(VAULT),
+                    "ttl:1",
+                    b"temp".to_vec(),
+                    Some(1_700_000_000),
+                    None,
+                    None,
+                )
                 .await
                 .unwrap();
 
@@ -2269,6 +2278,7 @@ mod tests {
                     b"conditional-temp".to_vec(),
                     Some(1_700_000_000),
                     Some(crate::SetCondition::NotExists),
+                    None,
                 )
                 .await
                 .unwrap();

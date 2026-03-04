@@ -2991,6 +2991,8 @@ impl LedgerClient {
     /// * `value` - The entity value.
     /// * `expires_at` - Optional Unix timestamp (seconds) when the entity expires.
     /// * `condition` - Optional condition for compare-and-swap writes.
+    /// * `token` - Optional cancellation token for this request. When triggered, the operation is
+    ///   cancelled at the next retry boundary. Pass `None` to rely on the client-level token only.
     ///
     /// # Errors
     ///
@@ -3005,13 +3007,13 @@ impl LedgerClient {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
     /// // Simple set:
-    /// client.set_entity(organization, Some(vault), "user:123", b"data".to_vec(), None, None).await?;
+    /// client.set_entity(organization, Some(vault), "user:123", b"data".to_vec(), None, None, None).await?;
     ///
     /// // With expiration:
-    /// client.set_entity(organization, Some(vault), "session:abc", b"token".to_vec(), Some(1700000000), None).await?;
+    /// client.set_entity(organization, Some(vault), "session:abc", b"token".to_vec(), Some(1700000000), None, None).await?;
     ///
     /// // Conditional (create-if-not-exists):
-    /// client.set_entity(organization, Some(vault), "lock:xyz", b"owner".to_vec(), None, Some(SetCondition::NotExists)).await?;
+    /// client.set_entity(organization, Some(vault), "lock:xyz", b"owner".to_vec(), None, Some(SetCondition::NotExists), None).await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -3023,12 +3025,13 @@ impl LedgerClient {
         value: Vec<u8>,
         expires_at: Option<u64>,
         condition: Option<SetCondition>,
+        token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<WriteSuccess> {
         self.write(
             organization,
             vault,
             vec![Operation::set_entity(key, value, expires_at, condition)],
-            None,
+            token,
         )
         .await
     }
@@ -3043,6 +3046,8 @@ impl LedgerClient {
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Optional vault slug (omit for organization-level entities).
     /// * `key` - The entity key to delete.
+    /// * `token` - Optional cancellation token for this request. When triggered, the operation is
+    ///   cancelled at the next retry boundary. Pass `None` to rely on the client-level token only.
     ///
     /// # Errors
     ///
@@ -3056,7 +3061,7 @@ impl LedgerClient {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
-    /// client.delete_entity(organization, Some(vault), "user:123").await?;
+    /// client.delete_entity(organization, Some(vault), "user:123", None).await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -3065,8 +3070,9 @@ impl LedgerClient {
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         key: impl Into<String>,
+        token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<WriteSuccess> {
-        self.write(organization, vault, vec![Operation::delete_entity(key)], None).await
+        self.write(organization, vault, vec![Operation::delete_entity(key)], token).await
     }
 
     // =============================================================================
