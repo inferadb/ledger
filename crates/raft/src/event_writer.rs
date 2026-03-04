@@ -490,8 +490,8 @@ impl HandlerPhaseEmitter {
 
 /// Cheaply cloneable handle for best-effort handler-phase event writes.
 ///
-/// Injected into gRPC service implementations (`WriteServiceImpl`,
-/// `AdminServiceImpl`, `ReadServiceImpl`) to record denial and admin events.
+/// Injected into gRPC service implementations (`WriteService`,
+/// `AdminService`, `ReadService`) to record denial and admin events.
 /// Write failures are logged as warnings but never propagate to the caller —
 /// the primary RPC must not be affected by event persistence issues.
 ///

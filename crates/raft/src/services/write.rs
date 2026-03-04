@@ -10,7 +10,7 @@ use std::{fmt::Write, sync::Arc, time::Duration};
 
 use inferadb_ledger_proto::proto::{
     BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, TxId, WriteError, WriteErrorCode,
-    WriteRequest, WriteResponse, WriteSuccess, write_service_server::WriteService,
+    WriteRequest, WriteResponse, WriteSuccess,
 };
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
@@ -58,7 +58,7 @@ fn classify_batch_error(err: &BatchError) -> Status {
 /// to the correct region's Raft instance.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
-pub struct WriteServiceImpl {
+pub struct WriteService {
     /// Region resolver for routing requests to the correct region.
     resolver: Arc<dyn RegionResolver>,
     /// Raft manager for creating forward clients when needed.
@@ -101,7 +101,7 @@ pub struct WriteServiceImpl {
 }
 
 #[allow(clippy::result_large_err)]
-impl WriteServiceImpl {
+impl WriteService {
     /// Adds per-organization rate limiting to an existing service.
     #[must_use]
     pub fn with_rate_limiter(mut self, rate_limiter: Arc<RateLimiter>) -> Self {
@@ -473,7 +473,7 @@ impl WriteServiceImpl {
 }
 
 #[tonic::async_trait]
-impl WriteService for WriteServiceImpl {
+impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteService {
     /// Processes a single write transaction containing entity and relationship operations.
     ///
     /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.

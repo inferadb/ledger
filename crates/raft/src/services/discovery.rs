@@ -164,7 +164,7 @@ const DEFAULT_LEARNER_CACHE_TTL: std::time::Duration = std::time::Duration::from
 /// Provides peer discovery and system state for cluster coordination.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
-pub struct DiscoveryServiceImpl {
+pub struct DiscoveryService {
     /// Raft consensus handle for membership and leader queries.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// State layer for organization registry access.
@@ -191,7 +191,7 @@ pub struct DiscoveryServiceImpl {
     region: inferadb_ledger_types::Region,
 }
 
-impl DiscoveryServiceImpl {
+impl DiscoveryService {
     /// Updates the last state update timestamp.
     ///
     /// Should be called after applying Raft entries.
@@ -261,7 +261,7 @@ impl DiscoveryServiceImpl {
 }
 
 #[tonic::async_trait]
-impl SystemDiscoveryService for DiscoveryServiceImpl {
+impl SystemDiscoveryService for DiscoveryService {
     async fn get_peers(
         &self,
         request: Request<GetPeersRequest>,

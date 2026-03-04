@@ -9,9 +9,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use inferadb_ledger_proto::proto::{
-    HealthCheckRequest, HealthCheckResponse, HealthStatus, health_service_server::HealthService,
-};
+use inferadb_ledger_proto::proto::{HealthCheckRequest, HealthCheckResponse, HealthStatus};
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
 use openraft::Raft;
@@ -33,7 +31,7 @@ use crate::{
 ///
 /// Dependency checks (disk, peer, Raft lag) are cached with a configurable TTL
 /// to prevent I/O storms from aggressive probe intervals.
-pub struct HealthServiceImpl {
+pub struct HealthService {
     /// Raft consensus handle for leadership and term queries.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// State layer for vault health and height queries.
@@ -48,7 +46,7 @@ pub struct HealthServiceImpl {
     dependency_checker: Option<DependencyHealthChecker>,
 }
 
-impl HealthServiceImpl {
+impl HealthService {
     /// Creates a new health service.
     pub fn new(
         raft: Arc<Raft<LedgerTypeConfig>>,
@@ -75,7 +73,7 @@ impl HealthServiceImpl {
 }
 
 #[tonic::async_trait]
-impl HealthService for HealthServiceImpl {
+impl inferadb_ledger_proto::proto::health_service_server::HealthService for HealthService {
     async fn check(
         &self,
         request: Request<HealthCheckRequest>,

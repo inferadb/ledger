@@ -10,7 +10,7 @@ use std::sync::Arc;
 use inferadb_ledger_proto::proto::{
     RaftAppendEntriesRequest, RaftAppendEntriesResponse, RaftInstallSnapshotRequest,
     RaftInstallSnapshotResponse, RaftLogId, RaftVoteRequest, RaftVoteResponse,
-    TriggerElectionRequest, TriggerElectionResponse, raft_service_server::RaftService,
+    TriggerElectionRequest, TriggerElectionResponse,
 };
 use inferadb_ledger_types::decode;
 use openraft::{Raft, Vote, raft::AppendEntriesRequest};
@@ -25,11 +25,11 @@ use crate::{
 ///
 /// Routes requests to the correct region's Raft group via the manager.
 /// Defaults to the system region (GLOBAL) when no region is specified.
-pub struct RaftServiceImpl {
+pub struct RaftService {
     manager: Arc<RaftManager>,
 }
 
-impl RaftServiceImpl {
+impl RaftService {
     /// Creates a new Raft service backed by a region-aware manager.
     pub fn new(manager: Arc<RaftManager>) -> Self {
         Self { manager }
@@ -58,7 +58,7 @@ impl RaftServiceImpl {
 }
 
 #[tonic::async_trait]
-impl RaftService for RaftServiceImpl {
+impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftService {
     async fn vote(
         &self,
         request: Request<RaftVoteRequest>,
@@ -249,19 +249,19 @@ mod tests {
     use inferadb_ledger_proto::proto::{
         RaftAppendEntriesRequest, RaftInstallSnapshotRequest, RaftLogId, RaftMembership,
         RaftMembershipConfig, RaftSnapshotMeta, RaftVote, RaftVoteRequest,
-        raft_service_server::RaftService,
+        raft_service_server::RaftService as RaftServiceProto,
     };
     use inferadb_ledger_test_utils::TestDir;
     use inferadb_ledger_types::Region;
     use tonic::Request;
 
-    use crate::{RaftManager, RaftManagerConfig, RegionConfig, services::raft::RaftServiceImpl};
+    use crate::{RaftManager, RaftManagerConfig, RegionConfig, services::raft::RaftService};
 
-    /// Creates a RaftServiceImpl backed by a real single-node Raft instance.
+    /// Creates a RaftService backed by a real single-node Raft instance.
     ///
     /// Uses RaftManager to bootstrap a single system region. The Raft
     /// instance runs a full consensus engine in-process with no networking.
-    async fn create_test_service() -> (RaftServiceImpl, Arc<RaftManager>, u64, TestDir) {
+    async fn create_test_service() -> (RaftService, Arc<RaftManager>, u64, TestDir) {
         let temp = TestDir::new();
         let node_id = 1u64;
         let config = RaftManagerConfig::new(temp.path().to_path_buf(), node_id, Region::GLOBAL);
@@ -284,7 +284,7 @@ mod tests {
         let metrics = raft.metrics().borrow().clone();
         assert_eq!(metrics.current_leader, Some(node_id), "Single-node failed to become leader");
 
-        let service = RaftServiceImpl::new(manager.clone());
+        let service = RaftService::new(manager.clone());
         (service, manager, node_id, temp)
     }
 
@@ -833,7 +833,7 @@ mod tests {
     }
 
     // ====================================================================
-    // Test: Region routing in unified RaftServiceImpl
+    // Test: Region routing in unified RaftService
     // ====================================================================
 
     /// Unknown region value → INVALID_ARGUMENT error.

@@ -27,8 +27,8 @@ use crate::{
     raft_manager::RaftManager,
     rate_limit::RateLimiter,
     services::{
-        AdminServiceImpl, DiscoveryServiceImpl, EventsServiceImpl, HealthServiceImpl,
-        RaftServiceImpl, ReadServiceImpl, RegionResolver, RegionResolverImpl, WriteServiceImpl,
+        AdminService, DiscoveryService, EventsService, HealthService, RaftService, ReadService,
+        RegionResolver, RegionResolverService, WriteService,
     },
 };
 
@@ -156,10 +156,10 @@ impl LedgerServer {
         // Build region resolver from the manager — routes requests to the
         // correct region based on organization assignment.
         let resolver: Arc<dyn RegionResolver> =
-            Arc::new(RegionResolverImpl::new(self.manager.clone()));
+            Arc::new(RegionResolverService::new(self.manager.clone()));
 
         // Create service implementations
-        let read_service = ReadServiceImpl::builder()
+        let read_service = ReadService::builder()
             .resolver(resolver.clone())
             .manager(Some(self.manager.clone()))
             .max_read_forward_lag(self.max_read_forward_lag)
@@ -167,7 +167,7 @@ impl LedgerServer {
 
         // Create write service using the resolver. Batch writers are per-region
         // (created by RaftManager::start_region), not constructed here.
-        let mut write_service = WriteServiceImpl::builder()
+        let mut write_service = WriteService::builder()
             .resolver(resolver.clone())
             .manager(Some(self.manager.clone()))
             .idempotency(self.idempotency.clone())
@@ -185,7 +185,7 @@ impl LedgerServer {
             write_service = write_service.with_event_handle(handle.clone());
         }
 
-        let admin_service = AdminServiceImpl::builder()
+        let admin_service = AdminService::builder()
             .raft(system.raft().clone())
             .state(system.state().clone())
             .applied_state(system.applied_state().clone())
@@ -222,9 +222,9 @@ impl LedgerServer {
         // Wire health state for drain-phase write rejection
         let admin_service = admin_service.with_health_state(self.health_state.clone());
 
-        // Extract connection tracker before health_state is moved into HealthServiceImpl
+        // Extract connection tracker before health_state is moved into HealthService
         let connection_tracker = self.health_state.connection_tracker().clone();
-        let health_service = HealthServiceImpl::new(
+        let health_service = HealthService::new(
             system.raft().clone(),
             system.state().clone(),
             system.applied_state().clone(),
@@ -243,7 +243,7 @@ impl LedgerServer {
             health_service
         };
 
-        let discovery_service = DiscoveryServiceImpl::builder()
+        let discovery_service = DiscoveryService::builder()
             .raft(system.raft().clone())
             .state(system.state().clone())
             .applied_state(system.applied_state().clone())
@@ -251,7 +251,7 @@ impl LedgerServer {
             .build();
 
         // RaftService routes inter-node Raft RPCs to the correct region.
-        let raft_service = RaftServiceImpl::new(self.manager.clone());
+        let raft_service = RaftService::new(self.manager.clone());
 
         // gRPC reflection allows tools like grpcurl to discover services
         // without requiring proto files on the client side.
@@ -303,7 +303,7 @@ impl LedgerServer {
                     (None, None, None)
                 };
 
-            let events_service = EventsServiceImpl::builder()
+            let events_service = EventsService::builder()
                 .events_db(events_db)
                 .applied_state(system.applied_state().clone())
                 .page_token_codec(crate::pagination::PageTokenCodec::with_random_key())

@@ -25,7 +25,6 @@ use inferadb_ledger_proto::proto::{
     RotateRegionKeyRequest, RotateRegionKeyResponse, TransferLeadershipRequest,
     TransferLeadershipResponse, UpdateConfigRequest, UpdateConfigResponse,
     UserSlug as ProtoUserSlug, VaultHealthProto, VaultSlug as ProtoVaultSlug,
-    admin_service_server::AdminService,
 };
 use inferadb_ledger_state::{BlockArchive, StateLayer, system::SystemOrganizationService};
 use inferadb_ledger_store::FileBackend;
@@ -59,7 +58,7 @@ use crate::{
 /// configuration via Raft consensus.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
-pub struct AdminServiceImpl {
+pub struct AdminService {
     /// Raft consensus handle for proposing admin operations.
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// State layer for entity and relationship reads during admin operations.
@@ -117,7 +116,7 @@ pub struct AdminServiceImpl {
     raft_manager: Option<Arc<crate::raft_manager::RaftManager>>,
 }
 
-impl AdminServiceImpl {
+impl AdminService {
     /// Sets input validation configuration for request field limits.
     #[must_use]
     pub fn with_validation_config(mut self, config: Arc<ValidationConfig>) -> Self {
@@ -194,7 +193,7 @@ impl AdminServiceImpl {
 }
 
 #[tonic::async_trait]
-impl AdminService for AdminServiceImpl {
+impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminService {
     /// Creates a new organization, generates a Snowflake slug, and assigns it to a region via Raft.
     ///
     /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.

@@ -212,7 +212,7 @@ If version <= 41, response is empty (use cached data). If version > 41, response
 
 ## Write Forwarding
 
-In multi-region deployments, the `WriteServiceImpl` transparently forwards writes to the correct region's leader. Clients can send write requests to **any node** in the cluster — if the target organization lives in a different region, the receiving node forwards the request to that region's leader via `RegionResolver`.
+In multi-region deployments, the `WriteService` transparently forwards writes to the correct region's leader. Clients can send write requests to **any node** in the cluster — if the target organization lives in a different region, the receiving node forwards the request to that region's leader via `RegionResolver`.
 
 ```
 Client --> Node A (us-east-va) --> RegionResolver(org) --> ie-east-dublin Leader --> Response --> Node A --> Client
@@ -226,7 +226,7 @@ Client --> Node A (us-east-va) --> RegionResolver(org) --> ie-east-dublin Leader
 - Forwarding is transparent to clients -- the response is relayed back through the originating node
 - If the destination leader is unavailable, the client receives `UNAVAILABLE` and can retry
 
-Clients do not need region-aware routing for writes. Any node accepts writes for any organization. The same forwarding applies for reads via `ReadServiceImpl`.
+Clients do not need region-aware routing for writes. Any node accepts writes for any organization. The same forwarding applies for reads via `ReadService`.
 
 ## Region Membership
 

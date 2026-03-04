@@ -8,7 +8,7 @@
 //!
 //! ```no_run
 //! # use inferadb_ledger_raft::peer_maintenance::PeerMaintenance;
-//! # fn example(discovery_service: std::sync::Arc<inferadb_ledger_raft::services::DiscoveryServiceImpl>) {
+//! # fn example(discovery_service: std::sync::Arc<inferadb_ledger_raft::services::DiscoveryService>) {
 //! let maintenance = PeerMaintenance::builder().discovery(discovery_service).build();
 //! let handle = maintenance.start();
 //! // ... later ...
@@ -21,7 +21,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::time::interval;
 use tracing::{debug, info};
 
-use crate::services::DiscoveryServiceImpl;
+use crate::services::DiscoveryService;
 
 /// Default maintenance interval: run pruning every 5 minutes.
 pub const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -33,7 +33,7 @@ pub const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 #[builder(on(_, required))]
 pub struct PeerMaintenance {
     /// The discovery service to maintain.
-    discovery: Arc<DiscoveryServiceImpl>,
+    discovery: Arc<DiscoveryService>,
     /// Interval between maintenance cycles.
     #[builder(default = DEFAULT_MAINTENANCE_INTERVAL)]
     interval: Duration,
@@ -76,7 +76,7 @@ impl PeerMaintenance {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
-    // Note: Full tests require setting up DiscoveryServiceImpl with mocked Raft.
+    // Note: Full tests require setting up DiscoveryService with mocked Raft.
     // The maintenance logic is simple enough that it's exercised through
     // integration tests.
 

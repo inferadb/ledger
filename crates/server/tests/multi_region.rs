@@ -3,8 +3,8 @@
 //! Tests write forwarding, read consistency, batch writes, and cross-region
 //! operations using the `RegionTestCluster` infrastructure.
 //!
-//! These tests exercise the full gRPC path through `WriteServiceImpl`
-//! and `ReadServiceImpl` with multi-region routing, validating that
+//! These tests exercise the full gRPC path through `WriteService`
+//! and `ReadService` with multi-region routing, validating that
 //! organization→region routing, idempotency, and error handling work
 //! correctly across region boundaries.
 
@@ -476,7 +476,7 @@ async fn test_multi_region_concurrent_writes() {
 /// forwarding code path is a transparent no-op for local organizations.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_write_forwarding_local_region_all_nodes() {
-    // Single-node cluster with 2 data regions still uses RegionResolverImpl
+    // Single-node cluster with 2 data regions still uses RegionResolverService
     // (supports_forwarding=true) so the forwarding code path is exercised.
     let cluster = RegionTestCluster::new(1, 2).await;
     assert!(
@@ -504,7 +504,7 @@ async fn test_write_forwarding_local_region_all_nodes() {
 /// Tests batch write through the forwarding-enabled write service.
 ///
 /// Verifies that `batch_write()` with the forwarding-enabled
-/// `RegionResolverImpl` works correctly for local regions.
+/// `RegionResolverService` works correctly for local regions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_batch_write_forwarding_local_region() {
     let cluster = RegionTestCluster::new(1, 2).await;

@@ -749,7 +749,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `LedgerServer::builder()`: bon-based builder with 20+ config options
 - `serve(addr) -> Result<()>`: Start gRPC server with all services
 - `serve_with_shutdown(addr, shutdown_signal) -> Result<()>`: Graceful shutdown support
-- `health_state: HealthState` field — threaded to `WriteServiceImpl` and `AdminServiceImpl` for drain-phase proposal rejection
+- `health_state: HealthState` field — threaded to `WriteService` and `AdminService` for drain-phase proposal rejection
 - Optional `events_db: Option<EventsDatabase<FileBackend>>` for EventsService registration
 - Optional `event_handle: Option<EventHandle<FileBackend>>` for handler-phase event recording in services
 - Integrates: Raft node, all services, metrics, tracing, event logging, health checks
@@ -850,7 +850,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `services/raft.rs`: RaftService (inter-node Raft RPCs) including `TriggerElection` RPC handler — validates leader term (rejects stale), calls `raft.trigger().elect()`, records metrics via `record_trigger_election()`. Routes to the correct region via `RaftManager`.
 - `services/discovery.rs`: DiscoveryService (cluster membership)
 - `services/forward_client.rs`: Leader forwarding
-- `services/events.rs`: `EventsServiceImpl` — EventsService gRPC implementation with 4 RPCs (`ListEvents`, `GetEvent`, `CountEvents`, `IngestEvents`). `GetEvent` uses O(log n) `EventStore::get_by_id()` via secondary index (replaces former O(n) full-org scan with `COUNT_SCAN_LIMIT` cap, eliminating false-not-found for orgs with >100k events). `ListEvents` supports HMAC-signed `EventPageToken` pagination with in-memory filtering (actions, event_type_prefix, principal, outcome, emission_path, correlation_id). `IngestEvents` implements 10-step pipeline: master switch → source allow-list → batch size → rate limit → org resolution → validation → write → metrics → log. Unit tests.
+- `services/events.rs`: `EventsService` — EventsService gRPC implementation with 4 RPCs (`ListEvents`, `GetEvent`, `CountEvents`, `IngestEvents`). `GetEvent` uses O(log n) `EventStore::get_by_id()` via secondary index (replaces former O(n) full-org scan with `COUNT_SCAN_LIMIT` cap, eliminating false-not-found for orgs with >100k events). `ListEvents` supports HMAC-signed `EventPageToken` pagination with in-memory filtering (actions, event_type_prefix, principal, outcome, emission_path, correlation_id). `IngestEvents` implements 10-step pipeline: master switch → source allow-list → batch size → rate limit → org resolution → validation → write → metrics → log. Unit tests.
 - `services/slug_resolver.rs`: Organization and vault slug ↔ internal ID resolution at gRPC boundary. `SlugResolver` wraps `AppliedStateAccessor`. Organization methods: `extract_slug`, `resolve`, `resolve_slug`, `extract_and_resolve`, `extract_and_resolve_optional`. Vault methods: `extract_vault_slug`, `resolve_vault`, `resolve_vault_slug`, `extract_and_resolve_vault`, `extract_and_resolve_vault_optional`. Events method: `extract_and_resolve_for_events()` (slug=0 → system org bypass). Unit tests (14 org + 19 vault + 4 events).
 - `services/region_resolver.rs`: Organization→region routing
 - `services/error_details.rs`: ErrorDetails proto builder

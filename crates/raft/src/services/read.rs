@@ -23,7 +23,6 @@ use inferadb_ledger_proto::{
         ListEntitiesResponse, ListRelationshipsRequest, ListRelationshipsResponse,
         ListResourcesRequest, ListResourcesResponse, ReadConsistency, ReadRequest, ReadResponse,
         VerifiedReadRequest, VerifiedReadResponse, WatchBlocksRequest,
-        read_service_server::ReadService,
     },
 };
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
@@ -57,7 +56,7 @@ use crate::{
 /// all regions on this node.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
-pub struct ReadServiceImpl {
+pub struct ReadService {
     /// Region resolver for routing requests to the correct region's state.
     resolver: Arc<dyn RegionResolver>,
     /// Multi-raft manager for creating forward clients to remote regions.
@@ -91,7 +90,7 @@ pub struct ReadServiceImpl {
     leader_channel_cache: LeaderChannelCache,
 }
 
-impl ReadServiceImpl {
+impl ReadService {
     /// Resolves organization and vault IDs from a request using the region resolver.
     ///
     /// Returns `(organization_id, vault_id, region_context)`.
@@ -488,7 +487,7 @@ impl ReadServiceImpl {
 }
 
 #[tonic::async_trait]
-impl ReadService for ReadServiceImpl {
+impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadService {
     /// Reads a single entity or relationship by key.
     ///
     /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.

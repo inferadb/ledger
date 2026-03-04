@@ -15,7 +15,7 @@
 //! ```
 //!
 //! Every server is multi-region capable. A single-region deployment is simply
-//! a `RegionResolverImpl` with one region (GLOBAL).
+//! a `RegionResolverService` with one region (GLOBAL).
 //!
 //! ## Request Forwarding
 //!
@@ -184,11 +184,11 @@ fn region_context_from(region: &crate::raft_manager::RegionGroup) -> RegionConte
 /// is not hosted locally. Uses `local_region` for data residency decisions:
 /// non-protected regions are always local; protected regions require the
 /// node to be in the same region.
-pub struct RegionResolverImpl {
+pub struct RegionResolverService {
     manager: Arc<RaftManager>,
 }
 
-impl RegionResolverImpl {
+impl RegionResolverService {
     /// Creates a new multi-region resolver.
     pub fn new(manager: Arc<RaftManager>) -> Self {
         Self { manager }
@@ -205,7 +205,7 @@ impl RegionResolverImpl {
     }
 }
 
-impl RegionResolver for RegionResolverImpl {
+impl RegionResolver for RegionResolverService {
     fn resolve(&self, organization: OrganizationId) -> Result<RegionContext, Status> {
         // System organization (0) always goes to system region
         if organization == OrganizationId::new(0) {
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn test_multi_region_resolver_local_region() {
-        // RegionResolverImpl delegates local_region() to RaftManager.
+        // RegionResolverService delegates local_region() to RaftManager.
         // Verify the accessor exists and returns the manager's local_region.
         // Full integration test requires async Raft setup; here we test the
         // type-level wiring.
@@ -430,7 +430,7 @@ mod tests {
             RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::DE_CENTRAL_FRANKFURT);
         let manager = Arc::new(RaftManager::new(config));
 
-        let resolver = RegionResolverImpl::new(manager);
+        let resolver = RegionResolverService::new(manager);
         assert_eq!(resolver.local_region(), Region::DE_CENTRAL_FRANKFURT);
     }
 
@@ -444,7 +444,7 @@ mod tests {
         let config = RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::GLOBAL);
         let manager = Arc::new(RaftManager::new(config));
 
-        let resolver = RegionResolverImpl::new(manager);
+        let resolver = RegionResolverService::new(manager);
         assert!(resolver.supports_forwarding());
     }
 

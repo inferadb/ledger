@@ -1,6 +1,6 @@
 //! Events query and ingestion service implementation.
 //!
-//! Provides [`EventsServiceImpl`], the gRPC service that reads from the
+//! Provides [`EventsService`], the gRPC service that reads from the
 //! local `Events` table with filtering, pagination, and organization-scoped
 //! access control. This is the unified query API — it returns events from
 //! all sources (Ledger, Engine, Control) stored in the same Events table.
@@ -15,7 +15,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::Utc;
-use inferadb_ledger_proto::{proto, proto::events_service_server::EventsService};
+use inferadb_ledger_proto::proto;
 use inferadb_ledger_state::{EventStore, EventsDatabase};
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
@@ -54,7 +54,7 @@ const COUNT_SCAN_LIMIT: usize = 100_000;
 /// (Engine, Control) — writing their audit events to the local Events table
 /// using handler-phase semantics.
 #[derive(bon::Builder)]
-pub struct EventsServiceImpl<B: StorageBackend> {
+pub struct EventsService<B: StorageBackend> {
     /// Events database (local to this node).
     events_db: EventsDatabase<B>,
 
@@ -74,7 +74,7 @@ pub struct EventsServiceImpl<B: StorageBackend> {
     ingestion_rate_limiter: Option<Arc<IngestionRateLimiter>>,
 }
 
-impl<B: StorageBackend + 'static> EventsServiceImpl<B> {
+impl<B: StorageBackend + 'static> EventsService<B> {
     /// Returns the page token codec reference (for tests).
     #[cfg(test)]
     pub fn codec(&self) -> &PageTokenCodec {
@@ -190,7 +190,7 @@ fn matches_filter(
 }
 
 #[tonic::async_trait]
-impl<B: StorageBackend + 'static> EventsService for EventsServiceImpl<B> {
+impl<B: StorageBackend + 'static> proto::events_service_server::EventsService for EventsService<B> {
     /// Lists events with pagination and optional filtering by action, type, or time range.
     ///
     /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
@@ -737,6 +737,7 @@ mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
     use chrono::{TimeZone, Utc};
+    use inferadb_ledger_proto::proto::events_service_server::EventsService as EventsServiceProto;
     use inferadb_ledger_state::EventsDatabase;
     use inferadb_ledger_store::InMemoryBackend;
     use inferadb_ledger_types::{
@@ -754,19 +755,19 @@ mod tests {
         log_storage::{AppliedState, AppliedStateAccessor},
     };
 
-    fn make_test_service() -> EventsServiceImpl<InMemoryBackend> {
+    fn make_test_service() -> EventsService<InMemoryBackend> {
         let events_db = EventsDatabase::open_in_memory().expect("open");
         let state = AppliedState::default();
         let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
 
-        EventsServiceImpl::builder()
+        EventsService::builder()
             .events_db(events_db)
             .applied_state(accessor)
             .page_token_codec(PageTokenCodec::with_random_key())
             .build()
     }
 
-    fn make_service_with_org(slug: u64, org_id: i64) -> EventsServiceImpl<InMemoryBackend> {
+    fn make_service_with_org(slug: u64, org_id: i64) -> EventsService<InMemoryBackend> {
         let events_db = EventsDatabase::open_in_memory().expect("open");
         let mut state = AppliedState::default();
         state.slug_index.insert(
@@ -779,7 +780,7 @@ mod tests {
         );
         let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
 
-        EventsServiceImpl::builder()
+        EventsService::builder()
             .events_db(events_db)
             .applied_state(accessor)
             .page_token_codec(PageTokenCodec::with_random_key())
@@ -787,7 +788,7 @@ mod tests {
     }
 
     /// Builds a service wired for ingestion tests with default `IngestionConfig`.
-    fn make_ingest_service(slug: u64, org_id: i64) -> EventsServiceImpl<InMemoryBackend> {
+    fn make_ingest_service(slug: u64, org_id: i64) -> EventsService<InMemoryBackend> {
         make_ingest_service_with_config(slug, org_id, IngestionConfig::default())
     }
 
@@ -796,7 +797,7 @@ mod tests {
         slug: u64,
         org_id: i64,
         ingestion: IngestionConfig,
-    ) -> EventsServiceImpl<InMemoryBackend> {
+    ) -> EventsService<InMemoryBackend> {
         let events_db = EventsDatabase::open_in_memory().expect("open");
         let mut state = AppliedState::default();
         state.slug_index.insert(
@@ -811,7 +812,7 @@ mod tests {
         let rate_limit = ingestion.ingest_rate_limit_per_source;
         let config = EventConfig { ingestion, ..EventConfig::default() };
 
-        EventsServiceImpl::builder()
+        EventsService::builder()
             .events_db(events_db)
             .applied_state(accessor)
             .page_token_codec(PageTokenCodec::with_random_key())
@@ -866,7 +867,7 @@ mod tests {
         }
     }
 
-    fn write_entries(service: &EventsServiceImpl<InMemoryBackend>, entries: &[EventEntry]) {
+    fn write_entries(service: &EventsService<InMemoryBackend>, entries: &[EventEntry]) {
         let mut txn = service.events_db.write().expect("write txn");
         for entry in entries {
             EventStore::write(&mut txn, entry).expect("write");
@@ -1058,7 +1059,7 @@ mod tests {
             .insert(OrganizationId::new(2), inferadb_ledger_types::OrganizationSlug::new(200));
         let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
 
-        let service = EventsServiceImpl::builder()
+        let service = EventsService::builder()
             .events_db(events_db)
             .applied_state(accessor)
             .page_token_codec(PageTokenCodec::with_random_key())
@@ -1161,7 +1162,7 @@ mod tests {
             .insert(OrganizationId::new(2), inferadb_ledger_types::OrganizationSlug::new(200));
         let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
 
-        let service = EventsServiceImpl::builder()
+        let service = EventsService::builder()
             .events_db(events_db)
             .applied_state(accessor)
             .page_token_codec(PageTokenCodec::with_random_key())
