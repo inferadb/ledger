@@ -15,7 +15,8 @@ use std::time::Duration;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
 use crate::common::{
-    RegionTestCluster, create_admin_client, create_read_client, create_write_client,
+    RegionTestCluster, create_organization_client, create_read_client, create_vault_client,
+    create_write_client,
 };
 
 // ============================================================================
@@ -27,12 +28,13 @@ async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let mut client = create_admin_client(addr).await?;
+    let mut client = create_organization_client(addr).await?;
     let response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: name.to_string(),
             region: 10, // REGION_US_EAST_VA
             tier: None,
+            admin: None,
         })
         .await?;
 
@@ -50,7 +52,7 @@ async fn create_vault(
     addr: std::net::SocketAddr,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    let mut client = create_admin_client(addr).await?;
+    let mut client = create_vault_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {

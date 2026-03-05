@@ -23,8 +23,8 @@ use inferadb_ledger_proto::proto::{
     GetClusterInfoRequest, admin_service_client::AdminServiceClient,
 };
 use inferadb_ledger_sdk::{
-    ClientConfig, LedgerClient, Operation, OrganizationSlug, Region, RetryPolicy, ServerSource,
-    VaultSlug,
+    ClientConfig, LedgerClient, Operation, OrganizationSlug, OrganizationTier, Region, RetryPolicy,
+    ServerSource, UserSlug, VaultSlug,
 };
 
 // ============================================================================
@@ -104,7 +104,7 @@ async fn create_single_endpoint_client(endpoint: &str, client_id: &str) -> Ledge
 async fn setup_test_org_vault(client: &LedgerClient) -> (OrganizationSlug, VaultSlug) {
     let ns_name = format!("test-ns-{}", uuid::Uuid::new_v4());
     let org = client
-        .create_organization(&ns_name, Region::US_EAST_VA)
+        .create_organization(&ns_name, Region::US_EAST_VA, UserSlug::new(0), OrganizationTier::Free)
         .await
         .expect("create organization");
     let vault_info = client.create_vault(org.slug).await.expect("create vault");
@@ -461,14 +461,14 @@ async fn test_admin_operations() {
     // Create an organization
     let ns_name = format!("test-admin-{}", uuid::Uuid::new_v4());
     let org = client
-        .create_organization(&ns_name, Region::US_EAST_VA)
+        .create_organization(&ns_name, Region::US_EAST_VA, UserSlug::new(0), OrganizationTier::Free)
         .await
         .expect("create organization");
     let organization = org.slug;
     assert!(organization.value() > 0, "should get valid organization slug");
 
     // Get the organization
-    let org_info = client.get_organization(organization).await.expect("get organization");
+    let org_info = client.get_organization(organization, 0).await.expect("get organization");
     assert_eq!(org_info.name, ns_name);
 
     // Create a vault
@@ -476,7 +476,8 @@ async fn test_admin_operations() {
     assert!(vault_info.vault.value() > 0, "should get valid vault slug");
 
     // List organizations
-    let organizations = client.list_organizations().await.expect("list organizations");
+    let (organizations, _next) =
+        client.list_organizations(UserSlug::new(0), 0, None).await.expect("list organizations");
     assert!(
         organizations.iter().any(|org| org.slug == organization),
         "created organization should be in list"

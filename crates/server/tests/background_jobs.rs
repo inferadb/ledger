@@ -19,7 +19,10 @@ use std::time::Duration;
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
-use crate::common::{ExternalCluster, create_admin_client_from_url, create_health_client_from_url};
+use crate::common::{
+    ExternalCluster, create_health_client_from_url, create_organization_client_from_url,
+    create_vault_client_from_url,
+};
 
 /// Skip macro: returns early if no external cluster is available.
 macro_rules! require_cluster {
@@ -86,17 +89,20 @@ async fn test_vault_health_tracking() {
     let cluster = require_cluster!();
 
     let leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
-    let mut admin_client =
-        create_admin_client_from_url(&leader_ep).await.expect("connect to admin");
+    let mut org_client =
+        create_organization_client_from_url(&leader_ep).await.expect("connect to organization");
+    let mut vault_client =
+        create_vault_client_from_url(&leader_ep).await.expect("connect to vault");
 
     let ns_name = format!("test-health-{}", uuid::Uuid::new_v4());
 
     // Create organization
-    let ns_response = admin_client
+    let ns_response = org_client
         .create_organization(proto::CreateOrganizationRequest {
             name: ns_name,
             region: 10, // REGION_US_EAST_VA
             tier: None,
+            admin: None,
         })
         .await
         .expect("create organization");
@@ -105,7 +111,7 @@ async fn test_vault_health_tracking() {
         ns_response.into_inner().slug.map(|n| OrganizationSlug::new(n.slug)).unwrap();
 
     // Create vault
-    let vault_response = admin_client
+    let vault_response = vault_client
         .create_vault(proto::CreateVaultRequest {
             organization: Some(proto::OrganizationSlug { slug: organization.value() }),
             replication_factor: 0,
@@ -198,16 +204,17 @@ async fn test_learner_cache_initialization() {
     let leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
 
     // Create an organization via the leader
-    let mut admin_client =
-        create_admin_client_from_url(&leader_ep).await.expect("connect to admin");
+    let mut org_client =
+        create_organization_client_from_url(&leader_ep).await.expect("connect to organization");
 
     let ns_name = format!("test-cache-{}", uuid::Uuid::new_v4());
 
-    let ns_response = admin_client
+    let ns_response = org_client
         .create_organization(proto::CreateOrganizationRequest {
             name: ns_name.clone(),
             region: 10, // REGION_US_EAST_VA
             tier: None,
+            admin: None,
         })
         .await
         .expect("create organization");
@@ -220,11 +227,13 @@ async fn test_learner_cache_initialization() {
 
     // Verify organization is readable from every endpoint
     for endpoint in cluster.endpoints() {
-        let mut client = create_admin_client_from_url(endpoint).await.expect("connect to admin");
+        let mut client =
+            create_organization_client_from_url(endpoint).await.expect("connect to organization");
 
         let response = client
             .get_organization(proto::GetOrganizationRequest {
                 slug: Some(proto::OrganizationSlug { slug: organization.value() }),
+                caller: None,
             })
             .await
             .unwrap_or_else(|e| panic!("get_organization from {} failed: {}", endpoint, e));
@@ -247,16 +256,19 @@ async fn test_concurrent_background_jobs() {
     let leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
 
     // Create some activity to exercise background jobs
-    let mut admin_client =
-        create_admin_client_from_url(&leader_ep).await.expect("connect to admin");
+    let mut org_client =
+        create_organization_client_from_url(&leader_ep).await.expect("connect to organization");
+    let mut vault_client =
+        create_vault_client_from_url(&leader_ep).await.expect("connect to vault");
 
     let ns_name = format!("test-concurrent-{}", uuid::Uuid::new_v4());
 
-    let ns_response = admin_client
+    let ns_response = org_client
         .create_organization(proto::CreateOrganizationRequest {
             name: ns_name,
             region: 10, // REGION_US_EAST_VA
             tier: None,
+            admin: None,
         })
         .await
         .expect("create organization");
@@ -264,7 +276,7 @@ async fn test_concurrent_background_jobs() {
     let organization =
         ns_response.into_inner().slug.map(|n| OrganizationSlug::new(n.slug)).unwrap();
 
-    let _vault_response = admin_client
+    let _vault_response = vault_client
         .create_vault(proto::CreateVaultRequest {
             organization: Some(proto::OrganizationSlug { slug: organization.value() }),
             replication_factor: 0,

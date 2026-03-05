@@ -3,10 +3,14 @@
 //! Provides concurrent read access to the state machine's applied state
 //! without holding the write lock.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use inferadb_ledger_types::{
-    OrganizationId, OrganizationSlug, OrganizationUsage, UserId, UserSlug, VaultId, VaultSlug,
+    OrganizationId, OrganizationSlug, OrganizationUsage, TeamId, TeamSlug, UserId, UserSlug,
+    VaultId, VaultSlug,
 };
 use parking_lot::RwLock;
 
@@ -80,6 +84,14 @@ impl AppliedStateAccessor {
             .filter(|ns| ns.status != OrganizationStatus::Deleted)
             .cloned()
             .collect()
+    }
+
+    /// Returns the set of organization IDs a user belongs to.
+    ///
+    /// Uses the `user_org_index` for O(1) lookup instead of scanning
+    /// all organization profiles.
+    pub fn user_organization_ids(&self, user: UserId) -> HashSet<OrganizationId> {
+        self.state.read().user_org_index.get(&user).cloned().unwrap_or_default()
     }
 
     /// Returns vault metadata by internal ID.
@@ -221,6 +233,18 @@ impl AppliedStateAccessor {
     /// Returns `None` if the ID is not registered in the user reverse index.
     pub fn resolve_user_id_to_slug(&self, id: UserId) -> Option<UserSlug> {
         self.state.read().user_id_to_slug.get(&id).copied()
+    }
+
+    // --- Team slug resolution ---
+
+    /// Resolves an external team slug to its internal (organization, team) IDs.
+    pub fn resolve_team_slug(&self, slug: TeamSlug) -> Option<(OrganizationId, TeamId)> {
+        self.state.read().team_slug_index.get(&slug).copied()
+    }
+
+    /// Resolves an internal team ID to its external slug.
+    pub fn resolve_team_id_to_slug(&self, id: TeamId) -> Option<TeamSlug> {
+        self.state.read().team_id_to_slug.get(&id).copied()
     }
 
     /// Checks the replicated client sequence table for idempotency.

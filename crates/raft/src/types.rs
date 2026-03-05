@@ -12,8 +12,8 @@ use chrono::{DateTime, Utc};
 // Re-export domain types that originated here but now live in types crate.
 pub use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId};
 use inferadb_ledger_types::{
-    Hash, OrganizationId, OrganizationSlug, Region, SetCondition, Transaction, UserId, UserSlug,
-    VaultId, VaultSlug,
+    Hash, OrganizationId, OrganizationSlug, Region, SetCondition, TeamId, TeamSlug, Transaction,
+    UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
 use openraft::{BasicNode, impls::OneshotResponder};
 use serde::{Deserialize, Serialize};
@@ -160,19 +160,6 @@ pub enum LedgerRequest {
         request_hash: u64,
     },
 
-    /// Creates a new organization (applied to `_system`).
-    CreateOrganization {
-        /// Requested organization name.
-        name: String,
-        /// External slug for API lookups (generated before Raft proposal).
-        slug: OrganizationSlug,
-        /// Target data residency region (required, must not be GLOBAL).
-        region: Region,
-        /// Billing tier (defaults to Free).
-        #[serde(default)]
-        tier: inferadb_ledger_state::system::OrganizationTier,
-    },
-
     /// Creates a new vault within an organization.
     CreateVault {
         /// Organization to create the vault in.
@@ -212,6 +199,42 @@ pub enum LedgerRequest {
     /// Resumes a suspended organization.
     ResumeOrganization {
         /// Organization to resume.
+        organization: OrganizationId,
+    },
+
+    /// Updates organization metadata (currently: name only).
+    UpdateOrganization {
+        /// Organization to update.
+        organization: OrganizationId,
+        /// New name (if changing).
+        name: Option<String>,
+    },
+
+    /// Removes a member from an organization.
+    RemoveOrganizationMember {
+        /// Organization to modify.
+        organization: OrganizationId,
+        /// User to remove.
+        target: UserId,
+    },
+
+    /// Updates a member's role within an organization.
+    UpdateOrganizationMemberRole {
+        /// Organization to modify.
+        organization: OrganizationId,
+        /// User whose role changes.
+        target: UserId,
+        /// New role for the member.
+        role: inferadb_ledger_state::system::OrganizationMemberRole,
+    },
+
+    /// Purges a deleted organization after its retention cooldown.
+    ///
+    /// Force-deletes all remaining vaults and removes all organization
+    /// data including slug index entries. Submitted by the background
+    /// `OrganizationPurgeJob` after `region.retention_days()` elapses.
+    PurgeOrganization {
+        /// Organization to purge.
         organization: OrganizationId,
     },
 
@@ -266,6 +289,36 @@ pub enum LedgerRequest {
         /// The requests to process.
         requests: Vec<LedgerRequest>,
     },
+
+    /// Creates a new team within an organization.
+    CreateOrganizationTeam {
+        /// Organization to create the team in.
+        organization: OrganizationId,
+        /// External slug for API lookups (generated before Raft proposal).
+        slug: TeamSlug,
+        /// Team name (unique within organization).
+        name: String,
+    },
+
+    /// Deletes a team from an organization.
+    DeleteOrganizationTeam {
+        /// Organization containing the team.
+        organization: OrganizationId,
+        /// Team to delete.
+        team: TeamId,
+        /// If set, move members to this team before deleting.
+        move_members_to: Option<TeamId>,
+    },
+
+    /// Updates team metadata.
+    UpdateOrganizationTeam {
+        /// Organization containing the team.
+        organization: OrganizationId,
+        /// Team to update.
+        team: TeamId,
+        /// New name (if changing).
+        name: Option<String>,
+    },
 }
 
 /// System-level requests that modify `_system` organization.
@@ -290,6 +343,52 @@ pub enum SystemRequest {
         slug: UserSlug,
         /// Data residency region for the user's PII.
         region: Region,
+    },
+
+    /// Updates an existing user's name, role, or primary email.
+    ///
+    /// At least one field must be `Some`. The state machine delegates to
+    /// `SystemOrganizationService::update_user` which performs partial updates.
+    UpdateUser {
+        /// User to update.
+        user_id: UserId,
+        /// New display name (if changing).
+        name: Option<String>,
+        /// New role (if changing).
+        role: Option<inferadb_ledger_types::UserRole>,
+        /// New primary email (if changing).
+        primary_email: Option<UserEmailId>,
+    },
+
+    /// Soft-deletes a user by setting status to `Deleting` and recording `deleted_at`.
+    ///
+    /// The user's data is retained for the region's retention period before
+    /// permanent erasure via `EraseUser`.
+    DeleteUser {
+        /// User to soft-delete.
+        user_id: UserId,
+    },
+
+    /// Creates an additional email address for a user.
+    CreateUserEmail {
+        /// User who owns this email.
+        user_id: UserId,
+        /// Email address to add.
+        email: String,
+    },
+
+    /// Deletes a non-primary email address from a user.
+    DeleteUserEmail {
+        /// User who owns this email.
+        user_id: UserId,
+        /// Email record to delete.
+        email_id: UserEmailId,
+    },
+
+    /// Marks a user email as verified.
+    VerifyUserEmail {
+        /// Email record to verify.
+        email_id: UserEmailId,
     },
 
     /// Adds a node to the cluster.
@@ -386,6 +485,60 @@ pub enum SystemRequest {
         /// Pre-computed migration entries (one per user).
         entries: Vec<inferadb_ledger_state::system::UserMigrationEntry>,
     },
+
+    /// Creates an organization directory entry in the GLOBAL control plane.
+    ///
+    /// Allocates an `OrganizationId` from the sequence counter, inserts
+    /// `OrganizationMeta` into Raft state, writes the `OrganizationRegistry`
+    /// to the StateLayer, and registers the slug index.
+    CreateOrganizationDirectory {
+        /// External Snowflake slug (generated before Raft proposal).
+        slug: OrganizationSlug,
+        /// Target data residency region.
+        region: Region,
+        /// Billing tier.
+        tier: inferadb_ledger_state::system::OrganizationTier,
+    },
+
+    /// Writes the organization profile to the regional store.
+    ///
+    /// Reads the pending profile from the StateLayer by `profile_key`,
+    /// writes the final `OrganizationProfile` keyed as
+    /// `_sys:org_profile:{organization}`, and deletes the pending key.
+    WriteOrganizationProfile {
+        /// Organization whose profile to write.
+        organization: OrganizationId,
+        /// StateLayer key where the pending profile is stored.
+        profile_key: String,
+        /// Initial administrator for this organization.
+        admin: UserId,
+    },
+
+    /// Updates the organization directory status in the GLOBAL control plane.
+    UpdateOrganizationDirectoryStatus {
+        /// Organization to update.
+        organization: OrganizationId,
+        /// New directory status.
+        status: inferadb_ledger_state::system::OrganizationDirectoryStatus,
+    },
+
+    /// Atomically creates an organization directory entry and writes its profile.
+    ///
+    /// Used by the admin API path where all data (name, admin, region, tier) is
+    /// available upfront. Creates the directory, writes the profile, and sets
+    /// status to `Active` in a single Raft entry — no saga needed.
+    CreateOrganizationWithProfile {
+        /// External Snowflake slug (generated before Raft proposal).
+        slug: OrganizationSlug,
+        /// Target data residency region.
+        region: Region,
+        /// Billing tier.
+        tier: inferadb_ledger_state::system::OrganizationTier,
+        /// Organization name (PII — stored in regional profile).
+        name: String,
+        /// Initial administrator for this organization.
+        admin: UserId,
+    },
 }
 
 /// Response from the Raft state machine.
@@ -407,12 +560,24 @@ pub enum LedgerResponse {
         assigned_sequence: u64,
     },
 
-    /// Organization created.
-    OrganizationCreated {
-        /// Assigned organization ID.
-        organization: OrganizationId,
-        /// Assigned region.
-        region: Region,
+    /// Organization directory entry created in GLOBAL control plane.
+    OrganizationDirectoryCreated {
+        /// Allocated internal organization ID.
+        organization_id: OrganizationId,
+        /// External Snowflake slug.
+        organization_slug: OrganizationSlug,
+    },
+
+    /// Organization profile written to regional store.
+    OrganizationProfileWritten {
+        /// Organization ID.
+        organization_id: OrganizationId,
+    },
+
+    /// Organization directory status updated.
+    OrganizationDirectoryStatusUpdated {
+        /// Organization ID.
+        organization_id: OrganizationId,
     },
 
     /// Vault created.
@@ -423,14 +588,38 @@ pub enum LedgerResponse {
         slug: VaultSlug,
     },
 
-    /// Organization deleted.
+    /// Organization soft-deleted. Data retained for region-specific cooldown.
     OrganizationDeleted {
-        /// Whether the deletion was successful.
-        /// If false, `blocking_vault_ids` contains the vaults that must be deleted first.
-        success: bool,
-        /// Vault IDs that are blocking deletion (only set when success=false).
-        /// Clients should delete these vaults before retrying organization deletion.
-        blocking_vault_ids: Vec<VaultId>,
+        /// Organization that was deleted.
+        organization_id: OrganizationId,
+        /// When the soft-delete was initiated.
+        deleted_at: DateTime<Utc>,
+        /// Region-derived retention period in days before purge.
+        retention_days: u32,
+    },
+
+    /// Organization metadata updated.
+    OrganizationUpdated {
+        /// Organization that was updated.
+        organization_id: OrganizationId,
+    },
+
+    /// Organization member removed.
+    OrganizationMemberRemoved {
+        /// Organization the member was removed from.
+        organization_id: OrganizationId,
+    },
+
+    /// Organization member role updated.
+    OrganizationMemberRoleUpdated {
+        /// Organization whose member was updated.
+        organization_id: OrganizationId,
+    },
+
+    /// Organization purged (all data removed).
+    OrganizationPurged {
+        /// Organization that was purged.
+        organization_id: OrganizationId,
     },
 
     /// Organization migrated to a new region.
@@ -473,15 +662,6 @@ pub enum LedgerResponse {
         new_region: Region,
     },
 
-    /// Organization marked for deletion (has active vaults).
-    /// Transitions to Deleted once all vaults are deleted.
-    OrganizationDeleting {
-        /// Organization marked for deletion.
-        organization: OrganizationId,
-        /// Vault IDs that must be deleted first.
-        blocking_vault_ids: Vec<VaultId>,
-    },
-
     /// Vault deleted.
     VaultDeleted {
         /// Whether the deletion was successful.
@@ -500,6 +680,38 @@ pub enum LedgerResponse {
         user_id: UserId,
         /// External Snowflake identifier.
         slug: UserSlug,
+    },
+
+    /// User updated.
+    UserUpdated {
+        /// Updated user ID.
+        user_id: UserId,
+    },
+
+    /// User soft-deleted (pending erasure after retention period).
+    UserSoftDeleted {
+        /// Soft-deleted user ID.
+        user_id: UserId,
+        /// Region-derived retention period in days.
+        retention_days: u32,
+    },
+
+    /// User email created.
+    UserEmailCreated {
+        /// Assigned email record ID.
+        email_id: UserEmailId,
+    },
+
+    /// User email deleted.
+    UserEmailDeleted {
+        /// Deleted email record ID.
+        email_id: UserEmailId,
+    },
+
+    /// User email verified.
+    UserEmailVerified {
+        /// Verified email record ID.
+        email_id: UserEmailId,
     },
 
     /// User data erased via crypto-shredding.
@@ -522,7 +734,13 @@ pub enum LedgerResponse {
 
     /// Error response.
     Error {
-        /// Error message.
+        /// Structured error code for type-safe matching.
+        ///
+        /// Defaults to `Internal` when deserializing log entries written before
+        /// this field was added.
+        #[serde(default)]
+        code: inferadb_ledger_types::LedgerErrorCode,
+        /// Human-readable error message.
         message: String,
     },
 
@@ -547,6 +765,26 @@ pub enum LedgerResponse {
         /// Responses for each request in the batch.
         responses: Vec<LedgerResponse>,
     },
+
+    /// Team created.
+    OrganizationTeamCreated {
+        /// Assigned internal team ID.
+        team_id: TeamId,
+        /// External Snowflake slug.
+        team_slug: TeamSlug,
+    },
+
+    /// Team deleted.
+    OrganizationTeamDeleted {
+        /// Organization the team belonged to.
+        organization_id: OrganizationId,
+    },
+
+    /// Team metadata updated.
+    OrganizationTeamUpdated {
+        /// Organization the team belongs to.
+        organization_id: OrganizationId,
+    },
 }
 
 impl fmt::Display for LedgerResponse {
@@ -556,8 +794,18 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::Write { block_height, .. } => {
                 write!(f, "Write(height={})", block_height)
             },
-            LedgerResponse::OrganizationCreated { organization, region } => {
-                write!(f, "OrganizationCreated(id={}, region={})", organization, region)
+            LedgerResponse::OrganizationDirectoryCreated { organization_id, organization_slug } => {
+                write!(
+                    f,
+                    "OrganizationDirectoryCreated(id={}, slug={})",
+                    organization_id, organization_slug
+                )
+            },
+            LedgerResponse::OrganizationProfileWritten { organization_id } => {
+                write!(f, "OrganizationProfileWritten(id={})", organization_id)
+            },
+            LedgerResponse::OrganizationDirectoryStatusUpdated { organization_id } => {
+                write!(f, "OrganizationDirectoryStatusUpdated(id={})", organization_id)
             },
             LedgerResponse::VaultCreated { vault, slug } => {
                 write!(f, "VaultCreated(id={}, slug={})", vault, slug)
@@ -565,16 +813,33 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::UserCreated { user_id, slug } => {
                 write!(f, "UserCreated(id={}, slug={})", user_id, slug)
             },
-            LedgerResponse::OrganizationDeleted { success, blocking_vault_ids } => {
-                if *success {
-                    write!(f, "OrganizationDeleted(success=true)")
-                } else {
-                    write!(
-                        f,
-                        "OrganizationDeleted(success=false, blocking_vaults={:?})",
-                        blocking_vault_ids
-                    )
-                }
+            LedgerResponse::OrganizationDeleted { organization_id, retention_days, .. } => {
+                write!(
+                    f,
+                    "OrganizationDeleted(id={}, retention_days={})",
+                    organization_id, retention_days
+                )
+            },
+            LedgerResponse::OrganizationUpdated { organization_id } => {
+                write!(f, "OrganizationUpdated(id={})", organization_id)
+            },
+            LedgerResponse::OrganizationMemberRemoved { organization_id } => {
+                write!(f, "OrganizationMemberRemoved(id={})", organization_id)
+            },
+            LedgerResponse::OrganizationMemberRoleUpdated { organization_id } => {
+                write!(f, "OrganizationMemberRoleUpdated(id={})", organization_id)
+            },
+            LedgerResponse::OrganizationTeamCreated { team_id, team_slug } => {
+                write!(f, "OrganizationTeamCreated(id={}, slug={})", team_id, team_slug)
+            },
+            LedgerResponse::OrganizationTeamDeleted { organization_id } => {
+                write!(f, "OrganizationTeamDeleted(org={})", organization_id)
+            },
+            LedgerResponse::OrganizationTeamUpdated { organization_id } => {
+                write!(f, "OrganizationTeamUpdated(org={})", organization_id)
+            },
+            LedgerResponse::OrganizationPurged { organization_id } => {
+                write!(f, "OrganizationPurged(id={})", organization_id)
             },
             LedgerResponse::OrganizationMigrated { organization, old_region, new_region } => {
                 write!(
@@ -595,18 +860,26 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::MigrationCompleted { organization, old_region, new_region } => {
                 write!(f, "MigrationCompleted(id={}, {}->{})", organization, old_region, new_region)
             },
-            LedgerResponse::OrganizationDeleting { organization, blocking_vault_ids } => {
-                write!(
-                    f,
-                    "OrganizationDeleting(id={}, blocking_vaults={:?})",
-                    organization, blocking_vault_ids
-                )
-            },
             LedgerResponse::VaultDeleted { success } => {
                 write!(f, "VaultDeleted(success={})", success)
             },
             LedgerResponse::VaultHealthUpdated { success } => {
                 write!(f, "VaultHealthUpdated(success={})", success)
+            },
+            LedgerResponse::UserUpdated { user_id } => {
+                write!(f, "UserUpdated(id={})", user_id)
+            },
+            LedgerResponse::UserSoftDeleted { user_id, retention_days } => {
+                write!(f, "UserSoftDeleted(id={}, retention_days={})", user_id, retention_days)
+            },
+            LedgerResponse::UserEmailCreated { email_id } => {
+                write!(f, "UserEmailCreated(id={})", email_id)
+            },
+            LedgerResponse::UserEmailDeleted { email_id } => {
+                write!(f, "UserEmailDeleted(id={})", email_id)
+            },
+            LedgerResponse::UserEmailVerified { email_id } => {
+                write!(f, "UserEmailVerified(id={})", email_id)
             },
             LedgerResponse::UserErased { user_id } => {
                 write!(f, "UserErased(id={})", user_id)
@@ -618,8 +891,8 @@ impl fmt::Display for LedgerResponse {
                     users, migrated, skipped, errors
                 )
             },
-            LedgerResponse::Error { message } => {
-                write!(f, "Error({})", message)
+            LedgerResponse::Error { code, message } => {
+                write!(f, "Error({code:?}: {message})")
             },
             LedgerResponse::PreconditionFailed { key, .. } => {
                 write!(f, "PreconditionFailed(key={})", key)
@@ -638,19 +911,21 @@ mod tests {
 
     #[test]
     fn test_ledger_request_serialization() {
-        let request = LedgerRequest::CreateOrganization {
-            name: "test-org".to_string(),
+        let request = LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
             slug: OrganizationSlug::new(12345),
             region: Region::US_EAST_VA,
             tier: Default::default(),
-        };
+        });
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::CreateOrganization { name, slug, region, .. } => {
-                assert_eq!(name, "test-org");
+            LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+                slug,
+                region,
+                ..
+            }) => {
                 assert_eq!(slug, OrganizationSlug::new(12345));
                 assert_eq!(region, Region::US_EAST_VA);
             },
@@ -776,12 +1051,11 @@ mod tests {
         use chrono::TimeZone;
 
         let payload = RaftPayload {
-            request: LedgerRequest::CreateOrganization {
-                name: "test-org".to_string(),
+            request: LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
                 slug: OrganizationSlug::new(999),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
-            },
+            }),
             proposed_at: Utc.with_ymd_and_hms(2099, 6, 15, 12, 30, 0).unwrap(),
             state_root_commitments: vec![],
         };
@@ -792,8 +1066,7 @@ mod tests {
         assert_eq!(payload, deserialized);
         assert_eq!(deserialized.proposed_at, Utc.with_ymd_and_hms(2099, 6, 15, 12, 30, 0).unwrap());
         match &deserialized.request {
-            LedgerRequest::CreateOrganization { name, slug, .. } => {
-                assert_eq!(name, "test-org");
+            LedgerRequest::System(SystemRequest::CreateOrganizationDirectory { slug, .. }) => {
                 assert_eq!(*slug, OrganizationSlug::new(999));
             },
             _ => panic!("unexpected variant"),
@@ -913,12 +1186,11 @@ mod tests {
         use chrono::TimeZone;
 
         let payload_without = RaftPayload {
-            request: LedgerRequest::CreateOrganization {
-                name: "test".to_string(),
+            request: LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
                 slug: OrganizationSlug::new(1),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
-            },
+            }),
             proposed_at: Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap(),
             state_root_commitments: vec![],
         };
@@ -966,7 +1238,7 @@ mod tests {
         use openraft::{CommittedLeaderId, LogId};
         use proptest::prelude::*;
 
-        use crate::types::{LedgerNodeId, LedgerRequest};
+        use crate::types::{LedgerNodeId, LedgerRequest, SystemRequest};
 
         /// Helper to create a LogId from term and index.
         fn make_log_id(term: u64, index: u64) -> LogId<LedgerNodeId> {
@@ -1107,12 +1379,11 @@ mod tests {
             ) {
                 let region = inferadb_ledger_types::ALL_REGIONS[region_idx];
                 let request = match variant_idx {
-                    0 => LedgerRequest::CreateOrganization {
-                        name: name.clone(),
+                    0 => LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
                         slug: inferadb_ledger_types::OrganizationSlug::new(42),
                         region,
                         tier: Default::default(),
-                    },
+                    }),
                     1 => LedgerRequest::CreateVault {
                         organization,
                         slug: VaultSlug::new(42),

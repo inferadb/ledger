@@ -268,6 +268,139 @@ pub fn validate_batch_payload_bytes(
     Ok(())
 }
 
+/// Maximum email length per RFC 5321.
+const MAX_EMAIL_LENGTH: usize = 320;
+
+/// Maximum user display name length.
+const MAX_USER_NAME_LENGTH: usize = 200;
+
+/// Validates an email address for basic structural correctness.
+///
+/// Checks that the email:
+/// - Is non-empty
+/// - Does not exceed 320 characters (RFC 5321 limit)
+/// - Contains exactly one `@` separator
+/// - Has non-empty local and domain parts
+/// - Domain contains at least one `.`
+///
+/// This is intentionally NOT a full RFC 5322 parser — it catches obvious
+/// structural problems while deferring to verification emails for correctness.
+///
+/// # Errors
+///
+/// Returns [`ValidationError`] if the email fails any structural check.
+pub fn validate_email(email: &str) -> Result<(), ValidationError> {
+    if email.is_empty() {
+        return Err(ValidationError {
+            field: "email".to_string(),
+            constraint: "must not be empty".to_string(),
+        });
+    }
+
+    if email.len() > MAX_EMAIL_LENGTH {
+        return Err(ValidationError {
+            field: "email".to_string(),
+            constraint: format!(
+                "length {} bytes exceeds maximum {} bytes",
+                email.len(),
+                MAX_EMAIL_LENGTH
+            ),
+        });
+    }
+
+    let Some((local, domain)) = email.split_once('@') else {
+        return Err(ValidationError {
+            field: "email".to_string(),
+            constraint: "must contain exactly one '@'".to_string(),
+        });
+    };
+
+    // If domain contains another '@', the email has multiple '@' signs.
+    if domain.contains('@') {
+        return Err(ValidationError {
+            field: "email".to_string(),
+            constraint: "must contain exactly one '@'".to_string(),
+        });
+    }
+
+    if local.is_empty() {
+        return Err(ValidationError {
+            field: "email".to_string(),
+            constraint: "local part must not be empty".to_string(),
+        });
+    }
+
+    if domain.is_empty() || !domain.contains('.') {
+        return Err(ValidationError {
+            field: "email".to_string(),
+            constraint: "domain must contain at least one '.'".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Validates a user display name.
+///
+/// Checks that the name:
+/// - Is non-empty
+/// - Does not exceed 200 characters (counted as Unicode chars, not bytes)
+/// - Does not contain control characters
+/// - Does not have leading, trailing, or consecutive whitespace
+///
+/// # Errors
+///
+/// Returns [`ValidationError`] if the name fails any constraint.
+pub fn validate_user_name(name: &str) -> Result<(), ValidationError> {
+    if name.is_empty() {
+        return Err(ValidationError {
+            field: "user_name".to_string(),
+            constraint: "must not be empty".to_string(),
+        });
+    }
+
+    let char_count = name.chars().count();
+    if char_count > MAX_USER_NAME_LENGTH {
+        return Err(ValidationError {
+            field: "user_name".to_string(),
+            constraint: format!(
+                "length {} characters exceeds maximum {} characters",
+                char_count, MAX_USER_NAME_LENGTH
+            ),
+        });
+    }
+
+    if name.starts_with(char::is_whitespace) {
+        return Err(ValidationError {
+            field: "user_name".to_string(),
+            constraint: "must not have leading whitespace".to_string(),
+        });
+    }
+
+    if name.ends_with(char::is_whitespace) {
+        return Err(ValidationError {
+            field: "user_name".to_string(),
+            constraint: "must not have trailing whitespace".to_string(),
+        });
+    }
+
+    if name.contains("  ") {
+        return Err(ValidationError {
+            field: "user_name".to_string(),
+            constraint: "must not contain consecutive whitespace".to_string(),
+        });
+    }
+
+    if let Some(pos) = name.find(|c: char| c.is_control()) {
+        return Err(ValidationError {
+            field: "user_name".to_string(),
+            constraint: format!("must not contain control character at byte offset {}", pos),
+        });
+    }
+
+    Ok(())
+}
+
 /// Checks if a character is allowed in entity keys.
 fn is_key_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, ':' | '/' | '_' | '.' | '-')
@@ -653,5 +786,143 @@ mod tests {
     fn test_validation_error_display() {
         let err = ValidationError { field: "key".to_string(), constraint: "too long".to_string() };
         assert_eq!(err.to_string(), "key: too long");
+    }
+
+    // =========================================================================
+    // validate_email tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_email_valid_simple() {
+        assert!(validate_email("user@example.com").is_ok());
+    }
+
+    #[test]
+    fn test_validate_email_valid_minimal() {
+        assert!(validate_email("a@b.c").is_ok());
+    }
+
+    #[test]
+    fn test_validate_email_valid_with_dots() {
+        assert!(validate_email("first.last@example.com").is_ok());
+    }
+
+    #[test]
+    fn test_validate_email_valid_with_plus() {
+        assert!(validate_email("user+tag@example.com").is_ok());
+    }
+
+    #[test]
+    fn test_validate_email_empty() {
+        let err = validate_email("").unwrap_err();
+        assert_eq!(err.field, "email");
+        assert!(err.constraint.contains("empty"));
+    }
+
+    #[test]
+    fn test_validate_email_no_at_sign() {
+        let err = validate_email("userexample.com").unwrap_err();
+        assert!(err.constraint.contains("@"));
+    }
+
+    #[test]
+    fn test_validate_email_multiple_at_signs() {
+        let err = validate_email("user@@example.com").unwrap_err();
+        assert!(err.constraint.contains("@"));
+    }
+
+    #[test]
+    fn test_validate_email_empty_local_part() {
+        let err = validate_email("@example.com").unwrap_err();
+        assert!(err.constraint.contains("local"));
+    }
+
+    #[test]
+    fn test_validate_email_empty_domain() {
+        let err = validate_email("user@").unwrap_err();
+        assert!(err.constraint.contains("domain"));
+    }
+
+    #[test]
+    fn test_validate_email_domain_no_dot() {
+        let err = validate_email("user@localhost").unwrap_err();
+        assert!(err.constraint.contains("domain"));
+    }
+
+    #[test]
+    fn test_validate_email_too_long() {
+        let long_local = "a".repeat(310);
+        let email = format!("{long_local}@example.com");
+        let err = validate_email(&email).unwrap_err();
+        assert!(err.constraint.contains("exceeds"));
+    }
+
+    // =========================================================================
+    // validate_user_name tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_user_name_valid_simple() {
+        assert!(validate_user_name("Alice Smith").is_ok());
+    }
+
+    #[test]
+    fn test_validate_user_name_valid_single_char() {
+        assert!(validate_user_name("A").is_ok());
+    }
+
+    #[test]
+    fn test_validate_user_name_valid_unicode() {
+        assert!(validate_user_name("Société Générale").is_ok());
+    }
+
+    #[test]
+    fn test_validate_user_name_empty() {
+        let err = validate_user_name("").unwrap_err();
+        assert_eq!(err.field, "user_name");
+        assert!(err.constraint.contains("empty"));
+    }
+
+    #[test]
+    fn test_validate_user_name_too_long() {
+        let name = "a".repeat(201);
+        let err = validate_user_name(&name).unwrap_err();
+        assert!(err.constraint.contains("exceeds"));
+    }
+
+    #[test]
+    fn test_validate_user_name_exactly_at_limit() {
+        let name = "a".repeat(200);
+        assert!(validate_user_name(&name).is_ok());
+    }
+
+    #[test]
+    fn test_validate_user_name_leading_space() {
+        let err = validate_user_name(" Alice").unwrap_err();
+        assert!(err.constraint.contains("leading"));
+    }
+
+    #[test]
+    fn test_validate_user_name_trailing_space() {
+        let err = validate_user_name("Alice ").unwrap_err();
+        assert!(err.constraint.contains("trailing"));
+    }
+
+    #[test]
+    fn test_validate_user_name_consecutive_spaces() {
+        let err = validate_user_name("Alice  Smith").unwrap_err();
+        assert!(err.constraint.contains("consecutive"));
+    }
+
+    #[test]
+    fn test_validate_user_name_control_char() {
+        let err = validate_user_name("Alice\x00Smith").unwrap_err();
+        assert!(err.constraint.contains("control"));
+    }
+
+    #[test]
+    fn test_validate_user_name_tab_rejected() {
+        let err = validate_user_name("Alice\tSmith").unwrap_err();
+        assert!(err.constraint.contains("control"));
     }
 }

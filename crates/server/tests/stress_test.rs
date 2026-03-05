@@ -172,20 +172,27 @@ async fn setup_organization_and_vault(
     config: &mut StressConfig,
 ) -> Result<(), String> {
     let endpoint = format!("http://{}", leader_addr);
-    let mut admin_client =
-        inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::connect(
+    let mut org_client =
+        inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient::connect(
             endpoint.clone(),
         )
         .await
-        .map_err(|e| format!("Failed to connect admin client: {}", e))?;
+        .map_err(|e| format!("Failed to connect organization client: {}", e))?;
+    let mut vault_client =
+        inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::connect(
+            endpoint.clone(),
+        )
+        .await
+        .map_err(|e| format!("Failed to connect vault client: {}", e))?;
 
     // Create organization and capture the actual Snowflake slug
     let ns_request = inferadb_ledger_proto::proto::CreateOrganizationRequest {
         name: format!("stress-ns-{}", config.organization.value()),
         region: 10, // REGION_US_EAST_VA
         tier: None,
+        admin: None,
     };
-    let ns_response = admin_client
+    let ns_response = org_client
         .create_organization(ns_request)
         .await
         .map_err(|e| format!("Failed to create organization: {}", e))?;
@@ -205,7 +212,7 @@ async fn setup_organization_and_vault(
         initial_nodes: vec![],
         retention_policy: None,
     };
-    let vault_response = admin_client
+    let vault_response = vault_client
         .create_vault(vault_request)
         .await
         .map_err(|e| format!("Failed to create vault: {}", e))?;
@@ -239,12 +246,18 @@ async fn setup_multi_region_organizations(
     num_regions: usize,
 ) -> Result<Vec<RegionAssignment>, String> {
     let endpoint = format!("http://{}", leader_addr);
-    let mut admin_client =
-        inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::connect(
+    let mut org_client =
+        inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient::connect(
             endpoint.clone(),
         )
         .await
-        .map_err(|e| format!("Failed to connect admin client: {}", e))?;
+        .map_err(|e| format!("Failed to connect organization client: {}", e))?;
+    let mut vault_client =
+        inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::connect(
+            endpoint.clone(),
+        )
+        .await
+        .map_err(|e| format!("Failed to connect vault client: {}", e))?;
 
     let mut assignments = Vec::with_capacity(num_regions);
 
@@ -256,9 +269,10 @@ async fn setup_multi_region_organizations(
             name: format!("stress-region-{}-ns", region),
             region: 10, // REGION_US_EAST_VA
             tier: None,
+            admin: None,
         };
 
-        let ns_response = admin_client
+        let ns_response = org_client
             .create_organization(ns_request)
             .await
             .map_err(|e| format!("Failed to create organization for region {}: {}", region, e))?;
@@ -279,7 +293,7 @@ async fn setup_multi_region_organizations(
             retention_policy: None,
         };
 
-        let vault_response = admin_client.create_vault(vault_request).await.map_err(|e| {
+        let vault_response = vault_client.create_vault(vault_request).await.map_err(|e| {
             format!("Failed to create vault in organization {}: {}", organization, e)
         })?;
 

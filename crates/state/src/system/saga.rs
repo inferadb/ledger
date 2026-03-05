@@ -5,8 +5,11 @@
 //!
 //! ## Saga Patterns
 //!
-//! - **CreateOrg**: Creates user in `_system`, then organization with membership
+//! - **CreateOrganization**: Multi-group saga creating org directory entry + profile
+//! - **CreateUser**: Multi-group saga allocating IDs, reserving email, writing regional data
 //! - **DeleteUser**: Marks user as deleting, removes memberships, then deletes user
+//! - **MigrateOrg**: Region migration with data transfer and integrity verification
+//! - **MigrateUser**: Moves user PII between regional Raft groups
 //!
 //! ## Storage
 //!
@@ -19,6 +22,8 @@ use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{OrganizationId, OrganizationSlug, Region, UserId, UserSlug};
 use serde::{Deserialize, Serialize};
 
+use super::types::OrganizationTier;
+
 /// Unique identifier for a saga.
 pub type SagaId = String;
 
@@ -30,172 +35,6 @@ pub const SAGA_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Maximum backoff duration for retries (5 minutes).
 pub const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
-
-// =============================================================================
-// Create Organization Saga
-// =============================================================================
-
-/// State machine for the Create Organization saga.
-///
-/// Creates a new user (if needed) and a new organization.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum CreateOrgSagaState {
-    /// Initial state: about to create user.
-    Pending,
-    /// User created in `_system`, waiting for organization creation.
-    UserCreated {
-        /// The created user's ID.
-        user_id: UserId,
-    },
-    /// Organization created, waiting for finalization.
-    OrganizationCreated {
-        /// The user's ID.
-        user_id: UserId,
-        /// The created organization's ID.
-        organization_id: OrganizationId,
-    },
-    /// Saga completed successfully.
-    Completed {
-        /// The user's ID.
-        user_id: UserId,
-        /// The created organization's ID.
-        organization_id: OrganizationId,
-    },
-    /// Saga failed and compensation was attempted.
-    Failed {
-        /// The step that failed (0-indexed).
-        step: u8,
-        /// Error description.
-        error: String,
-    },
-    /// Saga failed and compensation completed.
-    Compensated {
-        /// The step that failed.
-        step: u8,
-        /// What was cleaned up.
-        cleanup_summary: String,
-    },
-}
-
-/// Input parameters for Create Organization saga.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateOrgInput {
-    /// User's display name.
-    pub user_name: String,
-    /// User's email address.
-    pub user_email: String,
-    /// Organization name.
-    pub org_name: String,
-    /// Optional existing user ID (if user already exists).
-    pub existing_user_id: Option<UserId>,
-}
-
-/// Record for the Create Organization saga, tracking state and retry progress.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateOrgSaga {
-    /// Unique saga identifier.
-    pub id: SagaId,
-    /// Current state.
-    pub state: CreateOrgSagaState,
-    /// Input parameters.
-    pub input: CreateOrgInput,
-    /// When the saga was created.
-    pub created_at: DateTime<Utc>,
-    /// When the saga was last updated.
-    pub updated_at: DateTime<Utc>,
-    /// Number of retry attempts.
-    pub retries: u8,
-    /// Next retry time (for exponential backoff).
-    pub next_retry_at: Option<DateTime<Utc>>,
-}
-
-impl CreateOrgSaga {
-    /// Creates a new saga in Pending state.
-    pub fn new(id: SagaId, input: CreateOrgInput) -> Self {
-        let now = Utc::now();
-        Self {
-            id,
-            state: CreateOrgSagaState::Pending,
-            input,
-            created_at: now,
-            updated_at: now,
-            retries: 0,
-            next_retry_at: None,
-        }
-    }
-
-    /// Checks if the saga is complete (success or permanently failed).
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self.state,
-            CreateOrgSagaState::Completed { .. }
-                | CreateOrgSagaState::Failed { .. }
-                | CreateOrgSagaState::Compensated { .. }
-        )
-    }
-
-    /// Checks if the saga is ready for retry.
-    pub fn is_ready_for_retry(&self) -> bool {
-        if self.is_terminal() {
-            return false;
-        }
-        match self.next_retry_at {
-            Some(retry_at) => Utc::now() >= retry_at,
-            None => true,
-        }
-    }
-
-    /// Calculates next backoff duration using exponential backoff.
-    pub fn next_backoff(&self) -> Duration {
-        let base = Duration::from_secs(1);
-        let backoff = base * 2u32.saturating_pow(self.retries as u32);
-        std::cmp::min(backoff, MAX_BACKOFF)
-    }
-
-    /// Increments the retry count and sets the next retry time.
-    pub fn schedule_retry(&mut self) {
-        self.retries = self.retries.saturating_add(1);
-        let backoff = self.next_backoff();
-        self.next_retry_at =
-            Some(Utc::now() + chrono::Duration::from_std(backoff).unwrap_or_default());
-        self.updated_at = Utc::now();
-    }
-
-    /// Transitions to a new state.
-    pub fn transition(&mut self, new_state: CreateOrgSagaState) {
-        self.state = new_state;
-        self.updated_at = Utc::now();
-        self.next_retry_at = None; // Clear retry on successful transition
-    }
-
-    /// Marks as failed with error.
-    ///
-    /// After MAX_RETRIES failures, transitions to terminal Failed state.
-    pub fn fail(&mut self, step: u8, error: String) {
-        self.retries = self.retries.saturating_add(1);
-        if self.retries >= MAX_RETRIES {
-            self.state = CreateOrgSagaState::Failed { step, error };
-        } else {
-            // Schedule next retry with exponential backoff
-            let backoff = self.next_backoff();
-            self.next_retry_at =
-                Some(Utc::now() + chrono::Duration::from_std(backoff).unwrap_or_default());
-        }
-        self.updated_at = Utc::now();
-    }
-
-    /// Returns the step number for the current state (used in fail tracking).
-    pub fn current_step(&self) -> u8 {
-        match &self.state {
-            CreateOrgSagaState::Pending => 0,
-            CreateOrgSagaState::UserCreated { .. } => 1,
-            CreateOrgSagaState::OrganizationCreated { .. } => 2,
-            CreateOrgSagaState::Completed { .. }
-            | CreateOrgSagaState::Failed { .. }
-            | CreateOrgSagaState::Compensated { .. } => 0,
-        }
-    }
-}
 
 // =============================================================================
 // Delete User Saga
@@ -805,6 +644,13 @@ pub struct CreateUserInput {
     pub region: Region,
     /// Whether this user is a global service administrator.
     pub admin: bool,
+    /// Saga ID reference for the pending org profile in regional store.
+    /// Format: `_sys:pending_org_profile:{saga_id}`
+    #[serde(default)]
+    pub pending_org_profile_key: String,
+    /// Billing tier for the default organization created with this user.
+    #[serde(default)]
+    pub default_org_tier: OrganizationTier,
 }
 
 /// Record for the Create User saga, tracking state and retry progress.
@@ -928,14 +774,209 @@ impl CreateUserSaga {
 }
 
 // =============================================================================
+// Create Organization Saga (Multi-Group)
+// =============================================================================
+
+/// State machine for the Create Organization saga.
+///
+/// Coordinates writes across GLOBAL + regional stores:
+/// 1. GLOBAL: allocate OrganizationId/OrganizationSlug, create directory entry
+/// 2. Regional: finalize OrganizationProfile + write ownership membership
+/// 3. GLOBAL: update directory status to Active
+///
+/// Compensation in reverse: step 3 → revert directory status,
+/// step 2 → delete profile + membership from regional store,
+/// step 1 → delete directory entry + slug index from GLOBAL.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CreateOrganizationSagaState {
+    /// Initial state: about to allocate IDs and create directory entry in GLOBAL.
+    Pending,
+    /// Step 1 complete: directory entry created in GLOBAL with Provisioning status.
+    DirectoryCreated {
+        /// Allocated internal organization ID.
+        organization_id: OrganizationId,
+        /// Allocated external Snowflake slug.
+        organization_slug: OrganizationSlug,
+    },
+    /// Step 2 complete: profile finalized and ownership membership written in regional store.
+    ProfileWritten {
+        /// The organization's internal ID.
+        organization_id: OrganizationId,
+        /// The organization's external slug.
+        organization_slug: OrganizationSlug,
+    },
+    /// Step 3 complete: directory entry marked Active in GLOBAL.
+    Completed {
+        /// Created organization's internal ID.
+        organization_id: OrganizationId,
+        /// Created organization's external slug.
+        organization_slug: OrganizationSlug,
+    },
+    /// Saga failed after exhausting retries.
+    Failed {
+        /// The step that failed (0-indexed).
+        step: u8,
+        /// Error description.
+        error: String,
+    },
+    /// Saga failed and compensation completed.
+    Compensated {
+        /// The step that failed.
+        step: u8,
+        /// Summary of compensation actions taken.
+        cleanup_summary: String,
+    },
+    /// Saga exceeded timeout and was auto-compensated.
+    TimedOut,
+}
+
+/// Input parameters for Create Organization saga.
+///
+/// PII (organization name) is intentionally excluded — the saga is stored in
+/// the global control plane, and only pseudonymous identifiers are permitted.
+/// The organization name is written directly to the regional store by the
+/// gRPC handler, not through the saga's serialized state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateOrganizationInput {
+    /// Data residency region for the organization.
+    pub region: Region,
+    /// Billing tier for the organization.
+    pub tier: OrganizationTier,
+    /// Initial administrator for this organization.
+    pub admin: UserId,
+    /// Key in regional store where the handler wrote the pending org profile.
+    /// The orchestrator reads this during the regional step to get the org name.
+    /// Not PII — just a storage key reference.
+    pub pending_profile_key: String,
+}
+
+/// Record for the Create Organization saga, tracking state and retry progress.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateOrganizationSaga {
+    /// Unique saga identifier.
+    pub id: SagaId,
+    /// Current state.
+    pub state: CreateOrganizationSagaState,
+    /// Input parameters (PII-free).
+    pub input: CreateOrganizationInput,
+    /// When the saga was created.
+    pub created_at: DateTime<Utc>,
+    /// When the saga was last updated.
+    pub updated_at: DateTime<Utc>,
+    /// Number of retry attempts.
+    pub retries: u8,
+    /// Next retry time (for exponential backoff).
+    pub next_retry_at: Option<DateTime<Utc>>,
+}
+
+impl CreateOrganizationSaga {
+    /// Creates a new saga in Pending state.
+    pub fn new(id: SagaId, input: CreateOrganizationInput) -> Self {
+        let now = Utc::now();
+        Self {
+            id,
+            state: CreateOrganizationSagaState::Pending,
+            input,
+            created_at: now,
+            updated_at: now,
+            retries: 0,
+            next_retry_at: None,
+        }
+    }
+
+    /// Checks if the saga is complete (success or permanently failed).
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.state,
+            CreateOrganizationSagaState::Completed { .. }
+                | CreateOrganizationSagaState::Failed { .. }
+                | CreateOrganizationSagaState::Compensated { .. }
+                | CreateOrganizationSagaState::TimedOut
+        )
+    }
+
+    /// Checks if the saga is ready for retry.
+    pub fn is_ready_for_retry(&self) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        match self.next_retry_at {
+            Some(retry_at) => Utc::now() >= retry_at,
+            None => true,
+        }
+    }
+
+    /// Checks if the saga has exceeded the given timeout.
+    pub fn is_timed_out(&self, timeout: Duration) -> bool {
+        let elapsed = Utc::now() - self.created_at;
+        elapsed > chrono::Duration::from_std(timeout).unwrap_or(chrono::Duration::MAX)
+    }
+
+    /// Calculates next backoff duration using exponential backoff.
+    pub fn next_backoff(&self) -> Duration {
+        let base = Duration::from_secs(1);
+        let backoff = base * 2u32.saturating_pow(self.retries as u32);
+        std::cmp::min(backoff, MAX_BACKOFF)
+    }
+
+    /// Transitions to a new state.
+    pub fn transition(&mut self, new_state: CreateOrganizationSagaState) {
+        self.state = new_state;
+        self.updated_at = Utc::now();
+        self.next_retry_at = None;
+    }
+
+    /// Marks as failed with error.
+    ///
+    /// After MAX_RETRIES failures, transitions to terminal Failed state.
+    pub fn fail(&mut self, step: u8, error: String) {
+        self.retries = self.retries.saturating_add(1);
+        if self.retries >= MAX_RETRIES {
+            self.state = CreateOrganizationSagaState::Failed { step, error };
+        } else {
+            let backoff = self.next_backoff();
+            self.next_retry_at =
+                Some(Utc::now() + chrono::Duration::from_std(backoff).unwrap_or_default());
+        }
+        self.updated_at = Utc::now();
+    }
+
+    /// Returns the step number for the current state.
+    pub fn current_step(&self) -> u8 {
+        match &self.state {
+            CreateOrganizationSagaState::Pending => 0,
+            CreateOrganizationSagaState::DirectoryCreated { .. } => 1,
+            CreateOrganizationSagaState::ProfileWritten { .. } => 2,
+            CreateOrganizationSagaState::Completed { .. }
+            | CreateOrganizationSagaState::Failed { .. }
+            | CreateOrganizationSagaState::Compensated { .. }
+            | CreateOrganizationSagaState::TimedOut => 0,
+        }
+    }
+
+    /// Returns the target region for the current step.
+    ///
+    /// Steps 0, 2 target GLOBAL; step 1 targets the organization's declared region.
+    pub fn target_region(&self) -> Region {
+        match &self.state {
+            CreateOrganizationSagaState::Pending => Region::GLOBAL,
+            CreateOrganizationSagaState::DirectoryCreated { .. } => self.input.region,
+            CreateOrganizationSagaState::ProfileWritten { .. } => Region::GLOBAL,
+            CreateOrganizationSagaState::Completed { .. }
+            | CreateOrganizationSagaState::Failed { .. }
+            | CreateOrganizationSagaState::Compensated { .. }
+            | CreateOrganizationSagaState::TimedOut => Region::GLOBAL,
+        }
+    }
+}
+
+// =============================================================================
 // Generic Saga Wrapper
 // =============================================================================
 
 /// Type of saga.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SagaType {
-    /// Create Organization saga type.
-    CreateOrg,
     /// Delete User saga type.
     DeleteUser,
     /// Migrate Organization region saga type.
@@ -944,13 +985,13 @@ pub enum SagaType {
     MigrateUser,
     /// Create User saga type (multi-group: GLOBAL + regional).
     CreateUser,
+    /// Create Organization saga type (multi-group: GLOBAL + regional).
+    CreateOrganization,
 }
 
 /// Generic saga record that wraps specific saga types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Saga {
-    /// Create Organization saga.
-    CreateOrg(CreateOrgSaga),
     /// Delete User saga.
     DeleteUser(DeleteUserSaga),
     /// Migrate Organization region saga.
@@ -959,83 +1000,85 @@ pub enum Saga {
     MigrateUser(MigrateUserSaga),
     /// Create User saga (multi-group: GLOBAL + regional).
     CreateUser(CreateUserSaga),
+    /// Create Organization saga (multi-group: GLOBAL + regional).
+    CreateOrganization(CreateOrganizationSaga),
 }
 
 impl Saga {
     /// Returns the saga ID.
     pub fn id(&self) -> &str {
         match self {
-            Saga::CreateOrg(s) => &s.id,
             Saga::DeleteUser(s) => &s.id,
             Saga::MigrateOrg(s) => &s.id,
             Saga::MigrateUser(s) => &s.id,
             Saga::CreateUser(s) => &s.id,
+            Saga::CreateOrganization(s) => &s.id,
         }
     }
 
     /// Returns the saga type.
     pub fn saga_type(&self) -> SagaType {
         match self {
-            Saga::CreateOrg(_) => SagaType::CreateOrg,
             Saga::DeleteUser(_) => SagaType::DeleteUser,
             Saga::MigrateOrg(_) => SagaType::MigrateOrg,
             Saga::MigrateUser(_) => SagaType::MigrateUser,
             Saga::CreateUser(_) => SagaType::CreateUser,
+            Saga::CreateOrganization(_) => SagaType::CreateOrganization,
         }
     }
 
     /// Checks if the saga is in a terminal state.
     pub fn is_terminal(&self) -> bool {
         match self {
-            Saga::CreateOrg(s) => s.is_terminal(),
             Saga::DeleteUser(s) => s.is_terminal(),
             Saga::MigrateOrg(s) => s.is_terminal(),
             Saga::MigrateUser(s) => s.is_terminal(),
             Saga::CreateUser(s) => s.is_terminal(),
+            Saga::CreateOrganization(s) => s.is_terminal(),
         }
     }
 
     /// Checks if the saga is ready for retry.
     pub fn is_ready_for_retry(&self) -> bool {
         match self {
-            Saga::CreateOrg(s) => s.is_ready_for_retry(),
             Saga::DeleteUser(s) => s.is_ready_for_retry(),
             Saga::MigrateOrg(s) => s.is_ready_for_retry(),
             Saga::MigrateUser(s) => s.is_ready_for_retry(),
             Saga::CreateUser(s) => s.is_ready_for_retry(),
+            Saga::CreateOrganization(s) => s.is_ready_for_retry(),
         }
     }
 
     /// Returns the creation timestamp.
     pub fn created_at(&self) -> DateTime<Utc> {
         match self {
-            Saga::CreateOrg(s) => s.created_at,
             Saga::DeleteUser(s) => s.created_at,
             Saga::MigrateOrg(s) => s.created_at,
             Saga::MigrateUser(s) => s.created_at,
             Saga::CreateUser(s) => s.created_at,
+            Saga::CreateOrganization(s) => s.created_at,
         }
     }
 
     /// Returns the last-updated timestamp.
     pub fn updated_at(&self) -> DateTime<Utc> {
         match self {
-            Saga::CreateOrg(s) => s.updated_at,
             Saga::DeleteUser(s) => s.updated_at,
             Saga::MigrateOrg(s) => s.updated_at,
             Saga::MigrateUser(s) => s.updated_at,
             Saga::CreateUser(s) => s.updated_at,
+            Saga::CreateOrganization(s) => s.updated_at,
         }
     }
 
     /// Returns the retry count.
     pub fn retries(&self) -> u8 {
         match self {
-            Saga::CreateOrg(s) => s.retries,
             Saga::DeleteUser(s) => s.retries,
             Saga::MigrateOrg(s) => s.retries,
             Saga::MigrateUser(s) => s.retries,
             Saga::CreateUser(s) => s.retries,
+            Saga::CreateOrganization(s) => s.retries,
         }
     }
 
@@ -1044,7 +1087,6 @@ impl Saga {
     /// Used to reject concurrent sagas targeting the same entity.
     pub fn lock_keys(&self) -> Vec<SagaLockKey> {
         match self {
-            Saga::CreateOrg(_) => Vec::new(),
             Saga::DeleteUser(s) => vec![SagaLockKey::User(s.input.user)],
             Saga::MigrateOrg(s) => {
                 vec![SagaLockKey::Organization(s.input.organization_id)]
@@ -1053,17 +1095,25 @@ impl Saga {
             Saga::CreateUser(s) => {
                 vec![SagaLockKey::Email(s.input.hmac.clone())]
             },
+            Saga::CreateOrganization(s) => match &s.state {
+                CreateOrganizationSagaState::DirectoryCreated { organization_id, .. }
+                | CreateOrganizationSagaState::ProfileWritten { organization_id, .. }
+                | CreateOrganizationSagaState::Completed { organization_id, .. } => {
+                    vec![SagaLockKey::Organization(*organization_id)]
+                },
+                _ => Vec::new(),
+            },
         }
     }
 
     /// Returns the step number for the current state (used in fail tracking).
     pub fn current_step(&self) -> u8 {
         match self {
-            Saga::CreateOrg(s) => s.current_step(),
             Saga::DeleteUser(s) => s.current_step(),
             Saga::MigrateOrg(s) => s.current_step(),
             Saga::MigrateUser(s) => s.current_step(),
             Saga::CreateUser(s) => s.current_step(),
+            Saga::CreateOrganization(s) => s.current_step(),
         }
     }
 
@@ -1073,11 +1123,11 @@ impl Saga {
     pub fn fail(&mut self, error: String) {
         let step = self.current_step();
         match self {
-            Saga::CreateOrg(s) => s.fail(step, error),
             Saga::DeleteUser(s) => s.fail(step, error),
             Saga::MigrateOrg(s) => s.fail(step, error),
             Saga::MigrateUser(s) => s.fail(step, error),
             Saga::CreateUser(s) => s.fail(step, error),
+            Saga::CreateOrganization(s) => s.fail(step, error),
         }
     }
 
@@ -1098,64 +1148,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_create_org_saga_new() {
-        let input = CreateOrgInput {
-            user_name: "Alice".to_string(),
-            user_email: "alice@example.com".to_string(),
-            org_name: "Acme Corp".to_string(),
-            existing_user_id: None,
-        };
-        let saga = CreateOrgSaga::new("saga-123".to_string(), input);
-
-        assert_eq!(saga.id, "saga-123");
-        assert_eq!(saga.state, CreateOrgSagaState::Pending);
-        assert_eq!(saga.retries, 0);
-        assert!(!saga.is_terminal());
-        assert!(saga.is_ready_for_retry());
-    }
-
-    #[test]
-    fn test_create_org_saga_transitions() {
-        let input = CreateOrgInput {
-            user_name: "Alice".to_string(),
-            user_email: "alice@example.com".to_string(),
-            org_name: "Acme Corp".to_string(),
-            existing_user_id: None,
-        };
-        let mut saga = CreateOrgSaga::new("saga-123".to_string(), input);
-
-        // Transition to UserCreated
-        saga.transition(CreateOrgSagaState::UserCreated { user_id: UserId::new(1) });
-        assert!(matches!(
-            saga.state,
-            CreateOrgSagaState::UserCreated { user_id } if user_id == UserId::new(1)
-        ));
-        assert!(!saga.is_terminal());
-
-        // Transition to OrganizationCreated
-        saga.transition(CreateOrgSagaState::OrganizationCreated {
-            user_id: UserId::new(1),
-            organization_id: OrganizationId::new(100),
-        });
-        assert!(!saga.is_terminal());
-
-        // Transition to Completed
-        saga.transition(CreateOrgSagaState::Completed {
-            user_id: UserId::new(1),
-            organization_id: OrganizationId::new(100),
-        });
-        assert!(saga.is_terminal());
-    }
-
-    #[test]
     fn test_exponential_backoff() {
-        let input = CreateOrgInput {
-            user_name: "Alice".to_string(),
-            user_email: "alice@example.com".to_string(),
-            org_name: "Acme Corp".to_string(),
-            existing_user_id: None,
+        let input = DeleteUserInput {
+            user: UserId::new(1),
+            organization_ids: vec![OrganizationId::new(100)],
         };
-        let mut saga = CreateOrgSaga::new("saga-123".to_string(), input);
+        let mut saga = DeleteUserSaga::new("saga-123".to_string(), input);
 
         // First backoff: 1s
         assert_eq!(saga.next_backoff(), Duration::from_secs(1));
@@ -1171,13 +1169,11 @@ mod tests {
 
     #[test]
     fn test_max_backoff() {
-        let input = CreateOrgInput {
-            user_name: "Alice".to_string(),
-            user_email: "alice@example.com".to_string(),
-            org_name: "Acme Corp".to_string(),
-            existing_user_id: None,
+        let input = DeleteUserInput {
+            user: UserId::new(1),
+            organization_ids: vec![OrganizationId::new(100)],
         };
-        let mut saga = CreateOrgSaga::new("saga-123".to_string(), input);
+        let mut saga = DeleteUserSaga::new("saga-123".to_string(), input);
 
         // Simulate many retries
         for _ in 0..20 {
@@ -1190,13 +1186,11 @@ mod tests {
 
     #[test]
     fn test_fail_after_max_retries() {
-        let input = CreateOrgInput {
-            user_name: "Alice".to_string(),
-            user_email: "alice@example.com".to_string(),
-            org_name: "Acme Corp".to_string(),
-            existing_user_id: None,
+        let input = DeleteUserInput {
+            user: UserId::new(1),
+            organization_ids: vec![OrganizationId::new(100)],
         };
-        let mut saga = CreateOrgSaga::new("saga-123".to_string(), input);
+        let mut saga = DeleteUserSaga::new("saga-123".to_string(), input);
 
         // Fail MAX_RETRIES times
         for _ in 0..MAX_RETRIES {
@@ -1205,7 +1199,7 @@ mod tests {
 
         // Should now be in Failed state
         assert!(saga.is_terminal());
-        assert!(matches!(saga.state, CreateOrgSagaState::Failed { step: 1, .. }));
+        assert!(matches!(saga.state, DeleteUserSagaState::Failed { step: 1, .. }));
     }
 
     #[test]
@@ -1233,13 +1227,11 @@ mod tests {
 
     #[test]
     fn test_saga_serialization() {
-        let input = CreateOrgInput {
-            user_name: "Alice".to_string(),
-            user_email: "alice@example.com".to_string(),
-            org_name: "Acme Corp".to_string(),
-            existing_user_id: None,
+        let input = DeleteUserInput {
+            user: UserId::new(42),
+            organization_ids: vec![OrganizationId::new(1)],
         };
-        let saga = Saga::CreateOrg(CreateOrgSaga::new("saga-123".to_string(), input));
+        let saga = Saga::DeleteUser(DeleteUserSaga::new("saga-123".to_string(), input));
 
         let bytes = saga.to_bytes().unwrap();
         let restored = Saga::from_bytes(&bytes).unwrap();
@@ -1250,16 +1242,14 @@ mod tests {
 
     #[test]
     fn test_saga_wrapper() {
-        let input = CreateOrgInput {
-            user_name: "Alice".to_string(),
-            user_email: "alice@example.com".to_string(),
-            org_name: "Acme Corp".to_string(),
-            existing_user_id: None,
+        let input = DeleteUserInput {
+            user: UserId::new(42),
+            organization_ids: vec![OrganizationId::new(1)],
         };
-        let saga = Saga::CreateOrg(CreateOrgSaga::new("saga-123".to_string(), input));
+        let saga = Saga::DeleteUser(DeleteUserSaga::new("saga-123".to_string(), input));
 
         assert_eq!(saga.id(), "saga-123");
-        assert_eq!(saga.saga_type(), SagaType::CreateOrg);
+        assert_eq!(saga.saga_type(), SagaType::DeleteUser);
         assert!(!saga.is_terminal());
         assert!(saga.is_ready_for_retry());
         assert_eq!(saga.retries(), 0);
@@ -1758,6 +1748,8 @@ mod tests {
             hmac: "deadbeef0123456789abcdef".to_string(),
             region: Region::IE_EAST_DUBLIN,
             admin: false,
+            pending_org_profile_key: "_sys:pending_org_profile:test-saga".to_string(),
+            default_org_tier: OrganizationTier::Free,
         }
     }
 
@@ -1982,17 +1974,295 @@ mod tests {
         assert!(matches!(keys[0], SagaLockKey::User(id) if id == UserId::new(7)));
     }
 
-    #[test]
-    fn test_saga_lock_keys_create_org_has_none() {
-        let input = CreateOrgInput {
-            user_name: "Alice".to_string(),
-            user_email: "alice@example.com".to_string(),
-            org_name: "Acme Corp".to_string(),
-            existing_user_id: None,
-        };
-        let inner = CreateOrgSaga::new("co-lock".to_string(), input);
-        let saga = Saga::CreateOrg(inner);
+    // =========================================================================
+    // CreateOrganizationSaga tests
+    // =========================================================================
 
-        assert!(saga.lock_keys().is_empty());
+    fn make_create_organization_input() -> CreateOrganizationInput {
+        CreateOrganizationInput {
+            region: Region::US_EAST_VA,
+            tier: OrganizationTier::Free,
+            admin: UserId::new(1),
+            pending_profile_key: "_sys:pending_org_profile:test-saga-123".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_create_organization_saga_new() {
+        let saga =
+            CreateOrganizationSaga::new("org-saga-1".to_string(), make_create_organization_input());
+        assert_eq!(saga.id, "org-saga-1");
+        assert_eq!(saga.state, CreateOrganizationSagaState::Pending);
+        assert_eq!(saga.retries, 0);
+        assert!(saga.next_retry_at.is_none());
+        assert!(!saga.is_terminal());
+        assert!(saga.is_ready_for_retry());
+    }
+
+    #[test]
+    fn test_create_organization_saga_transitions() {
+        let input = CreateOrganizationInput {
+            region: Region::US_EAST_VA,
+            tier: OrganizationTier::Pro,
+            admin: UserId::new(1),
+            pending_profile_key: "_sys:pending_org_profile:test".to_string(),
+        };
+        let mut saga = CreateOrganizationSaga::new("org-saga-2".to_string(), input);
+
+        let org_id = OrganizationId::new(42);
+        let org_slug = OrganizationSlug::new(9999);
+
+        // Pending → DirectoryCreated
+        saga.transition(CreateOrganizationSagaState::DirectoryCreated {
+            organization_id: org_id,
+            organization_slug: org_slug,
+        });
+        assert_eq!(saga.current_step(), 1);
+        assert!(!saga.is_terminal());
+
+        // DirectoryCreated → ProfileWritten
+        saga.transition(CreateOrganizationSagaState::ProfileWritten {
+            organization_id: org_id,
+            organization_slug: org_slug,
+        });
+        assert_eq!(saga.current_step(), 2);
+        assert!(!saga.is_terminal());
+
+        // ProfileWritten → Completed
+        saga.transition(CreateOrganizationSagaState::Completed {
+            organization_id: org_id,
+            organization_slug: org_slug,
+        });
+        assert!(saga.is_terminal());
+    }
+
+    #[test]
+    fn test_create_organization_saga_target_region() {
+        let input = CreateOrganizationInput {
+            region: Region::IE_EAST_DUBLIN,
+            tier: OrganizationTier::Free,
+            admin: UserId::new(1),
+            pending_profile_key: "_sys:pending_org_profile:test".to_string(),
+        };
+        let mut saga = CreateOrganizationSaga::new("org-saga-3".to_string(), input);
+
+        // Step 0 targets GLOBAL
+        assert_eq!(saga.target_region(), Region::GLOBAL);
+
+        // Step 1 targets regional
+        saga.transition(CreateOrganizationSagaState::DirectoryCreated {
+            organization_id: OrganizationId::new(1),
+            organization_slug: OrganizationSlug::new(1),
+        });
+        assert_eq!(saga.target_region(), Region::IE_EAST_DUBLIN);
+
+        // Step 2 targets GLOBAL
+        saga.transition(CreateOrganizationSagaState::ProfileWritten {
+            organization_id: OrganizationId::new(1),
+            organization_slug: OrganizationSlug::new(1),
+        });
+        assert_eq!(saga.target_region(), Region::GLOBAL);
+    }
+
+    #[test]
+    fn test_create_organization_saga_is_terminal() {
+        let base =
+            CreateOrganizationSaga::new("org-saga-4".to_string(), make_create_organization_input());
+
+        let mut s = base.clone();
+        s.state = CreateOrganizationSagaState::Completed {
+            organization_id: OrganizationId::new(1),
+            organization_slug: OrganizationSlug::new(1),
+        };
+        assert!(s.is_terminal());
+
+        let mut s = base.clone();
+        s.state = CreateOrganizationSagaState::Failed { step: 1, error: "err".to_string() };
+        assert!(s.is_terminal());
+
+        let mut s = base.clone();
+        s.state = CreateOrganizationSagaState::Compensated {
+            step: 0,
+            cleanup_summary: "cleaned".to_string(),
+        };
+        assert!(s.is_terminal());
+
+        let mut s = base.clone();
+        s.state = CreateOrganizationSagaState::TimedOut;
+        assert!(s.is_terminal());
+
+        // Non-terminal
+        let mut s = base;
+        s.state = CreateOrganizationSagaState::DirectoryCreated {
+            organization_id: OrganizationId::new(1),
+            organization_slug: OrganizationSlug::new(1),
+        };
+        assert!(!s.is_terminal());
+    }
+
+    #[test]
+    fn test_create_organization_saga_fail_and_retry() {
+        let mut saga =
+            CreateOrganizationSaga::new("org-saga-5".to_string(), make_create_organization_input());
+
+        for _ in 0..MAX_RETRIES.saturating_sub(1) {
+            saga.fail(0, "transient".to_string());
+            assert!(!saga.is_terminal());
+            assert!(saga.next_retry_at.is_some());
+        }
+
+        saga.fail(0, "permanent".to_string());
+        assert!(saga.is_terminal());
+        assert!(matches!(
+            saga.state,
+            CreateOrganizationSagaState::Failed { step: 0, ref error } if error == "permanent"
+        ));
+    }
+
+    #[test]
+    fn test_create_organization_saga_is_timed_out() {
+        let mut saga =
+            CreateOrganizationSaga::new("org-saga-6".to_string(), make_create_organization_input());
+        saga.created_at = Utc::now() - chrono::Duration::minutes(5);
+
+        assert!(saga.is_timed_out(Duration::from_secs(60))); // 1 min timeout
+        assert!(!saga.is_timed_out(Duration::from_secs(600))); // 10 min timeout
+    }
+
+    #[test]
+    fn test_create_organization_saga_current_step() {
+        let mut saga =
+            CreateOrganizationSaga::new("org-saga-7".to_string(), make_create_organization_input());
+
+        assert_eq!(saga.current_step(), 0); // Pending
+
+        saga.state = CreateOrganizationSagaState::DirectoryCreated {
+            organization_id: OrganizationId::new(1),
+            organization_slug: OrganizationSlug::new(1),
+        };
+        assert_eq!(saga.current_step(), 1);
+
+        saga.state = CreateOrganizationSagaState::ProfileWritten {
+            organization_id: OrganizationId::new(1),
+            organization_slug: OrganizationSlug::new(1),
+        };
+        assert_eq!(saga.current_step(), 2);
+
+        // Terminal states return 0
+        saga.state = CreateOrganizationSagaState::Completed {
+            organization_id: OrganizationId::new(1),
+            organization_slug: OrganizationSlug::new(1),
+        };
+        assert_eq!(saga.current_step(), 0);
+
+        saga.state = CreateOrganizationSagaState::Failed { step: 1, error: "err".to_string() };
+        assert_eq!(saga.current_step(), 0);
+
+        saga.state = CreateOrganizationSagaState::TimedOut;
+        assert_eq!(saga.current_step(), 0);
+    }
+
+    #[test]
+    fn test_create_organization_saga_serialization() {
+        let input = CreateOrganizationInput {
+            region: Region::US_EAST_VA,
+            tier: OrganizationTier::Enterprise,
+            admin: UserId::new(7),
+            pending_profile_key: "_sys:pending_org_profile:abc".to_string(),
+        };
+        let saga = CreateOrganizationSaga::new("org-saga-ser".to_string(), input);
+        let wrapped = Saga::CreateOrganization(saga);
+
+        let json = serde_json::to_string(&wrapped).unwrap();
+        let deserialized: Saga = serde_json::from_str(&json).unwrap();
+
+        match deserialized {
+            Saga::CreateOrganization(s) => {
+                assert_eq!(s.id, "org-saga-ser");
+                assert_eq!(s.input.region, Region::US_EAST_VA);
+                assert_eq!(s.input.tier, OrganizationTier::Enterprise);
+                assert_eq!(s.input.admin, UserId::new(7));
+                assert_eq!(s.input.pending_profile_key, "_sys:pending_org_profile:abc");
+            },
+            _ => panic!("wrong saga variant"),
+        }
+    }
+
+    #[test]
+    fn test_create_organization_saga_wrapper() {
+        let saga = CreateOrganizationSaga::new(
+            "org-saga-wrap".to_string(),
+            make_create_organization_input(),
+        );
+        let wrapped = Saga::CreateOrganization(saga);
+
+        assert_eq!(wrapped.id(), "org-saga-wrap");
+        assert_eq!(wrapped.saga_type(), SagaType::CreateOrganization);
+        assert!(!wrapped.is_terminal());
+        assert!(wrapped.is_ready_for_retry());
+        assert_eq!(wrapped.retries(), 0);
+        assert_eq!(wrapped.current_step(), 0);
+    }
+
+    #[test]
+    fn test_create_organization_saga_lock_keys() {
+        // Pending state has no lock keys (no org ID allocated yet)
+        let saga = CreateOrganizationSaga::new(
+            "org-saga-lock-1".to_string(),
+            make_create_organization_input(),
+        );
+        let wrapped = Saga::CreateOrganization(saga);
+        assert!(wrapped.lock_keys().is_empty());
+
+        // DirectoryCreated state locks the organization
+        let mut saga = CreateOrganizationSaga::new(
+            "org-saga-lock-2".to_string(),
+            make_create_organization_input(),
+        );
+        saga.transition(CreateOrganizationSagaState::DirectoryCreated {
+            organization_id: OrganizationId::new(42),
+            organization_slug: OrganizationSlug::new(9999),
+        });
+        let wrapped = Saga::CreateOrganization(saga);
+        let keys = wrapped.lock_keys();
+        assert_eq!(keys.len(), 1);
+        assert!(matches!(keys[0], SagaLockKey::Organization(id) if id == OrganizationId::new(42)));
+
+        // ProfileWritten state also locks the organization
+        let mut saga = CreateOrganizationSaga::new(
+            "org-saga-lock-3".to_string(),
+            make_create_organization_input(),
+        );
+        saga.state = CreateOrganizationSagaState::ProfileWritten {
+            organization_id: OrganizationId::new(42),
+            organization_slug: OrganizationSlug::new(9999),
+        };
+        let wrapped = Saga::CreateOrganization(saga);
+        let keys = wrapped.lock_keys();
+        assert_eq!(keys.len(), 1);
+        assert!(matches!(keys[0], SagaLockKey::Organization(id) if id == OrganizationId::new(42)));
+
+        // Completed state also locks the organization
+        let mut saga = CreateOrganizationSaga::new(
+            "org-saga-lock-4".to_string(),
+            make_create_organization_input(),
+        );
+        saga.state = CreateOrganizationSagaState::Completed {
+            organization_id: OrganizationId::new(42),
+            organization_slug: OrganizationSlug::new(9999),
+        };
+        let wrapped = Saga::CreateOrganization(saga);
+        let keys = wrapped.lock_keys();
+        assert_eq!(keys.len(), 1);
+        assert!(matches!(keys[0], SagaLockKey::Organization(id) if id == OrganizationId::new(42)));
+
+        // Failed state has no lock keys
+        let mut saga = CreateOrganizationSaga::new(
+            "org-saga-lock-5".to_string(),
+            make_create_organization_input(),
+        );
+        saga.state = CreateOrganizationSagaState::Failed { step: 0, error: "err".to_string() };
+        let wrapped = Saga::CreateOrganization(saga);
+        assert!(wrapped.lock_keys().is_empty());
     }
 }

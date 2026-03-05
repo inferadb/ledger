@@ -400,7 +400,7 @@ impl SystemDiscoveryService for DiscoveryService {
                             .resolve_id_to_slug(ns.organization)
                             .map_or(ns.organization.value() as u64, |s| s.value()),
                     }),
-                    name: ns.name,
+                    name: String::new(),
                     region: ProtoRegion::Global.into(),
                     members: member_nodes.clone(),
                     status: status.into(),

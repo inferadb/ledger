@@ -55,8 +55,13 @@ use inferadb_ledger_proto::proto::{
     self,
     admin_service_server::{AdminService, AdminServiceServer},
     health_service_server::{HealthService, HealthServiceServer},
+    organization_service_server::{
+        OrganizationService as OrganizationServiceTrait, OrganizationServiceServer,
+    },
     read_service_server::{ReadService, ReadServiceServer},
     system_discovery_service_server::{SystemDiscoveryService, SystemDiscoveryServiceServer},
+    user_service_server::{UserService, UserServiceServer},
+    vault_service_server::{VaultService as VaultServiceTrait, VaultServiceServer},
     write_service_server::{WriteService, WriteServiceServer},
 };
 use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
@@ -126,6 +131,41 @@ struct MockState {
 
     /// Peer info for discovery
     peers: RwLock<Vec<proto::PeerInfo>>,
+
+    /// User storage: user slug -> User proto
+    users: RwLock<HashMap<u64, proto::User>>,
+
+    /// User email storage: email_id -> UserEmail proto
+    user_emails: RwLock<HashMap<i64, proto::UserEmail>>,
+
+    /// Next user slug to assign
+    next_user_slug: AtomicU64,
+
+    /// Next user email ID to assign
+    next_user_email_id: AtomicU64,
+
+    /// Team storage: team slug -> TeamData
+    teams: RwLock<HashMap<u64, TeamData>>,
+
+    /// Next team slug to assign
+    next_team: AtomicU64,
+}
+
+/// Member entry in mock organization storage.
+#[derive(Debug, Clone)]
+struct MockMember {
+    slug: u64,
+    role: i32,
+}
+
+impl MockMember {
+    fn to_proto(&self) -> proto::OrganizationMember {
+        proto::OrganizationMember {
+            user: Some(proto::UserSlug { slug: self.slug }),
+            role: self.role,
+            joined_at: None,
+        }
+    }
 }
 
 /// Organization metadata for mock storage.
@@ -134,6 +174,23 @@ struct OrganizationData {
     name: String,
     region: Region,
     status: i32,
+    members: Vec<MockMember>,
+    deleted_at: Option<std::time::SystemTime>,
+}
+
+impl OrganizationData {
+    fn is_admin(&self, slug: u64) -> bool {
+        self.members
+            .iter()
+            .any(|m| m.slug == slug && m.role == proto::OrganizationMemberRole::Admin as i32)
+    }
+}
+
+/// Team metadata for mock storage.
+#[derive(Debug, Clone)]
+struct TeamData {
+    name: String,
+    org_slug: u64,
 }
 
 /// Vault metadata for mock storage.
@@ -150,6 +207,9 @@ impl MockState {
             block_height: AtomicU64::new(1),
             next_organization: AtomicU64::new(1),
             next_vault: AtomicU64::new(1),
+            next_user_slug: AtomicU64::new(1000),
+            next_user_email_id: AtomicU64::new(1),
+            next_team: AtomicU64::new(1),
             ..Default::default()
         }
     }
@@ -245,8 +305,11 @@ impl MockLedgerServer {
         let read_service = MockReadService::new(state.clone());
         let write_service = MockWriteService::new(state.clone());
         let admin_service = MockAdminService::new(state.clone());
+        let organization_service = MockOrganizationService::new(state.clone());
+        let vault_service = MockVaultService::new(state.clone());
         let health_service = MockHealthService::new(state.clone());
         let discovery_service = MockDiscoveryService::new(state.clone());
+        let user_service = MockUserService::new(state.clone());
 
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -258,8 +321,11 @@ impl MockLedgerServer {
                 .add_service(ReadServiceServer::new(read_service))
                 .add_service(WriteServiceServer::new(write_service))
                 .add_service(AdminServiceServer::new(admin_service))
+                .add_service(OrganizationServiceServer::new(organization_service))
+                .add_service(VaultServiceServer::new(vault_service))
                 .add_service(HealthServiceServer::new(health_service))
                 .add_service(SystemDiscoveryServiceServer::new(discovery_service))
+                .add_service(UserServiceServer::new(user_service))
                 .serve_with_incoming_shutdown(incoming, async {
                     let _ = shutdown_rx.await;
                 })
@@ -443,6 +509,8 @@ impl MockLedgerServer {
                 name: name.to_string(),
                 region,
                 status: proto::OrganizationStatus::Active as i32,
+                members: vec![],
+                deleted_at: None,
             },
         );
     }
@@ -485,11 +553,15 @@ impl MockLedgerServer {
         self.state.organizations.write().clear();
         self.state.vaults.write().clear();
         self.state.peers.write().clear();
+        self.state.users.write().clear();
+        self.state.user_emails.write().clear();
         self.state.unavailable_count.store(0, Ordering::SeqCst);
         self.state.delay_ms.store(0, Ordering::SeqCst);
         self.state.write_count.store(0, Ordering::SeqCst);
         self.state.read_count.store(0, Ordering::SeqCst);
         self.state.block_height.store(1, Ordering::SeqCst);
+        self.state.next_user_slug.store(1000, Ordering::SeqCst);
+        self.state.next_user_email_id.store(1, Ordering::SeqCst);
     }
 
     /// Shuts down the server gracefully.
@@ -1103,21 +1175,21 @@ impl WriteService for MockWriteService {
 }
 
 // =============================================================================
-// Mock AdminService Implementation
+// Mock OrganizationService Implementation
 // =============================================================================
 
-struct MockAdminService {
+struct MockOrganizationService {
     state: Arc<MockState>,
 }
 
-impl MockAdminService {
+impl MockOrganizationService {
     fn new(state: Arc<MockState>) -> Self {
         Self { state }
     }
 }
 
 #[tonic::async_trait]
-impl AdminService for MockAdminService {
+impl OrganizationServiceTrait for MockOrganizationService {
     async fn create_organization(
         &self,
         request: Request<proto::CreateOrganizationRequest>,
@@ -1129,6 +1201,7 @@ impl AdminService for MockAdminService {
             OrganizationSlug::new(self.state.next_organization.fetch_add(1, Ordering::SeqCst));
 
         let region = crate::client::region_from_proto_i32(req.region).unwrap_or(Region::GLOBAL);
+        let admin_slug = req.admin.map_or(0, |u| u.slug);
 
         {
             let mut organizations = self.state.organizations.write();
@@ -1138,6 +1211,11 @@ impl AdminService for MockAdminService {
                     name: req.name,
                     region,
                     status: proto::OrganizationStatus::Active as i32,
+                    members: vec![MockMember {
+                        slug: admin_slug,
+                        role: proto::OrganizationMemberRole::Admin as i32,
+                    }],
+                    deleted_at: None,
                 },
             );
         }
@@ -1150,11 +1228,43 @@ impl AdminService for MockAdminService {
 
     async fn delete_organization(
         &self,
-        _request: Request<proto::DeleteOrganizationRequest>,
+        request: Request<proto::DeleteOrganizationRequest>,
     ) -> Result<Response<proto::DeleteOrganizationResponse>, Status> {
         self.state.check_injection().await?;
 
-        Ok(Response::new(proto::DeleteOrganizationResponse { deleted_at: None }))
+        let req = request.into_inner();
+        let slug = req
+            .slug
+            .as_ref()
+            .map(|s| OrganizationSlug::new(s.slug))
+            .ok_or_else(|| Status::invalid_argument("Missing organization slug"))?;
+
+        let initiator_slug = req
+            .initiator
+            .as_ref()
+            .map(|u| u.slug)
+            .ok_or_else(|| Status::invalid_argument("Missing initiator"))?;
+
+        let mut organizations = self.state.organizations.write();
+        let data = organizations
+            .get_mut(&slug)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+
+        if !data.members.is_empty() && !data.is_admin(initiator_slug) {
+            return Err(Status::permission_denied("Initiator is not an admin"));
+        }
+
+        data.status = proto::OrganizationStatus::Deleted as i32;
+        data.deleted_at = Some(std::time::SystemTime::now());
+
+        let now = chrono::Utc::now();
+        Ok(Response::new(proto::DeleteOrganizationResponse {
+            deleted_at: Some(prost_types::Timestamp {
+                seconds: now.timestamp(),
+                nanos: now.timestamp_subsec_nanos() as i32,
+            }),
+            retention_days: 90,
+        }))
     }
 
     async fn get_organization(
@@ -1175,6 +1285,10 @@ impl AdminService for MockAdminService {
             .get(&organization)
             .ok_or_else(|| Status::not_found("Organization not found"))?;
 
+        if data.deleted_at.is_some() {
+            return Err(Status::not_found("Organization not found"));
+        }
+
         Ok(Response::new(proto::GetOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: organization.value() }),
             name: data.name.clone(),
@@ -1184,6 +1298,8 @@ impl AdminService for MockAdminService {
             config_version: 1,
             created_at: None,
             tier: 0, // Free (default)
+            members: data.members.iter().map(MockMember::to_proto).collect(),
+            updated_at: None,
         }))
     }
 
@@ -1196,6 +1312,7 @@ impl AdminService for MockAdminService {
         let organizations = self.state.organizations.read();
         let responses: Vec<proto::GetOrganizationResponse> = organizations
             .iter()
+            .filter(|(_, data)| data.deleted_at.is_none())
             .map(|(slug, data)| proto::GetOrganizationResponse {
                 slug: Some(proto::OrganizationSlug { slug: slug.value() }),
                 name: data.name.clone(),
@@ -1205,6 +1322,16 @@ impl AdminService for MockAdminService {
                 config_version: 1,
                 created_at: None,
                 tier: 0, // Free (default)
+                members: data
+                    .members
+                    .iter()
+                    .map(|m| proto::OrganizationMember {
+                        user: Some(proto::UserSlug { slug: m.slug }),
+                        role: m.role,
+                        joined_at: None,
+                    })
+                    .collect(),
+                updated_at: None,
             })
             .collect();
 
@@ -1214,6 +1341,365 @@ impl AdminService for MockAdminService {
         }))
     }
 
+    async fn migrate_organization(
+        &self,
+        request: Request<proto::MigrateOrganizationRequest>,
+    ) -> Result<Response<proto::MigrateOrganizationResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let slug_val = req.slug.map_or(0, |s| s.slug);
+        let slug = OrganizationSlug::new(slug_val);
+
+        let initiator_slug = req
+            .initiator
+            .as_ref()
+            .map(|u| u.slug)
+            .ok_or_else(|| Status::invalid_argument("Missing initiator"))?;
+
+        // Look up existing org to get source region and validate initiator
+        let source_region_i32 = {
+            let organizations = self.state.organizations.read();
+            let data = organizations
+                .get(&slug)
+                .ok_or_else(|| Status::not_found("Organization not found"))?;
+
+            if !data.members.is_empty() && !data.is_admin(initiator_slug) {
+                return Err(Status::permission_denied("Initiator is not an admin"));
+            }
+
+            crate::client::region_to_proto_i32(data.region)
+        };
+
+        // Update status to Migrating
+        {
+            let mut organizations = self.state.organizations.write();
+            if let Some(org) = organizations.get_mut(&slug) {
+                org.status = proto::OrganizationStatus::Migrating as i32;
+            }
+        }
+
+        Ok(Response::new(proto::MigrateOrganizationResponse {
+            slug: Some(proto::OrganizationSlug { slug: slug_val }),
+            source_region: source_region_i32,
+            target_region: req.target_region,
+            status: proto::OrganizationStatus::Migrating as i32,
+        }))
+    }
+
+    async fn update_organization(
+        &self,
+        request: Request<proto::UpdateOrganizationRequest>,
+    ) -> Result<Response<proto::UpdateOrganizationResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let slug_val = req.slug.map_or(0, |s| s.slug);
+        let slug = OrganizationSlug::new(slug_val);
+
+        let initiator_slug = req
+            .initiator
+            .as_ref()
+            .map(|u| u.slug)
+            .ok_or_else(|| Status::invalid_argument("Missing initiator"))?;
+
+        let mut organizations = self.state.organizations.write();
+        let data = organizations
+            .get_mut(&slug)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+
+        if !data.members.is_empty() && !data.is_admin(initiator_slug) {
+            return Err(Status::permission_denied("Initiator is not an admin"));
+        }
+
+        if let Some(name) = req.name {
+            data.name = name;
+        }
+
+        let now = chrono::Utc::now();
+        Ok(Response::new(proto::UpdateOrganizationResponse {
+            slug: Some(proto::OrganizationSlug { slug: slug_val }),
+            name: data.name.clone(),
+            region: crate::client::region_to_proto_i32(data.region),
+            member_nodes: vec![],
+            status: data.status,
+            config_version: 1,
+            created_at: None,
+            tier: 0,
+            members: data.members.iter().map(MockMember::to_proto).collect(),
+            updated_at: Some(prost_types::Timestamp {
+                seconds: now.timestamp(),
+                nanos: now.timestamp_subsec_nanos() as i32,
+            }),
+        }))
+    }
+
+    async fn list_organization_members(
+        &self,
+        request: Request<proto::ListOrganizationMembersRequest>,
+    ) -> Result<Response<proto::ListOrganizationMembersResponse>, Status> {
+        self.state.check_injection().await?;
+        let req = request.into_inner();
+        let slug = OrganizationSlug::new(req.slug.map_or(0, |n| n.slug));
+
+        let organizations = self.state.organizations.read();
+        let data =
+            organizations.get(&slug).ok_or_else(|| Status::not_found("Organization not found"))?;
+
+        let members = data
+            .members
+            .iter()
+            .map(|m| proto::OrganizationMember {
+                user: Some(proto::UserSlug { slug: m.slug }),
+                role: m.role,
+                joined_at: None,
+            })
+            .collect();
+
+        Ok(Response::new(proto::ListOrganizationMembersResponse { members, next_page_token: None }))
+    }
+
+    async fn remove_organization_member(
+        &self,
+        request: Request<proto::RemoveOrganizationMemberRequest>,
+    ) -> Result<Response<proto::RemoveOrganizationMemberResponse>, Status> {
+        self.state.check_injection().await?;
+        let req = request.into_inner();
+        let slug = OrganizationSlug::new(req.slug.map_or(0, |n| n.slug));
+        let initiator_slug = req.initiator.map_or(0, |u| u.slug);
+        let target_slug = req.target.map_or(0, |u| u.slug);
+
+        let mut organizations = self.state.organizations.write();
+        let data = organizations
+            .get_mut(&slug)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+
+        if initiator_slug != target_slug && !data.is_admin(initiator_slug) {
+            return Err(Status::permission_denied("Initiator is not an admin"));
+        }
+
+        if let Some(pos) = data.members.iter().position(|m| m.slug == target_slug) {
+            data.members.remove(pos);
+        } else {
+            return Err(Status::not_found("Target is not a member"));
+        }
+
+        Ok(Response::new(proto::RemoveOrganizationMemberResponse {}))
+    }
+
+    async fn update_organization_member_role(
+        &self,
+        request: Request<proto::UpdateOrganizationMemberRoleRequest>,
+    ) -> Result<Response<proto::UpdateOrganizationMemberRoleResponse>, Status> {
+        self.state.check_injection().await?;
+        let req = request.into_inner();
+        let slug = OrganizationSlug::new(req.slug.map_or(0, |n| n.slug));
+        let initiator_slug = req.initiator.map_or(0, |u| u.slug);
+        let target_slug = req.target.map_or(0, |u| u.slug);
+
+        let mut organizations = self.state.organizations.write();
+        let data = organizations
+            .get_mut(&slug)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+
+        if !data.is_admin(initiator_slug) {
+            return Err(Status::permission_denied("Initiator is not an admin"));
+        }
+
+        if let Some(member) = data.members.iter_mut().find(|m| m.slug == target_slug) {
+            member.role = req.role;
+            Ok(Response::new(proto::UpdateOrganizationMemberRoleResponse {
+                member: Some(member.to_proto()),
+            }))
+        } else {
+            Err(Status::not_found("Target is not a member"))
+        }
+    }
+
+    async fn list_organization_teams(
+        &self,
+        request: Request<proto::ListOrganizationTeamsRequest>,
+    ) -> Result<Response<proto::ListOrganizationTeamsResponse>, Status> {
+        self.state.check_injection().await?;
+        let req = request.into_inner();
+        let org_slug = req.organization.map_or(0, |n| n.slug);
+
+        let teams = self.state.teams.read();
+        let org_teams: Vec<proto::OrganizationTeam> = teams
+            .iter()
+            .filter(|(_, data)| data.org_slug == org_slug)
+            .map(|(&slug, data)| proto::OrganizationTeam {
+                slug: Some(proto::TeamSlug { slug }),
+                organization: Some(proto::OrganizationSlug { slug: data.org_slug }),
+                name: data.name.clone(),
+                members: vec![],
+                created_at: None,
+                updated_at: None,
+            })
+            .collect();
+
+        Ok(Response::new(proto::ListOrganizationTeamsResponse {
+            teams: org_teams,
+            next_page_token: None,
+        }))
+    }
+
+    async fn create_organization_team(
+        &self,
+        request: Request<proto::CreateOrganizationTeamRequest>,
+    ) -> Result<Response<proto::CreateOrganizationTeamResponse>, Status> {
+        self.state.check_injection().await?;
+        let req = request.into_inner();
+        let org_slug = req.organization.map_or(0, |n| n.slug);
+
+        // Validate organization exists
+        {
+            let organizations = self.state.organizations.read();
+            if !organizations.contains_key(&OrganizationSlug::new(org_slug)) {
+                return Err(Status::not_found("Organization not found"));
+            }
+        }
+
+        // Check name uniqueness within org
+        {
+            let teams = self.state.teams.read();
+            let duplicate = teams.values().any(|t| t.org_slug == org_slug && t.name == req.name);
+            if duplicate {
+                return Err(Status::already_exists(format!(
+                    "Team name '{}' already exists",
+                    req.name
+                )));
+            }
+        }
+
+        let team_slug = self.state.next_team.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut teams = self.state.teams.write();
+            teams.insert(team_slug, TeamData { name: req.name.clone(), org_slug });
+        }
+
+        Ok(Response::new(proto::CreateOrganizationTeamResponse {
+            team: Some(proto::OrganizationTeam {
+                slug: Some(proto::TeamSlug { slug: team_slug }),
+                organization: Some(proto::OrganizationSlug { slug: org_slug }),
+                name: req.name,
+                members: vec![],
+                created_at: None,
+                updated_at: None,
+            }),
+        }))
+    }
+
+    async fn delete_organization_team(
+        &self,
+        request: Request<proto::DeleteOrganizationTeamRequest>,
+    ) -> Result<Response<proto::DeleteOrganizationTeamResponse>, Status> {
+        self.state.check_injection().await?;
+        let req = request.into_inner();
+        let team_slug = req.slug.map_or(0, |n| n.slug);
+
+        // Validate team exists and its org exists
+        let org_slug = {
+            let teams = self.state.teams.read();
+            let team_data =
+                teams.get(&team_slug).ok_or_else(|| Status::not_found("Team not found"))?;
+            team_data.org_slug
+        };
+
+        {
+            let organizations = self.state.organizations.read();
+            if !organizations.contains_key(&OrganizationSlug::new(org_slug)) {
+                return Err(Status::not_found("Organization not found"));
+            }
+        }
+
+        let mut teams = self.state.teams.write();
+        teams.remove(&team_slug);
+
+        Ok(Response::new(proto::DeleteOrganizationTeamResponse {}))
+    }
+
+    async fn update_organization_team(
+        &self,
+        request: Request<proto::UpdateOrganizationTeamRequest>,
+    ) -> Result<Response<proto::UpdateOrganizationTeamResponse>, Status> {
+        self.state.check_injection().await?;
+        let req = request.into_inner();
+        let team_slug = req.slug.map_or(0, |n| n.slug);
+
+        // Validate team exists and its org exists
+        {
+            let teams = self.state.teams.read();
+            let team_data =
+                teams.get(&team_slug).ok_or_else(|| Status::not_found("Team not found"))?;
+            let org_slug = team_data.org_slug;
+            drop(teams);
+
+            let organizations = self.state.organizations.read();
+            if !organizations.contains_key(&OrganizationSlug::new(org_slug)) {
+                return Err(Status::not_found("Organization not found"));
+            }
+        }
+
+        let mut teams = self.state.teams.write();
+
+        if let Some(ref name) = req.name {
+            let org_slug = teams[&team_slug].org_slug;
+            let duplicate = teams
+                .iter()
+                .any(|(&s, t)| s != team_slug && t.org_slug == org_slug && t.name == *name);
+            if duplicate {
+                return Err(Status::already_exists(format!("Team name '{}' already exists", name)));
+            }
+            if let Some(data) = teams.get_mut(&team_slug) {
+                data.name = name.clone();
+            }
+        }
+
+        let team_data = &teams[&team_slug];
+        let response_team = proto::OrganizationTeam {
+            slug: Some(proto::TeamSlug { slug: team_slug }),
+            organization: Some(proto::OrganizationSlug { slug: team_data.org_slug }),
+            name: team_data.name.clone(),
+            members: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+
+        Ok(Response::new(proto::UpdateOrganizationTeamResponse { team: Some(response_team) }))
+    }
+}
+
+// =============================================================================
+// Mock AdminService Implementation
+// =============================================================================
+
+struct MockAdminService {
+    state: Arc<MockState>,
+}
+
+impl MockAdminService {
+    fn new(state: Arc<MockState>) -> Self {
+        Self { state }
+    }
+}
+
+// =============================================================================
+// Mock VaultService Implementation
+// =============================================================================
+
+struct MockVaultService {
+    state: Arc<MockState>,
+}
+
+impl MockVaultService {
+    fn new(state: Arc<MockState>) -> Self {
+        Self { state }
+    }
+}
+
+#[tonic::async_trait]
+impl VaultServiceTrait for MockVaultService {
     async fn create_vault(
         &self,
         request: Request<proto::CreateVaultRequest>,
@@ -1256,11 +1742,22 @@ impl AdminService for MockAdminService {
 
     async fn delete_vault(
         &self,
-        _request: Request<proto::DeleteVaultRequest>,
+        request: Request<proto::DeleteVaultRequest>,
     ) -> Result<Response<proto::DeleteVaultResponse>, Status> {
         self.state.check_injection().await?;
 
-        Ok(Response::new(proto::DeleteVaultResponse { deleted_at: None }))
+        let req = request.into_inner();
+        let organization = OrganizationSlug::new(req.organization.map_or(0, |n| n.slug));
+        let vault = VaultSlug::new(req.vault.map_or(0, |v| v.slug));
+        self.state.vaults.write().remove(&(organization, vault));
+
+        let now = chrono::Utc::now();
+        Ok(Response::new(proto::DeleteVaultResponse {
+            deleted_at: Some(prost_types::Timestamp {
+                seconds: now.timestamp(),
+                nanos: now.timestamp_subsec_nanos() as i32,
+            }),
+        }))
     }
 
     async fn get_vault(
@@ -1311,9 +1808,12 @@ impl AdminService for MockAdminService {
             })
             .collect();
 
-        Ok(Response::new(proto::ListVaultsResponse { vaults: responses }))
+        Ok(Response::new(proto::ListVaultsResponse { vaults: responses, next_page_token: None }))
     }
+}
 
+#[tonic::async_trait]
+impl AdminService for MockAdminService {
     async fn join_cluster(
         &self,
         _request: Request<proto::JoinClusterRequest>,
@@ -1512,69 +2012,6 @@ impl AdminService for MockAdminService {
         Err(Status::unimplemented("Rewrap status not supported in mock"))
     }
 
-    async fn erase_user(
-        &self,
-        request: Request<proto::EraseUserRequest>,
-    ) -> Result<Response<proto::EraseUserResponse>, Status> {
-        self.state.check_injection().await?;
-
-        let req = request.into_inner();
-        Ok(Response::new(proto::EraseUserResponse { user: req.user }))
-    }
-
-    async fn migrate_organization(
-        &self,
-        request: Request<proto::MigrateOrganizationRequest>,
-    ) -> Result<Response<proto::MigrateOrganizationResponse>, Status> {
-        self.state.check_injection().await?;
-
-        let req = request.into_inner();
-        let slug_val = req.slug.map_or(0, |s| s.slug);
-
-        // Look up existing org to get source region
-        let source_region_i32 = {
-            let organizations = self.state.organizations.read();
-            let slug = OrganizationSlug::new(slug_val);
-            organizations
-                .get(&slug)
-                .map(|org| crate::client::region_to_proto_i32(org.region))
-                .unwrap_or(0)
-        };
-
-        // Update status to Migrating
-        {
-            let mut organizations = self.state.organizations.write();
-            let slug = OrganizationSlug::new(slug_val);
-            if let Some(org) = organizations.get_mut(&slug) {
-                org.status = proto::OrganizationStatus::Migrating as i32;
-            }
-        }
-
-        Ok(Response::new(proto::MigrateOrganizationResponse {
-            slug: Some(proto::OrganizationSlug { slug: slug_val }),
-            source_region: source_region_i32,
-            target_region: req.target_region,
-            status: proto::OrganizationStatus::Migrating as i32,
-        }))
-    }
-
-    async fn migrate_user_region(
-        &self,
-        request: Request<proto::MigrateUserRegionRequest>,
-    ) -> Result<Response<proto::MigrateUserRegionResponse>, Status> {
-        self.state.check_injection().await?;
-
-        let req = request.into_inner();
-        let slug_val = req.slug.map_or(0, |s| s.slug);
-
-        Ok(Response::new(proto::MigrateUserRegionResponse {
-            slug: Some(proto::UserSlug { slug: slug_val }),
-            source_region: crate::client::region_to_proto_i32(Region::GLOBAL),
-            target_region: req.target_region,
-            directory_status: "migrating".to_string(),
-        }))
-    }
-
     async fn migrate_existing_users(
         &self,
         _request: Request<proto::MigrateExistingUsersRequest>,
@@ -1683,6 +2120,368 @@ impl SystemDiscoveryService for MockDiscoveryService {
             nodes: vec![],
             organizations: vec![],
         }))
+    }
+}
+
+// =============================================================================
+// Mock UserService Implementation
+// =============================================================================
+
+struct MockUserService {
+    state: Arc<MockState>,
+}
+
+impl MockUserService {
+    fn new(state: Arc<MockState>) -> Self {
+        Self { state }
+    }
+
+    fn now_timestamp() -> prost_types::Timestamp {
+        let now =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        prost_types::Timestamp { seconds: now.as_secs() as i64, nanos: now.subsec_nanos() as i32 }
+    }
+}
+
+#[tonic::async_trait]
+impl UserService for MockUserService {
+    async fn create_user(
+        &self,
+        request: Request<proto::CreateUserRequest>,
+    ) -> Result<Response<proto::CreateUserResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let slug = self.state.next_user_slug.fetch_add(1, Ordering::SeqCst);
+        let email_id = self.state.next_user_email_id.fetch_add(1, Ordering::SeqCst);
+        let now = Self::now_timestamp();
+
+        let role = req.role.unwrap_or(proto::UserRole::User as i32);
+
+        let user = proto::User {
+            id: Some(proto::UserId { id: slug as i64 }),
+            name: req.name,
+            email: Some(proto::UserEmailId { id: email_id as i64 }),
+            status: proto::UserStatus::Active as i32,
+            created_at: Some(now),
+            updated_at: Some(now),
+            role,
+            slug: Some(proto::UserSlug { slug }),
+            deleted_at: None,
+        };
+
+        let user_email = proto::UserEmail {
+            id: Some(proto::UserEmailId { id: email_id as i64 }),
+            user: Some(proto::UserId { id: slug as i64 }),
+            email: req.email,
+            created_at: Some(now),
+            verified_at: None,
+        };
+
+        self.state.users.write().insert(slug, user.clone());
+        self.state.user_emails.write().insert(email_id as i64, user_email);
+
+        Ok(Response::new(proto::CreateUserResponse {
+            slug: Some(proto::UserSlug { slug }),
+            user: Some(user),
+            default_organization_slug: None,
+        }))
+    }
+
+    async fn get_user(
+        &self,
+        request: Request<proto::GetUserRequest>,
+    ) -> Result<Response<proto::GetUserResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let slug = req.slug.map_or(0, |s| s.slug);
+
+        let users = self.state.users.read();
+        let user = users.get(&slug).cloned();
+
+        if user.is_none() {
+            return Err(Status::not_found(format!("User {slug} not found")));
+        }
+
+        // Collect emails for this user
+        let user_emails = self.state.user_emails.read();
+        let emails: Vec<proto::UserEmail> = user_emails
+            .values()
+            .filter(|e| e.user.is_some_and(|u| u.id == slug as i64))
+            .cloned()
+            .collect();
+
+        Ok(Response::new(proto::GetUserResponse { user, emails }))
+    }
+
+    async fn update_user(
+        &self,
+        request: Request<proto::UpdateUserRequest>,
+    ) -> Result<Response<proto::UpdateUserResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let slug = req.slug.map_or(0, |s| s.slug);
+
+        let mut users = self.state.users.write();
+        let user = users
+            .get_mut(&slug)
+            .ok_or_else(|| Status::not_found(format!("User {slug} not found")))?;
+
+        if let Some(name) = req.name {
+            user.name = name;
+        }
+        if let Some(role) = req.role {
+            user.role = role;
+        }
+        if let Some(primary_email) = req.primary_email {
+            user.email = Some(primary_email);
+        }
+        user.updated_at = Some(Self::now_timestamp());
+
+        Ok(Response::new(proto::UpdateUserResponse { user: Some(user.clone()) }))
+    }
+
+    async fn delete_user(
+        &self,
+        request: Request<proto::DeleteUserRequest>,
+    ) -> Result<Response<proto::DeleteUserResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let slug = req.slug.map_or(0, |s| s.slug);
+        let now = Self::now_timestamp();
+
+        let mut users = self.state.users.write();
+        let user = users
+            .get_mut(&slug)
+            .ok_or_else(|| Status::not_found(format!("User {slug} not found")))?;
+
+        user.status = proto::UserStatus::Deleting as i32;
+        user.deleted_at = Some(now);
+        user.updated_at = Some(now);
+
+        Ok(Response::new(proto::DeleteUserResponse {
+            slug: Some(proto::UserSlug { slug }),
+            deleted_at: Some(now),
+            retention_days: 90,
+        }))
+    }
+
+    async fn list_users(
+        &self,
+        request: Request<proto::ListUsersRequest>,
+    ) -> Result<Response<proto::ListUsersResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let page_size = if req.page_size == 0 { 100 } else { req.page_size as usize };
+
+        let users = self.state.users.read();
+        let all_users: Vec<proto::User> = users.values().cloned().collect();
+        let page = all_users.into_iter().take(page_size).collect();
+
+        Ok(Response::new(proto::ListUsersResponse { users: page, next_page_token: None }))
+    }
+
+    async fn search_users(
+        &self,
+        request: Request<proto::SearchUsersRequest>,
+    ) -> Result<Response<proto::SearchUsersResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let filter = req.filter.unwrap_or_default();
+        let page_size = if req.page_size == 0 { 100 } else { req.page_size as usize };
+
+        let users = self.state.users.read();
+        let user_emails = self.state.user_emails.read();
+
+        let results: Vec<proto::User> = users
+            .values()
+            .filter(|u| {
+                if filter.status.is_some_and(|status| u.status != status) {
+                    return false;
+                }
+                if filter.role.is_some_and(|role| u.role != role) {
+                    return false;
+                }
+                if filter
+                    .name_prefix
+                    .as_ref()
+                    .is_some_and(|prefix| !u.name.starts_with(prefix.as_str()))
+                {
+                    return false;
+                }
+                if let Some(ref email_filter) = filter.email {
+                    let user_id = u.id.map_or(0, |id| id.id);
+                    let has_match = user_emails.values().any(|e| {
+                        e.user.is_some_and(|uid| uid.id == user_id)
+                            && e.email.contains(email_filter.as_str())
+                    });
+                    if !has_match {
+                        return false;
+                    }
+                }
+                true
+            })
+            .take(page_size)
+            .cloned()
+            .collect();
+
+        Ok(Response::new(proto::SearchUsersResponse { users: results, next_page_token: None }))
+    }
+
+    async fn create_user_email(
+        &self,
+        request: Request<proto::CreateUserEmailRequest>,
+    ) -> Result<Response<proto::CreateUserEmailResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let user_slug = req.user.map_or(0, |s| s.slug);
+
+        // Verify user exists
+        let users = self.state.users.read();
+        if !users.contains_key(&user_slug) {
+            return Err(Status::not_found(format!("User {user_slug} not found")));
+        }
+        drop(users);
+
+        let email_id = self.state.next_user_email_id.fetch_add(1, Ordering::SeqCst);
+        let now = Self::now_timestamp();
+
+        let user_email = proto::UserEmail {
+            id: Some(proto::UserEmailId { id: email_id as i64 }),
+            user: Some(proto::UserId { id: user_slug as i64 }),
+            email: req.email,
+            created_at: Some(now),
+            verified_at: None,
+        };
+
+        self.state.user_emails.write().insert(email_id as i64, user_email.clone());
+
+        Ok(Response::new(proto::CreateUserEmailResponse { email: Some(user_email) }))
+    }
+
+    async fn delete_user_email(
+        &self,
+        request: Request<proto::DeleteUserEmailRequest>,
+    ) -> Result<Response<proto::DeleteUserEmailResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let email_id = req.email_id.map_or(0, |e| e.id);
+
+        let mut emails = self.state.user_emails.write();
+        if emails.remove(&email_id).is_none() {
+            return Err(Status::not_found(format!("Email {email_id} not found")));
+        }
+
+        Ok(Response::new(proto::DeleteUserEmailResponse {
+            deleted_at: Some(Self::now_timestamp()),
+        }))
+    }
+
+    async fn search_user_email(
+        &self,
+        request: Request<proto::SearchUserEmailRequest>,
+    ) -> Result<Response<proto::SearchUserEmailResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let filter = req.filter.unwrap_or_default();
+        let page_size = if req.page_size == 0 { 100 } else { req.page_size as usize };
+
+        let emails = self.state.user_emails.read();
+        let results: Vec<proto::UserEmail> = emails
+            .values()
+            .filter(|e| {
+                if filter.email.as_ref().is_some_and(|ef| !e.email.contains(ef.as_str())) {
+                    return false;
+                }
+                if filter
+                    .user
+                    .as_ref()
+                    .is_some_and(|uf| e.user.is_none_or(|u| u.id != uf.slug as i64))
+                {
+                    return false;
+                }
+                if filter.verified_only.is_some_and(|v| v && e.verified_at.is_none()) {
+                    return false;
+                }
+                true
+            })
+            .take(page_size)
+            .cloned()
+            .collect();
+
+        Ok(Response::new(proto::SearchUserEmailResponse { emails: results, next_page_token: None }))
+    }
+
+    async fn verify_user_email(
+        &self,
+        request: Request<proto::VerifyUserEmailRequest>,
+    ) -> Result<Response<proto::VerifyUserEmailResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        // In the mock, we treat the token as the email_id string for simplicity
+        let email_id: i64 =
+            req.token.parse().map_err(|_| Status::not_found("Invalid verification token"))?;
+
+        let mut emails = self.state.user_emails.write();
+        let email = emails
+            .get_mut(&email_id)
+            .ok_or_else(|| Status::not_found("Verification token not found"))?;
+
+        email.verified_at = Some(Self::now_timestamp());
+
+        Ok(Response::new(proto::VerifyUserEmailResponse { email: Some(email.clone()) }))
+    }
+
+    async fn migrate_user_region(
+        &self,
+        request: Request<proto::MigrateUserRegionRequest>,
+    ) -> Result<Response<proto::MigrateUserRegionResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let slug = req.slug.map_or(0, |s| s.slug);
+
+        let users = self.state.users.read();
+        if !users.contains_key(&slug) {
+            return Err(Status::not_found(format!("User {slug} not found")));
+        }
+
+        Ok(Response::new(proto::MigrateUserRegionResponse {
+            slug: Some(proto::UserSlug { slug }),
+            source_region: proto::Region::Global as i32,
+            target_region: req.target_region,
+            directory_status: "MIGRATING".to_string(),
+        }))
+    }
+
+    async fn erase_user(
+        &self,
+        request: Request<proto::EraseUserRequest>,
+    ) -> Result<Response<proto::EraseUserResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let slug = req.user.map_or(0, |s| s.slug);
+
+        let mut users = self.state.users.write();
+        if users.remove(&slug).is_none() {
+            return Err(Status::not_found(format!("User {slug} not found")));
+        }
+
+        // Also remove their emails
+        let mut emails = self.state.user_emails.write();
+        emails.retain(|_, e| e.user.is_none_or(|u| u.id != slug as i64));
+
+        Ok(Response::new(proto::EraseUserResponse { user: Some(proto::UserSlug { slug }) }))
     }
 }
 
@@ -1902,7 +2701,10 @@ mod tests {
         use std::time::Duration;
 
         use super::*;
-        use crate::{ClientConfig, LedgerClient, Operation, RetryPolicy, ServerSource};
+        use crate::{
+            ClientConfig, LedgerClient, Operation, RetryPolicy, ServerSource, TeamSlug, UserSlug,
+            client::OrganizationTier,
+        };
 
         /// Helper to create a client connected to a mock server.
         async fn create_client_for_mock(server: &MockLedgerServer) -> LedgerClient {
@@ -2463,11 +3265,18 @@ mod tests {
             let server = MockLedgerServer::start().await.unwrap();
             let client = create_client_for_mock(&server).await;
 
-            let org =
-                client.create_organization("test-organization", Region::US_EAST_VA).await.unwrap();
+            let org = client
+                .create_organization(
+                    "test-organization",
+                    Region::US_EAST_VA,
+                    UserSlug::new(0),
+                    OrganizationTier::Free,
+                )
+                .await
+                .unwrap();
             assert!(org.slug.value() > 0);
 
-            let org_info = client.get_organization(org.slug).await.unwrap();
+            let org_info = client.get_organization(org.slug, 0).await.unwrap();
             assert_eq!(org_info.slug, org.slug);
             assert_eq!(org_info.name, "test-organization");
         }
@@ -2479,7 +3288,8 @@ mod tests {
             server.add_organization(OrganizationSlug::new(2), "ns2", Region::US_EAST_VA);
             let client = create_client_for_mock(&server).await;
 
-            let organizations = client.list_organizations().await.unwrap();
+            let (organizations, _next) =
+                client.list_organizations(UserSlug::new(1), 0, None).await.unwrap();
 
             assert_eq!(organizations.len(), 2);
             let names: Vec<_> = organizations.iter().map(|n| n.name.as_str()).collect();
@@ -2507,7 +3317,7 @@ mod tests {
             server.add_vault(ORG, VaultSlug::new(1));
             let client = create_client_for_mock(&server).await;
 
-            let vaults = client.list_vaults().await.unwrap();
+            let (vaults, _next) = client.list_vaults(0, None).await.unwrap();
 
             assert_eq!(vaults.len(), 2);
         }
@@ -2833,6 +3643,178 @@ mod tests {
                 client3.read(ORG, Some(VAULT), "key", None, None).await,
                 Err(crate::error::SdkError::Shutdown)
             ));
+        }
+
+        // =====================================================================
+        // Team CRUD Tests
+        // =====================================================================
+
+        const INITIATOR: UserSlug = UserSlug::new(100);
+
+        #[tokio::test]
+        async fn test_create_organization_team() {
+            let server = MockLedgerServer::start().await.unwrap();
+            server.add_organization(ORG, "test-org", Region::US_EAST_VA);
+            let client = create_client_for_mock(&server).await;
+
+            let team =
+                client.create_organization_team(ORG, "engineering", INITIATOR).await.unwrap();
+
+            assert_eq!(team.name, "engineering");
+            assert_eq!(team.organization, ORG);
+            assert!(team.slug.value() > 0);
+        }
+
+        #[tokio::test]
+        async fn test_create_team_duplicate_name_fails() {
+            let server = MockLedgerServer::start().await.unwrap();
+            server.add_organization(ORG, "test-org", Region::US_EAST_VA);
+            let client = create_client_for_mock(&server).await;
+
+            client.create_organization_team(ORG, "engineering", INITIATOR).await.unwrap();
+
+            let err =
+                client.create_organization_team(ORG, "engineering", INITIATOR).await.unwrap_err();
+            assert!(matches!(
+                err,
+                crate::error::SdkError::Rpc { code: tonic::Code::AlreadyExists, .. }
+            ));
+        }
+
+        #[tokio::test]
+        async fn test_create_team_nonexistent_org_fails() {
+            let server = MockLedgerServer::start().await.unwrap();
+            let client = create_client_for_mock(&server).await;
+
+            let nonexistent_org = OrganizationSlug::new(9999);
+            let err = client
+                .create_organization_team(nonexistent_org, "engineering", INITIATOR)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, crate::error::SdkError::Rpc { code: tonic::Code::NotFound, .. }));
+        }
+
+        #[tokio::test]
+        async fn test_list_organization_teams_empty() {
+            let server = MockLedgerServer::start().await.unwrap();
+            server.add_organization(ORG, "test-org", Region::US_EAST_VA);
+            let client = create_client_for_mock(&server).await;
+
+            let (teams, next_page_token) =
+                client.list_organization_teams(ORG, INITIATOR, 10, None).await.unwrap();
+
+            assert!(teams.is_empty());
+            assert!(next_page_token.is_none());
+        }
+
+        #[tokio::test]
+        async fn test_list_organization_teams() {
+            let server = MockLedgerServer::start().await.unwrap();
+            server.add_organization(ORG, "test-org", Region::US_EAST_VA);
+            let client = create_client_for_mock(&server).await;
+
+            client.create_organization_team(ORG, "engineering", INITIATOR).await.unwrap();
+            client.create_organization_team(ORG, "design", INITIATOR).await.unwrap();
+            client.create_organization_team(ORG, "product", INITIATOR).await.unwrap();
+
+            let (teams, _) =
+                client.list_organization_teams(ORG, INITIATOR, 10, None).await.unwrap();
+
+            assert_eq!(teams.len(), 3);
+            let mut names: Vec<&str> = teams.iter().map(|t| t.name.as_str()).collect();
+            names.sort();
+            assert_eq!(names, vec!["design", "engineering", "product"]);
+        }
+
+        #[tokio::test]
+        async fn test_delete_organization_team() {
+            let server = MockLedgerServer::start().await.unwrap();
+            server.add_organization(ORG, "test-org", Region::US_EAST_VA);
+            let client = create_client_for_mock(&server).await;
+
+            let team =
+                client.create_organization_team(ORG, "engineering", INITIATOR).await.unwrap();
+
+            client.delete_organization_team(team.slug, INITIATOR, None).await.unwrap();
+
+            let (teams, _) =
+                client.list_organization_teams(ORG, INITIATOR, 10, None).await.unwrap();
+            assert!(teams.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_delete_nonexistent_team_fails() {
+            let server = MockLedgerServer::start().await.unwrap();
+            server.add_organization(ORG, "test-org", Region::US_EAST_VA);
+            let client = create_client_for_mock(&server).await;
+
+            let nonexistent_team = TeamSlug::new(99999);
+            let err = client
+                .delete_organization_team(nonexistent_team, INITIATOR, None)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, crate::error::SdkError::Rpc { code: tonic::Code::NotFound, .. }));
+        }
+
+        #[tokio::test]
+        async fn test_update_organization_team_name() {
+            let server = MockLedgerServer::start().await.unwrap();
+            server.add_organization(ORG, "test-org", Region::US_EAST_VA);
+            let client = create_client_for_mock(&server).await;
+
+            let team =
+                client.create_organization_team(ORG, "engineering", INITIATOR).await.unwrap();
+
+            let updated = client
+                .update_organization_team(team.slug, INITIATOR, Some("platform"))
+                .await
+                .unwrap();
+
+            assert_eq!(updated.name, "platform");
+            assert_eq!(updated.slug, team.slug);
+            assert_eq!(updated.organization, ORG);
+        }
+
+        #[tokio::test]
+        async fn test_update_team_duplicate_name_fails() {
+            let server = MockLedgerServer::start().await.unwrap();
+            server.add_organization(ORG, "test-org", Region::US_EAST_VA);
+            let client = create_client_for_mock(&server).await;
+
+            client.create_organization_team(ORG, "engineering", INITIATOR).await.unwrap();
+            let team_b = client.create_organization_team(ORG, "design", INITIATOR).await.unwrap();
+
+            let err = client
+                .update_organization_team(team_b.slug, INITIATOR, Some("engineering"))
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                crate::error::SdkError::Rpc { code: tonic::Code::AlreadyExists, .. }
+            ));
+        }
+
+        #[tokio::test]
+        async fn test_team_isolation_between_orgs() {
+            let server = MockLedgerServer::start().await.unwrap();
+            let org2 = OrganizationSlug::new(2);
+            server.add_organization(ORG, "org-one", Region::US_EAST_VA);
+            server.add_organization(org2, "org-two", Region::US_EAST_VA);
+            let client = create_client_for_mock(&server).await;
+
+            client.create_organization_team(ORG, "alpha", INITIATOR).await.unwrap();
+            client.create_organization_team(ORG, "beta", INITIATOR).await.unwrap();
+            client.create_organization_team(org2, "gamma", INITIATOR).await.unwrap();
+
+            let (org1_teams, _) =
+                client.list_organization_teams(ORG, INITIATOR, 10, None).await.unwrap();
+            let (org2_teams, _) =
+                client.list_organization_teams(org2, INITIATOR, 10, None).await.unwrap();
+
+            assert_eq!(org1_teams.len(), 2);
+            assert_eq!(org2_teams.len(), 1);
+            assert_eq!(org2_teams[0].name, "gamma");
+            assert_eq!(org2_teams[0].organization, org2);
         }
     }
 }

@@ -1377,4 +1377,47 @@ mod tests {
         assert!(props.contains_key("organization_rate"));
         assert!(props.contains_key("backpressure_threshold"));
     }
+
+    // =========================================================================
+    // Region::retention_days tests
+    // =========================================================================
+
+    #[test]
+    fn test_region_retention_days_default_90() {
+        use crate::Region;
+
+        assert_eq!(Region::US_EAST_VA.retention_days(), 90);
+        assert_eq!(Region::US_WEST_OR.retention_days(), 90);
+        assert_eq!(Region::GLOBAL.retention_days(), 90);
+        assert_eq!(Region::JP_EAST_TOKYO.retention_days(), 90);
+        assert_eq!(Region::AU_EAST_SYDNEY.retention_days(), 90);
+    }
+
+    #[test]
+    fn test_region_retention_days_eu_gdpr_30() {
+        use crate::Region;
+
+        assert_eq!(Region::IE_EAST_DUBLIN.retention_days(), 30);
+        assert_eq!(Region::FR_NORTH_PARIS.retention_days(), 30);
+        assert_eq!(Region::DE_CENTRAL_FRANKFURT.retention_days(), 30);
+        assert_eq!(Region::SE_EAST_STOCKHOLM.retention_days(), 30);
+        assert_eq!(Region::IT_NORTH_MILAN.retention_days(), 30);
+    }
+
+    #[test]
+    fn test_region_retention_days_uk_gdpr_30() {
+        use crate::Region;
+
+        assert_eq!(Region::UK_SOUTH_LONDON.retention_days(), 30);
+    }
+
+    #[test]
+    fn test_region_retention_days_non_eu_90() {
+        use crate::Region;
+
+        assert_eq!(Region::BR_SOUTHEAST_SP.retention_days(), 90);
+        assert_eq!(Region::SG_CENTRAL_SINGAPORE.retention_days(), 90);
+        assert_eq!(Region::IN_WEST_MUMBAI.retention_days(), 90);
+        assert_eq!(Region::SA_CENTRAL_RIYADH.retention_days(), 90);
+    }
 }

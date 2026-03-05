@@ -12,7 +12,9 @@
 // Examples are allowed to use expect/unwrap for brevity
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::disallowed_methods)]
 
-use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Operation, Region, Result, ServerSource};
+use inferadb_ledger_sdk::{
+    ClientConfig, LedgerClient, Operation, OrganizationTier, Region, Result, ServerSource, UserSlug,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -41,9 +43,16 @@ async fn main() -> Result<()> {
     println!("Client connected with ID: {}", client.client_id());
 
     // -------------------------------------------------------------------------
-    // 2. Create a organization and vault for our data
+    // 2. Create an organization and vault for our data
     // -------------------------------------------------------------------------
-    let org = client.create_organization("example_organization", Region::US_EAST_VA).await?;
+    let org = client
+        .create_organization(
+            "example_organization",
+            Region::US_EAST_VA,
+            UserSlug::new(0),
+            OrganizationTier::Free,
+        )
+        .await?;
     let organization = org.slug;
     println!("Created organization with slug: {organization}");
 

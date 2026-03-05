@@ -11,10 +11,6 @@
           {
             "type": "command",
             "command": "just clippy || true"
-          },
-          {
-            "type": "command",
-            "command": "just doc-check || true"
           }
         ]
       }

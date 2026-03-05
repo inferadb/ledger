@@ -527,6 +527,23 @@ pub async fn create_admin_client(
     inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::connect(endpoint).await
 }
 
+/// Helper to create an organization client for a node.
+#[allow(dead_code)]
+pub async fn create_organization_client(
+    addr: SocketAddr,
+) -> Result<
+    inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient<
+        tonic::transport::Channel,
+    >,
+    tonic::transport::Error,
+> {
+    let endpoint = format!("http://{}", addr);
+    inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient::connect(
+        endpoint,
+    )
+    .await
+}
+
 // ============================================================================
 // Multi-Region Test Infrastructure
 // ============================================================================
@@ -957,6 +974,52 @@ pub async fn create_admin_client_from_url(
     tonic::transport::Error,
 > {
     inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::connect(
+        endpoint.to_string(),
+    )
+    .await
+}
+
+/// Helper to create a vault client for a node.
+#[allow(dead_code)]
+pub async fn create_vault_client(
+    addr: SocketAddr,
+) -> Result<
+    inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient<
+        tonic::transport::Channel,
+    >,
+    tonic::transport::Error,
+> {
+    let endpoint = format!("http://{}", addr);
+    inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::connect(endpoint).await
+}
+
+/// Helper to create a vault client from a URL string.
+#[allow(dead_code)]
+pub async fn create_vault_client_from_url(
+    endpoint: &str,
+) -> Result<
+    inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient<
+        tonic::transport::Channel,
+    >,
+    tonic::transport::Error,
+> {
+    inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::connect(
+        endpoint.to_string(),
+    )
+    .await
+}
+
+/// Helper to create an organization client from a URL string.
+#[allow(dead_code)]
+pub async fn create_organization_client_from_url(
+    endpoint: &str,
+) -> Result<
+    inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient<
+        tonic::transport::Channel,
+    >,
+    tonic::transport::Error,
+> {
+    inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient::connect(
         endpoint.to_string(),
     )
     .await

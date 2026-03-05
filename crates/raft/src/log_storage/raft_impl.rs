@@ -405,6 +405,7 @@ fn iter_table_raw(
         TableId::VaultHeights => collect_table!(tables::VaultHeights),
         TableId::VaultHashes => collect_table!(tables::VaultHashes),
         TableId::VaultHealth => collect_table!(tables::VaultHealth),
+        TableId::TeamSlugIndex => collect_table!(tables::TeamSlugIndex),
     }
 }
 

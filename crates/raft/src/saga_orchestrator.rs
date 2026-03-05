@@ -25,9 +25,10 @@ use std::{
 use inferadb_ledger_state::{
     StateLayer,
     system::{
-        CreateOrgSaga, CreateOrgSagaState, CreateUserSaga, CreateUserSagaState, DeleteUserSaga,
-        DeleteUserSagaState, MigrateOrgSaga, MigrateOrgSagaState, MigrateUserSaga,
-        MigrateUserSagaState, SAGA_POLL_INTERVAL, Saga, SagaLockKey,
+        CreateOrganizationInput, CreateOrganizationSaga, CreateOrganizationSagaState,
+        CreateUserSaga, CreateUserSagaState, DeleteUserSaga, DeleteUserSagaState, MigrateOrgSaga,
+        MigrateOrgSagaState, MigrateUserSaga, MigrateUserSagaState, SAGA_POLL_INTERVAL, Saga,
+        SagaLockKey,
     },
 };
 use inferadb_ledger_store::StorageBackend;
@@ -183,121 +184,6 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
         let operation = Operation::SetEntity { key, value, expires_at: None, condition: None };
         self.propose_write(SYSTEM_ORGANIZATION_ID, SYSTEM_VAULT_ID, vec![operation]).await
-    }
-
-    /// Executes a single step of a CreateOrg saga.
-    // Allow: serde_json::json! macro uses unwrap internally for key insertion,
-    // but with string literal keys this is infallible.
-    #[allow(clippy::disallowed_methods)]
-    async fn execute_create_org_step(&self, saga: &mut CreateOrgSaga) -> Result<(), SagaError> {
-        // Clone state to avoid borrow conflicts with saga.transition()
-        match saga.state.clone() {
-            CreateOrgSagaState::Pending => {
-                // Step 1: Create user in _system (if not using existing)
-                if let Some(user_id) = saga.input.existing_user_id {
-                    // Skip user creation, use existing
-                    saga.transition(CreateOrgSagaState::UserCreated { user_id });
-                    info!(saga_id = %saga.id, user_id = user_id.value(), "CreateOrg: using existing user");
-                } else {
-                    // Create new user - allocate ID, generate slug, and write user entity
-                    // Note: In production, this would call through the proper user creation flow
-                    // For now, we simulate by writing to _system
-                    let raw_id = self.allocate_sequence_id("user").await?;
-                    let user_id = UserId::new(raw_id);
-                    let user_slug = snowflake::generate_user_slug().map_err(|e| {
-                        SagaError::UnexpectedSagaResponse {
-                            description: format!("failed to generate user slug: {e}"),
-                        }
-                    })?;
-
-                    let user_key = format!("user:{}", user_id.value());
-                    let user_value = serde_json::json!({
-                        "id": user_id.value(),
-                        "slug": user_slug.value(),
-                        "name": saga.input.user_name,
-                        "email": saga.input.user_email,
-                        "created_at": chrono::Utc::now().to_rfc3339(),
-                    });
-
-                    self.write_entity(
-                        SYSTEM_ORGANIZATION_ID,
-                        SYSTEM_VAULT_ID,
-                        &user_key,
-                        &user_value,
-                    )
-                    .await?;
-
-                    // Also write email index
-                    let email_idx_key = format!("_idx:user:email:{}", saga.input.user_email);
-                    let email_idx_value = serde_json::json!({ "user_id": user_id.value() });
-                    self.write_entity(
-                        SYSTEM_ORGANIZATION_ID,
-                        SYSTEM_VAULT_ID,
-                        &email_idx_key,
-                        &email_idx_value,
-                    )
-                    .await?;
-
-                    saga.transition(CreateOrgSagaState::UserCreated { user_id });
-                    info!(saga_id = %saga.id, user_id = user_id.value(), "CreateOrg: user created");
-                }
-                Ok(())
-            },
-
-            CreateOrgSagaState::UserCreated { user_id } => {
-                // Step 2: Create organization
-                let raw_ns_id = self.allocate_sequence_id("organization").await?;
-                let organization = OrganizationId::new(raw_ns_id);
-
-                let ns_key = format!("organization:{}", organization.value());
-                let ns_value = serde_json::json!({
-                    "id": organization.value(),
-                    "name": saga.input.org_name,
-                    "owner_user_id": user_id.value(),
-                    "created_at": chrono::Utc::now().to_rfc3339(),
-                });
-
-                self.write_entity(SYSTEM_ORGANIZATION_ID, SYSTEM_VAULT_ID, &ns_key, &ns_value)
-                    .await?;
-
-                saga.transition(CreateOrgSagaState::OrganizationCreated {
-                    user_id,
-                    organization_id: organization,
-                });
-                info!(saga_id = %saga.id, organization = organization.value(), "CreateOrg: organization created");
-                Ok(())
-            },
-
-            CreateOrgSagaState::OrganizationCreated { user_id, organization_id } => {
-                // Step 3: Create membership record in the new organization
-                let member_key = format!("member:{}", user_id.value());
-                let member_value = serde_json::json!({
-                    "user_id": user_id.value(),
-                    "role": "owner",
-                    "created_at": chrono::Utc::now().to_rfc3339(),
-                });
-
-                // Write to the new organization (not _system)
-                self.write_entity(organization_id, SYSTEM_VAULT_ID, &member_key, &member_value)
-                    .await?;
-
-                saga.transition(CreateOrgSagaState::Completed { user_id, organization_id });
-                info!(
-                    saga_id = %saga.id,
-                    user_id = user_id.value(),
-                    organization = organization_id.value(),
-                    "CreateOrg: saga completed"
-                );
-                Ok(())
-            },
-
-            CreateOrgSagaState::Completed { .. }
-            | CreateOrgSagaState::Failed { .. }
-            | CreateOrgSagaState::Compensated { .. } => {
-                // Terminal states - nothing to do
-                Ok(())
-            },
-        }
     }
 
     /// Executes a single step of a DeleteUser saga.
@@ -548,8 +434,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     })?;
 
                 let response = result.data;
-                if let crate::types::LedgerResponse::Error { message } = &response {
-                    return Err(SagaError::UnexpectedSagaResponse { description: message.clone() });
+                if let crate::types::LedgerResponse::Error { code, message } = &response {
+                    return Err(SagaError::UnexpectedSagaResponse {
+                        code: *code,
+                        description: message.clone(),
+                    });
                 }
 
                 saga.transition(MigrateOrgSagaState::MigrationStarted);
@@ -629,8 +518,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     })?;
 
                 let response = result.data;
-                if let crate::types::LedgerResponse::Error { message } = &response {
-                    return Err(SagaError::UnexpectedSagaResponse { description: message.clone() });
+                if let crate::types::LedgerResponse::Error { code, message } = &response {
+                    return Err(SagaError::UnexpectedSagaResponse {
+                        code: *code,
+                        description: message.clone(),
+                    });
                 }
 
                 saga.transition(MigrateOrgSagaState::RoutingUpdated);
@@ -794,6 +686,16 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     LedgerRequest::System(SystemRequest::RemoveEmailHash { hmac_hex: hmac });
                 let _ = self.raft.client_write(RaftPayload::new(request)).await;
             }
+            // Clean up pending org profile (TTL provides backup)
+            if !saga.input.pending_org_profile_key.is_empty() {
+                let _ = self
+                    .delete_entity(
+                        SYSTEM_ORGANIZATION_ID,
+                        SYSTEM_VAULT_ID,
+                        &saga.input.pending_org_profile_key,
+                    )
+                    .await;
+            }
             saga.transition(CreateUserSagaState::TimedOut);
             return Ok(());
         }
@@ -805,6 +707,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 let user_id = UserId::new(raw_id);
                 let user_slug = snowflake::generate_user_slug().map_err(|e| {
                     SagaError::UnexpectedSagaResponse {
+                        code: inferadb_ledger_types::LedgerErrorCode::Internal,
                         description: format!("failed to generate user slug: {e}"),
                     }
                 })?;
@@ -887,6 +790,33 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     user_slug = user_slug.value(),
                     "CreateUser: saga completed"
                 );
+
+                // Fire CreateOrganizationSaga for the user's default organization
+                let org_saga_id = uuid::Uuid::new_v4().to_string();
+                let org_saga = CreateOrganizationSaga::new(
+                    org_saga_id.clone(),
+                    CreateOrganizationInput {
+                        region: saga.input.region,
+                        tier: saga.input.default_org_tier,
+                        admin: user_id,
+                        pending_profile_key: saga.input.pending_org_profile_key.clone(),
+                    },
+                );
+                if let Err(e) = self.save_saga(&Saga::CreateOrganization(org_saga)).await {
+                    warn!(
+                        saga_id = %saga.id,
+                        org_saga_id = %org_saga_id,
+                        error = %e,
+                        "CreateUser: failed to persist CreateOrganizationSaga"
+                    );
+                } else {
+                    info!(
+                        saga_id = %saga.id,
+                        org_saga_id = %org_saga_id,
+                        "CreateUser: fired CreateOrganizationSaga for default org"
+                    );
+                }
+
                 Ok(())
             },
 
@@ -900,24 +830,259 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         }
     }
 
+    /// Executes one step of the Create Organization saga.
+    ///
+    /// Multi-group saga coordinating GLOBAL + regional writes:
+    /// Step 0 (GLOBAL): allocate OrgId, generate slug, create directory entry
+    /// Step 1 (Regional): write organization profile + ownership membership
+    /// Step 2 (GLOBAL): update directory status to Active
+    async fn execute_create_organization_step(
+        &self,
+        saga: &mut CreateOrganizationSaga,
+    ) -> Result<(), SagaError> {
+        let timeout = Duration::from_secs(self.migration_config.timeout_secs.min(60));
+        if saga.is_timed_out(timeout) {
+            warn!(
+                saga_id = %saga.id,
+                "CreateOrganization saga timed out, initiating compensation"
+            );
+            // If past step 0, mark directory as Deleted
+            if let CreateOrganizationSagaState::DirectoryCreated { organization_id, .. }
+            | CreateOrganizationSagaState::ProfileWritten { organization_id, .. } = &saga.state
+            {
+                let request =
+                    LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
+                        organization: *organization_id,
+                        status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Deleted,
+                    });
+                let _ = self.raft.client_write(RaftPayload::new(request)).await;
+            }
+            // Clean up pending org profile (TTL provides backup)
+            if !saga.input.pending_profile_key.is_empty() {
+                let _ = self
+                    .delete_entity(
+                        SYSTEM_ORGANIZATION_ID,
+                        SYSTEM_VAULT_ID,
+                        &saga.input.pending_profile_key,
+                    )
+                    .await;
+            }
+            saga.transition(CreateOrganizationSagaState::TimedOut);
+            return Ok(());
+        }
+
+        match saga.state.clone() {
+            CreateOrganizationSagaState::Pending => {
+                // Step 0 (GLOBAL): Generate slug, create directory entry
+                let org_slug = snowflake::generate_organization_slug().map_err(|e| {
+                    SagaError::UnexpectedSagaResponse {
+                        code: inferadb_ledger_types::LedgerErrorCode::Internal,
+                        description: format!("failed to generate organization slug: {e}"),
+                    }
+                })?;
+
+                let request = LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+                    slug: org_slug,
+                    region: saga.input.region,
+                    tier: saga.input.tier,
+                });
+                let result =
+                    self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                        SagaError::SagaRaftWrite {
+                            message: format!("{e:?}"),
+                            backtrace: snafu::Backtrace::generate(),
+                        }
+                    })?;
+
+                let response = result.data;
+                match response {
+                    crate::types::LedgerResponse::OrganizationDirectoryCreated {
+                        organization_id,
+                        organization_slug,
+                    } => {
+                        saga.transition(CreateOrganizationSagaState::DirectoryCreated {
+                            organization_id,
+                            organization_slug,
+                        });
+                        info!(
+                            saga_id = %saga.id,
+                            organization_id = organization_id.value(),
+                            organization_slug = organization_slug.value(),
+                            "CreateOrganization: directory created (GLOBAL)"
+                        );
+                        Ok(())
+                    },
+                    crate::types::LedgerResponse::Error { code, message } => {
+                        Err(SagaError::UnexpectedSagaResponse { code, description: message })
+                    },
+                    other => Err(SagaError::UnexpectedSagaResponse {
+                        code: inferadb_ledger_types::LedgerErrorCode::Internal,
+                        description: format!("expected OrganizationDirectoryCreated, got {other}"),
+                    }),
+                }
+            },
+
+            CreateOrganizationSagaState::DirectoryCreated {
+                organization_id,
+                organization_slug,
+            } => {
+                // Step 1 (Regional): Write organization profile + ownership
+                let request = LedgerRequest::System(SystemRequest::WriteOrganizationProfile {
+                    organization: organization_id,
+                    profile_key: saga.input.pending_profile_key.clone(),
+                    admin: saga.input.admin,
+                });
+                self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                    SagaError::SagaRaftWrite {
+                        message: format!("{e:?}"),
+                        backtrace: snafu::Backtrace::generate(),
+                    }
+                })?;
+
+                saga.transition(CreateOrganizationSagaState::ProfileWritten {
+                    organization_id,
+                    organization_slug,
+                });
+                info!(
+                    saga_id = %saga.id,
+                    organization_id = organization_id.value(),
+                    region = %saga.input.region,
+                    "CreateOrganization: profile written (regional)"
+                );
+                Ok(())
+            },
+
+            CreateOrganizationSagaState::ProfileWritten { organization_id, organization_slug } => {
+                // Step 2 (GLOBAL): Update directory status to Active
+                let request =
+                    LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
+                        organization: organization_id,
+                        status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Active,
+                    });
+                self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                    SagaError::SagaRaftWrite {
+                        message: format!("{e:?}"),
+                        backtrace: snafu::Backtrace::generate(),
+                    }
+                })?;
+
+                saga.transition(CreateOrganizationSagaState::Completed {
+                    organization_id,
+                    organization_slug,
+                });
+                info!(
+                    saga_id = %saga.id,
+                    organization_id = organization_id.value(),
+                    organization_slug = organization_slug.value(),
+                    "CreateOrganization: saga completed"
+                );
+                Ok(())
+            },
+
+            CreateOrganizationSagaState::Completed { .. }
+            | CreateOrganizationSagaState::Failed { .. }
+            | CreateOrganizationSagaState::Compensated { .. }
+            | CreateOrganizationSagaState::TimedOut => {
+                // Terminal states — nothing to do
+                Ok(())
+            },
+        }
+    }
+
     /// Compensates a permanently failed saga by cleaning up partial state.
     ///
-    /// For `CreateUser`, removes the email HMAC reservation if step 0 completed.
-    /// Other saga types do not currently require compensation.
-    async fn compensate_failed_saga(&self, saga: &Saga) {
-        if let Saga::CreateUser(s) = saga
-            && let CreateUserSagaState::Failed { step, .. } = &s.state
-            && *step > 0
-        {
-            // Remove email HMAC reservation since step 0 (email CAS) completed
-            let request = LedgerRequest::System(SystemRequest::RemoveEmailHash {
-                hmac_hex: s.input.hmac.clone(),
-            });
-            let _ = self.raft.client_write(RaftPayload::new(request)).await;
-            warn!(
-                saga_id = %s.id,
-                "CreateUser: compensated email HMAC after permanent failure"
-            );
+    /// For `CreateUser`: removes email HMAC reservation and pending org profile.
+    /// For `CreateOrganization`: marks directory entry as Deleted and removes pending profile.
+    ///
+    /// `org_id_for_compensation` is captured before `fail()` transitions the state,
+    /// since `Failed { step, error }` doesn't carry the allocated organization ID.
+    async fn compensate_failed_saga(
+        &self,
+        saga: &mut Saga,
+        org_id_for_compensation: Option<OrganizationId>,
+    ) {
+        match saga {
+            Saga::CreateUser(s) => {
+                if let CreateUserSagaState::Failed { step, .. } = &s.state {
+                    let mut cleanup = Vec::new();
+
+                    if *step > 0 {
+                        // Remove email HMAC reservation since step 0 (email CAS) completed
+                        let request = LedgerRequest::System(SystemRequest::RemoveEmailHash {
+                            hmac_hex: s.input.hmac.clone(),
+                        });
+                        let _ = self.raft.client_write(RaftPayload::new(request)).await;
+                        cleanup.push("email_hmac_removed");
+                    }
+
+                    // Delete pending org profile (TTL provides backup, but explicit cleanup is
+                    // correct)
+                    if !s.input.pending_org_profile_key.is_empty() {
+                        let _ = self
+                            .delete_entity(
+                                SYSTEM_ORGANIZATION_ID,
+                                SYSTEM_VAULT_ID,
+                                &s.input.pending_org_profile_key,
+                            )
+                            .await;
+                        cleanup.push("pending_org_profile_deleted");
+                    }
+
+                    let step = *step;
+                    let cleanup_summary = cleanup.join(", ");
+                    warn!(
+                        saga_id = %s.id,
+                        step,
+                        cleanup = %cleanup_summary,
+                        "CreateUser: compensated after permanent failure"
+                    );
+                    s.transition(CreateUserSagaState::Compensated { step, cleanup_summary });
+                }
+            },
+            Saga::CreateOrganization(s) => {
+                if let CreateOrganizationSagaState::Failed { step, .. } = &s.state {
+                    let mut cleanup = Vec::new();
+
+                    // Mark directory entry as Deleted if step 0 completed
+                    if let Some(organization_id) = org_id_for_compensation {
+                        let request = LedgerRequest::System(
+                            SystemRequest::UpdateOrganizationDirectoryStatus {
+                                organization: organization_id,
+                                status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Deleted,
+                            },
+                        );
+                        let _ = self.raft.client_write(RaftPayload::new(request)).await;
+                        cleanup.push("directory_marked_deleted");
+                    }
+
+                    // Delete pending org profile
+                    if !s.input.pending_profile_key.is_empty() {
+                        let _ = self
+                            .delete_entity(
+                                SYSTEM_ORGANIZATION_ID,
+                                SYSTEM_VAULT_ID,
+                                &s.input.pending_profile_key,
+                            )
+                            .await;
+                        cleanup.push("pending_org_profile_deleted");
+                    }
+
+                    let step = *step;
+                    let cleanup_summary = cleanup.join(", ");
+                    warn!(
+                        saga_id = %s.id,
+                        step,
+                        cleanup = %cleanup_summary,
+                        "CreateOrganization: compensated after permanent failure"
+                    );
+                    s.transition(CreateOrganizationSagaState::Compensated {
+                        step,
+                        cleanup_summary,
+                    });
+                }
+            },
+            // Other saga types don't have compensation logic
+            _ => {},
         }
     }
 
@@ -931,6 +1096,22 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         saga.lock_keys().into_iter().find(|key| active_locks.contains(key))
     }
 
+    /// Extracts the allocated organization ID from a CreateOrganization saga's
+    /// current state (before `fail()` transitions it to `Failed`).
+    fn extract_org_id_for_compensation(saga: &Saga) -> Option<OrganizationId> {
+        if let Saga::CreateOrganization(s) = saga {
+            match &s.state {
+                CreateOrganizationSagaState::DirectoryCreated { organization_id, .. }
+                | CreateOrganizationSagaState::ProfileWritten { organization_id, .. } => {
+                    Some(*organization_id)
+                },
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
     /// Executes a single saga.
     async fn execute_saga(&self, mut saga: Saga) {
         let saga_id = saga.id().to_string();
@@ -939,21 +1120,25 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         debug!(saga_id = %saga_id, saga_type = ?saga_type, "Executing saga step");
 
         let result = match &mut saga {
-            Saga::CreateOrg(s) => self.execute_create_org_step(s).await,
             Saga::DeleteUser(s) => self.execute_delete_user_step(s).await,
             Saga::MigrateOrg(s) => self.execute_migrate_org_step(s).await,
             Saga::MigrateUser(s) => self.execute_migrate_user_step(s).await,
             Saga::CreateUser(s) => self.execute_create_user_step(s).await,
+            Saga::CreateOrganization(s) => self.execute_create_organization_step(s).await,
         };
 
         if let Err(e) = result {
             warn!(saga_id = %saga_id, error = %e, "Saga step failed");
+
+            // Capture state needed for compensation BEFORE fail() transitions to Failed
+            let org_id_for_compensation = Self::extract_org_id_for_compensation(&saga);
+
             saga.fail(e.to_string());
 
             // If the saga exhausted retries and transitioned to Failed,
-            // compensate to clean up partial state (e.g., email HMAC reservation).
+            // compensate to clean up partial state.
             if saga.is_terminal() {
-                self.compensate_failed_saga(&saga).await;
+                self.compensate_failed_saga(&mut saga, org_id_for_compensation).await;
             }
         }
 
@@ -1042,7 +1227,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
-    use inferadb_ledger_state::system::{CreateOrgInput, DeleteUserInput};
+    use inferadb_ledger_state::system::DeleteUserInput;
 
     use super::*;
 
@@ -1051,25 +1236,6 @@ mod tests {
         let saga_id = "test-saga-123";
         let key = format!("{}{}", SAGA_KEY_PREFIX, saga_id);
         assert_eq!(key, "saga:test-saga-123");
-    }
-
-    #[test]
-    fn test_create_org_saga_serialization() {
-        let input = CreateOrgInput {
-            user_name: "Alice".to_string(),
-            user_email: "alice@example.com".to_string(),
-            org_name: "Acme Corporation".to_string(),
-            existing_user_id: None,
-        };
-
-        let saga = CreateOrgSaga::new("test-123".to_string(), input);
-        let wrapped = Saga::CreateOrg(saga);
-
-        let serialized = serde_json::to_vec(&wrapped).unwrap();
-        let deserialized: Saga = serde_json::from_slice(&serialized).unwrap();
-
-        assert_eq!(deserialized.id(), "test-123");
-        assert!(!deserialized.is_terminal());
     }
 
     #[test]

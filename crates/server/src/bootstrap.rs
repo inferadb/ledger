@@ -15,8 +15,9 @@ use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_raft::{
     AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, EventsGarbageCollector,
     GrpcRaftNetworkFactory, IntegrityScrubberJob, LearnerRefreshJob, LedgerNodeId,
-    LedgerTypeConfig, OrphanCleanupJob, RaftLogStore, RaftManager, RaftManagerConfig,
-    ResourceMetricsCollector, RuntimeConfigHandle, SagaOrchestrator, TtlGarbageCollector,
+    LedgerTypeConfig, OrganizationPurgeJob, OrphanCleanupJob, RaftLogStore, RaftManager,
+    RaftManagerConfig, ResourceMetricsCollector, RuntimeConfigHandle, SagaOrchestrator,
+    TtlGarbageCollector,
     event_writer::{EventHandle, EventWriter},
 };
 use inferadb_ledger_services::LedgerServer;
@@ -133,6 +134,9 @@ pub struct BootstrappedNode {
     /// Integrity scrubber background task handle.
     #[allow(dead_code)] // retained to keep background task alive
     pub integrity_scrub_handle: tokio::task::JoinHandle<()>,
+    /// Organization purge background task handle (leader-only).
+    #[allow(dead_code)] // retained to keep background task alive
+    pub org_purge_handle: tokio::task::JoinHandle<()>,
     /// Snapshot demotion background task handle (only active when warm tier is configured).
     #[allow(dead_code)] // retained to keep background task alive
     pub snapshot_demotion_handle: Option<tokio::task::JoinHandle<()>>,
@@ -595,6 +599,17 @@ pub async fn bootstrap_node(
         .start();
     tracing::info!("Started integrity scrubber");
 
+    // Start organization purge job for removing soft-deleted organizations
+    // after their retention cooldown expires (leader-only)
+    let org_purge_handle = OrganizationPurgeJob::builder()
+        .raft(raft.clone())
+        .node_id(node_id)
+        .state(state.clone())
+        .watchdog_handle(watchdog.map(|w| w.register("org_purge", 7200)))
+        .build()
+        .start();
+    tracing::info!("Started organization purge job");
+
     // Start snapshot demotion task if warm tier is configured.
     // Periodically moves old snapshots from local SSD to object storage.
     // S3 unavailability degrades gracefully: logs the error and retries next cycle.
@@ -637,6 +652,7 @@ pub async fn bootstrap_node(
         saga_handle,
         orphan_cleanup_handle,
         integrity_scrub_handle,
+        org_purge_handle,
         snapshot_demotion_handle,
     })
 }

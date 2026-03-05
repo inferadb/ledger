@@ -1,8 +1,8 @@
 //! Key patterns for the `_system` organization.
 
 use inferadb_ledger_types::{
-    EmailVerifyTokenId, NodeId, OrganizationId, OrganizationSlug, Region, UserEmailId, UserId,
-    UserSlug, VaultSlug,
+    EmailVerifyTokenId, NodeId, OrganizationId, OrganizationSlug, Region, TeamId, TeamSlug,
+    UserEmailId, UserId, UserSlug, VaultSlug,
 };
 
 /// Key pattern generators for `_system` organization entities.
@@ -71,6 +71,17 @@ impl SystemKeys {
         format!("email_verify:{}", token_id.value())
     }
 
+    /// Index key for looking up a verification token by its hash.
+    ///
+    /// Pattern: `_idx:email_verify_hash:{hex}` → `EmailVerifyTokenId`
+    ///
+    /// The hex string is the SHA-256 hash of the plaintext token, formatted
+    /// as lowercase hex. This index is written when a token is created and
+    /// enables constant-time token verification without scanning.
+    pub fn email_verify_hash_index_key(token_hash_hex: &str) -> String {
+        format!("_idx:email_verify_hash:{token_hash_hex}")
+    }
+
     // ========================================================================
     // User Directory Keys (GLOBAL control plane)
     // ========================================================================
@@ -126,6 +137,27 @@ impl SystemKeys {
         format!("_idx:org:slug:{}", slug.value())
     }
 
+    /// Primary key for an organization profile record in the regional store.
+    ///
+    /// Pattern: `_sys:org_profile:{organization_id}` → postcard-serialized `OrganizationProfile`
+    ///
+    /// Contains PII (organization name). Stored in the region declared at creation.
+    pub fn organization_profile_key(organization: OrganizationId) -> String {
+        format!("_sys:org_profile:{}", organization.value())
+    }
+
+    /// Key for a pending organization profile written by the gRPC handler
+    /// before saga creation.
+    ///
+    /// Pattern: `_sys:pending_org_profile:{saga_id}` → postcard-serialized
+    /// `PendingOrganizationProfile`
+    ///
+    /// Temporary key with TTL; deleted by `WriteOrganizationProfile` on success
+    /// or garbage-collected on saga failure.
+    pub fn pending_organization_profile_key(saga_id: &str) -> String {
+        format!("_sys:pending_org_profile:{saga_id}")
+    }
+
     // ========================================================================
     // Vault Keys
     // ========================================================================
@@ -136,6 +168,27 @@ impl SystemKeys {
     pub fn vault_slug_key(slug: VaultSlug) -> String {
         format!("_idx:vault:slug:{}", slug.value())
     }
+
+    // ========================================================================
+    // Team Keys
+    // ========================================================================
+
+    /// Primary key for a team profile record in the system vault.
+    ///
+    /// Pattern: `_sys:team_profile:{organization_id}:{team_id}` → postcard-serialized `TeamProfile`
+    pub fn team_profile_key(organization: OrganizationId, team: TeamId) -> String {
+        format!("_sys:team_profile:{}:{}", organization.value(), team.value())
+    }
+
+    /// Index key for team slug lookup.
+    ///
+    /// Pattern: `_idx:team:slug:{slug}` → team_id
+    pub fn team_slug_key(slug: TeamSlug) -> String {
+        format!("_idx:team:slug:{}", slug.value())
+    }
+
+    /// Prefix for team profile keys.
+    pub const TEAM_PROFILE_PREFIX: &'static str = "_sys:team_profile:";
 
     // ========================================================================
     // Node Keys
@@ -296,6 +349,9 @@ impl SystemKeys {
     /// Prefix for all user email keys.
     pub const USER_EMAIL_PREFIX: &'static str = "user_email:";
 
+    /// Prefix for email verification hash index entries.
+    pub const EMAIL_VERIFY_HASH_INDEX_PREFIX: &'static str = "_idx:email_verify_hash:";
+
     /// Prefix for all organization keys.
     pub const ORG_PREFIX: &'static str = "org:";
 
@@ -313,6 +369,12 @@ impl SystemKeys {
 
     /// Prefix for user slug index entries.
     pub const USER_SLUG_INDEX_PREFIX: &'static str = "_idx:user:slug:";
+
+    /// Prefix for organization profile keys.
+    pub const ORG_PROFILE_PREFIX: &'static str = "_sys:org_profile:";
+
+    /// Prefix for pending organization profile keys.
+    pub const PENDING_ORG_PROFILE_PREFIX: &'static str = "_sys:pending_org_profile:";
 
     /// Prefix for all index keys.
     pub const INDEX_PREFIX: &'static str = "_idx:";
@@ -358,6 +420,44 @@ mod tests {
     fn test_organization_key() {
         assert_eq!(SystemKeys::organization_key(OrganizationId::new(42)), "org:42");
         assert_eq!(SystemKeys::parse_organization_key("org:42"), Some(OrganizationId::new(42)));
+    }
+
+    #[test]
+    fn test_organization_profile_key() {
+        assert_eq!(
+            SystemKeys::organization_profile_key(OrganizationId::new(42)),
+            "_sys:org_profile:42"
+        );
+        assert!(
+            SystemKeys::organization_profile_key(OrganizationId::new(1))
+                .starts_with(SystemKeys::ORG_PROFILE_PREFIX)
+        );
+        assert!(
+            SystemKeys::organization_profile_key(OrganizationId::new(1))
+                .starts_with(SystemKeys::SYS_PREFIX)
+        );
+    }
+
+    #[test]
+    fn test_pending_organization_profile_key() {
+        assert_eq!(
+            SystemKeys::pending_organization_profile_key("saga-abc"),
+            "_sys:pending_org_profile:saga-abc"
+        );
+        assert!(
+            SystemKeys::pending_organization_profile_key("x")
+                .starts_with(SystemKeys::PENDING_ORG_PROFILE_PREFIX)
+        );
+        assert!(
+            SystemKeys::pending_organization_profile_key("x").starts_with(SystemKeys::SYS_PREFIX)
+        );
+    }
+
+    #[test]
+    fn test_org_profile_does_not_collide_with_pending() {
+        let profile_key = SystemKeys::organization_profile_key(OrganizationId::new(42));
+        let pending_key = SystemKeys::pending_organization_profile_key("42");
+        assert_ne!(profile_key, pending_key);
     }
 
     #[test]

@@ -4,7 +4,8 @@ use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
-    EmailVerifyTokenId, NodeId, OrganizationId, Region, UserEmailId, UserId, UserSlug,
+    EmailVerifyTokenId, NodeId, OrganizationId, OrganizationSlug, Region, TeamId, TeamSlug,
+    UserEmailId, UserId, UserRole, UserSlug, UserStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,37 +38,9 @@ pub struct User {
     pub created_at: DateTime<Utc>,
     /// Last modification timestamp.
     pub updated_at: DateTime<Utc>,
-}
-
-/// User account status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UserStatus {
-    /// User is active and can authenticate.
-    #[default]
-    Active,
-    /// User is pending organization creation (saga in progress).
-    PendingOrg,
-    /// User is suspended and cannot authenticate.
-    Suspended,
-    /// User is being deleted (cascade in progress).
-    Deleting,
-    /// User has been deleted (tombstone for audit).
-    Deleted,
-}
-
-/// User authorization role.
-///
-/// Determines what operations a user can perform at the global service level.
-/// Organization-level permissions are separate (derived from membership records).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UserRole {
-    /// Regular user with standard permissions.
-    #[default]
-    User,
-    /// Global service administrator.
-    Admin,
+    /// When soft-delete was initiated (None if not deleted).
+    #[serde(default)]
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 // ============================================================================
@@ -252,8 +225,6 @@ pub struct UserDirectoryEntry {
 pub struct OrganizationRegistry {
     /// Organization identifier.
     pub organization_id: OrganizationId,
-    /// Human-readable organization name.
-    pub name: String,
     /// Region hosting this organization.
     pub region: Region,
     /// Nodes in the region group.
@@ -264,6 +235,167 @@ pub struct OrganizationRegistry {
     pub config_version: u64,
     /// When this organization was created.
     pub created_at: DateTime<Utc>,
+    /// When this organization was soft-deleted.
+    #[serde(default)]
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+// ============================================================================
+// Organization Directory Types (GLOBAL control plane)
+// ============================================================================
+
+/// Organization lifecycle status at the GLOBAL directory level.
+///
+/// Distinct from [`OrganizationStatus`] which tracks richer regional-level
+/// lifecycle (e.g. `Suspended`, `Deleting`). The directory only needs to
+/// route and gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationDirectoryStatus {
+    /// Organization is active and accepting requests.
+    Active,
+    /// Organization is being provisioned (saga in progress).
+    #[default]
+    Provisioning,
+    /// Organization is being migrated to another region.
+    Migrating,
+    /// Organization has been deleted (tombstone).
+    Deleted,
+}
+
+/// Non-PII organization directory record in the GLOBAL control plane.
+///
+/// Enables any node to resolve an [`OrganizationId`] to its data region
+/// without touching regional stores. Contains no personally identifiable
+/// information — only opaque identifiers, enums, and timestamps.
+///
+/// Key pattern: `_sys:org_dir:{organization_id}` → postcard-serialized entry.
+///
+/// Mirrors [`UserDirectoryEntry`] for users.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrganizationDirectoryEntry {
+    /// Internal organization identifier. Always present, even after deletion.
+    pub organization: OrganizationId,
+    /// External Snowflake identifier. `None` after deletion.
+    pub slug: Option<OrganizationSlug>,
+    /// Region where organization data is stored. `None` after deletion.
+    pub region: Option<Region>,
+    /// Billing tier.
+    pub tier: OrganizationTier,
+    /// Lifecycle status visible at the global level.
+    pub status: OrganizationDirectoryStatus,
+    /// Last modification timestamp. `None` after deletion.
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+/// Organization profile record stored in a regional store.
+///
+/// Organization PII (name) resides in the region declared at creation.
+/// The GLOBAL control plane holds a non-PII [`OrganizationDirectoryEntry`]
+/// for cross-region resolution.
+///
+/// Key pattern: `_sys:org_profile:{organization_id}` → postcard-serialized entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrganizationProfile {
+    /// Organization identifier (matches [`OrganizationDirectoryEntry::organization`]).
+    pub organization: OrganizationId,
+    /// External Snowflake identifier.
+    pub slug: OrganizationSlug,
+    /// Data residency region where this record is stored.
+    pub region: Region,
+    /// Human-readable organization name (PII — stays regional).
+    pub name: String,
+    /// Billing tier.
+    pub tier: OrganizationTier,
+    /// Current status.
+    pub status: OrganizationStatus,
+    /// Members of this organization with roles.
+    pub members: Vec<OrganizationMember>,
+    /// Account creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Last modification timestamp.
+    pub updated_at: DateTime<Utc>,
+    /// When this organization was soft-deleted.
+    #[serde(default)]
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+/// Pending organization profile written by the gRPC handler before saga creation.
+///
+/// Contains only the PII (organization name) that must not appear in the saga's
+/// serialized state. All other fields (region, tier, owner) are carried in the
+/// saga's [`super::saga::CreateOrganizationInput`] and combined at apply time.
+///
+/// Key pattern: `_sys:pending_org_profile:{saga_id}` → postcard-serialized entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingOrganizationProfile {
+    /// Human-readable organization name (PII).
+    pub name: String,
+}
+
+/// Role within an organization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationMemberRole {
+    /// Organization administrator — can manage members and settings.
+    Admin,
+    /// Regular organization member.
+    #[default]
+    Member,
+}
+
+/// A member of an organization with their role and join timestamp.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrganizationMember {
+    /// The user's internal identifier.
+    pub user_id: UserId,
+    /// The member's role within the organization.
+    pub role: OrganizationMemberRole,
+    /// When the member joined the organization.
+    pub joined_at: DateTime<Utc>,
+}
+
+/// Team profile record stored in the system vault.
+///
+/// Key pattern: `_sys:team_profile:{organization_id}:{team_id}` → postcard-serialized entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamProfile {
+    /// Internal team identifier.
+    pub team: TeamId,
+    /// Organization this team belongs to.
+    pub organization: OrganizationId,
+    /// External Snowflake identifier.
+    pub slug: TeamSlug,
+    /// Human-readable team name (unique within the organization).
+    pub name: String,
+    /// Members of this team with roles.
+    pub members: Vec<TeamMember>,
+    /// Team creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Last modification timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Role within a team.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamMemberRole {
+    /// Team manager — can update team settings.
+    Manager,
+    /// Regular team member.
+    #[default]
+    Member,
+}
+
+/// A member of a team with their role and join timestamp.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamMember {
+    /// The user's internal identifier.
+    pub user_id: UserId,
+    /// The member's role within the team.
+    pub role: TeamMemberRole,
+    /// When the member joined the team.
+    pub joined_at: DateTime<Utc>,
 }
 
 /// Organization lifecycle status.
@@ -271,14 +403,14 @@ pub struct OrganizationRegistry {
 #[serde(rename_all = "snake_case")]
 pub enum OrganizationStatus {
     /// Organization is active and accepting requests.
-    #[default]
     Active,
+    /// Organization is being provisioned (saga in progress, not yet ready).
+    #[default]
+    Provisioning,
     /// Organization is being migrated to another region.
     Migrating,
     /// Organization is suspended (billing, policy, etc.).
     Suspended,
-    /// Organization is being deleted.
-    Deleting,
     /// Organization has been deleted (tombstone).
     Deleted,
 }
@@ -359,7 +491,7 @@ mod tests {
 
     #[test]
     fn test_organization_status_default() {
-        assert_eq!(OrganizationStatus::default(), OrganizationStatus::Active);
+        assert_eq!(OrganizationStatus::default(), OrganizationStatus::Provisioning);
     }
 
     #[test]
@@ -389,6 +521,7 @@ mod tests {
             role: UserRole::User,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            deleted_at: None,
         };
 
         let bytes = postcard::to_allocvec(&user).unwrap();
@@ -410,6 +543,7 @@ mod tests {
             role: UserRole::Admin,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            deleted_at: None,
         };
 
         let bytes = postcard::to_allocvec(&user).unwrap();
@@ -429,6 +563,7 @@ mod tests {
             role: UserRole::User,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            deleted_at: None,
         };
 
         let bytes = postcard::to_allocvec(&user).unwrap();
@@ -497,18 +632,18 @@ mod tests {
     fn test_organization_registry_serialization() {
         let registry = OrganizationRegistry {
             organization_id: OrganizationId::new(1),
-            name: "acme-corp".to_string(),
             region: Region::GLOBAL,
             member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
             status: OrganizationStatus::Active,
             config_version: 1,
             created_at: Utc::now(),
+            deleted_at: None,
         };
 
         let bytes = postcard::to_allocvec(&registry).unwrap();
         let deserialized: OrganizationRegistry = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(registry.organization_id, deserialized.organization_id);
-        assert_eq!(registry.name, deserialized.name);
+        assert_eq!(registry.region, deserialized.region);
     }
 
     #[test]
@@ -526,6 +661,89 @@ mod tests {
         let deserialized: NodeInfo = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(deserialized.node_id, "node-42");
         assert_eq!(deserialized.region, Region::IE_EAST_DUBLIN);
+    }
+
+    #[test]
+    fn test_organization_directory_entry_serialization() {
+        let entry = OrganizationDirectoryEntry {
+            organization: OrganizationId::new(42),
+            slug: Some(OrganizationSlug::new(9999)),
+            region: Some(Region::IE_EAST_DUBLIN),
+            tier: OrganizationTier::Free,
+            status: OrganizationDirectoryStatus::Active,
+            updated_at: Some(Utc::now()),
+        };
+        let bytes = postcard::to_allocvec(&entry).unwrap();
+        let deserialized: OrganizationDirectoryEntry = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized.organization, OrganizationId::new(42));
+        assert_eq!(deserialized.slug, Some(OrganizationSlug::new(9999)));
+        assert_eq!(deserialized.region, Some(Region::IE_EAST_DUBLIN));
+        assert_eq!(deserialized.tier, OrganizationTier::Free);
+        assert_eq!(deserialized.status, OrganizationDirectoryStatus::Active);
+    }
+
+    #[test]
+    fn test_organization_directory_entry_tombstone() {
+        let tombstone = OrganizationDirectoryEntry {
+            organization: OrganizationId::new(42),
+            slug: None,
+            region: None,
+            tier: OrganizationTier::Free,
+            status: OrganizationDirectoryStatus::Deleted,
+            updated_at: None,
+        };
+        let bytes = postcard::to_allocvec(&tombstone).unwrap();
+        let deserialized: OrganizationDirectoryEntry = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized.slug, None);
+        assert_eq!(deserialized.region, None);
+        assert_eq!(deserialized.status, OrganizationDirectoryStatus::Deleted);
+    }
+
+    #[test]
+    fn test_organization_directory_status_default() {
+        assert_eq!(
+            OrganizationDirectoryStatus::default(),
+            OrganizationDirectoryStatus::Provisioning
+        );
+    }
+
+    #[test]
+    fn test_organization_profile_serialization() {
+        let now = Utc::now();
+        let profile = OrganizationProfile {
+            organization: OrganizationId::new(42),
+            slug: OrganizationSlug::new(9999),
+            region: Region::US_EAST_VA,
+            name: "Evan's Organization".to_string(),
+            tier: OrganizationTier::Free,
+            status: OrganizationStatus::Active,
+            members: vec![OrganizationMember {
+                user_id: UserId::new(1),
+                role: OrganizationMemberRole::Admin,
+                joined_at: now,
+            }],
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+        };
+        let bytes = postcard::to_allocvec(&profile).unwrap();
+        let deserialized: OrganizationProfile = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized.organization, OrganizationId::new(42));
+        assert_eq!(deserialized.name, "Evan's Organization");
+        assert_eq!(deserialized.members.len(), 1);
+        assert_eq!(deserialized.members[0].user_id, UserId::new(1));
+        assert_eq!(deserialized.members[0].role, OrganizationMemberRole::Admin);
+        assert_eq!(deserialized.tier, OrganizationTier::Free);
+    }
+
+    #[test]
+    fn test_organization_directory_status_serde_json() {
+        let json = serde_json::to_string(&OrganizationDirectoryStatus::Provisioning).unwrap();
+        assert_eq!(json, r#""provisioning""#);
+
+        let deserialized: OrganizationDirectoryStatus =
+            serde_json::from_str(r#""active""#).unwrap();
+        assert_eq!(deserialized, OrganizationDirectoryStatus::Active);
     }
 
     #[test]

@@ -225,10 +225,34 @@ pub enum EventAction {
     OrganizationSuspended,
     /// Organization resumed.
     OrganizationResumed,
+    /// Organization metadata updated.
+    OrganizationUpdated,
+    /// Organization member removed.
+    OrganizationMemberRemoved,
+    /// Organization member role updated.
+    OrganizationMemberRoleUpdated,
+    /// Organization team created.
+    TeamCreated,
+    /// Organization team updated.
+    TeamUpdated,
+    /// Organization team deleted.
+    TeamDeleted,
+    /// Organization purged (all data permanently removed).
+    OrganizationPurged,
     /// User account created.
     UserCreated,
     /// User account deleted.
     UserDeleted,
+    /// User account updated.
+    UserUpdated,
+    /// User account soft-deleted (pending erasure).
+    UserSoftDeleted,
+    /// User email address created.
+    UserEmailCreated,
+    /// User email address deleted.
+    UserEmailDeleted,
+    /// User email address verified.
+    UserEmailVerified,
     /// Data migration started.
     MigrationStarted,
     /// Data migration completed.
@@ -289,8 +313,20 @@ impl EventAction {
             | EventAction::OrganizationDeleted
             | EventAction::OrganizationSuspended
             | EventAction::OrganizationResumed
+            | EventAction::OrganizationUpdated
+            | EventAction::OrganizationMemberRemoved
+            | EventAction::OrganizationMemberRoleUpdated
+            | EventAction::TeamCreated
+            | EventAction::TeamUpdated
+            | EventAction::TeamDeleted
+            | EventAction::OrganizationPurged
             | EventAction::UserCreated
             | EventAction::UserDeleted
+            | EventAction::UserUpdated
+            | EventAction::UserSoftDeleted
+            | EventAction::UserEmailCreated
+            | EventAction::UserEmailDeleted
+            | EventAction::UserEmailVerified
             | EventAction::MigrationStarted
             | EventAction::MigrationCompleted
             | EventAction::NodeJoinedCluster
@@ -329,8 +365,20 @@ impl EventAction {
             EventAction::OrganizationDeleted => "ledger.organization.deleted",
             EventAction::OrganizationSuspended => "ledger.organization.suspended",
             EventAction::OrganizationResumed => "ledger.organization.resumed",
+            EventAction::OrganizationUpdated => "ledger.organization.updated",
+            EventAction::OrganizationMemberRemoved => "ledger.organization.member_removed",
+            EventAction::OrganizationMemberRoleUpdated => "ledger.organization.member_role_updated",
+            EventAction::TeamCreated => "ledger.team.created",
+            EventAction::TeamUpdated => "ledger.team.updated",
+            EventAction::TeamDeleted => "ledger.team.deleted",
+            EventAction::OrganizationPurged => "ledger.organization.purged",
             EventAction::UserCreated => "ledger.user.created",
             EventAction::UserDeleted => "ledger.user.deleted",
+            EventAction::UserUpdated => "ledger.user.updated",
+            EventAction::UserSoftDeleted => "ledger.user.soft_deleted",
+            EventAction::UserEmailCreated => "ledger.user_email.created",
+            EventAction::UserEmailDeleted => "ledger.user_email.deleted",
+            EventAction::UserEmailVerified => "ledger.user_email.verified",
             EventAction::MigrationStarted => "ledger.migration.started",
             EventAction::MigrationCompleted => "ledger.migration.completed",
             EventAction::NodeJoinedCluster => "ledger.node.joined",
@@ -367,8 +415,20 @@ impl EventAction {
             EventAction::OrganizationDeleted => "organization_deleted",
             EventAction::OrganizationSuspended => "organization_suspended",
             EventAction::OrganizationResumed => "organization_resumed",
+            EventAction::OrganizationUpdated => "organization_updated",
+            EventAction::OrganizationMemberRemoved => "organization_member_removed",
+            EventAction::OrganizationMemberRoleUpdated => "organization_member_role_updated",
+            EventAction::TeamCreated => "team_created",
+            EventAction::TeamUpdated => "team_updated",
+            EventAction::TeamDeleted => "team_deleted",
+            EventAction::OrganizationPurged => "organization_purged",
             EventAction::UserCreated => "user_created",
             EventAction::UserDeleted => "user_deleted",
+            EventAction::UserUpdated => "user_updated",
+            EventAction::UserSoftDeleted => "user_soft_deleted",
+            EventAction::UserEmailCreated => "user_email_created",
+            EventAction::UserEmailDeleted => "user_email_deleted",
+            EventAction::UserEmailVerified => "user_email_verified",
             EventAction::MigrationStarted => "migration_started",
             EventAction::MigrationCompleted => "migration_completed",
             EventAction::NodeJoinedCluster => "node_joined_cluster",
@@ -400,8 +460,20 @@ impl EventAction {
         EventAction::OrganizationDeleted,
         EventAction::OrganizationSuspended,
         EventAction::OrganizationResumed,
+        EventAction::OrganizationUpdated,
+        EventAction::OrganizationMemberRemoved,
+        EventAction::OrganizationMemberRoleUpdated,
+        EventAction::TeamCreated,
+        EventAction::TeamUpdated,
+        EventAction::TeamDeleted,
+        EventAction::OrganizationPurged,
         EventAction::UserCreated,
         EventAction::UserDeleted,
+        EventAction::UserUpdated,
+        EventAction::UserSoftDeleted,
+        EventAction::UserEmailCreated,
+        EventAction::UserEmailDeleted,
+        EventAction::UserEmailVerified,
         EventAction::MigrationStarted,
         EventAction::MigrationCompleted,
         EventAction::NodeJoinedCluster,
@@ -825,8 +897,8 @@ mod tests {
 
     #[test]
     fn event_action_all_count() {
-        // 17 system + 11 organization = 28 total
-        assert_eq!(EventAction::ALL.len(), 28);
+        // 29 system + 11 organization = 40 total
+        assert_eq!(EventAction::ALL.len(), 40);
     }
 
     // ── EventOutcome ────────────────────────────────────────

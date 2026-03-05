@@ -102,6 +102,8 @@ pub mod file_lock;
 #[doc(hidden)]
 pub mod learner_refresh;
 #[doc(hidden)]
+pub mod organization_purge;
+#[doc(hidden)]
 pub mod orphan_cleanup;
 #[doc(hidden)]
 pub mod raft_network;
@@ -121,6 +123,8 @@ pub mod state_root_verifier;
 pub mod ttl_gc;
 #[doc(hidden)]
 pub mod types;
+#[doc(hidden)]
+pub mod user_retention;
 
 // ---------------------------------------------------------------------------
 // Server infrastructure re-exports — consumed by the server crate for
@@ -150,6 +154,8 @@ pub use learner_refresh::LearnerRefreshJob;
 #[doc(hidden)]
 pub use log_storage::RaftLogStore;
 #[doc(hidden)]
+pub use organization_purge::OrganizationPurgeJob;
+#[doc(hidden)]
 pub use orphan_cleanup::OrphanCleanupJob;
 #[doc(hidden)]
 pub use raft_manager::{RaftManager, RaftManagerConfig, RegionConfig, RegionGroup};
@@ -171,3 +177,5 @@ pub use ttl_gc::TtlGarbageCollector;
 pub use types::LedgerNodeId;
 /// OpenRaft type configuration for the ledger's Raft consensus layer.
 pub use types::LedgerTypeConfig;
+#[doc(hidden)]
+pub use user_retention::UserRetentionReaper;

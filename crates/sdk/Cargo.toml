@@ -67,11 +67,7 @@ inferadb-ledger-raft = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
-tokio-test = "0.4"
-inferadb-ledger-server = { workspace = true }
-inferadb-ledger-test-utils = { workspace = true }
 openraft = { workspace = true }
-serial_test = "3.2"
 
 [lints]
 workspace = true

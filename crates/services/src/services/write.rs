@@ -952,8 +952,8 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     &trace_ctx.trace_id,
                 ))
             },
-            LedgerResponse::Error { message } => {
-                ctx.set_error("Unspecified", &message);
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
                 metrics::record_write(false, ctx.elapsed_secs());
 
                 Ok(response_with_correlation(
@@ -1481,8 +1481,8 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     &trace_ctx.trace_id,
                 ))
             },
-            LedgerResponse::Error { message } => {
-                ctx.set_error("Unspecified", &message);
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
                 metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
 
                 Ok(response_with_correlation(

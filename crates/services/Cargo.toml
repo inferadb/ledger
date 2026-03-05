@@ -57,7 +57,6 @@ snafu.workspace = true
 
 [dev-dependencies]
 inferadb-ledger-test-utils.workspace = true
-tracing-subscriber.workspace = true
 proptest.workspace = true
 
 [lints]

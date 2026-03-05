@@ -6,13 +6,16 @@ use std::{
 };
 
 use inferadb_ledger_proto::proto::BlockAnnouncement;
-use inferadb_ledger_state::{BlockArchive, StateLayer};
+use inferadb_ledger_state::{
+    BlockArchive, StateLayer,
+    system::{SYSTEM_VAULT_ID, SystemKeys, TeamProfile},
+};
 use inferadb_ledger_store::{
     Database, DatabaseConfig, FileBackend, Key, StorageBackend, Value, WriteTransaction, tables,
 };
 use inferadb_ledger_types::{
-    EmailVerifyTokenId, OrganizationId, OrganizationSlug, Region, UserEmailId, UserId, UserSlug,
-    VaultId, VaultSlug, decode, encode,
+    EmailVerifyTokenId, OrganizationId, OrganizationSlug, Region, TeamId, TeamSlug, UserEmailId,
+    UserId, UserSlug, VaultId, VaultSlug, decode, encode,
 };
 use openraft::{Entry, LogId, StorageError, Vote};
 use parking_lot::RwLock;
@@ -165,7 +168,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
     }
 
     /// Configures the state layer for transaction application.
+    ///
+    /// Also rebuilds in-memory secondary indices (team name index, user→org
+    /// index) from persisted profiles in the state layer.
     pub fn with_state_layer(mut self, state_layer: Arc<StateLayer<B>>) -> Self {
+        self.rebuild_secondary_indices(&state_layer);
         self.state_layer = Some(state_layer);
         self
     }
@@ -214,6 +221,100 @@ impl<B: StorageBackend> RaftLogStore<B> {
     ) -> Self {
         self.client_sequence_eviction = config;
         self
+    }
+
+    /// Rebuilds in-memory secondary indices from persisted profiles.
+    ///
+    /// Rebuilds:
+    /// - `team_name_index`: (org_id, name) → team_id for O(1) name conflict checks
+    /// - `user_org_index`: user_id → {org_ids} for O(1) membership lookups
+    fn rebuild_secondary_indices(&self, state_layer: &StateLayer<B>) {
+        let state = self.applied_state.read();
+        let team_pairs: Vec<_> =
+            state.team_slug_index.values().map(|(org_id, team_id)| (*org_id, *team_id)).collect();
+        let org_ids: Vec<_> = state.organizations.keys().copied().collect();
+        drop(state);
+
+        // Rebuild team name index
+        let mut name_entries = Vec::with_capacity(team_pairs.len());
+        for (org_id, team_id) in team_pairs {
+            let key = SystemKeys::team_profile_key(org_id, team_id);
+            match state_layer.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
+                Ok(Some(entity)) => match decode::<TeamProfile>(&entity.value) {
+                    Ok(profile) => {
+                        name_entries.push(((org_id, profile.name), team_id));
+                    },
+                    Err(e) => {
+                        warn!(
+                            organization_id = %org_id,
+                            team_id = %team_id,
+                            error = %e,
+                            "Failed to decode team profile during index rebuild"
+                        );
+                    },
+                },
+                Ok(None) => {
+                    warn!(
+                        organization_id = %org_id,
+                        team_id = %team_id,
+                        "Team profile missing during index rebuild"
+                    );
+                },
+                Err(e) => {
+                    warn!(
+                        organization_id = %org_id,
+                        team_id = %team_id,
+                        error = %e,
+                        "Failed to read team profile during index rebuild"
+                    );
+                },
+            }
+        }
+
+        // Rebuild user→org index from organization profiles
+        let mut user_org_entries: std::collections::HashMap<
+            UserId,
+            std::collections::HashSet<OrganizationId>,
+        > = std::collections::HashMap::new();
+        for org_id in org_ids {
+            let key = SystemKeys::organization_profile_key(org_id);
+            match state_layer.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
+                Ok(Some(entity)) => {
+                    match decode::<inferadb_ledger_state::system::OrganizationProfile>(
+                        &entity.value,
+                    ) {
+                        Ok(profile) => {
+                            for member in &profile.members {
+                                user_org_entries.entry(member.user_id).or_default().insert(org_id);
+                            }
+                        },
+                        Err(e) => {
+                            warn!(
+                                organization_id = %org_id,
+                                error = %e,
+                                "Failed to decode organization profile during index rebuild"
+                            );
+                        },
+                    }
+                },
+                Ok(None) => {
+                    // Profile may not exist yet for orgs still provisioning
+                },
+                Err(e) => {
+                    warn!(
+                        organization_id = %org_id,
+                        error = %e,
+                        "Failed to read organization profile during index rebuild"
+                    );
+                },
+            }
+        }
+
+        let mut state = self.applied_state.write();
+        for (key, team_id) in name_entries {
+            state.team_name_index.insert(key, team_id);
+        }
+        state.user_org_index = user_org_entries;
     }
 
     /// Returns a reference to the event writer (if configured).
@@ -489,6 +590,21 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 .map_err(|e| to_storage_error(&e))?;
         }
 
+        // TeamSlugIndex inserts/updates
+        for (slug, (org_id, team_id)) in &pending.team_slug_index {
+            let value = encode(&(*org_id, *team_id)).map_err(|e| to_serde_error(&e))?;
+            write_txn
+                .insert::<tables::TeamSlugIndex>(&slug.value(), &value)
+                .map_err(|e| to_storage_error(&e))?;
+        }
+
+        // TeamSlugIndex deletes
+        for slug in &pending.team_slug_index_deleted {
+            write_txn
+                .delete::<tables::TeamSlugIndex>(&slug.value())
+                .map_err(|e| to_storage_error(&e))?;
+        }
+
         Ok(())
     }
 
@@ -640,6 +756,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
         // UserSlugIndex table scan
         Self::load_user_slug_index(&read_txn, &mut state)?;
 
+        // TeamSlugIndex table scan
+        Self::load_team_slug_index(&read_txn, &mut state)?;
+
         Ok(state)
     }
 
@@ -670,6 +789,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 "email_verify" => {
                     state.sequences.email_verify = EmailVerifyTokenId::new(value as i64);
                 },
+                "team" => state.sequences.team = TeamId::new(value as i64),
                 unknown => {
                     warn!(key = unknown, "Unknown sequence key in Sequences table, skipping");
                 },
@@ -896,6 +1016,29 @@ impl<B: StorageBackend> RaftLogStore<B> {
         Ok(())
     }
 
+    /// Load team slug index from the TeamSlugIndex table.
+    fn load_team_slug_index(
+        read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
+        state: &mut AppliedState,
+    ) -> Result<(), StorageError<LedgerNodeId>> {
+        let mut iter =
+            read_txn.iter::<tables::TeamSlugIndex>().map_err(|e| to_storage_error(&e))?;
+
+        while let Some((key_bytes, value_bytes)) =
+            iter.next_entry().map_err(|e| to_storage_error(&e))?
+        {
+            let slug_raw = <u64 as Key>::decode(&key_bytes)
+                .ok_or_else(|| corrupted_error("invalid u64 key in TeamSlugIndex table"))?;
+            let slug = TeamSlug::new(slug_raw);
+            let (org_id, team_id): (OrganizationId, TeamId) =
+                decode(&value_bytes).map_err(|e| to_serde_error(&e))?;
+            state.team_slug_index.insert(slug, (org_id, team_id));
+            state.team_id_to_slug.insert(team_id, slug);
+        }
+
+        Ok(())
+    }
+
     /// Decode a 16-byte composite key into (OrganizationId, VaultId).
     fn decode_vault_composite_key(
         key_bytes: &[u8],
@@ -968,6 +1111,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         pending
             .sequences
             .push(("email_verify".to_string(), old_state.sequences.email_verify.value() as u64));
+        pending.sequences.push(("team".to_string(), old_state.sequences.team.value() as u64));
 
         // Populate client sequences
         for ((org_id, vault_id, client_id), sequence) in &old_state.client_sequences {
@@ -995,6 +1139,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
             pending.user_slug_index.push((*slug, *user_id));
         }
 
+        // Populate team slug index
+        for (slug, ids) in &old_state.team_slug_index {
+            pending.team_slug_index.push((*slug, *ids));
+        }
+
         // Write core + external tables atomically
         self.save_state_core(old_state, &pending)
     }
@@ -1006,7 +1155,8 @@ mod tests {
     use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
     use inferadb_ledger_store::{FileBackend, tables};
     use inferadb_ledger_types::{
-        OrganizationId, OrganizationSlug, Region, UserEmailId, VaultId, VaultSlug, decode, encode,
+        OrganizationId, OrganizationSlug, Region, TeamId, UserEmailId, VaultId, VaultSlug, decode,
+        encode,
     };
     use openraft::{CommittedLeaderId, LogId};
     use tempfile::tempdir;
@@ -1033,6 +1183,7 @@ mod tests {
                 user: UserId::new(30),
                 user_email: UserEmailId::new(40),
                 email_verify: EmailVerifyTokenId::new(50),
+                team: TeamId::new(0),
             },
             ..Default::default()
         };
@@ -1047,7 +1198,6 @@ mod tests {
                     organization: org_id,
                     slug,
                     region: Region::GLOBAL,
-                    name: format!("org-{i}"),
                     status: OrganizationStatus::Active,
                     tier: OrganizationTier::Free,
                     pending_region: None,
@@ -1146,6 +1296,7 @@ mod tests {
         pending
             .sequences
             .push(("email_verify".to_string(), state.sequences.email_verify.value() as u64));
+        pending.sequences.push(("team".to_string(), state.sequences.team.value() as u64));
 
         for ((org_id, vault_id, client_id), sequence) in &state.client_sequences {
             let key = PendingExternalWrites::client_sequence_key(
@@ -1163,6 +1314,10 @@ mod tests {
 
         for (slug, vault_id) in &state.vault_slug_index {
             pending.vault_slug_index.push((*slug, *vault_id));
+        }
+
+        for (slug, ids) in &state.team_slug_index {
+            pending.team_slug_index.push((*slug, *ids));
         }
 
         pending
@@ -1188,7 +1343,6 @@ mod tests {
                 .get(id)
                 .unwrap_or_else(|| panic!("missing organization {id:?}"));
             assert_eq!(meta.organization, right_meta.organization, "org {id:?} organization");
-            assert_eq!(meta.name, right_meta.name, "org {id:?} name");
             assert_eq!(meta.slug, right_meta.slug, "org {id:?} slug");
             assert_eq!(meta.storage_bytes, right_meta.storage_bytes, "org {id:?} storage_bytes");
         }
@@ -1291,7 +1445,6 @@ mod tests {
                         organization: OrganizationId::new(999),
                         slug: OrganizationSlug::new(9999),
                         region: Region::GLOBAL,
-                        name: "phantom".to_string(),
                         status: OrganizationStatus::Active,
                         tier: OrganizationTier::Free,
                         pending_region: None,
@@ -1559,7 +1712,6 @@ mod tests {
                     organization: OrganizationId::new(99),
                     slug: OrganizationSlug::new(9900),
                     region: Region::GLOBAL,
-                    name: "new-org".to_string(),
                     status: OrganizationStatus::Active,
                     tier: OrganizationTier::Free,
                     pending_region: None,
@@ -1608,7 +1760,6 @@ mod tests {
                 organization: new_org_id,
                 slug: new_slug,
                 region: Region::GLOBAL,
-                name: "org-3".to_string(),
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
                 pending_region: None,
@@ -1647,7 +1798,6 @@ mod tests {
                 organization: new_org_id,
                 slug: new_slug,
                 region: Region::GLOBAL,
-                name: "org-3".to_string(),
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
                 pending_region: None,
@@ -1765,6 +1915,7 @@ mod tests {
                 user: UserId::new(10000),
                 user_email: UserEmailId::new(10000),
                 email_verify: EmailVerifyTokenId::new(10000),
+                team: TeamId::new(0),
             },
             ..Default::default()
         };
@@ -1780,7 +1931,6 @@ mod tests {
                     slug,
                     region: inferadb_ledger_types::ALL_REGIONS
                         [i as usize % inferadb_ledger_types::ALL_REGIONS.len()],
-                    name: format!("org-{i}"),
                     status: OrganizationStatus::Active,
                     tier: OrganizationTier::Free,
                     pending_region: None,
@@ -1866,6 +2016,7 @@ mod tests {
                 user: UserId::new(70),
                 user_email: UserEmailId::new(80),
                 email_verify: EmailVerifyTokenId::new(90),
+                team: TeamId::new(0),
             },
             ..Default::default()
         };
@@ -1877,7 +2028,6 @@ mod tests {
                 organization: org_id,
                 slug,
                 region: Region::GLOBAL,
-                name: "new-org".to_string(),
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
                 pending_region: None,

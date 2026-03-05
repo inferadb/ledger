@@ -14,7 +14,9 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-use inferadb_ledger_sdk::{ClientConfig, LedgerClient, Operation, Region, Result, ServerSource};
+use inferadb_ledger_sdk::{
+    ClientConfig, LedgerClient, Operation, OrganizationTier, Region, Result, ServerSource, UserSlug,
+};
 use tokio::time::timeout;
 
 #[tokio::main]
@@ -41,9 +43,16 @@ async fn main() -> Result<()> {
     let client = LedgerClient::new(config).await?;
 
     // -------------------------------------------------------------------------
-    // 2. Create a organization and vault to watch
+    // 2. Create an organization and vault to watch
     // -------------------------------------------------------------------------
-    let org = client.create_organization("streaming_example", Region::US_EAST_VA).await?;
+    let org = client
+        .create_organization(
+            "streaming_example",
+            Region::US_EAST_VA,
+            UserSlug::new(0),
+            OrganizationTier::Free,
+        )
+        .await?;
     let organization = org.slug;
     println!("Created organization with slug: {organization}");
 

@@ -3,7 +3,10 @@
 //! This module provides the main server that exposes all gRPC services:
 //! - ReadService: Query operations
 //! - WriteService: Transaction submission
-//! - AdminService: Organization and vault management
+//! - OrganizationService: Organization lifecycle management
+//! - VaultService: Vault lifecycle management
+//! - AdminService: Cluster operations, maintenance, backup/restore
+//! - UserService: User lifecycle and email management
 //! - HealthService: Health checks
 //! - SystemDiscoveryService: Peer discovery
 
@@ -11,9 +14,11 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use inferadb_ledger_proto::proto::{
     admin_service_server::AdminServiceServer, events_service_server::EventsServiceServer,
-    health_service_server::HealthServiceServer, raft_service_server::RaftServiceServer,
+    health_service_server::HealthServiceServer,
+    organization_service_server::OrganizationServiceServer, raft_service_server::RaftServiceServer,
     read_service_server::ReadServiceServer,
     system_discovery_service_server::SystemDiscoveryServiceServer,
+    user_service_server::UserServiceServer, vault_service_server::VaultServiceServer,
     write_service_server::WriteServiceServer,
 };
 use inferadb_ledger_raft::{
@@ -27,8 +32,9 @@ use tower::ServiceBuilder;
 use crate::{
     api_version::{ApiVersionLayer, api_version_interceptor},
     services::{
-        AdminService, DiscoveryService, EventsService, HealthService, RaftService, ReadService,
-        RegionResolver, RegionResolverService, WriteService,
+        AdminService, DiscoveryService, EventsService, HealthService, OrganizationService,
+        RaftService, ReadService, RegionResolver, RegionResolverService, UserService, VaultService,
+        WriteService,
     },
 };
 
@@ -222,6 +228,70 @@ impl LedgerServer {
         // Wire health state for drain-phase write rejection
         let admin_service = admin_service.with_health_state(self.health_state.clone());
 
+        // OrganizationService handles organization lifecycle: creation, deletion,
+        // retrieval, listing, and region migration.
+        let organization_service = if let Some(ref handle) = self.event_handle {
+            OrganizationService::builder()
+                .raft(system.raft().clone())
+                .state(system.state().clone())
+                .applied_state(system.applied_state().clone())
+                .proposal_timeout(self.proposal_timeout)
+                .node_id(Some(handle.node_id()))
+                .health_state(Some(self.health_state.clone()))
+                .event_handle(Some(handle.clone()))
+                .build()
+        } else {
+            OrganizationService::builder()
+                .raft(system.raft().clone())
+                .state(system.state().clone())
+                .applied_state(system.applied_state().clone())
+                .proposal_timeout(self.proposal_timeout)
+                .health_state(Some(self.health_state.clone()))
+                .build()
+        };
+
+        // VaultService handles vault lifecycle: creation, deletion, retrieval, listing.
+        let vault_service = if let Some(ref handle) = self.event_handle {
+            VaultService::builder()
+                .raft(system.raft().clone())
+                .state(system.state().clone())
+                .applied_state(system.applied_state().clone())
+                .proposal_timeout(self.proposal_timeout)
+                .node_id(Some(handle.node_id()))
+                .health_state(Some(self.health_state.clone()))
+                .event_handle(Some(handle.clone()))
+                .build()
+        } else {
+            VaultService::builder()
+                .raft(system.raft().clone())
+                .state(system.state().clone())
+                .applied_state(system.applied_state().clone())
+                .proposal_timeout(self.proposal_timeout)
+                .health_state(Some(self.health_state.clone()))
+                .build()
+        };
+
+        // UserService handles user lifecycle, email management, region migration,
+        // and GDPR erasure. Uses _system Raft group for all writes.
+        let user_service = if let Some(ref handle) = self.event_handle {
+            UserService::builder()
+                .raft(system.raft().clone())
+                .state(system.state().clone())
+                .applied_state(system.applied_state().clone())
+                .proposal_timeout(self.proposal_timeout)
+                .health_state(Some(self.health_state.clone()))
+                .event_handle(Some(handle.clone()))
+                .build()
+        } else {
+            UserService::builder()
+                .raft(system.raft().clone())
+                .state(system.state().clone())
+                .applied_state(system.applied_state().clone())
+                .proposal_timeout(self.proposal_timeout)
+                .health_state(Some(self.health_state.clone()))
+                .build()
+        };
+
         // Extract connection tracker before health_state is moved into HealthService
         let connection_tracker = self.health_state.connection_tracker().clone();
         let health_service = HealthService::new(
@@ -281,6 +351,15 @@ impl LedgerServer {
                 admin_service,
                 api_version_interceptor,
             ))
+            .add_service(OrganizationServiceServer::with_interceptor(
+                organization_service,
+                api_version_interceptor,
+            ))
+            .add_service(VaultServiceServer::with_interceptor(
+                vault_service,
+                api_version_interceptor,
+            ))
+            .add_service(UserServiceServer::with_interceptor(user_service, api_version_interceptor))
             .add_service(HealthServiceServer::new(health_service))
             .add_service(SystemDiscoveryServiceServer::new(discovery_service))
             .add_service(RaftServiceServer::new(raft_service))

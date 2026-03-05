@@ -1,7 +1,6 @@
 //! Integration tests for the saga orchestrator.
 //!
 //! Tests that:
-//! - CreateOrg saga completes successfully creating user, organization, and membership
 //! - DeleteUser saga completes successfully removing user and memberships
 //! - Saga orchestrator only runs on leader
 //! - Failed sagas are retried with backoff
@@ -13,7 +12,10 @@ use std::time::Duration;
 
 use inferadb_ledger_types::{OrganizationId, OrganizationSlug, UserId, VaultSlug};
 
-use crate::common::{TestCluster, create_admin_client, create_read_client, create_write_client};
+use crate::common::{
+    TestCluster, create_organization_client, create_read_client, create_vault_client,
+    create_write_client,
+};
 
 // ============================================================================
 // Test Helpers
@@ -24,12 +26,13 @@ async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let mut client = create_admin_client(addr).await?;
+    let mut client = create_organization_client(addr).await?;
     let response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: name.to_string(),
             region: 10, // REGION_US_EAST_VA
             tier: None,
+            admin: None,
         })
         .await?;
 
@@ -47,7 +50,7 @@ async fn create_vault(
     addr: std::net::SocketAddr,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    let mut client = create_admin_client(addr).await?;
+    let mut client = create_vault_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
@@ -174,66 +177,6 @@ async fn test_saga_orchestrator_leader_only() {
     assert_eq!(leader_id, new_leader_id, "leader should not have changed");
 }
 
-/// Tests that a CreateOrg saga stored in storage will be picked up and executed.
-///
-/// This tests the full saga lifecycle: pending -> user_created -> organization_created -> completed
-#[tokio::test]
-async fn test_create_org_saga_execution() {
-    use inferadb_ledger_state::system::{CreateOrgInput, CreateOrgSaga, Saga};
-
-    let cluster = TestCluster::new(1).await;
-    let _leader_id = cluster.wait_for_leader().await;
-    let leader = cluster.leader().expect("should have leader");
-
-    // Create organization and vault for saga storage
-    let organization =
-        create_organization(leader.addr, "saga-exec-ns").await.expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
-
-    // Create a CreateOrg saga
-    let saga_id = "test-create-org-1".to_string();
-    let input = CreateOrgInput {
-        user_name: "Test User".to_string(),
-        user_email: "test@example.com".to_string(),
-        org_name: "test-org".to_string(),
-        existing_user_id: None,
-    };
-    let saga = CreateOrgSaga::new(saga_id.clone(), input);
-    let wrapped = Saga::CreateOrg(saga);
-
-    // Write saga to storage
-    let saga_key = format!("saga:{}", saga_id);
-    let saga_value = serde_json::to_value(&wrapped).unwrap();
-
-    write_entity(leader.addr, organization, vault, &saga_key, &saga_value, "saga-test-client")
-        .await
-        .expect("write saga");
-
-    // The saga entity is committed through Raft when write_entity returns.
-    // A short delay lets async state-machine application complete.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Read the saga back and verify it round-trips correctly
-    let saga_bytes = read_entity(leader.addr, organization, vault, &saga_key)
-        .await
-        .expect("read saga")
-        .expect("saga exists");
-
-    let result: Saga = serde_json::from_slice(&saga_bytes).expect("deserialize saga");
-
-    // The saga should be readable and correctly typed
-    match result {
-        Saga::CreateOrg(s) => {
-            // Verify the saga was stored and read back correctly
-            assert_eq!(s.id, saga_id);
-            assert_eq!(s.input.user_name, "Test User");
-            assert_eq!(s.input.org_name, "test-org");
-            println!("Saga state after execution: {:?}", s.state);
-        },
-        _ => panic!("Expected CreateOrg saga"),
-    }
-}
-
 /// Tests that a DeleteUser saga progresses through its states.
 #[tokio::test]
 async fn test_delete_user_saga_state_transitions() {
@@ -302,7 +245,11 @@ async fn test_delete_user_saga_state_transitions() {
 /// Tests that terminal sagas are not re-executed.
 #[tokio::test]
 async fn test_completed_saga_not_reexecuted() {
-    use inferadb_ledger_state::system::{CreateOrgInput, CreateOrgSaga, CreateOrgSagaState, Saga};
+    use inferadb_ledger_state::system::{
+        CreateOrganizationInput, CreateOrganizationSaga, CreateOrganizationSagaState,
+        OrganizationTier, Saga,
+    };
+    use inferadb_ledger_types::Region;
 
     let cluster = TestCluster::new(1).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -315,19 +262,19 @@ async fn test_completed_saga_not_reexecuted() {
 
     // Create a saga that's already completed
     let saga_id = "test-completed-saga".to_string();
-    let input = CreateOrgInput {
-        user_name: "Completed User".to_string(),
-        user_email: "completed@example.com".to_string(),
-        org_name: "completed-org".to_string(),
-        existing_user_id: Some(UserId::new(999)),
+    let input = CreateOrganizationInput {
+        region: Region::US_EAST_VA,
+        tier: OrganizationTier::Free,
+        admin: UserId::new(999),
+        pending_profile_key: "_sys:pending_org_profile:test-completed".to_string(),
     };
-    let mut saga = CreateOrgSaga::new(saga_id.clone(), input);
-    saga.state = CreateOrgSagaState::Completed {
-        user_id: UserId::new(999),
+    let mut saga = CreateOrganizationSaga::new(saga_id.clone(), input);
+    saga.state = CreateOrganizationSagaState::Completed {
         organization_id: OrganizationId::new(888),
+        organization_slug: inferadb_ledger_types::OrganizationSlug::new(777),
     };
 
-    let wrapped = Saga::CreateOrg(saga);
+    let wrapped = Saga::CreateOrganization(saga);
 
     // Write completed saga
     let saga_key = format!("saga:{}", saga_id);
@@ -349,21 +296,24 @@ async fn test_completed_saga_not_reexecuted() {
     let result: Saga = serde_json::from_slice(&saga_bytes).expect("deserialize");
 
     match result {
-        Saga::CreateOrg(s) => match s.state {
-            CreateOrgSagaState::Completed { user_id, organization_id } => {
-                assert_eq!(user_id, UserId::new(999));
+        Saga::CreateOrganization(s) => match s.state {
+            CreateOrganizationSagaState::Completed { organization_id, organization_slug } => {
                 assert_eq!(organization_id, OrganizationId::new(888));
+                assert_eq!(organization_slug, inferadb_ledger_types::OrganizationSlug::new(777));
             },
             other => panic!("Completed saga should not be re-executed, got: {:?}", other),
         },
-        _ => panic!("Expected CreateOrg saga"),
+        _ => panic!("Expected CreateOrganization saga"),
     }
 }
 
 /// Tests saga serialization round-trip through storage.
 #[tokio::test]
 async fn test_saga_serialization_roundtrip() {
-    use inferadb_ledger_state::system::{CreateOrgInput, CreateOrgSaga, Saga};
+    use inferadb_ledger_state::system::{
+        CreateOrganizationInput, CreateOrganizationSaga, OrganizationTier, Saga,
+    };
+    use inferadb_ledger_types::Region;
 
     let cluster = TestCluster::new(1).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -376,14 +326,14 @@ async fn test_saga_serialization_roundtrip() {
 
     // Create saga with various field values
     let saga_id = "test-roundtrip-saga".to_string();
-    let input = CreateOrgInput {
-        user_name: "Round Trip User".to_string(),
-        user_email: "roundtrip@example.com".to_string(),
-        org_name: "roundtrip-org".to_string(),
-        existing_user_id: Some(UserId::new(42)),
+    let input = CreateOrganizationInput {
+        region: Region::US_EAST_VA,
+        tier: OrganizationTier::Free,
+        admin: UserId::new(42),
+        pending_profile_key: "_sys:pending_org_profile:roundtrip".to_string(),
     };
-    let saga = CreateOrgSaga::new(saga_id.clone(), input);
-    let wrapped = Saga::CreateOrg(saga);
+    let saga = CreateOrganizationSaga::new(saga_id.clone(), input);
+    let wrapped = Saga::CreateOrganization(saga);
 
     // Write to storage
     let saga_key = format!("saga:{}", saga_id);
@@ -402,13 +352,12 @@ async fn test_saga_serialization_roundtrip() {
     let result: Saga = serde_json::from_slice(&saga_bytes).expect("deserialize");
 
     match result {
-        Saga::CreateOrg(s) => {
+        Saga::CreateOrganization(s) => {
             assert_eq!(s.id, saga_id);
-            assert_eq!(s.input.user_name, "Round Trip User");
-            assert_eq!(s.input.user_email, "roundtrip@example.com");
-            assert_eq!(s.input.org_name, "roundtrip-org");
-            assert_eq!(s.input.existing_user_id, Some(UserId::new(42)));
+            assert_eq!(s.input.region, Region::US_EAST_VA);
+            assert_eq!(s.input.admin, UserId::new(42));
+            assert_eq!(s.input.pending_profile_key, "_sys:pending_org_profile:roundtrip");
         },
-        _ => panic!("Expected CreateOrg saga"),
+        _ => panic!("Expected CreateOrganization saga"),
     }
 }

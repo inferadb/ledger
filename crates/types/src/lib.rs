@@ -20,6 +20,8 @@ pub mod config;
 pub mod email_hash;
 /// Error types using snafu with structured error codes.
 pub mod error;
+/// Structured error codes for Raft state machine responses.
+mod error_code;
 /// Event logging domain types for organization-scoped audit trails.
 pub mod events;
 /// Cryptographic hashing (SHA-256, seahash) and block/transaction hashing.
@@ -38,6 +40,7 @@ pub use email_hash::{
     EmailBlindingKey, EmailBlindingKeyParseError, compute_email_hmac, normalize_email,
 };
 pub use error::{ErrorCode, LedgerError, Result};
+pub use error_code::LedgerErrorCode;
 pub use hash::{
     BucketHasher, EMPTY_HASH, Hash, ZERO_HASH, bucket_id, compute_chain_commitment,
     compute_tx_merkle_root, hash_eq, sha256, sha256_concat, tx_hash, vault_entry_hash,
@@ -70,13 +73,19 @@ pub use types::{
     RegionParseError,
     Relationship,
     SetCondition,
+    // Team identifiers
+    TeamId,
+    TeamSlug,
     Transaction,
     TransactionValidationError,
     TxId,
     UserEmailId,
     UserId,
+    // User enums
+    UserRole,
     // External user identifier
     UserSlug,
+    UserStatus,
     VaultBlock,
     VaultEntry,
     VaultHealth,

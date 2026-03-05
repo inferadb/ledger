@@ -660,7 +660,6 @@ mod tests {
                 OrganizationMeta {
                     organization: OrganizationId::new(1),
                     slug: OrganizationSlug::new(100),
-                    name: "Org1".to_string(),
                     region: Region::GLOBAL,
                     status: Default::default(),
                     tier: Default::default(),
@@ -670,7 +669,6 @@ mod tests {
                 OrganizationMeta {
                     organization: OrganizationId::new(2),
                     slug: OrganizationSlug::new(200),
-                    name: "Org2".to_string(),
                     region: Region::GLOBAL,
                     status: Default::default(),
                     tier: Default::default(),

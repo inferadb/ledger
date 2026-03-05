@@ -697,12 +697,12 @@ mod tests {
         // Register an organization in _system
         let registry = inferadb_ledger_state::system::OrganizationRegistry {
             organization_id: OrganizationId::new(42),
-            name: "test-ns".to_string(),
             region: inferadb_ledger_types::Region::GLOBAL,
             member_nodes: vec!["node-a:50051".to_string(), "node-b:50051".to_string()],
             status: inferadb_ledger_state::system::OrganizationStatus::Active,
             config_version: 1,
             created_at: chrono::Utc::now(),
+            deleted_at: None,
         };
         let system = SystemOrganizationService::new(Arc::clone(&state));
         system
@@ -734,12 +734,12 @@ mod tests {
         for (ns_id, region) in [(10, 1), (20, 2)] {
             let registry = inferadb_ledger_state::system::OrganizationRegistry {
                 organization_id: OrganizationId::new(ns_id),
-                name: format!("ns-{}", ns_id),
                 region: inferadb_ledger_types::Region::GLOBAL,
                 member_nodes: vec![format!("node-{}:50051", region)],
                 status: inferadb_ledger_state::system::OrganizationStatus::Active,
                 config_version: 1,
                 created_at: chrono::Utc::now(),
+                deleted_at: None,
             };
             system
                 .register_organization(
@@ -770,12 +770,12 @@ mod tests {
         let system = SystemOrganizationService::new(Arc::clone(&state));
         let registry = inferadb_ledger_state::system::OrganizationRegistry {
             organization_id: OrganizationId::new(5),
-            name: "hint-test".to_string(),
             region: inferadb_ledger_types::Region::GLOBAL,
             member_nodes: vec!["node-a:50051".to_string(), "node-b:50051".to_string()],
             status: inferadb_ledger_state::system::OrganizationStatus::Active,
             config_version: 1,
             created_at: chrono::Utc::now(),
+            deleted_at: None,
         };
         system
             .register_organization(
@@ -806,12 +806,12 @@ mod tests {
         let system = SystemOrganizationService::new(Arc::clone(&state));
         let registry = inferadb_ledger_state::system::OrganizationRegistry {
             organization_id: OrganizationId::new(77),
-            name: "suspended-ns".to_string(),
             region: inferadb_ledger_types::Region::GLOBAL,
             member_nodes: vec!["node-1:50051".to_string()],
             status: inferadb_ledger_state::system::OrganizationStatus::Suspended,
             config_version: 1,
             created_at: chrono::Utc::now(),
+            deleted_at: None,
         };
         system
             .register_organization(
@@ -901,12 +901,12 @@ mod tests {
         let system = SystemOrganizationService::new(Arc::clone(&state));
         let registry = inferadb_ledger_state::system::OrganizationRegistry {
             organization_id: OrganizationId::new(100),
-            name: "de-org".to_string(),
             region: Region::DE_CENTRAL_FRANKFURT,
             member_nodes: vec!["node-de:50051".to_string()],
             status: inferadb_ledger_state::system::OrganizationStatus::Active,
             config_version: 1,
             created_at: chrono::Utc::now(),
+            deleted_at: None,
         };
         system
             .register_organization(&registry, inferadb_ledger_types::OrganizationSlug::new(100))
@@ -927,20 +927,20 @@ mod tests {
         let system = SystemOrganizationService::new(Arc::clone(&state));
 
         let regions = [
-            (1, "org-us", Region::US_EAST_VA),
-            (2, "org-de", Region::DE_CENTRAL_FRANKFURT),
-            (3, "org-jp", Region::JP_EAST_TOKYO),
+            (1, Region::US_EAST_VA),
+            (2, Region::DE_CENTRAL_FRANKFURT),
+            (3, Region::JP_EAST_TOKYO),
         ];
 
-        for (id, name, region) in &regions {
+        for (id, region) in &regions {
             let registry = inferadb_ledger_state::system::OrganizationRegistry {
                 organization_id: OrganizationId::new(*id),
-                name: name.to_string(),
                 region: *region,
                 member_nodes: vec![format!("node-{id}:50051")],
                 status: inferadb_ledger_state::system::OrganizationStatus::Active,
                 config_version: 1,
                 created_at: chrono::Utc::now(),
+                deleted_at: None,
             };
             system
                 .register_organization(
@@ -950,7 +950,7 @@ mod tests {
                 .expect("register");
         }
 
-        for (id, _, expected_region) in &regions {
+        for (id, expected_region) in &regions {
             let info = router.get_routing(OrganizationId::new(*id)).expect("get routing");
             assert_eq!(info.region, *expected_region);
         }

@@ -3,12 +3,12 @@
 //! Defines [`AppliedState`], [`OrganizationMeta`], [`VaultMeta`],
 //! [`SequenceCounters`], and snapshot types used by the log store.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
 use inferadb_ledger_types::{
-    EmailVerifyTokenId, Hash, Operation, OrganizationId, OrganizationSlug, Region, Transaction,
-    UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
+    EmailVerifyTokenId, Hash, Operation, OrganizationId, OrganizationSlug, Region, TeamId,
+    TeamSlug, Transaction, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
 use openraft::{LogId, StoredMembership};
 use serde::{Deserialize, Serialize};
@@ -75,6 +75,24 @@ pub struct AppliedState {
     /// Internal user ID → slug reverse mapping for response construction.
     #[serde(default)]
     pub user_id_to_slug: HashMap<UserId, UserSlug>,
+    /// Team slug → (organization ID, team ID) mapping for fast resolution.
+    #[serde(default)]
+    pub team_slug_index: HashMap<TeamSlug, (OrganizationId, TeamId)>,
+    /// Internal team ID → slug reverse mapping for response construction.
+    #[serde(default)]
+    pub team_id_to_slug: HashMap<TeamId, TeamSlug>,
+    /// Team name uniqueness index: (organization, name) → team ID.
+    ///
+    /// Enables O(1) name conflict checks for team create/rename operations,
+    /// replacing the previous O(n) scan of all team profiles in the organization.
+    #[serde(default)]
+    pub team_name_index: HashMap<(OrganizationId, String), TeamId>,
+    /// User → organizations membership index for O(1) membership lookups.
+    ///
+    /// Enables `list_organizations` to filter by caller membership without
+    /// loading every organization profile from the state layer.
+    #[serde(default)]
+    pub user_org_index: HashMap<UserId, HashSet<OrganizationId>>,
     /// Deterministic timestamp (nanoseconds since epoch) from the last applied
     /// Raft entry's `proposed_at`. Used as the reference "now" for snapshot event
     /// collection — ensures two snapshots of the same state produce identical
@@ -90,8 +108,6 @@ pub struct OrganizationMeta {
     pub organization: OrganizationId,
     /// External slug for API lookups.
     pub slug: OrganizationSlug,
-    /// Human-readable name.
-    pub name: String,
     /// Data residency region for this organization.
     pub region: Region,
     /// Organization lifecycle status.
@@ -170,6 +186,9 @@ pub struct SequenceCounters {
     pub user_email: UserEmailId,
     /// Next email verification token ID.
     pub email_verify: EmailVerifyTokenId,
+    /// Next team ID.
+    #[serde(default)]
+    pub team: TeamId,
 }
 
 impl Default for SequenceCounters {
@@ -180,6 +199,7 @@ impl Default for SequenceCounters {
             user: UserId::new(0),
             user_email: UserEmailId::new(0),
             email_verify: EmailVerifyTokenId::new(0),
+            team: TeamId::new(0),
         }
     }
 }
@@ -193,6 +213,7 @@ impl SequenceCounters {
             user: UserId::new(1),
             user_email: UserEmailId::new(1),
             email_verify: EmailVerifyTokenId::new(1),
+            team: TeamId::new(1),
         }
     }
 
@@ -228,6 +249,13 @@ impl SequenceCounters {
     pub fn next_email_verify(&mut self) -> EmailVerifyTokenId {
         let id = self.email_verify;
         self.email_verify = EmailVerifyTokenId::new(id.value() + 1);
+        id
+    }
+
+    /// Returns and increments the next team ID.
+    pub fn next_team(&mut self) -> TeamId {
+        let id = self.team;
+        self.team = TeamId::new(id.value() + 1);
         id
     }
 }
@@ -310,6 +338,10 @@ pub struct PendingExternalWrites {
     pub user_slug_index: Vec<(UserSlug, UserId)>,
     /// `UserSlugIndex` table deletes (on user deletion).
     pub user_slug_index_deleted: Vec<UserSlug>,
+    /// `TeamSlugIndex` table inserts/updates.
+    pub team_slug_index: Vec<(TeamSlug, (OrganizationId, TeamId))>,
+    /// `TeamSlugIndex` table deletes (on team deletion).
+    pub team_slug_index_deleted: Vec<TeamSlug>,
 }
 
 impl PendingExternalWrites {
@@ -334,6 +366,8 @@ impl PendingExternalWrites {
             && self.slug_index_deleted.is_empty()
             && self.vault_slug_index.is_empty()
             && self.vault_slug_index_deleted.is_empty()
+            && self.team_slug_index.is_empty()
+            && self.team_slug_index_deleted.is_empty()
     }
 
     /// Encodes a composite key for vault-scoped tables (`VaultHeights`,
@@ -570,7 +604,6 @@ mod tests {
                 organization: OrganizationId::new(1),
                 slug: OrganizationSlug::new(0),
                 region: Region::GLOBAL,
-                name: "test".to_string(),
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
                 pending_region: None,

@@ -72,8 +72,8 @@ mod tests {
     };
     use inferadb_ledger_store::{FileBackend, tables};
     use inferadb_ledger_types::{
-        EmailVerifyTokenId, Operation, OrganizationId, Region, Transaction, UserEmailId, UserId,
-        UserSlug, VaultId, VaultSlug,
+        EmailVerifyTokenId, LedgerErrorCode, Operation, OrganizationId, Region, Transaction,
+        UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
         events::{EventAction, EventConfig, EventEntry, EventScope},
     };
     use openraft::{
@@ -97,6 +97,39 @@ mod tests {
     /// Wraps a `LedgerRequest` into a `RaftPayload` with `Utc::now()` for test entries.
     fn wrap_payload(request: LedgerRequest) -> RaftPayload {
         RaftPayload { request, proposed_at: Utc::now(), state_root_commitments: vec![] }
+    }
+
+    /// Creates an organization directory and immediately activates it.
+    ///
+    /// `CreateOrganizationDirectory` sets status to `Provisioning`. Tests that
+    /// need the org to accept writes must activate it via
+    /// `UpdateOrganizationDirectoryStatus`.
+    fn create_active_organization(
+        store: &RaftLogStore<FileBackend>,
+        state: &mut AppliedState,
+        slug: inferadb_ledger_types::OrganizationSlug,
+        region: Region,
+    ) -> OrganizationId {
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+                slug,
+                region,
+                tier: Default::default(),
+            }),
+            state,
+        );
+        let org_id = match response {
+            LedgerResponse::OrganizationDirectoryCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationDirectoryCreated"),
+        };
+        store.apply_request(
+            &LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
+                organization: org_id,
+                status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Active,
+            }),
+            state,
+        );
+        org_id
     }
 
     #[tokio::test]
@@ -151,18 +184,23 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        let request = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
+        let request = LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
             region: Region::US_EAST_VA,
             tier: Default::default(),
-        };
+        });
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
+            LedgerResponse::OrganizationDirectoryCreated { organization_id, .. } => {
                 assert_eq!(organization_id, OrganizationId::new(1));
+
+                // Bare directory creation starts in Provisioning (saga will activate later)
+                assert_eq!(
+                    state.organizations.get(&organization_id).unwrap().status,
+                    OrganizationStatus::Provisioning
+                );
             },
             _ => panic!("unexpected response"),
         }
@@ -181,19 +219,19 @@ mod tests {
         drop(state);
 
         let mut state = store.applied_state.write();
-        let request = LedgerRequest::CreateOrganization {
-            name: "new-ns".to_string(),
+        let request = LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
             region: Region::US_EAST_VA,
             tier: Default::default(),
-        };
+        });
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, region } => {
+            LedgerResponse::OrganizationDirectoryCreated { organization_id, .. } => {
                 assert_eq!(organization_id, OrganizationId::new(1));
-                assert_eq!(region, Region::US_EAST_VA, "Should use provided region");
+                let meta = state.organizations.get(&organization_id).expect("org exists");
+                assert_eq!(meta.region, Region::US_EAST_VA, "Should use provided region");
             },
             _ => panic!("unexpected response"),
         }
@@ -213,7 +251,6 @@ mod tests {
             OrganizationMeta {
                 organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                name: "existing".to_string(),
                 region: Region::GLOBAL,
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
@@ -224,21 +261,21 @@ mod tests {
         state.sequences.organization = OrganizationId::new(2);
 
         // Create organization with explicit IE_EAST_DUBLIN region
-        let request = LedgerRequest::CreateOrganization {
-            name: "new-ns".to_string(),
+        let request = LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
             region: Region::IE_EAST_DUBLIN,
             tier: Default::default(),
-        };
+        });
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, region } => {
+            LedgerResponse::OrganizationDirectoryCreated { organization_id, .. } => {
                 assert_eq!(organization_id, OrganizationId::new(2));
                 // Explicit region should override load balancing
+                let meta = state.organizations.get(&organization_id).expect("org exists");
                 assert_eq!(
-                    region,
+                    meta.region,
                     Region::IE_EAST_DUBLIN,
                     "Explicit region should override load balancing"
                 );
@@ -301,7 +338,7 @@ mod tests {
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("diverged"));
             },
             _ => panic!("expected error response"),
@@ -484,19 +521,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Create two vaults
         let create_vault1 = LedgerRequest::CreateVault {
@@ -523,25 +553,30 @@ mod tests {
             _ => panic!("expected VaultCreated"),
         };
 
-        // Try to delete organization - should transition to Deleting with blocking vault IDs
+        // Delete organization — should soft-delete regardless of active vaults
         let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::OrganizationDeleting { organization: ns_id, blocking_vault_ids } => {
-                assert_eq!(ns_id, organization_id);
-                assert_eq!(blocking_vault_ids.len(), 2);
-                assert!(blocking_vault_ids.contains(&vault1_id));
-                assert!(blocking_vault_ids.contains(&vault2_id));
+            LedgerResponse::OrganizationDeleted {
+                organization_id: deleted_id,
+                retention_days,
+                ..
+            } => {
+                assert_eq!(deleted_id, organization_id);
+                assert!(retention_days > 0);
             },
-            _ => panic!("expected OrganizationDeleting"),
+            _ => panic!("expected OrganizationDeleted, got {:?}", response),
         }
 
-        // Verify organization is now in Deleting state
+        // Verify organization is now in Deleted state
         assert_eq!(
             state.organizations.get(&organization_id).unwrap().status,
-            OrganizationStatus::Deleting
+            OrganizationStatus::Deleted
         );
+        // Vaults are NOT cleaned up at delete time — that's deferred to PurgeOrganization
+        let _ = vault1_id;
+        let _ = vault2_id;
     }
 
     #[tokio::test]
@@ -553,19 +588,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Create vault
         let create_vault = LedgerRequest::CreateVault {
@@ -589,16 +617,15 @@ mod tests {
             _ => panic!("expected VaultDeleted"),
         }
 
-        // Now delete organization - should succeed
+        // Now delete organization - should succeed (soft-delete)
         let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::OrganizationDeleted { success, blocking_vault_ids } => {
-                assert!(success);
-                assert!(blocking_vault_ids.is_empty());
+            LedgerResponse::OrganizationDeleted { organization_id: deleted_id, .. } => {
+                assert_eq!(deleted_id, organization_id);
             },
-            _ => panic!("expected OrganizationDeleted"),
+            _ => panic!("expected OrganizationDeleted, got {:?}", response),
         }
 
         // Verify organization is marked as deleted
@@ -617,30 +644,22 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization with no vaults
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "empty-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
-        // Delete organization immediately - should succeed (no vaults)
+        // Delete organization immediately - should succeed (soft-delete, no vaults)
         let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::OrganizationDeleted { success, blocking_vault_ids } => {
-                assert!(success);
-                assert!(blocking_vault_ids.is_empty());
+            LedgerResponse::OrganizationDeleted { organization_id: deleted_id, .. } => {
+                assert_eq!(deleted_id, organization_id);
             },
-            _ => panic!("expected OrganizationDeleted"),
+            _ => panic!("expected OrganizationDeleted, got {:?}", response),
         }
     }
 
@@ -658,7 +677,7 @@ mod tests {
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::NotFound, message } => {
                 assert!(message.contains("999"));
                 assert!(message.contains("not found"));
             },
@@ -675,19 +694,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Create two vaults
         let create_vault1 = LedgerRequest::CreateVault {
@@ -723,27 +735,23 @@ mod tests {
             _ => panic!("expected VaultDeleted"),
         }
 
-        // Try to delete organization - should transition to Deleting, but only vault2 should be in
-        // blocking list
+        // Delete organization — should soft-delete regardless of active vaults
         let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::OrganizationDeleting { organization: ns_id, blocking_vault_ids } => {
-                assert_eq!(ns_id, organization_id);
-                assert_eq!(blocking_vault_ids.len(), 1);
-                assert!(blocking_vault_ids.contains(&vault2_id));
-                // vault1 was deleted, so it should NOT be in blocking list
-                assert!(!blocking_vault_ids.contains(&vault1_id));
+            LedgerResponse::OrganizationDeleted { organization_id: deleted_id, .. } => {
+                assert_eq!(deleted_id, organization_id);
             },
-            _ => panic!("expected OrganizationDeleting"),
+            _ => panic!("expected OrganizationDeleted, got {:?}", response),
         }
 
-        // Verify organization is now in Deleting state
+        // Verify organization is now in Deleted state
         assert_eq!(
             state.organizations.get(&organization_id).unwrap().status,
-            OrganizationStatus::Deleting
+            OrganizationStatus::Deleted
         );
+        let _ = vault2_id;
     }
 
     // ========================================================================
@@ -763,20 +771,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization on US_EAST_VA
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, region } => {
-                assert_eq!(region, Region::US_EAST_VA);
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Verify initial state
         let meta = state.organizations.get(&organization_id).expect("organization should exist");
@@ -825,7 +825,7 @@ mod tests {
         let (response, _) = store.apply_request(&migrate, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::NotFound, message } => {
                 assert!(message.contains("999"), "error should mention organization ID");
                 assert!(message.contains("not found"), "error should indicate not found");
             },
@@ -842,26 +842,19 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and delete organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "deleted-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Delete the organization
         let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
         match response {
-            LedgerResponse::OrganizationDeleted { success, .. } => assert!(success),
-            _ => panic!("expected OrganizationDeleted"),
+            LedgerResponse::OrganizationDeleted { .. } => {},
+            _ => panic!("expected OrganizationDeleted, got {:?}", response),
         }
 
         // Verify organization is deleted
@@ -876,7 +869,7 @@ mod tests {
         let (response, _) = store.apply_request(&migrate, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("deleted"), "error should mention deleted organization");
             },
             _ => panic!("expected Error response, got {:?}", response),
@@ -892,20 +885,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization on US_EAST_VA
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, region } => {
-                assert_eq!(region, Region::US_EAST_VA);
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Migrate to same region (idempotent case)
         let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
@@ -942,19 +927,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "migrating-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Migration 1: US_EAST_VA -> IE_EAST_DUBLIN
         let migrate1 = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
@@ -1019,19 +997,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Verify initial state
         let meta = state.organizations.get(&organization_id).expect("organization should exist");
@@ -1065,19 +1036,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and suspend organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         let suspend =
             LedgerRequest::SuspendOrganization { organization: organization_id, reason: None };
@@ -1116,19 +1080,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization on region 0
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Start migration to IE_EAST_DUBLIN
         let start_migration = LedgerRequest::StartMigration {
@@ -1167,7 +1124,7 @@ mod tests {
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::NotFound, message } => {
                 assert!(message.contains("not found"));
             },
             _ => panic!("expected Error"),
@@ -1183,19 +1140,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Start migration
         let start_migration = LedgerRequest::StartMigration {
@@ -1213,7 +1163,7 @@ mod tests {
         let (response, _) = store.apply_request(&start_migration2, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("already migrating"));
             },
             _ => panic!("expected Error"),
@@ -1229,19 +1179,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and suspend organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         let suspend =
             LedgerRequest::SuspendOrganization { organization: organization_id, reason: None };
@@ -1255,7 +1198,7 @@ mod tests {
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("suspended"));
             },
             _ => panic!("expected Error"),
@@ -1271,19 +1214,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization on region 0
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Start migration to IE_EAST_DUBLIN
         let start_migration = LedgerRequest::StartMigration {
@@ -1321,26 +1257,19 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization (Active state)
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Try to complete migration without starting - should fail
         let complete_migration = LedgerRequest::CompleteMigration { organization: organization_id };
         let (response, _) = store.apply_request(&complete_migration, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("not migrating"));
             },
             _ => panic!("expected Error"),
@@ -1356,19 +1285,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization and vault
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         let create_vault = LedgerRequest::CreateVault {
             organization: organization_id,
@@ -1400,7 +1322,7 @@ mod tests {
         let (response, _) = store.apply_request(&write, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("migrating"));
             },
             _ => panic!("expected Error"),
@@ -1416,19 +1338,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Start migration
         let start_migration = LedgerRequest::StartMigration {
@@ -1447,7 +1362,7 @@ mod tests {
         let (response, _) = store.apply_request(&create_vault, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("migrating"));
             },
             _ => panic!("expected Error"),
@@ -1459,7 +1374,7 @@ mod tests {
     // ========================================================================
 
     #[tokio::test]
-    async fn test_deleting_organization_auto_transitions_on_last_vault_delete() {
+    async fn test_deleted_organization_vault_delete_does_not_affect_org_status() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
@@ -1467,19 +1382,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Create two vaults
         let create_vault1 = LedgerRequest::CreateVault {
@@ -1496,7 +1404,7 @@ mod tests {
 
         let create_vault2 = LedgerRequest::CreateVault {
             organization: organization_id,
-            slug: VaultSlug::new(1),
+            slug: VaultSlug::new(2),
             name: Some("vault2".to_string()),
             retention_policy: None,
         };
@@ -1506,30 +1414,30 @@ mod tests {
             _ => panic!("expected VaultCreated"),
         };
 
-        // Mark organization for deletion (transitions to Deleting)
+        // Soft-delete the organization
         let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
-        assert!(matches!(response, LedgerResponse::OrganizationDeleting { .. }));
+        assert!(matches!(response, LedgerResponse::OrganizationDeleted { .. }));
         assert_eq!(
             state.organizations.get(&organization_id).unwrap().status,
-            OrganizationStatus::Deleting
+            OrganizationStatus::Deleted
         );
 
-        // Delete first vault - organization should still be Deleting
+        // Deleting vaults does NOT change the org status (no auto-cascade)
         let delete_vault1 =
             LedgerRequest::DeleteVault { organization: organization_id, vault: vault1_id };
         let (response, _) = store.apply_request(&delete_vault1, &mut state);
         assert!(matches!(response, LedgerResponse::VaultDeleted { success: true }));
         assert_eq!(
             state.organizations.get(&organization_id).unwrap().status,
-            OrganizationStatus::Deleting
+            OrganizationStatus::Deleted
         );
 
-        // Delete second (last) vault - organization should auto-transition to Deleted
         let delete_vault2 =
             LedgerRequest::DeleteVault { organization: organization_id, vault: vault2_id };
         let (response, _) = store.apply_request(&delete_vault2, &mut state);
         assert!(matches!(response, LedgerResponse::VaultDeleted { success: true }));
+        // Still Deleted — PurgeOrganization would remove the org entirely
         assert_eq!(
             state.organizations.get(&organization_id).unwrap().status,
             OrganizationStatus::Deleted
@@ -1545,19 +1453,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization and vault
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         let create_vault = LedgerRequest::CreateVault {
             organization: organization_id,
@@ -1586,7 +1487,7 @@ mod tests {
         let (response, _) = store.apply_request(&write, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("deleted") || message.contains("deleting"));
             },
             _ => panic!("expected Error"),
@@ -1602,19 +1503,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization with a vault
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         let create_vault = LedgerRequest::CreateVault {
             organization: organization_id,
@@ -1638,7 +1532,7 @@ mod tests {
         let (response, _) = store.apply_request(&create_vault2, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("deleted") || message.contains("deleting"));
             },
             _ => panic!("expected Error"),
@@ -1654,19 +1548,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and suspend organization with a vault
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Create vault before suspending
         let create_vault = LedgerRequest::CreateVault {
@@ -1701,7 +1588,7 @@ mod tests {
         let (response, _) = store.apply_request(&write, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("suspended"), "error should mention suspended");
             },
             _ => panic!("expected Error for write to suspended organization, got {:?}", response),
@@ -1717,19 +1604,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and suspend organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         let suspend =
             LedgerRequest::SuspendOrganization { organization: organization_id, reason: None };
@@ -1749,7 +1629,7 @@ mod tests {
         let (response, _) = store.apply_request(&create_vault, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("suspended"), "error should mention suspended");
             },
             _ => {
@@ -1770,19 +1650,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and suspend organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         let suspend =
             LedgerRequest::SuspendOrganization { organization: organization_id, reason: None };
@@ -1798,7 +1671,7 @@ mod tests {
         let (response, _) = store.apply_request(&suspend2, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
                 assert!(
                     message.contains("already suspended"),
                     "error should mention already suspended"
@@ -1819,27 +1692,20 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        // Create organization (active by default)
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        // Create organization (active after activation)
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         // Try to resume active organization - should fail
         let resume = LedgerRequest::ResumeOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&resume, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("not suspended"), "error should mention not suspended");
             },
             _ => panic!("expected Error for resuming active organization, got {:?}", response),
@@ -1855,25 +1721,18 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and delete organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         let delete_ns = LedgerRequest::DeleteOrganization { organization: organization_id };
         let (response, _) = store.apply_request(&delete_ns, &mut state);
         match response {
-            LedgerResponse::OrganizationDeleted { success, .. } => assert!(success),
-            _ => panic!("expected OrganizationDeleted"),
+            LedgerResponse::OrganizationDeleted { .. } => {},
+            _ => panic!("expected OrganizationDeleted, got {:?}", response),
         }
 
         // Try to suspend deleted organization - should fail
@@ -1882,7 +1741,7 @@ mod tests {
         let (response, _) = store.apply_request(&suspend, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("deleted"), "error should mention deleted organization");
             },
             _ => panic!("expected Error for suspending deleted organization, got {:?}", response),
@@ -1905,7 +1764,7 @@ mod tests {
         let (response, _) = store.apply_request(&suspend, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::NotFound, message } => {
                 assert!(message.contains("999"), "error should mention organization ID");
                 assert!(message.contains("not found"), "error should mention not found");
             },
@@ -1929,7 +1788,7 @@ mod tests {
         let (response, _) = store.apply_request(&resume, &mut state);
 
         match response {
-            LedgerResponse::Error { message } => {
+            LedgerResponse::Error { code: LedgerErrorCode::NotFound, message } => {
                 assert!(message.contains("999"), "error should mention organization ID");
                 assert!(message.contains("not found"), "error should mention not found");
             },
@@ -1948,19 +1807,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create and suspend organization (no vaults)
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test-ns".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        let (response, _) = store.apply_request(&create_ns, &mut state);
-        let organization_id = match response {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            _ => panic!("expected OrganizationCreated"),
-        };
+        let organization_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
 
         let suspend =
             LedgerRequest::SuspendOrganization { organization: organization_id, reason: None };
@@ -1975,9 +1827,7 @@ mod tests {
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::OrganizationDeleted { success, .. } => {
-                assert!(success, "deletion should succeed for suspended organization");
-            },
+            LedgerResponse::OrganizationDeleted { .. } => {},
             _ => panic!("expected OrganizationDeleted, got {:?}", response),
         }
 
@@ -2014,18 +1864,24 @@ mod tests {
 
         // Same sequence of requests to apply
         let requests = vec![
-            LedgerRequest::CreateOrganization {
-                name: "acme-corp".to_string(),
+            LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
-            },
-            LedgerRequest::CreateOrganization {
-                name: "startup-inc".to_string(),
+            }),
+            LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
+                organization: OrganizationId::new(1),
+                status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Active,
+            }),
+            LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
-            },
+            }),
+            LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
+                organization: OrganizationId::new(2),
+                status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Active,
+            }),
             LedgerRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
@@ -2259,12 +2115,15 @@ mod tests {
 
         // Create organization and vaults
         let requests: Vec<LedgerRequest> = vec![
-            LedgerRequest::CreateOrganization {
-                name: "ns1".to_string(),
+            LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
-            },
+            }),
+            LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
+                organization: OrganizationId::new(1),
+                status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Active,
+            }),
             LedgerRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
@@ -2421,14 +2280,11 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Setup: create organization and vault
-        store.apply_request(
-            &LedgerRequest::CreateOrganization {
-                name: "test".to_string(),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                region: Region::US_EAST_VA,
-                tier: Default::default(),
-            },
+        create_active_organization(
+            &store,
             &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
@@ -2525,6 +2381,10 @@ mod tests {
             vault_id_to_slug: HashMap::new(),
             user_slug_index: HashMap::new(),
             user_id_to_slug: HashMap::new(),
+            team_slug_index: HashMap::new(),
+            team_id_to_slug: HashMap::new(),
+            team_name_index: HashMap::new(),
+            user_org_index: HashMap::new(),
             last_applied_timestamp_ns: 0,
         };
 
@@ -2546,7 +2406,6 @@ mod tests {
                 organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 region: Region::GLOBAL,
-                name: "test-ns".to_string(),
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
                 pending_region: None,
@@ -2609,7 +2468,6 @@ mod tests {
                     organization: OrganizationId::new(1),
                     slug: inferadb_ledger_types::OrganizationSlug::new(0),
                     region: Region::GLOBAL,
-                    name: "test".to_string(),
                     status: OrganizationStatus::Active,
                     tier: OrganizationTier::Free,
                     pending_region: None,
@@ -2686,12 +2544,13 @@ mod tests {
         let entries: Vec<Entry<LedgerTypeConfig>> = (1..=100u64)
             .map(|i| Entry {
                 log_id: make_log_id(1, i),
-                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateOrganization {
-                    name: format!("ns-{}", i),
-                    slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                    region: Region::US_EAST_VA,
-                    tier: Default::default(),
-                })),
+                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
+                    SystemRequest::CreateOrganizationDirectory {
+                        slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                        region: Region::US_EAST_VA,
+                        tier: Default::default(),
+                    },
+                ))),
             })
             .collect();
 
@@ -2745,19 +2604,12 @@ mod tests {
         {
             let mut state = store.applied_state.write();
 
-            let create_ns = LedgerRequest::CreateOrganization {
-                name: "test-ns".to_string(),
-                slug: inferadb_ledger_types::OrganizationSlug::new(42),
-                region: Region::US_EAST_VA,
-                tier: Default::default(),
-            };
-            let (response, _) = store.apply_request(&create_ns, &mut state);
-            let organization_id = match response {
-                LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                    organization_id
-                },
-                _ => panic!("expected OrganizationCreated"),
-            };
+            let organization_id = create_active_organization(
+                &store,
+                &mut state,
+                inferadb_ledger_types::OrganizationSlug::new(42),
+                Region::US_EAST_VA,
+            );
             assert_eq!(organization_id, OrganizationId::new(1));
 
             let create_vault = LedgerRequest::CreateVault {
@@ -2840,13 +2692,12 @@ mod tests {
         {
             let mut state = store.applied_state.write();
 
-            let create_ns = LedgerRequest::CreateOrganization {
-                name: "test-ns".to_string(),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                region: Region::US_EAST_VA,
-                tier: Default::default(),
-            };
-            store.apply_request(&create_ns, &mut state);
+            create_active_organization(
+                &store,
+                &mut state,
+                inferadb_ledger_types::OrganizationSlug::new(0),
+                Region::US_EAST_VA,
+            );
 
             let create_vault = LedgerRequest::CreateVault {
                 organization: OrganizationId::new(1),
@@ -2974,13 +2825,12 @@ mod tests {
         // Create org + vault
         {
             let mut state = store.applied_state.write();
-            let create_ns = LedgerRequest::CreateOrganization {
-                name: "test-ns".to_string(),
-                slug: inferadb_ledger_types::OrganizationSlug::new(99),
-                region: Region::US_EAST_VA,
-                tier: Default::default(),
-            };
-            store.apply_request(&create_ns, &mut state);
+            create_active_organization(
+                &store,
+                &mut state,
+                inferadb_ledger_types::OrganizationSlug::new(99),
+                Region::US_EAST_VA,
+            );
 
             let create_vault = LedgerRequest::CreateVault {
                 organization: OrganizationId::new(1),
@@ -3285,13 +3135,12 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization so writes don't fail for missing organization
-        let create_ns = LedgerRequest::CreateOrganization {
-            name: "test".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(0),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
-        store.apply_request(&create_ns, &mut state);
+        create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
+        );
         let create_vault = LedgerRequest::CreateVault {
             organization: OrganizationId::new(1),
             slug: VaultSlug::new(1),
@@ -3516,14 +3365,11 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Setup organization + vault
-        store.apply_request(
-            &LedgerRequest::CreateOrganization {
-                name: "test-ns".to_string(),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                region: Region::US_EAST_VA,
-                tier: Default::default(),
-            },
+        create_active_organization(
+            &store,
             &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
@@ -3611,14 +3457,11 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Setup
-        store.apply_request(
-            &LedgerRequest::CreateOrganization {
-                name: "ns".to_string(),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                region: Region::US_EAST_VA,
-                tier: Default::default(),
-            },
+        create_active_organization(
+            &store,
             &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
@@ -3692,14 +3535,11 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        store.apply_request(
-            &LedgerRequest::CreateOrganization {
-                name: "ns".to_string(),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                region: Region::US_EAST_VA,
-                tier: Default::default(),
-            },
+        create_active_organization(
+            &store,
             &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
@@ -3748,23 +3588,17 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create two organizations, each with a vault
-        store.apply_request(
-            &LedgerRequest::CreateOrganization {
-                name: "ns-alpha".to_string(),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                region: Region::US_EAST_VA,
-                tier: Default::default(),
-            },
+        create_active_organization(
+            &store,
             &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
         );
-        store.apply_request(
-            &LedgerRequest::CreateOrganization {
-                name: "ns-beta".to_string(),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                region: Region::US_EAST_VA,
-                tier: Default::default(),
-            },
+        create_active_organization(
+            &store,
             &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
@@ -3871,14 +3705,11 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create organization with two vaults
-        store.apply_request(
-            &LedgerRequest::CreateOrganization {
-                name: "usage-ns".to_string(),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                region: Region::US_EAST_VA,
-                tier: Default::default(),
-            },
+        create_active_organization(
+            &store,
             &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
@@ -3943,14 +3774,11 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        store.apply_request(
-            &LedgerRequest::CreateOrganization {
-                name: "del-ns".to_string(),
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                region: Region::US_EAST_VA,
-                tier: Default::default(),
-            },
+        create_active_organization(
+            &store,
             &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(0),
+            Region::US_EAST_VA,
         );
         store.apply_request(
             &LedgerRequest::CreateVault {
@@ -4004,14 +3832,11 @@ mod tests {
         // Set up state with known storage bytes
         {
             let mut state = store.applied_state.write();
-            store.apply_request(
-                &LedgerRequest::CreateOrganization {
-                    name: "conc-ns".to_string(),
-                    slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                    region: Region::US_EAST_VA,
-                    tier: Default::default(),
-                },
+            create_active_organization(
+                &store,
                 &mut state,
+                inferadb_ledger_types::OrganizationSlug::new(0),
+                Region::US_EAST_VA,
             );
             store.apply_request(
                 &LedgerRequest::CreateVault {
@@ -4120,7 +3945,6 @@ mod tests {
             OrganizationMeta {
                 organization: org_id,
                 slug: org_slug,
-                name: "test-org".to_string(),
                 region: Region::GLOBAL,
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
@@ -4221,7 +4045,7 @@ mod tests {
 
         let ts = fixed_timestamp();
 
-        // Apply identical sequences to both: CreateOrganization + Write
+        // Apply identical sequences to both: CreateOrganizationDirectory + Write
         let write_request = simple_write_request(org_id_a, vault_id_a);
 
         let mut events_a: Vec<EventEntry> = Vec::new();
@@ -4381,12 +4205,11 @@ mod tests {
         let store = store_with_events(dir.path());
         let mut state = store.applied_state.write();
 
-        let request = LedgerRequest::CreateOrganization {
-            name: "slug-test-org".to_string(),
+        let request = LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
             slug: inferadb_ledger_types::OrganizationSlug::new(42_000),
             region: Region::US_EAST_VA,
             tier: Default::default(),
-        };
+        });
 
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
@@ -4647,13 +4470,12 @@ mod tests {
         let mut state = store.applied_state.write();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
-        // Emit a system event (OrganizationCreated via CreateOrganization)
-        let create_org = LedgerRequest::CreateOrganization {
-            name: "second-org".to_string(),
+        // Emit a system event (OrganizationDirectoryCreated via CreateOrganizationDirectory)
+        let create_org = LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
             slug: inferadb_ledger_types::OrganizationSlug::new(9999),
             region: Region::US_EAST_VA,
             tier: Default::default(),
-        };
+        });
         let mut all_events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
@@ -4763,33 +4585,15 @@ mod tests {
         let mut state = store.applied_state.write();
 
         // Create an organization first
-        let create_org = LedgerRequest::CreateOrganization {
-            name: "events-test-org".to_string(),
-            slug: inferadb_ledger_types::OrganizationSlug::new(5000),
-            region: Region::US_EAST_VA,
-            tier: Default::default(),
-        };
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(5000),
+            Region::US_EAST_VA,
+        );
         let ts = fixed_timestamp();
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
-
-        let (resp, _) = store.apply_request_with_events(
-            &create_org,
-            &mut state,
-            ts,
-            &mut op_index,
-            &mut events,
-            90,
-            &mut PendingExternalWrites::default(),
-        );
-        let org_id = match resp {
-            LedgerResponse::OrganizationCreated { organization: organization_id, .. } => {
-                organization_id
-            },
-            other => panic!("expected OrganizationCreated, got {:?}", other),
-        };
-        events.clear();
-        op_index = 0;
 
         // Create a vault
         let create_vault = LedgerRequest::CreateVault {
@@ -4987,7 +4791,6 @@ mod tests {
             OrganizationMeta {
                 organization: org_b,
                 slug: org_b_slug,
-                name: "org-b".to_string(),
                 region: Region::GLOBAL,
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
@@ -5231,7 +5034,6 @@ mod tests {
             let org_meta = super::types::OrganizationMeta {
                 organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(100),
-                name: "test-org".to_string(),
                 region: Region::GLOBAL,
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
@@ -5343,7 +5145,6 @@ mod tests {
             let org_meta = super::types::OrganizationMeta {
                 organization: OrganizationId::new(1),
                 slug: inferadb_ledger_types::OrganizationSlug::new(100),
-                name: "test-org".to_string(),
                 region: Region::GLOBAL,
                 status: OrganizationStatus::Active,
                 tier: OrganizationTier::Free,
@@ -5791,16 +5592,27 @@ mod tests {
             // Entry 1: Create organization
             Entry {
                 log_id: make_log_id(1, 1),
-                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateOrganization {
-                    name: "snapshot-org-1".to_string(),
-                    slug: inferadb_ledger_types::OrganizationSlug::new(1000),
-                    region: Region::US_EAST_VA,
-                    tier: Default::default(),
-                })),
+                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
+                    SystemRequest::CreateOrganizationDirectory {
+                        slug: inferadb_ledger_types::OrganizationSlug::new(1000),
+                        region: Region::US_EAST_VA,
+                        tier: Default::default(),
+                    },
+                ))),
             },
-            // Entry 2: Create vault in org 1
+            // Entry 2: Activate org 1
             Entry {
                 log_id: make_log_id(1, 2),
+                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
+                    SystemRequest::UpdateOrganizationDirectoryStatus {
+                        organization: OrganizationId::new(1),
+                        status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Active,
+                    },
+                ))),
+            },
+            // Entry 3: Create vault in org 1
+            Entry {
+                log_id: make_log_id(1, 3),
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateVault {
                     organization: OrganizationId::new(1),
                     slug: VaultSlug::new(100),
@@ -5808,9 +5620,9 @@ mod tests {
                     retention_policy: None,
                 })),
             },
-            // Entry 3: Write to vault (populates vault_heights, vault_hashes, client_sequences)
+            // Entry 4: Write to vault (populates vault_heights, vault_hashes, client_sequences)
             Entry {
-                log_id: make_log_id(1, 3),
+                log_id: make_log_id(1, 4),
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::Write {
                     organization: OrganizationId::new(1),
                     vault: VaultId::new(1),
@@ -5819,19 +5631,30 @@ mod tests {
                     request_hash: 42,
                 })),
             },
-            // Entry 4: Create second organization
-            Entry {
-                log_id: make_log_id(1, 4),
-                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateOrganization {
-                    name: "snapshot-org-2".to_string(),
-                    slug: inferadb_ledger_types::OrganizationSlug::new(2000),
-                    region: Region::US_EAST_VA,
-                    tier: Default::default(),
-                })),
-            },
-            // Entry 5: Create vault in org 2
+            // Entry 5: Create second organization
             Entry {
                 log_id: make_log_id(1, 5),
+                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
+                    SystemRequest::CreateOrganizationDirectory {
+                        slug: inferadb_ledger_types::OrganizationSlug::new(2000),
+                        region: Region::US_EAST_VA,
+                        tier: Default::default(),
+                    },
+                ))),
+            },
+            // Entry 6: Activate org 2
+            Entry {
+                log_id: make_log_id(1, 6),
+                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
+                    SystemRequest::UpdateOrganizationDirectoryStatus {
+                        organization: OrganizationId::new(2),
+                        status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Active,
+                    },
+                ))),
+            },
+            // Entry 7: Create vault in org 2
+            Entry {
+                log_id: make_log_id(1, 7),
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateVault {
                     organization: OrganizationId::new(2),
                     slug: VaultSlug::new(200),
@@ -5839,9 +5662,9 @@ mod tests {
                     retention_policy: None,
                 })),
             },
-            // Entry 6: Write to second vault
+            // Entry 8: Write to second vault
             Entry {
-                log_id: make_log_id(1, 6),
+                log_id: make_log_id(1, 8),
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::Write {
                     organization: OrganizationId::new(2),
                     vault: VaultId::new(2),
@@ -6081,7 +5904,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_apply_no_commitments_for_non_write_entries() {
-        // CreateOrganization / CreateVault don't produce vault entries,
+        // CreateOrganizationDirectory / CreateVault don't produce vault entries,
         // so no commitments should be buffered.
         use openraft::RaftStorage;
 
@@ -6090,12 +5913,13 @@ mod tests {
 
         let entry = Entry {
             log_id: make_log_id(1, 1),
-            payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateOrganization {
-                name: "test-org".to_string(),
-                slug: inferadb_ledger_types::OrganizationSlug::new(999),
-                region: Region::US_EAST_VA,
-                tier: Default::default(),
-            })),
+            payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
+                SystemRequest::CreateOrganizationDirectory {
+                    slug: inferadb_ledger_types::OrganizationSlug::new(999),
+                    region: Region::US_EAST_VA,
+                    tier: Default::default(),
+                },
+            ))),
         };
 
         store.apply_to_state_machine(&[entry]).await.expect("apply");
@@ -6215,12 +6039,11 @@ mod tests {
         let second_entry = Entry {
             log_id: make_log_id(1, 2),
             payload: EntryPayload::Normal(RaftPayload {
-                request: LedgerRequest::CreateOrganization {
-                    name: "dummy".to_string(),
+                request: LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
                     slug: inferadb_ledger_types::OrganizationSlug::new(9999),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
-                },
+                }),
                 proposed_at: Utc::now(),
                 state_root_commitments: commitments,
             }),
@@ -6268,12 +6091,11 @@ mod tests {
         let verify_entry = Entry {
             log_id: make_log_id(1, 2),
             payload: EntryPayload::Normal(RaftPayload {
-                request: LedgerRequest::CreateOrganization {
-                    name: "dummy-2".to_string(),
+                request: LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
                     slug: inferadb_ledger_types::OrganizationSlug::new(8888),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
-                },
+                }),
                 proposed_at: Utc::now(),
                 state_root_commitments: commitments,
             }),
@@ -6310,12 +6132,11 @@ mod tests {
         let entry = Entry {
             log_id: make_log_id(1, 1),
             payload: EntryPayload::Normal(RaftPayload {
-                request: LedgerRequest::CreateOrganization {
-                    name: "dummy".to_string(),
+                request: LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
                     slug: inferadb_ledger_types::OrganizationSlug::new(7777),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
-                },
+                }),
                 proposed_at: Utc::now(),
                 state_root_commitments: vec![crate::types::StateRootCommitment {
                     organization: OrganizationId::new(1),
@@ -6352,12 +6173,11 @@ mod tests {
         let entry = Entry {
             log_id: make_log_id(1, 1),
             payload: EntryPayload::Normal(RaftPayload {
-                request: LedgerRequest::CreateOrganization {
-                    name: "dummy".to_string(),
+                request: LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
                     slug: inferadb_ledger_types::OrganizationSlug::new(6666),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
-                },
+                }),
                 proposed_at: Utc::now(),
                 state_root_commitments: vec![crate::types::StateRootCommitment {
                     organization: OrganizationId::new(1),
@@ -6443,12 +6263,11 @@ mod tests {
         let verify_entry = Entry {
             log_id: make_log_id(1, 2),
             payload: EntryPayload::Normal(RaftPayload {
-                request: LedgerRequest::CreateOrganization {
-                    name: "dummy".to_string(),
+                request: LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
                     slug: inferadb_ledger_types::OrganizationSlug::new(5555),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
-                },
+                }),
                 proposed_at: Utc::now(),
                 state_root_commitments: commitments,
             }),

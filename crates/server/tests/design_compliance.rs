@@ -18,7 +18,10 @@ use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
 use crate::{
     common,
-    common::{TestCluster, create_admin_client, create_health_client, create_read_client},
+    common::{
+        TestCluster, create_health_client, create_organization_client, create_read_client,
+        create_vault_client,
+    },
 };
 
 // =============================================================================
@@ -30,12 +33,13 @@ async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let mut client = create_admin_client(addr).await?;
+    let mut client = create_organization_client(addr).await?;
     let response = client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: name.to_string(),
             region: 10, // REGION_US_EAST_VA
             tier: None,
+            admin: None,
         })
         .await?;
     let slug = response
@@ -51,7 +55,7 @@ async fn create_vault(
     addr: std::net::SocketAddr,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    let mut client = create_admin_client(addr).await?;
+    let mut client = create_vault_client(addr).await?;
     let response = client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
@@ -970,14 +974,17 @@ async fn test_idempotency_survives_leader_failover() {
     let leader_addr = leader.addr;
 
     // Create organization and vault before writing
-    let mut admin_client =
-        common::create_admin_client(leader_addr).await.expect("connect to admin service");
+    let mut org_client =
+        common::create_organization_client(leader_addr).await.expect("connect to organization");
+    let mut vault_client =
+        common::create_vault_client(leader_addr).await.expect("connect to vault service");
 
-    let ns_response = admin_client
+    let ns_response = org_client
         .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
             name: "failover-test-ns".to_string(),
             region: 10, // REGION_US_EAST_VA
             tier: None,
+            admin: None,
         })
         .await
         .expect("create organization");
@@ -985,7 +992,7 @@ async fn test_idempotency_survives_leader_failover() {
     let organization =
         ns_response.into_inner().slug.map(|n| OrganizationSlug::new(n.slug)).expect("organization");
 
-    let vault_response = admin_client
+    let vault_response = vault_client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
                 slug: organization.value(),

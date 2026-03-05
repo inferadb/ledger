@@ -25,7 +25,7 @@
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_raft::log_storage::AppliedStateAccessor;
 use inferadb_ledger_types::{
-    OrganizationId, OrganizationSlug, UserId, UserSlug, VaultId, VaultSlug,
+    OrganizationId, OrganizationSlug, TeamId, TeamSlug, UserId, UserSlug, VaultId, VaultSlug,
 };
 use tonic::Status;
 
@@ -258,6 +258,54 @@ impl SlugResolver {
             Some(slug) => {
                 let domain_slug = UserSlug::new(slug.slug);
                 self.resolve_user(domain_slug).map(Some)
+            },
+        }
+    }
+
+    // =========================================================================
+    // Team slug resolution
+    // =========================================================================
+
+    /// Extracts and validates a team slug from a proto message.
+    ///
+    /// Returns `INVALID_ARGUMENT` if the slug field is missing or zero.
+    pub fn extract_team_slug(proto_slug: &Option<proto::TeamSlug>) -> Result<TeamSlug, Status> {
+        let slug = proto_slug.as_ref().ok_or_else(|| Status::invalid_argument("Missing team"))?;
+        if slug.slug == 0 {
+            return Err(Status::invalid_argument("team must be non-zero"));
+        }
+        Ok(TeamSlug::new(slug.slug))
+    }
+
+    /// Resolves a team slug to its internal (organization ID, team ID) pair.
+    ///
+    /// Returns `NOT_FOUND` if the slug is not registered.
+    pub fn resolve_team(&self, slug: TeamSlug) -> Result<(OrganizationId, TeamId), Status> {
+        self.state
+            .resolve_team_slug(slug)
+            .ok_or_else(|| Status::not_found(format!("Team with slug {} not found", slug.value())))
+    }
+
+    /// Extracts a team slug from a proto message and resolves it to internal IDs.
+    pub fn extract_and_resolve_team(
+        &self,
+        proto_slug: &Option<proto::TeamSlug>,
+    ) -> Result<(OrganizationId, TeamId), Status> {
+        let slug = Self::extract_team_slug(proto_slug)?;
+        self.resolve_team(slug)
+    }
+
+    /// Extracts an optional team slug and resolves it if present.
+    pub fn extract_and_resolve_team_optional(
+        &self,
+        proto_slug: &Option<proto::TeamSlug>,
+    ) -> Result<Option<(OrganizationId, TeamId)>, Status> {
+        match proto_slug {
+            None => Ok(None),
+            Some(slug) if slug.slug == 0 => Err(Status::invalid_argument("team must be non-zero")),
+            Some(slug) => {
+                let domain_slug = TeamSlug::new(slug.slug);
+                self.resolve_team(domain_slug).map(Some)
             },
         }
     }

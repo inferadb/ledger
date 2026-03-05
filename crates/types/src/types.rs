@@ -92,170 +92,106 @@ define_id!(
     OrganizationId, i64, "org"
 );
 
-/// Snowflake-generated external identifier for an organization.
+/// Generates a newtype wrapper around `u64` for Snowflake-based external identifiers.
 ///
-/// Wraps a `u64` Snowflake ID that is the sole external identifier for
-/// organizations in gRPC APIs and the SDK. The display format is the raw
-/// number without prefix for API clarity.
-///
-/// # Display
-///
-/// Displays as the raw number: `1234567890`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct OrganizationSlug(u64);
+/// Each generated type provides:
+/// - Standard derives: Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord
+/// - Serde with `#[serde(transparent)]` for wire format compatibility
+/// - `From<u64>` and `Into<u64>` conversions
+/// - `Display` as raw number (no prefix) for API clarity
+/// - `new()` constructor and `value()` accessor
+macro_rules! define_slug {
+    (
+        $(#[$meta:meta])*
+        $name:ident
+    ) => {
+        $(#[$meta])*
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord,
+            Serialize, Deserialize,
+        )]
+        #[serde(transparent)]
+        pub struct $name(u64);
 
-impl OrganizationSlug {
-    /// Creates a new slug from a raw Snowflake ID value.
-    #[inline]
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
+        impl $name {
+            /// Creates a new slug from a raw Snowflake ID value.
+            #[inline]
+            pub const fn new(value: u64) -> Self {
+                Self(value)
+            }
 
-    /// Returns the raw Snowflake ID value.
-    #[inline]
-    pub const fn value(self) -> u64 {
-        self.0
-    }
+            /// Returns the raw Snowflake ID value.
+            #[inline]
+            pub const fn value(self) -> u64 {
+                self.0
+            }
+        }
+
+        impl From<u64> for $name {
+            #[inline]
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<$name> for u64 {
+            #[inline]
+            fn from(slug: $name) -> Self {
+                slug.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = <u64 as std::str::FromStr>::Err;
+
+            fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+                s.parse::<u64>().map(Self)
+            }
+        }
+    };
 }
 
-impl From<u64> for OrganizationSlug {
-    #[inline]
-    fn from(value: u64) -> Self {
-        Self(value)
-    }
-}
+define_slug!(
+    /// Snowflake-generated external identifier for an organization.
+    ///
+    /// Wraps a `u64` Snowflake ID that is the sole external identifier for
+    /// organizations in gRPC APIs and the SDK.
+    ///
+    /// # Display
+    ///
+    /// Displays as the raw number: `1234567890`.
+    OrganizationSlug
+);
 
-impl From<OrganizationSlug> for u64 {
-    #[inline]
-    fn from(slug: OrganizationSlug) -> Self {
-        slug.0
-    }
-}
+define_slug!(
+    /// Snowflake-generated external identifier for a vault.
+    ///
+    /// Wraps a `u64` Snowflake ID that is the sole external identifier for
+    /// vaults in gRPC APIs and the SDK.
+    ///
+    /// # Display
+    ///
+    /// Displays as the raw number: `1234567890`.
+    VaultSlug
+);
 
-impl fmt::Display for OrganizationSlug {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::str::FromStr for OrganizationSlug {
-    type Err = <u64 as std::str::FromStr>::Err;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        s.parse::<u64>().map(Self)
-    }
-}
-
-/// Snowflake-generated external identifier for a vault.
-///
-/// Wraps a `u64` Snowflake ID that is the sole external identifier for
-/// vaults in gRPC APIs and the SDK. The display format is the raw
-/// number without prefix for API clarity.
-///
-/// # Display
-///
-/// Displays as the raw number: `1234567890`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct VaultSlug(u64);
-
-impl VaultSlug {
-    /// Creates a new slug from a raw Snowflake ID value.
-    #[inline]
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Returns the raw Snowflake ID value.
-    #[inline]
-    pub const fn value(self) -> u64 {
-        self.0
-    }
-}
-
-impl From<u64> for VaultSlug {
-    #[inline]
-    fn from(value: u64) -> Self {
-        Self(value)
-    }
-}
-
-impl From<VaultSlug> for u64 {
-    #[inline]
-    fn from(slug: VaultSlug) -> Self {
-        slug.0
-    }
-}
-
-impl fmt::Display for VaultSlug {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::str::FromStr for VaultSlug {
-    type Err = <u64 as std::str::FromStr>::Err;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        s.parse::<u64>().map(Self)
-    }
-}
-
-/// Snowflake-generated external identifier for a user.
-///
-/// Wraps a `u64` Snowflake ID that is the sole external identifier for
-/// users in gRPC APIs and the SDK. The display format is the raw
-/// number without prefix for API clarity.
-///
-/// # Display
-///
-/// Displays as the raw number: `1234567890`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct UserSlug(u64);
-
-impl UserSlug {
-    /// Creates a new slug from a raw Snowflake ID value.
-    #[inline]
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Returns the raw Snowflake ID value.
-    #[inline]
-    pub const fn value(self) -> u64 {
-        self.0
-    }
-}
-
-impl From<u64> for UserSlug {
-    #[inline]
-    fn from(value: u64) -> Self {
-        Self(value)
-    }
-}
-
-impl From<UserSlug> for u64 {
-    #[inline]
-    fn from(slug: UserSlug) -> Self {
-        slug.0
-    }
-}
-
-impl fmt::Display for UserSlug {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::str::FromStr for UserSlug {
-    type Err = <u64 as std::str::FromStr>::Err;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        s.parse::<u64>().map(Self)
-    }
-}
+define_slug!(
+    /// Snowflake-generated external identifier for a user.
+    ///
+    /// Wraps a `u64` Snowflake ID that is the sole external identifier for
+    /// users in gRPC APIs and the SDK.
+    ///
+    /// # Display
+    ///
+    /// Displays as the raw number: `1234567890`.
+    UserSlug
+);
 
 define_id!(
     /// Unique identifier for a vault within an organization.
@@ -306,6 +242,37 @@ define_id!(
     ///
     /// Formats with `verify:` prefix: `verify:42`.
     EmailVerifyTokenId, i64, "verify"
+);
+
+define_id!(
+    /// Internal sequential identifier for a team within an organization.
+    ///
+    /// Wraps an `i64` with compile-time type safety to prevent mixing
+    /// with [`OrganizationId`], [`VaultId`], [`UserId`], or other identifiers.
+    /// Never exposed in APIs — use [`TeamSlug`] for external identification.
+    ///
+    /// # Display
+    ///
+    /// Formats with `team:` prefix: `team:3`.
+    TeamId, i64, "team"
+);
+
+impl Default for TeamId {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+define_slug!(
+    /// Snowflake-generated external identifier for a team.
+    ///
+    /// Wraps a `u64` Snowflake ID that is the sole external identifier for
+    /// teams in gRPC APIs and the SDK.
+    ///
+    /// # Display
+    ///
+    /// Displays as the raw number: `1234567890`.
+    TeamSlug
 );
 
 // ============================================================================
@@ -504,6 +471,26 @@ impl Region {
     pub const fn requires_residency(&self) -> bool {
         !matches!(self, Self::GLOBAL | Self::US_EAST_VA | Self::US_WEST_OR)
     }
+
+    /// Soft-delete retention period in days for this region.
+    ///
+    /// After a user is soft-deleted, their data is retained for this many days
+    /// before permanent erasure. EU/GDPR regions use shorter retention periods
+    /// to comply with data protection regulations.
+    pub const fn retention_days(&self) -> u32 {
+        match self {
+            // EU/EEA regions: 30-day retention (GDPR compliance)
+            Self::IE_EAST_DUBLIN
+            | Self::FR_NORTH_PARIS
+            | Self::DE_CENTRAL_FRANKFURT
+            | Self::SE_EAST_STOCKHOLM
+            | Self::IT_NORTH_MILAN => 30,
+            // UK: 30-day retention (UK GDPR)
+            Self::UK_SOUTH_LONDON => 30,
+            // All other regions: 90-day default
+            _ => 90,
+        }
+    }
 }
 
 impl fmt::Display for Region {
@@ -537,6 +524,38 @@ impl std::str::FromStr for Region {
             .copied()
             .ok_or_else(|| RegionParseError { input: s.to_owned() })
     }
+}
+
+// ============================================================================
+// User Types
+// ============================================================================
+
+/// User account lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserStatus {
+    /// User can authenticate.
+    #[default]
+    Active,
+    /// Pending organization creation (saga in progress).
+    PendingOrg,
+    /// User cannot authenticate.
+    Suspended,
+    /// Deletion cascade in progress.
+    Deleting,
+    /// Tombstone for audit.
+    Deleted,
+}
+
+/// User authorization role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserRole {
+    /// Regular user (default).
+    #[default]
+    User,
+    /// Global service administrator.
+    Admin,
 }
 
 /// Transaction identifier (16 bytes, typically UUIDv4).

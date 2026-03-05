@@ -43,6 +43,13 @@ message UserSlug {
   uint64 slug = 1;
 }
 
+// External Snowflake identifier for a team within an organization.
+// This is the only team identifier exposed to API consumers.
+// Internal sequential TeamId(i64) is used for storage but never appears in the API.
+message TeamSlug {
+  uint64 slug = 1;
+}
+
 // Geographic region for data residency. Each Raft consensus group maps 1:1 to
 // a region. Organizations declare a region governing where their data is stored.
 enum Region {
@@ -142,6 +149,7 @@ message User {
   google.protobuf.Timestamp updated_at = 6;
   UserRole role = 7;            // Authorization role (default: USER)
   UserSlug slug = 8;            // External Snowflake identifier
+  optional google.protobuf.Timestamp deleted_at = 9; // When soft-delete was initiated
 }
 
 // User email address (stored in _system organization as Entity with key "user_email:{id}")
@@ -770,14 +778,10 @@ message BatchWriteSuccess {
 }
 
 // =============================================================================
-// Admin Service
+// Organization Service
 // =============================================================================
 
-service AdminService {
-  // ==========================================================================
-  // Organization Management
-  // ==========================================================================
-
+service OrganizationService {
   // Create a new organization. An OrganizationSlug (Snowflake ID) is generated
   // and returned. Internal sequential OrganizationId is never exposed.
   rpc CreateOrganization(CreateOrganizationRequest) returns (CreateOrganizationResponse);
@@ -798,15 +802,41 @@ service AdminService {
   // Writes to the organization are rejected during migration.
   rpc MigrateOrganization(MigrateOrganizationRequest) returns (MigrateOrganizationResponse);
 
-  // Migrate a user's PII from one regional store to another.
-  // Updates the GLOBAL directory entry and moves data via saga.
-  // Authenticated API calls are rejected during migration.
-  rpc MigrateUserRegion(MigrateUserRegionRequest) returns (MigrateUserRegionResponse);
+  // Update organization metadata. Only organization administrators can update.
+  // Returns the full updated organization (same shape as GetOrganizationResponse).
+  rpc UpdateOrganization(UpdateOrganizationRequest) returns (UpdateOrganizationResponse);
 
-  // ==========================================================================
-  // Vault Management
-  // ==========================================================================
+  // List all members of an organization. Caller must be a member.
+  rpc ListOrganizationMembers(ListOrganizationMembersRequest) returns (ListOrganizationMembersResponse);
 
+  // Remove a member from an organization.
+  // Self-removal: any member can leave unless they are the last admin.
+  // Removing others: initiator must be an admin.
+  rpc RemoveOrganizationMember(RemoveOrganizationMemberRequest) returns (RemoveOrganizationMemberResponse);
+
+  // Promote or demote an organization member.
+  // Initiator must be an admin. Cannot demote the last admin.
+  rpc UpdateOrganizationMemberRole(UpdateOrganizationMemberRoleRequest) returns (UpdateOrganizationMemberRoleResponse);
+
+  // List all teams in an organization.
+  rpc ListOrganizationTeams(ListOrganizationTeamsRequest) returns (ListOrganizationTeamsResponse);
+
+  // Create a new team within an organization.
+  // A TeamSlug (Snowflake ID) is generated and returned.
+  rpc CreateOrganizationTeam(CreateOrganizationTeamRequest) returns (CreateOrganizationTeamResponse);
+
+  // Delete a team. Optionally move members to another team before deletion.
+  rpc DeleteOrganizationTeam(DeleteOrganizationTeamRequest) returns (DeleteOrganizationTeamResponse);
+
+  // Update team metadata. Only organization admins or team managers can update.
+  rpc UpdateOrganizationTeam(UpdateOrganizationTeamRequest) returns (UpdateOrganizationTeamResponse);
+}
+
+// =============================================================================
+// Vault Service
+// =============================================================================
+
+service VaultService {
   // Create a new vault
   rpc CreateVault(CreateVaultRequest) returns (CreateVaultResponse);
 
@@ -818,7 +848,13 @@ service AdminService {
 
   // List all vaults on this node
   rpc ListVaults(ListVaultsRequest) returns (ListVaultsResponse);
+}
 
+// =============================================================================
+// Admin Service
+// =============================================================================
+
+service AdminService {
   // ==========================================================================
   // Cluster Membership
   // ==========================================================================
@@ -920,16 +956,6 @@ service AdminService {
   rpc GetRewrapStatus(GetRewrapStatusRequest) returns (GetRewrapStatusResponse);
 
   // ==========================================================================
-  // User Erasure (GDPR Article 17)
-  // ==========================================================================
-
-  // Erase a user's PII via crypto-shredding. Forward-only finalization:
-  // destroys the per-subject encryption key, scrubs directory entry,
-  // removes email hash indexes, and creates erasure audit record.
-  // Each step is idempotent — safe to retry on failure.
-  rpc EraseUser(EraseUserRequest) returns (EraseUserResponse);
-
-  // ==========================================================================
   // User Migration (flat _system → regional)
   // ==========================================================================
 
@@ -955,6 +981,7 @@ message CreateOrganizationRequest {
   string name = 1; // Human-readable name (e.g., "acme_corp")
   Region region = 2; // Data residency region (required)
   optional OrganizationTier tier = 3; // Billing tier (Free if not specified)
+  UserSlug admin = 4; // First organization administrator (required)
 }
 
 message CreateOrganizationResponse {
@@ -964,16 +991,18 @@ message CreateOrganizationResponse {
 
 message DeleteOrganizationRequest {
   OrganizationSlug slug = 1;
+  UserSlug initiator = 2; // Must be an organization administrator
 }
 
 message DeleteOrganizationResponse {
   google.protobuf.Timestamp deleted_at = 1;
+  uint32 retention_days = 2; // Region-derived cooldown before purge
 }
 
-// Get organization info by slug only.
-// Organization names are not unique, so name-based lookup is not supported.
+// Get organization info by slug. Caller must be a member of the organization.
 message GetOrganizationRequest {
   OrganizationSlug slug = 1;
+  UserSlug caller = 2; // Must be an organization member
 }
 
 // Organization info (routing metadata from _system)
@@ -987,15 +1016,17 @@ message GetOrganizationResponse {
   uint64 config_version = 6;        // For cache invalidation
   google.protobuf.Timestamp created_at = 7;
   OrganizationTier tier = 8;        // Billing tier
+  repeated OrganizationMember members = 9; // Organization members with roles
+  google.protobuf.Timestamp updated_at = 10;
 }
 
 enum OrganizationStatus {
   ORGANIZATION_STATUS_UNSPECIFIED = 0;
-  ORGANIZATION_STATUS_ACTIVE = 1;    // Accepting requests
-  ORGANIZATION_STATUS_MIGRATING = 2; // Being migrated to another region
-  ORGANIZATION_STATUS_SUSPENDED = 3; // Billing or policy suspension
-  ORGANIZATION_STATUS_DELETING = 4;  // Deletion in progress
-  ORGANIZATION_STATUS_DELETED = 5;   // Tombstone
+  ORGANIZATION_STATUS_ACTIVE = 1;       // Accepting requests
+  ORGANIZATION_STATUS_MIGRATING = 2;    // Being migrated to another region
+  ORGANIZATION_STATUS_SUSPENDED = 3;    // Billing or policy suspension
+  ORGANIZATION_STATUS_DELETED = 4;      // Tombstone (soft-deleted, pending purge)
+  ORGANIZATION_STATUS_PROVISIONING = 5; // Saga in progress, not yet ready
 }
 
 enum OrganizationTier {
@@ -1005,9 +1036,22 @@ enum OrganizationTier {
   ORGANIZATION_TIER_ENTERPRISE = 3;  // Enterprise tier
 }
 
+enum OrganizationMemberRole {
+  ORGANIZATION_MEMBER_ROLE_UNSPECIFIED = 0;
+  ORGANIZATION_MEMBER_ROLE_ADMIN = 1;  // Organization administrator
+  ORGANIZATION_MEMBER_ROLE_MEMBER = 2; // Regular member
+}
+
+message OrganizationMember {
+  UserSlug user = 1;
+  OrganizationMemberRole role = 2;
+  google.protobuf.Timestamp joined_at = 3;
+}
+
 message ListOrganizationsRequest {
   optional bytes page_token = 1;
   uint32 page_size = 2; // Default: 100, Max: 1000
+  UserSlug caller = 3; // For authorization filtering
 }
 
 message ListOrganizationsResponse {
@@ -1021,6 +1065,7 @@ message MigrateOrganizationRequest {
   OrganizationSlug slug = 1;
   Region target_region = 2;
   bool acknowledge_residency_downgrade = 3;
+  UserSlug initiator = 4; // Must be an organization administrator
 }
 
 // Migration response with source/target region and current status.
@@ -1030,6 +1075,139 @@ message MigrateOrganizationResponse {
   Region source_region = 2;
   Region target_region = 3;
   OrganizationStatus status = 4;
+}
+
+// Update organization metadata.
+// At least one optional field must be set.
+message UpdateOrganizationRequest {
+  OrganizationSlug slug = 1;
+  UserSlug initiator = 2; // Must be an organization administrator
+  optional string name = 3; // New name (1-200 chars, validated)
+}
+
+// Returns the full updated organization (mirrors GetOrganizationResponse).
+message UpdateOrganizationResponse {
+  OrganizationSlug slug = 1;
+  string name = 2;
+  Region region = 3;
+  repeated NodeId member_nodes = 4;
+  OrganizationStatus status = 5;
+  uint64 config_version = 6;
+  google.protobuf.Timestamp created_at = 7;
+  OrganizationTier tier = 8;
+  repeated OrganizationMember members = 9;
+  google.protobuf.Timestamp updated_at = 10;
+}
+
+// List members of an organization. Caller must be a member.
+message ListOrganizationMembersRequest {
+  OrganizationSlug slug = 1;
+  UserSlug caller = 2; // Must be an organization member
+  optional bytes page_token = 3; // Opaque cursor
+  uint32 page_size = 4; // Max items per page
+}
+
+message ListOrganizationMembersResponse {
+  repeated OrganizationMember members = 1;
+  optional bytes next_page_token = 2; // Absent if no more pages
+}
+
+// Remove a member from an organization.
+// Self-removal: any member unless they are the last admin.
+// Removing others: initiator must be an admin.
+message RemoveOrganizationMemberRequest {
+  OrganizationSlug slug = 1;
+  UserSlug initiator = 2;
+  UserSlug target = 3;
+}
+
+message RemoveOrganizationMemberResponse {}
+
+// Promote or demote a member within an organization.
+// Initiator must be an admin. Cannot demote the last admin.
+message UpdateOrganizationMemberRoleRequest {
+  OrganizationSlug slug = 1;
+  UserSlug initiator = 2;
+  UserSlug target = 3;
+  OrganizationMemberRole role = 4;
+}
+
+message UpdateOrganizationMemberRoleResponse {
+  OrganizationMember member = 1; // Updated member state
+}
+
+// -----------------------------------------------------------------------------
+// Organization Team Messages
+// -----------------------------------------------------------------------------
+
+// Role within a team.
+enum OrganizationTeamMemberRole {
+  ORGANIZATION_TEAM_MEMBER_ROLE_UNSPECIFIED = 0;
+  ORGANIZATION_TEAM_MEMBER_ROLE_MANAGER = 1; // Can manage team settings
+  ORGANIZATION_TEAM_MEMBER_ROLE_MEMBER = 2;  // Regular team member
+}
+
+// A member of a team.
+message OrganizationTeamMember {
+  UserSlug user = 1;
+  OrganizationTeamMemberRole role = 2;
+  google.protobuf.Timestamp joined_at = 3;
+}
+
+// Full team representation returned in responses.
+message OrganizationTeam {
+  TeamSlug slug = 1;
+  OrganizationSlug organization = 2;
+  string name = 3;
+  repeated OrganizationTeamMember members = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+// List all teams in an organization.
+message ListOrganizationTeamsRequest {
+  OrganizationSlug organization = 1;
+  UserSlug caller = 2; // For authorization filtering
+  optional bytes page_token = 3; // Opaque cursor
+  uint32 page_size = 4; // Max items per page
+}
+
+message ListOrganizationTeamsResponse {
+  repeated OrganizationTeam teams = 1;
+  optional bytes next_page_token = 2; // Absent if no more pages
+}
+
+// Create a new team. Name must be unique within the organization.
+message CreateOrganizationTeamRequest {
+  OrganizationSlug organization = 1;
+  string name = 2;           // Unique within organization (1-200 chars)
+  UserSlug initiator = 3;    // For audit logging
+}
+
+message CreateOrganizationTeamResponse {
+  OrganizationTeam team = 1;
+}
+
+// Delete a team. Optionally move members to another team before deletion.
+message DeleteOrganizationTeamRequest {
+  TeamSlug slug = 1;
+  // If set, move all members to this team before deleting.
+  // If not set, members are simply removed from the team.
+  optional TeamSlug move_members_to = 2;
+  UserSlug initiator = 3;        // Must be org admin or team manager
+}
+
+message DeleteOrganizationTeamResponse {}
+
+// Update team metadata. Only organization admins or team managers can update.
+message UpdateOrganizationTeamRequest {
+  TeamSlug slug = 1;
+  UserSlug initiator = 2;        // Must be org admin or team manager
+  optional string name = 3;      // New name (1-200 chars, unique within org)
+}
+
+message UpdateOrganizationTeamResponse {
+  OrganizationTeam team = 1;
 }
 
 // Request to migrate a user's PII to a different region.
@@ -1117,11 +1295,13 @@ enum VaultStatus {
 }
 
 message ListVaultsRequest {
-  // Empty - lists all vaults on this node
+  optional bytes page_token = 1; // Opaque cursor
+  uint32 page_size = 2; // Max items per page
 }
 
 message ListVaultsResponse {
   repeated GetVaultResponse vaults = 1;
+  optional bytes next_page_token = 2; // Absent if no more pages
 }
 
 message CreateSnapshotRequest {
@@ -1215,6 +1395,135 @@ enum VaultHealthProto {
   VAULT_HEALTH_PROTO_HEALTHY = 1;
   VAULT_HEALTH_PROTO_DIVERGED = 2;
   VAULT_HEALTH_PROTO_RECOVERING = 3;
+}
+
+// -----------------------------------------------------------------------------
+// User Management Messages
+// -----------------------------------------------------------------------------
+
+message CreateUserRequest {
+  string name = 1;                // Display name (1-200 characters)
+  string email = 2;               // Primary email address (normalized to lowercase)
+  Region region = 3;              // Region for PII storage
+  optional UserRole role = 4;     // Default: USER
+  string email_hmac = 5;          // HMAC-SHA256 of normalized email (hex, caller-computed with blinding key)
+  string organization_name = 6;   // Name for the default organization
+  optional OrganizationTier organization_tier = 7; // Tier for default org (Free if not specified)
+}
+
+message CreateUserResponse {
+  UserSlug slug = 1;
+  User user = 2;
+  optional OrganizationSlug default_organization_slug = 3; // Slug of the default org (populated after saga completes)
+}
+
+message GetUserRequest {
+  UserSlug slug = 1;
+}
+
+message GetUserResponse {
+  User user = 1;
+  repeated UserEmail emails = 2;  // All emails for this user
+}
+
+message UpdateUserRequest {
+  UserSlug slug = 1;
+  optional string name = 2;              // New display name
+  optional UserRole role = 3;            // New role
+  optional UserEmailId primary_email = 4; // Change primary email (must be owned by user)
+}
+
+message UpdateUserResponse {
+  User user = 1;
+}
+
+message DeleteUserRequest {
+  UserSlug slug = 1;
+  string deleted_by = 2;          // Audit trail: who requested deletion
+}
+
+message DeleteUserResponse {
+  UserSlug slug = 1;
+  google.protobuf.Timestamp deleted_at = 2;
+  uint32 retention_days = 3;      // Region-specific retention period (derived from user's region)
+}
+
+message ListUsersRequest {
+  optional bytes page_token = 1;
+  uint32 page_size = 2;           // Default: 100, Max: 1000
+  optional Region region = 3;     // Filter by region
+}
+
+message ListUsersResponse {
+  repeated User users = 1;
+  optional bytes next_page_token = 2;
+}
+
+// Flexible search filter — optional fields are AND-combined.
+// At least one filter field must be set.
+message UserSearchFilter {
+  optional string email = 1;          // Email prefix or exact match
+  optional UserStatus status = 2;     // Filter by lifecycle state
+  optional UserRole role = 3;         // Filter by role
+  optional string name_prefix = 4;    // Display name prefix match
+}
+
+message SearchUsersRequest {
+  UserSearchFilter filter = 1;
+  optional bytes page_token = 2;
+  uint32 page_size = 3;           // Default: 100, Max: 1000
+}
+
+message SearchUsersResponse {
+  repeated User users = 1;
+  optional bytes next_page_token = 2;
+}
+
+// -----------------------------------------------------------------------------
+// User Email Management Messages
+// -----------------------------------------------------------------------------
+
+message CreateUserEmailRequest {
+  UserSlug user = 1;              // Owning user
+  string email = 2;               // Email address to add
+}
+
+message CreateUserEmailResponse {
+  UserEmail email = 1;
+}
+
+message DeleteUserEmailRequest {
+  UserSlug user = 1;
+  UserEmailId email_id = 2;       // Email to remove (cannot be primary)
+}
+
+message DeleteUserEmailResponse {
+  google.protobuf.Timestamp deleted_at = 1;
+}
+
+message UserEmailSearchFilter {
+  optional string email = 1;          // Email prefix or exact match
+  optional UserSlug user = 2;         // Filter by owning user
+  optional bool verified_only = 3;    // Only return verified emails
+}
+
+message SearchUserEmailRequest {
+  UserEmailSearchFilter filter = 1;
+  optional bytes page_token = 2;
+  uint32 page_size = 3;
+}
+
+message SearchUserEmailResponse {
+  repeated UserEmail emails = 1;
+  optional bytes next_page_token = 2;
+}
+
+message VerifyUserEmailRequest {
+  string token = 1;               // 64-char hex verification token
+}
+
+message VerifyUserEmailResponse {
+  UserEmail email = 1;            // Updated email with verified_at set
 }
 
 // -----------------------------------------------------------------------------
@@ -1408,6 +1717,59 @@ enum ClusterMemberRole {
   CLUSTER_MEMBER_ROLE_UNSPECIFIED = 0;
   CLUSTER_MEMBER_ROLE_VOTER = 1; // Full voting member
   CLUSTER_MEMBER_ROLE_LEARNER = 2; // Receiving logs but can't vote
+}
+
+// =============================================================================
+// User Service
+// =============================================================================
+
+// User lifecycle, email management, region migration, and GDPR erasure.
+service UserService {
+  // Create a new user with a primary email address.
+  // Atomically creates the user record and their primary UserEmail.
+  // A UserSlug (Snowflake ID) is generated and returned.
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+
+  // Get user info by slug.
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+
+  // Partial update of user fields (name, role, primary email).
+  // Only provided optional fields are modified.
+  rpc UpdateUser(UpdateUserRequest) returns (UpdateUserResponse);
+
+  // Soft-delete a user. Sets status to DELETING with a regional retention
+  // period (default 90 days). After retention expires, EraseUser triggers
+  // automatically followed by hard deletion.
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+
+  // List all users (paginated).
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+
+  // Search users by filter (email, status, role). Extensible filter design.
+  rpc SearchUsers(SearchUsersRequest) returns (SearchUsersResponse);
+
+  // Add an email address to an existing user.
+  rpc CreateUserEmail(CreateUserEmailRequest) returns (CreateUserEmailResponse);
+
+  // Remove a non-primary email address from a user.
+  rpc DeleteUserEmail(DeleteUserEmailRequest) returns (DeleteUserEmailResponse);
+
+  // Search email records by filter.
+  rpc SearchUserEmail(SearchUserEmailRequest) returns (SearchUserEmailResponse);
+
+  // Mark an email as verified using a verification token.
+  rpc VerifyUserEmail(VerifyUserEmailRequest) returns (VerifyUserEmailResponse);
+
+  // Migrate a user's PII from one regional store to another.
+  // Updates the GLOBAL directory entry and moves data via saga.
+  // Authenticated API calls are rejected during migration.
+  rpc MigrateUserRegion(MigrateUserRegionRequest) returns (MigrateUserRegionResponse);
+
+  // Erase a user's PII via crypto-shredding (GDPR Article 17).
+  // Destroys the per-subject encryption key, scrubs directory entry,
+  // removes email hash indexes, and creates erasure audit record.
+  // Each step is idempotent — safe to retry on failure.
+  rpc EraseUser(EraseUserRequest) returns (EraseUserResponse);
 }
 
 // =============================================================================

@@ -705,6 +705,168 @@ impl TieredStorageConfig {
     }
 }
 
+// =========================================================================
+// UserRetentionConfig
+// =========================================================================
+
+/// Default reaper scan interval in seconds (1 hour).
+const fn default_reaper_interval_secs() -> u64 {
+    3600
+}
+
+/// Default batch size for retention reaper scans.
+const fn default_reaper_batch_size() -> usize {
+    100
+}
+
+/// Configuration for the user retention reaper background job.
+///
+/// The reaper periodically scans for users in `Deleting` status whose
+/// retention period has elapsed, and submits `EraseUser` Raft proposals
+/// to finalize deletion. Only runs on the leader node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserRetentionConfig {
+    /// Interval between reaper scan cycles in seconds.
+    ///
+    /// Must be >= 60. Default: 3600 (1 hour).
+    #[serde(default = "default_reaper_interval_secs")]
+    pub interval_secs: u64,
+    /// Maximum number of users to process per cycle.
+    ///
+    /// Must be >= 1. Default: 100.
+    #[serde(default = "default_reaper_batch_size")]
+    pub batch_size: usize,
+}
+
+impl Default for UserRetentionConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: default_reaper_interval_secs(),
+            batch_size: default_reaper_batch_size(),
+        }
+    }
+}
+
+#[bon::bon]
+impl UserRetentionConfig {
+    /// Creates a new retention reaper configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if:
+    /// - `interval_secs` < 60
+    /// - `batch_size` < 1
+    #[builder]
+    pub fn new(
+        #[builder(default = default_reaper_interval_secs())] interval_secs: u64,
+        #[builder(default = default_reaper_batch_size())] batch_size: usize,
+    ) -> Result<Self, ConfigError> {
+        let config = Self { interval_secs, batch_size };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl UserRetentionConfig {
+    /// Validates the configuration values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.interval_secs < 60 {
+            return Err(ConfigError::Validation {
+                message: format!("interval_secs must be >= 60, got {}", self.interval_secs),
+            });
+        }
+        if self.batch_size == 0 {
+            return Err(ConfigError::Validation { message: "batch_size must be >= 1".to_string() });
+        }
+        Ok(())
+    }
+}
+
+// =========================================================================
+// OrganizationPurgeConfig
+// =========================================================================
+
+/// Default purge scan interval in seconds (1 hour).
+const fn default_purge_interval_secs() -> u64 {
+    3600
+}
+
+/// Default batch size for organization purge scans.
+const fn default_purge_batch_size() -> usize {
+    50
+}
+
+/// Configuration for the organization purge background job.
+///
+/// The purge job periodically scans for organizations in `Deleted` status
+/// whose retention cooldown has elapsed, and submits `PurgeOrganization`
+/// Raft proposals to finalize removal. Only runs on the leader node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrganizationPurgeConfig {
+    /// Interval between purge scan cycles in seconds.
+    ///
+    /// Must be >= 60. Default: 3600 (1 hour).
+    #[serde(default = "default_purge_interval_secs")]
+    pub interval_secs: u64,
+    /// Maximum number of organizations to process per cycle.
+    ///
+    /// Must be >= 1. Default: 50.
+    #[serde(default = "default_purge_batch_size")]
+    pub batch_size: usize,
+}
+
+impl Default for OrganizationPurgeConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: default_purge_interval_secs(),
+            batch_size: default_purge_batch_size(),
+        }
+    }
+}
+
+#[bon::bon]
+impl OrganizationPurgeConfig {
+    /// Creates a new organization purge configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if:
+    /// - `interval_secs` < 60
+    /// - `batch_size` < 1
+    #[builder]
+    pub fn new(
+        #[builder(default = default_purge_interval_secs())] interval_secs: u64,
+        #[builder(default = default_purge_batch_size())] batch_size: usize,
+    ) -> Result<Self, ConfigError> {
+        let config = Self { interval_secs, batch_size };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl OrganizationPurgeConfig {
+    /// Validates the configuration values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.interval_secs < 60 {
+            return Err(ConfigError::Validation {
+                message: format!("interval_secs must be >= 60, got {}", self.interval_secs),
+            });
+        }
+        if self.batch_size == 0 {
+            return Err(ConfigError::Validation { message: "batch_size must be >= 1".to_string() });
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tiered_storage_tests {

@@ -892,6 +892,81 @@ pub fn region_from_i32(value: i32) -> Result<inferadb_ledger_types::Region, Stat
     inferadb_ledger_types::Region::try_from(proto_region)
 }
 
+// =============================================================================
+// UserStatus conversions
+// =============================================================================
+
+impl From<inferadb_ledger_types::UserStatus> for proto::UserStatus {
+    fn from(status: inferadb_ledger_types::UserStatus) -> Self {
+        use inferadb_ledger_types::UserStatus as D;
+        match status {
+            D::Active => proto::UserStatus::Active,
+            D::PendingOrg => proto::UserStatus::PendingOrg,
+            D::Suspended => proto::UserStatus::Suspended,
+            D::Deleting => proto::UserStatus::Deleting,
+            D::Deleted => proto::UserStatus::Deleted,
+        }
+    }
+}
+
+impl TryFrom<proto::UserStatus> for inferadb_ledger_types::UserStatus {
+    type Error = Status;
+
+    fn try_from(proto: proto::UserStatus) -> Result<Self, Status> {
+        use inferadb_ledger_types::UserStatus as D;
+        match proto {
+            proto::UserStatus::Unspecified => {
+                Err(Status::invalid_argument("user status must be specified"))
+            },
+            proto::UserStatus::Active => Ok(D::Active),
+            proto::UserStatus::PendingOrg => Ok(D::PendingOrg),
+            proto::UserStatus::Suspended => Ok(D::Suspended),
+            proto::UserStatus::Deleting => Ok(D::Deleting),
+            proto::UserStatus::Deleted => Ok(D::Deleted),
+        }
+    }
+}
+
+/// Convert a raw i32 user status value to a domain `UserStatus`.
+pub fn user_status_from_i32(value: i32) -> Result<inferadb_ledger_types::UserStatus, Status> {
+    let proto_status = proto::UserStatus::try_from(value)
+        .map_err(|_| Status::invalid_argument(format!("unknown user status value: {value}")))?;
+    inferadb_ledger_types::UserStatus::try_from(proto_status)
+}
+
+// =============================================================================
+// UserRole conversions
+// =============================================================================
+
+impl From<inferadb_ledger_types::UserRole> for proto::UserRole {
+    fn from(role: inferadb_ledger_types::UserRole) -> Self {
+        use inferadb_ledger_types::UserRole as D;
+        match role {
+            D::User => proto::UserRole::User,
+            D::Admin => proto::UserRole::Admin,
+        }
+    }
+}
+
+impl TryFrom<proto::UserRole> for inferadb_ledger_types::UserRole {
+    type Error = Status;
+
+    fn try_from(proto: proto::UserRole) -> Result<Self, Status> {
+        use inferadb_ledger_types::UserRole as D;
+        match proto {
+            proto::UserRole::Unspecified | proto::UserRole::User => Ok(D::User),
+            proto::UserRole::Admin => Ok(D::Admin),
+        }
+    }
+}
+
+/// Convert a raw i32 user role value to a domain `UserRole`.
+pub fn user_role_from_i32(value: i32) -> Result<inferadb_ledger_types::UserRole, Status> {
+    let proto_role = proto::UserRole::try_from(value)
+        .map_err(|_| Status::invalid_argument(format!("unknown user role value: {value}")))?;
+    inferadb_ledger_types::UserRole::try_from(proto_role)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
@@ -2171,5 +2246,52 @@ mod tests {
                 prop_assert_eq!(entry.expires_at, recovered.expires_at);
             }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // UserStatus / UserRole conversions
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn user_status_roundtrip() {
+        use inferadb_ledger_types::UserStatus;
+        let statuses = [
+            UserStatus::Active,
+            UserStatus::PendingOrg,
+            UserStatus::Suspended,
+            UserStatus::Deleting,
+            UserStatus::Deleted,
+        ];
+        for status in statuses {
+            let proto_val: proto::UserStatus = status.into();
+            let i32_val: i32 = proto_val.into();
+            let back = user_status_from_i32(i32_val).expect("valid status");
+            assert_eq!(status, back, "roundtrip failed for {status:?}");
+        }
+    }
+
+    #[test]
+    fn user_role_roundtrip() {
+        use inferadb_ledger_types::UserRole;
+        let roles = [UserRole::User, UserRole::Admin];
+        for role in roles {
+            let proto_val: proto::UserRole = role.into();
+            let i32_val: i32 = proto_val.into();
+            let back = user_role_from_i32(i32_val).expect("valid role");
+            assert_eq!(role, back, "roundtrip failed for {role:?}");
+        }
+    }
+
+    #[test]
+    fn user_status_unspecified_rejected() {
+        let result = user_status_from_i32(0); // 0 = Unspecified
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn user_role_unspecified_treated_as_user() {
+        use inferadb_ledger_types::UserRole;
+        let result = user_role_from_i32(0); // 0 = Unspecified
+        assert_eq!(result.expect("unspecified should map to User"), UserRole::User);
     }
 }
