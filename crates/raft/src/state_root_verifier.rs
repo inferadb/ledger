@@ -219,32 +219,4 @@ mod tests {
         let none = rx.recv().await;
         assert!(none.is_none(), "should return None after sender dropped");
     }
-
-    #[test]
-    fn test_divergence_event_fields_preserved() {
-        let divergence = StateRootDivergence {
-            organization: OrganizationId::new(99),
-            vault: VaultId::new(55),
-            vault_height: 12345,
-            local_state_root: [0x11; 32],
-            leader_state_root: [0x22; 32],
-        };
-
-        // Clone preserves all fields
-        let cloned = divergence.clone();
-        assert_eq!(cloned.organization, OrganizationId::new(99));
-        assert_eq!(cloned.vault, VaultId::new(55));
-        assert_eq!(cloned.vault_height, 12345);
-        assert_eq!(cloned.local_state_root, [0x11; 32]);
-        assert_eq!(cloned.leader_state_root, [0x22; 32]);
-    }
-
-    #[test]
-    fn test_divergence_event_debug_impl() {
-        let divergence = sample_divergence();
-        let debug = format!("{:?}", divergence);
-        assert!(debug.contains("StateRootDivergence"));
-        assert!(debug.contains("42")); // org id
-        assert!(debug.contains("7")); // vault id
-    }
 }

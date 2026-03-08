@@ -313,14 +313,6 @@ mod tests {
     }
 
     #[test]
-    fn test_peer_tracker_config_builder_matches_default() {
-        let from_builder = PeerTrackerConfig::builder().build();
-        let from_default = PeerTrackerConfig::default();
-        assert_eq!(from_builder.staleness_threshold, from_default.staleness_threshold);
-        assert_eq!(from_builder.maintenance_interval, from_default.maintenance_interval);
-    }
-
-    #[test]
     fn test_timestamp_is_reasonable() {
         let mut tracker = PeerTracker::new();
 

@@ -519,27 +519,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_otel_enabled_before_init() {
-        // Before any initialization, should be false
-        // Note: This test assumes it runs in isolation or before init_otel
-        // In practice, OTEL state is global and can be affected by other tests
-        // For a clean test, we'd need to run in a separate process
-    }
-
-    #[test]
-    fn test_get_tracer_before_init() {
-        // Before initialization, get_tracer should return None
-        // Same caveat as above about global state
-    }
-
-    #[test]
-    fn test_export_span_when_disabled() {
-        // When OTEL is not initialized, export_span should be a no-op
-        export_span("TestService", "test", SpanAttributes::default(), None, None, None);
-        // Should not panic
-    }
-
-    #[test]
     fn test_hostname_fallback() {
         // hostname() should return something even when env vars are not set
         let host = hostname();

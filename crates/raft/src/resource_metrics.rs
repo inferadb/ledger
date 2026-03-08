@@ -268,15 +268,4 @@ mod tests {
         let depths = db.table_depths().unwrap();
         assert!(depths.is_empty(), "empty database should have no btree depths");
     }
-
-    #[test]
-    fn test_resource_metrics_no_panic_without_recorder() {
-        // Metrics crate is safe to call without a recorder
-        metrics::set_disk_bytes(1_000_000_000, 500_000_000, "global");
-        metrics::set_page_cache_metrics(100, 50, 75, "global");
-        metrics::set_btree_depth("entities", 3, "global");
-        metrics::set_btree_page_splits(42, "global");
-        metrics::set_compaction_lag_blocks(10, "global");
-        metrics::set_snapshot_disk_bytes(1_048_576, "global");
-    }
 }

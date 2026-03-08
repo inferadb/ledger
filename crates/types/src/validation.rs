@@ -404,523 +404,289 @@ mod tests {
         ValidationConfig::default()
     }
 
-    // =========================================================================
-    // validate_key tests
-    // =========================================================================
-
+    /// Table-driven: validate_key accepts valid keys, rejects invalid ones.
     #[test]
-    fn test_validate_key_valid_simple() {
+    fn test_validate_key_all_cases() {
         let config = default_config();
-        assert!(validate_key("user:123", &config).is_ok());
+
+        // (input, expected_ok, constraint_substring)
+        let cases: Vec<(&str, bool, &str)> = vec![
+            // Valid keys
+            ("user:123", true, ""),
+            ("a-z_A-Z.0-9:/path", true, ""),
+            ("a", true, ""),
+            // Invalid keys
+            ("", false, "empty"),
+            ("key\x00value", false, "invalid character"),
+            ("key\0", false, "invalid character"),
+            ("key_\u{00e9}", false, "invalid character"),
+            ("key with space", false, "invalid character"),
+            ("key\nvalue", false, "invalid character"),
+        ];
+
+        for (input, expected_ok, constraint_sub) in &cases {
+            let result = validate_key(input, &config);
+            assert_eq!(result.is_ok(), *expected_ok, "validate_key({input:?})");
+            if !expected_ok {
+                let err = result.unwrap_err();
+                assert_eq!(err.field, "key", "field for validate_key({input:?})");
+                assert!(
+                    err.constraint.contains(constraint_sub),
+                    "validate_key({input:?}): {}",
+                    err.constraint
+                );
+            }
+        }
     }
 
+    /// Boundary test: key at and over byte limit.
     #[test]
-    fn test_validate_key_valid_all_allowed_chars() {
-        let config = default_config();
-        assert!(validate_key("a-z_A-Z.0-9:/path", &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_key_empty() {
-        let config = default_config();
-        let err = validate_key("", &config).unwrap_err();
-        assert_eq!(err.field, "key");
-        assert!(err.constraint.contains("empty"));
-    }
-
-    #[test]
-    fn test_validate_key_exactly_at_limit() {
+    fn test_validate_key_byte_boundary() {
         let config = ValidationConfig { max_key_bytes: 10, ..ValidationConfig::default() };
-        assert!(validate_key("a234567890", &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_key_one_byte_over_limit() {
-        let config = ValidationConfig { max_key_bytes: 10, ..ValidationConfig::default() };
+        assert!(validate_key("a234567890", &config).is_ok(), "exactly at limit");
         let err = validate_key("a2345678901", &config).unwrap_err();
-        assert_eq!(err.field, "key");
         assert!(err.constraint.contains("exceeds maximum"));
     }
 
+    /// Table-driven: validate_value accepts any binary content within size limits.
     #[test]
-    fn test_validate_key_control_character() {
+    fn test_validate_value_all_cases() {
         let config = default_config();
-        let err = validate_key("key\x00value", &config).unwrap_err();
-        assert_eq!(err.field, "key");
-        assert!(err.constraint.contains("invalid character"));
-    }
+        assert!(validate_value(b"", &config).is_ok(), "empty value is valid");
 
-    #[test]
-    fn test_validate_key_null_byte() {
-        let config = default_config();
-        let err = validate_key("key\0", &config).unwrap_err();
-        assert!(err.constraint.contains("invalid character"));
-    }
+        // All byte values 0..=255 should be accepted
+        let data: Vec<u8> = (0..=255).collect();
+        assert!(validate_value(&data, &config).is_ok(), "all byte values accepted");
 
-    #[test]
-    fn test_validate_key_unicode() {
-        let config = default_config();
-        let err = validate_key("key_\u{00e9}", &config).unwrap_err();
-        assert!(err.constraint.contains("invalid character"));
-    }
-
-    #[test]
-    fn test_validate_key_space() {
-        let config = default_config();
-        let err = validate_key("key with space", &config).unwrap_err();
-        assert!(err.constraint.contains("invalid character"));
-    }
-
-    #[test]
-    fn test_validate_key_newline() {
-        let config = default_config();
-        let err = validate_key("key\nvalue", &config).unwrap_err();
-        assert!(err.constraint.contains("invalid character"));
-    }
-
-    #[test]
-    fn test_validate_key_single_char() {
-        let config = default_config();
-        assert!(validate_key("a", &config).is_ok());
-    }
-
-    // =========================================================================
-    // validate_value tests
-    // =========================================================================
-
-    #[test]
-    fn test_validate_value_empty() {
-        let config = default_config();
-        assert!(validate_value(b"", &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_value_exactly_at_limit() {
+        // Boundary test with custom limit
         let config = ValidationConfig { max_value_bytes: 10, ..ValidationConfig::default() };
-        assert!(validate_value(&[0u8; 10], &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_value_one_byte_over_limit() {
-        let config = ValidationConfig { max_value_bytes: 10, ..ValidationConfig::default() };
+        assert!(validate_value(&[0u8; 10], &config).is_ok(), "exactly at limit");
         let err = validate_value(&[0u8; 11], &config).unwrap_err();
         assert_eq!(err.field, "value");
         assert!(err.constraint.contains("exceeds maximum"));
     }
 
+    /// Table-driven: validate_organization_name accepts valid display names.
     #[test]
-    fn test_validate_value_binary_data() {
+    fn test_validate_organization_name_all_cases() {
         let config = default_config();
-        let data: Vec<u8> = (0..=255).collect();
-        assert!(validate_value(&data, &config).is_ok());
+
+        // (input, expected_ok, constraint_substring)
+        let cases: Vec<(&str, bool, &str)> = vec![
+            // Valid names
+            ("My Organization", true, ""),
+            ("my-organization", true, ""),
+            ("Org 123", true, ""),
+            ("Microsoft Corporation", true, ""),
+            ("OpenAI, LLC.", true, ""),
+            ("Soci\u{00e9}t\u{00e9} G\u{00e9}n\u{00e9}rale", true, ""),
+            ("\u{30C8}\u{30E8}\u{30BF}", true, ""), // Katakana
+            ("\u{041C}\u{043E}\u{0441}\u{043A}\u{0432}\u{0430}", true, ""), // Cyrillic
+            ("a", true, ""),
+            // Invalid names
+            ("", false, "empty"),
+            (" org", false, "leading whitespace"),
+            ("org ", false, "trailing whitespace"),
+            ("my  org", false, "consecutive whitespace"),
+            ("org\tname", false, "control character"),
+            ("org\nname", false, "control character"),
+            ("org\x00name", false, "control character"),
+        ];
+
+        for (input, expected_ok, constraint_sub) in &cases {
+            let result = validate_organization_name(input, &config);
+            assert_eq!(result.is_ok(), *expected_ok, "validate_organization_name({input:?})");
+            if !expected_ok {
+                let err = result.unwrap_err();
+                assert!(
+                    err.constraint.contains(constraint_sub),
+                    "validate_organization_name({input:?}): {}",
+                    err.constraint
+                );
+            }
+        }
     }
 
-    // =========================================================================
-    // validate_organization_name tests
-    // =========================================================================
-
+    /// Boundary test: organization name char limit (ASCII and multibyte).
     #[test]
-    fn test_validate_organization_name_valid_simple() {
-        let config = default_config();
-        assert!(validate_organization_name("My Organization", &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_organization_name_valid_lowercase_hyphen() {
-        let config = default_config();
-        assert!(validate_organization_name("my-organization", &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_organization_name_valid_digits() {
-        let config = default_config();
-        assert!(validate_organization_name("Org 123", &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_organization_name_with_spaces() {
-        let config = default_config();
-        assert!(validate_organization_name("Microsoft Corporation", &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_organization_name_punctuation_valid() {
-        let config = default_config();
-        assert!(validate_organization_name("OpenAI, LLC.", &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_organization_name_unicode_valid() {
-        let config = default_config();
-        assert!(
-            validate_organization_name("Soci\u{00e9}t\u{00e9} G\u{00e9}n\u{00e9}rale", &config)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn test_validate_organization_name_mixed_scripts() {
-        let config = default_config();
-        assert!(validate_organization_name("\u{30C8}\u{30E8}\u{30BF}", &config).is_ok());
-        assert!(
-            validate_organization_name("\u{041C}\u{043E}\u{0441}\u{043A}\u{0432}\u{0430}", &config)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn test_validate_organization_name_single_char() {
-        let config = default_config();
-        assert!(validate_organization_name("a", &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_organization_name_empty() {
-        let config = default_config();
-        let err = validate_organization_name("", &config).unwrap_err();
-        assert_eq!(err.field, "organization_name");
-        assert!(err.constraint.contains("empty"));
-    }
-
-    #[test]
-    fn test_validate_organization_name_exactly_at_limit() {
+    fn test_validate_organization_name_char_boundary() {
         let config =
             ValidationConfig { max_organization_name_chars: 10, ..ValidationConfig::default() };
-        // 10 ASCII characters = 10 chars
         assert!(validate_organization_name("a234567890", &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_organization_name_one_char_over_limit() {
-        let config =
-            ValidationConfig { max_organization_name_chars: 10, ..ValidationConfig::default() };
         let err = validate_organization_name("a2345678901", &config).unwrap_err();
         assert!(err.constraint.contains("exceeds maximum"));
         assert!(err.constraint.contains("characters"));
-    }
 
-    #[test]
-    fn test_validate_organization_name_multibyte_char_limit() {
-        // 3 CJK characters = 3 chars (9 UTF-8 bytes)
+        // CJK: 3 chars fit, 4 chars don't
         let config =
             ValidationConfig { max_organization_name_chars: 3, ..ValidationConfig::default() };
         assert!(validate_organization_name("\u{6771}\u{4EAC}\u{90FD}", &config).is_ok());
-
-        // 4 CJK characters exceeds limit of 3
         let err =
             validate_organization_name("\u{6771}\u{4EAC}\u{90FD}\u{5E02}", &config).unwrap_err();
         assert!(err.constraint.contains("4 characters exceeds maximum 3"));
     }
 
+    /// Table-driven: validate_relationship_string with key+# charset.
     #[test]
-    fn test_validate_organization_name_leading_space_rejected() {
+    fn test_validate_relationship_string_all_cases() {
         let config = default_config();
-        let err = validate_organization_name(" org", &config).unwrap_err();
-        assert!(err.constraint.contains("leading whitespace"));
-    }
 
-    #[test]
-    fn test_validate_organization_name_trailing_space_rejected() {
-        let config = default_config();
-        let err = validate_organization_name("org ", &config).unwrap_err();
-        assert!(err.constraint.contains("trailing whitespace"));
-    }
+        let cases: Vec<(&str, &str, bool, &str)> = vec![
+            // (input, field_name, expected_ok, constraint_substring)
+            ("document:123", "resource", true, ""),
+            ("user:456#member", "subject", true, ""),
+            ("viewer", "relation", true, ""),
+            ("", "resource", false, "empty"),
+            ("doc 123", "resource", false, "invalid character"),
+            ("doc\u{00e9}:123", "resource", false, "invalid character"),
+        ];
 
-    #[test]
-    fn test_validate_organization_name_consecutive_spaces_rejected() {
-        let config = default_config();
-        let err = validate_organization_name("my  org", &config).unwrap_err();
-        assert!(err.constraint.contains("consecutive whitespace"));
-    }
+        for (input, field, expected_ok, constraint_sub) in &cases {
+            let result = validate_relationship_string(input, field, &config);
+            assert_eq!(
+                result.is_ok(),
+                *expected_ok,
+                "validate_relationship_string({input:?}, {field})"
+            );
+            if !expected_ok {
+                let err = result.unwrap_err();
+                assert!(
+                    err.constraint.contains(constraint_sub),
+                    "validate_relationship_string({input:?}): {}",
+                    err.constraint
+                );
+            }
+        }
 
-    #[test]
-    fn test_validate_organization_name_tab_rejected() {
-        let config = default_config();
-        let err = validate_organization_name("org\tname", &config).unwrap_err();
-        assert!(err.constraint.contains("control character"));
-    }
-
-    #[test]
-    fn test_validate_organization_name_newline_rejected() {
-        let config = default_config();
-        let err = validate_organization_name("org\nname", &config).unwrap_err();
-        assert!(err.constraint.contains("control character"));
-    }
-
-    #[test]
-    fn test_validate_organization_name_null_byte_rejected() {
-        let config = default_config();
-        let err = validate_organization_name("org\x00name", &config).unwrap_err();
-        assert!(err.constraint.contains("control character"));
-    }
-
-    // =========================================================================
-    // validate_relationship_string tests
-    // =========================================================================
-
-    #[test]
-    fn test_validate_relationship_valid_resource() {
-        let config = default_config();
-        assert!(validate_relationship_string("document:123", "resource", &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_relationship_valid_subject_with_fragment() {
-        let config = default_config();
-        assert!(validate_relationship_string("user:456#member", "subject", &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_relationship_valid_relation() {
-        let config = default_config();
-        assert!(validate_relationship_string("viewer", "relation", &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_relationship_empty() {
-        let config = default_config();
-        let err = validate_relationship_string("", "resource", &config).unwrap_err();
-        assert_eq!(err.field, "resource");
-        assert!(err.constraint.contains("empty"));
-    }
-
-    #[test]
-    fn test_validate_relationship_over_limit() {
+        // Boundary test with custom limit
         let config =
             ValidationConfig { max_relationship_string_bytes: 5, ..ValidationConfig::default() };
         let err = validate_relationship_string("toolong", "resource", &config).unwrap_err();
         assert!(err.constraint.contains("exceeds maximum"));
     }
 
+    /// Table-driven: validate_operations_count boundary cases.
     #[test]
-    fn test_validate_relationship_space_rejected() {
+    fn test_validate_operations_count_all_cases() {
         let config = default_config();
-        let err = validate_relationship_string("doc 123", "resource", &config).unwrap_err();
-        assert!(err.constraint.contains("invalid character"));
+
+        let cases: Vec<(usize, bool, &str)> = vec![
+            (0, false, "at least one"),
+            (1, true, ""),
+            (500, true, ""),
+            (config.max_operations_per_write, true, ""),
+            (config.max_operations_per_write + 1, false, "exceeds maximum"),
+        ];
+
+        for (count, expected_ok, constraint_sub) in &cases {
+            let result = validate_operations_count(*count, &config);
+            assert_eq!(result.is_ok(), *expected_ok, "validate_operations_count({count})");
+            if !expected_ok {
+                assert!(result.unwrap_err().constraint.contains(constraint_sub));
+            }
+        }
     }
 
+    /// Table-driven: validate_batch_payload_bytes boundary cases.
     #[test]
-    fn test_validate_relationship_unicode_rejected() {
+    fn test_validate_batch_payload_all_cases() {
         let config = default_config();
-        let err = validate_relationship_string("doc\u{00e9}:123", "resource", &config).unwrap_err();
-        assert!(err.constraint.contains("invalid character"));
+
+        let cases: Vec<(usize, bool)> = vec![
+            (0, true),
+            (config.max_batch_payload_bytes, true),
+            (config.max_batch_payload_bytes + 1, false),
+        ];
+
+        for (size, expected_ok) in &cases {
+            let result = validate_batch_payload_bytes(*size, &config);
+            assert_eq!(result.is_ok(), *expected_ok, "validate_batch_payload_bytes({size})");
+            if !expected_ok {
+                assert!(result.unwrap_err().constraint.contains("exceeds maximum"));
+            }
+        }
     }
 
-    // =========================================================================
-    // validate_operations_count tests
-    // =========================================================================
-
-    #[test]
-    fn test_validate_operations_count_valid() {
-        let config = default_config();
-        assert!(validate_operations_count(1, &config).is_ok());
-        assert!(validate_operations_count(500, &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_operations_count_zero() {
-        let config = default_config();
-        let err = validate_operations_count(0, &config).unwrap_err();
-        assert!(err.constraint.contains("at least one"));
-    }
-
-    #[test]
-    fn test_validate_operations_count_exactly_at_limit() {
-        let config = default_config();
-        assert!(validate_operations_count(config.max_operations_per_write, &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_operations_count_over_limit() {
-        let config = default_config();
-        let err =
-            validate_operations_count(config.max_operations_per_write + 1, &config).unwrap_err();
-        assert!(err.constraint.contains("exceeds maximum"));
-    }
-
-    // =========================================================================
-    // validate_batch_payload_bytes tests
-    // =========================================================================
-
-    #[test]
-    fn test_validate_batch_payload_exactly_at_limit() {
-        let config = default_config();
-        assert!(validate_batch_payload_bytes(config.max_batch_payload_bytes, &config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_batch_payload_over_limit() {
-        let config = default_config();
-        let err =
-            validate_batch_payload_bytes(config.max_batch_payload_bytes + 1, &config).unwrap_err();
-        assert!(err.constraint.contains("exceeds maximum"));
-    }
-
-    #[test]
-    fn test_validate_batch_payload_zero() {
-        let config = default_config();
-        assert!(validate_batch_payload_bytes(0, &config).is_ok());
-    }
-
-    // =========================================================================
-    // ValidationError display tests
-    // =========================================================================
-
+    /// ValidationError Display format.
     #[test]
     fn test_validation_error_display() {
         let err = ValidationError { field: "key".to_string(), constraint: "too long".to_string() };
         assert_eq!(err.to_string(), "key: too long");
     }
 
-    // =========================================================================
-    // validate_email tests
-    // =========================================================================
-
+    /// Table-driven: validate_email structural checks.
     #[test]
-    fn test_validate_email_valid_simple() {
-        assert!(validate_email("user@example.com").is_ok());
-    }
-
-    #[test]
-    fn test_validate_email_valid_minimal() {
-        assert!(validate_email("a@b.c").is_ok());
-    }
-
-    #[test]
-    fn test_validate_email_valid_with_dots() {
-        assert!(validate_email("first.last@example.com").is_ok());
-    }
-
-    #[test]
-    fn test_validate_email_valid_with_plus() {
-        assert!(validate_email("user+tag@example.com").is_ok());
-    }
-
-    #[test]
-    fn test_validate_email_empty() {
-        let err = validate_email("").unwrap_err();
-        assert_eq!(err.field, "email");
-        assert!(err.constraint.contains("empty"));
-    }
-
-    #[test]
-    fn test_validate_email_no_at_sign() {
-        let err = validate_email("userexample.com").unwrap_err();
-        assert!(err.constraint.contains("@"));
-    }
-
-    #[test]
-    fn test_validate_email_multiple_at_signs() {
-        let err = validate_email("user@@example.com").unwrap_err();
-        assert!(err.constraint.contains("@"));
-    }
-
-    #[test]
-    fn test_validate_email_empty_local_part() {
-        let err = validate_email("@example.com").unwrap_err();
-        assert!(err.constraint.contains("local"));
-    }
-
-    #[test]
-    fn test_validate_email_empty_domain() {
-        let err = validate_email("user@").unwrap_err();
-        assert!(err.constraint.contains("domain"));
-    }
-
-    #[test]
-    fn test_validate_email_domain_no_dot() {
-        let err = validate_email("user@localhost").unwrap_err();
-        assert!(err.constraint.contains("domain"));
-    }
-
-    #[test]
-    fn test_validate_email_too_long() {
+    fn test_validate_email_all_cases() {
+        // (input, expected_ok, constraint_substring)
         let long_local = "a".repeat(310);
-        let email = format!("{long_local}@example.com");
-        let err = validate_email(&email).unwrap_err();
+        let too_long_email = format!("{long_local}@example.com");
+
+        let cases: Vec<(&str, bool, &str)> = vec![
+            // Valid emails
+            ("user@example.com", true, ""),
+            ("a@b.c", true, ""),
+            ("first.last@example.com", true, ""),
+            ("user+tag@example.com", true, ""),
+            // Invalid emails
+            ("", false, "empty"),
+            ("userexample.com", false, "@"),
+            ("user@@example.com", false, "@"),
+            ("@example.com", false, "local"),
+            ("user@", false, "domain"),
+            ("user@localhost", false, "domain"),
+        ];
+
+        for (input, expected_ok, constraint_sub) in &cases {
+            let result = validate_email(input);
+            assert_eq!(result.is_ok(), *expected_ok, "validate_email({input:?})");
+            if !expected_ok {
+                assert!(
+                    result.unwrap_err().constraint.contains(constraint_sub),
+                    "validate_email({input:?})"
+                );
+            }
+        }
+
+        // Separate: too-long email (can't put owned String in static table)
+        let err = validate_email(&too_long_email).unwrap_err();
         assert!(err.constraint.contains("exceeds"));
     }
 
-    // =========================================================================
-    // validate_user_name tests
-    // =========================================================================
-
+    /// Table-driven: validate_user_name display name checks.
     #[test]
-    fn test_validate_user_name_valid_simple() {
-        assert!(validate_user_name("Alice Smith").is_ok());
-    }
+    fn test_validate_user_name_all_cases() {
+        // (input, expected_ok, constraint_substring)
+        let cases: Vec<(&str, bool, &str)> = vec![
+            // Valid names
+            ("Alice Smith", true, ""),
+            ("A", true, ""),
+            ("Société Générale", true, ""),
+            // Invalid names
+            ("", false, "empty"),
+            (" Alice", false, "leading"),
+            ("Alice ", false, "trailing"),
+            ("Alice  Smith", false, "consecutive"),
+            ("Alice\x00Smith", false, "control"),
+            ("Alice\tSmith", false, "control"),
+            ("Alice\u{00A0} Smith", false, "consecutive whitespace"),
+            ("Alice\u{2003}\u{2003}Smith", false, "consecutive whitespace"),
+        ];
 
-    #[test]
-    fn test_validate_user_name_valid_single_char() {
-        assert!(validate_user_name("A").is_ok());
-    }
+        for (input, expected_ok, constraint_sub) in &cases {
+            let result = validate_user_name(input);
+            assert_eq!(result.is_ok(), *expected_ok, "validate_user_name({input:?})");
+            if !expected_ok {
+                assert!(
+                    result.unwrap_err().constraint.contains(constraint_sub),
+                    "validate_user_name({input:?})"
+                );
+            }
+        }
 
-    #[test]
-    fn test_validate_user_name_valid_unicode() {
-        assert!(validate_user_name("Société Générale").is_ok());
-    }
-
-    #[test]
-    fn test_validate_user_name_empty() {
-        let err = validate_user_name("").unwrap_err();
-        assert_eq!(err.field, "user_name");
-        assert!(err.constraint.contains("empty"));
-    }
-
-    #[test]
-    fn test_validate_user_name_too_long() {
-        let name = "a".repeat(201);
-        let err = validate_user_name(&name).unwrap_err();
-        assert!(err.constraint.contains("exceeds"));
-    }
-
-    #[test]
-    fn test_validate_user_name_exactly_at_limit() {
-        let name = "a".repeat(200);
-        assert!(validate_user_name(&name).is_ok());
-    }
-
-    #[test]
-    fn test_validate_user_name_leading_space() {
-        let err = validate_user_name(" Alice").unwrap_err();
-        assert!(err.constraint.contains("leading"));
-    }
-
-    #[test]
-    fn test_validate_user_name_trailing_space() {
-        let err = validate_user_name("Alice ").unwrap_err();
-        assert!(err.constraint.contains("trailing"));
-    }
-
-    #[test]
-    fn test_validate_user_name_consecutive_spaces() {
-        let err = validate_user_name("Alice  Smith").unwrap_err();
-        assert!(err.constraint.contains("consecutive"));
-    }
-
-    #[test]
-    fn test_validate_user_name_control_char() {
-        let err = validate_user_name("Alice\x00Smith").unwrap_err();
-        assert!(err.constraint.contains("control"));
-    }
-
-    #[test]
-    fn test_validate_user_name_tab_rejected() {
-        let err = validate_user_name("Alice\tSmith").unwrap_err();
-        assert!(err.constraint.contains("control"));
-    }
-
-    #[test]
-    fn test_validate_user_name_unicode_consecutive_whitespace() {
-        // Non-breaking space (\u{00A0}) followed by regular space
-        let err = validate_user_name("Alice\u{00A0} Smith").unwrap_err();
-        assert!(err.constraint.contains("consecutive whitespace"));
-    }
-
-    #[test]
-    fn test_validate_user_name_em_space_consecutive() {
-        // Two em spaces (\u{2003})
-        let err = validate_user_name("Alice\u{2003}\u{2003}Smith").unwrap_err();
-        assert!(err.constraint.contains("consecutive whitespace"));
+        // Boundary: exactly at limit vs over limit
+        let at_limit = "a".repeat(200);
+        assert!(validate_user_name(&at_limit).is_ok());
+        let over_limit = "a".repeat(201);
+        assert!(validate_user_name(&over_limit).unwrap_err().constraint.contains("exceeds"));
     }
 }

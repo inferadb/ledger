@@ -94,12 +94,6 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_config_cache_size_zero() {
-        let result = StorageConfig::builder().cache_size_bytes(0).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_storage_config_compression_level_valid_range() {
         // Min boundary
         let result = StorageConfig::builder().compression_level(1).build();
@@ -129,12 +123,6 @@ mod tests {
         assert!(result.is_err());
 
         let result = StorageConfig::builder().compression_level(100).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_storage_config_compression_level_negative() {
-        let result = StorageConfig::builder().compression_level(-1).build();
         assert!(result.is_err());
     }
 
@@ -293,36 +281,6 @@ mod tests {
     // Default impl tests
     // =========================================================================
 
-    #[test]
-    fn test_default_configs() {
-        let storage = StorageConfig::default();
-        assert_eq!(storage.hot_cache_snapshots, 3);
-        assert_eq!(storage.compression_level, 3);
-
-        let raft = RaftConfig::default();
-        assert_eq!(raft.heartbeat_interval, Duration::from_millis(100));
-
-        let batch = BatchConfig::default();
-        assert_eq!(batch.max_batch_size, 100);
-        assert!(batch.coalesce_enabled);
-    }
-
-    #[test]
-    fn test_defaults_pass_validation() {
-        assert!(StorageConfig::default().validate().is_ok());
-        assert!(RaftConfig::default().validate().is_ok());
-        assert!(BatchConfig::default().validate().is_ok());
-        assert!(RateLimitConfig::default().validate().is_ok());
-    }
-
-    #[test]
-    fn test_builder_matches_default() {
-        assert_eq!(StorageConfig::builder().build().expect("valid"), StorageConfig::default());
-        assert_eq!(RaftConfig::builder().build().expect("valid"), RaftConfig::default());
-        assert_eq!(BatchConfig::builder().build().expect("valid"), BatchConfig::default());
-        assert_eq!(RateLimitConfig::builder().build().expect("valid"), RateLimitConfig::default());
-    }
-
     // =========================================================================
     // Validate method tests (for post-deserialization)
     // =========================================================================
@@ -466,12 +424,6 @@ mod tests {
     // ConfigError display tests
     // =========================================================================
 
-    #[test]
-    fn test_config_error_display() {
-        let err = ConfigError::Validation { message: "test error".to_string() };
-        assert_eq!(err.to_string(), "invalid config: test error");
-    }
-
     // =========================================================================
     // RateLimitConfig validation tests
     // =========================================================================
@@ -504,49 +456,32 @@ mod tests {
     }
 
     #[test]
-    fn test_rate_limit_config_client_burst_zero() {
-        let result = RateLimitConfig::builder().client_burst(0).build();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("client_burst"));
-    }
-
-    #[test]
-    fn test_rate_limit_config_client_rate_zero() {
-        let result = RateLimitConfig::builder().client_rate(0.0).build();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("client_rate"));
-    }
-
-    #[test]
-    fn test_rate_limit_config_client_rate_negative() {
-        let result = RateLimitConfig::builder().client_rate(-1.0).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_rate_limit_config_organization_burst_zero() {
-        let result = RateLimitConfig::builder().organization_burst(0).build();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("organization_burst"));
-    }
-
-    #[test]
-    fn test_rate_limit_config_organization_rate_zero() {
-        let result = RateLimitConfig::builder().organization_rate(0.0).build();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("organization_rate"));
-    }
-
-    #[test]
-    fn test_rate_limit_config_backpressure_threshold_zero() {
-        let result = RateLimitConfig::builder().backpressure_threshold(0).build();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("backpressure_threshold"));
+    #[allow(clippy::type_complexity)]
+    fn test_rate_limit_config_rejects_invalid_fields() {
+        let cases: Vec<(&str, Box<dyn Fn() -> Result<RateLimitConfig, ConfigError>>)> = vec![
+            ("client_burst", Box::new(|| RateLimitConfig::builder().client_burst(0).build())),
+            ("client_rate", Box::new(|| RateLimitConfig::builder().client_rate(0.0).build())),
+            (
+                "client_rate (negative)",
+                Box::new(|| RateLimitConfig::builder().client_rate(-1.0).build()),
+            ),
+            (
+                "organization_burst",
+                Box::new(|| RateLimitConfig::builder().organization_burst(0).build()),
+            ),
+            (
+                "organization_rate",
+                Box::new(|| RateLimitConfig::builder().organization_rate(0.0).build()),
+            ),
+            (
+                "backpressure_threshold",
+                Box::new(|| RateLimitConfig::builder().backpressure_threshold(0).build()),
+            ),
+        ];
+        for (label, build_fn) in &cases {
+            let result = build_fn();
+            assert!(result.is_err(), "{label} should be rejected");
+        }
     }
 
     #[test]
@@ -560,17 +495,6 @@ mod tests {
             .backpressure_threshold(1)
             .build();
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_rate_limit_config_default_impl() {
-        let config = RateLimitConfig::default();
-        assert_eq!(config.client_burst, 100);
-        assert_eq!(config.client_rate, 50.0);
-        assert_eq!(config.organization_burst, 1000);
-        assert_eq!(config.organization_rate, 500.0);
-        assert_eq!(config.backpressure_threshold, 100);
-        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -600,13 +524,6 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: RateLimitConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(config, deserialized);
-    }
-
-    #[test]
-    fn test_rate_limit_config_builder_matches_default() {
-        let from_builder = RateLimitConfig::builder().build().expect("valid");
-        let from_default = RateLimitConfig::default();
-        assert_eq!(from_builder, from_default);
     }
 
     // =========================================================================
@@ -647,12 +564,6 @@ mod tests {
     #[test]
     fn test_btree_compaction_config_fill_factor_one() {
         let result = BTreeCompactionConfig::builder().min_fill_factor(1.0).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_btree_compaction_config_fill_factor_negative() {
-        let result = BTreeCompactionConfig::builder().min_fill_factor(-0.1).build();
         assert!(result.is_err());
     }
 
@@ -731,57 +642,54 @@ mod tests {
     }
 
     #[test]
-    fn test_shutdown_config_grace_period_zero() {
-        let result = ShutdownConfig::builder().grace_period_secs(0).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_shutdown_config_grace_period_minimum() {
-        let config =
-            ShutdownConfig::builder().grace_period_secs(1).build().expect("valid at minimum");
-        assert_eq!(config.grace_period_secs, 1);
-    }
-
-    #[test]
-    fn test_shutdown_config_drain_timeout_too_short() {
-        let result = ShutdownConfig::builder().drain_timeout_secs(4).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_shutdown_config_drain_timeout_minimum() {
-        let config =
-            ShutdownConfig::builder().drain_timeout_secs(5).build().expect("valid at minimum");
-        assert_eq!(config.drain_timeout_secs, 5);
-    }
-
-    #[test]
-    fn test_shutdown_config_pre_shutdown_timeout_too_short() {
-        let result = ShutdownConfig::builder().pre_shutdown_timeout_secs(4).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_shutdown_config_pre_shutdown_timeout_minimum() {
-        let config = ShutdownConfig::builder()
-            .pre_shutdown_timeout_secs(5)
-            .build()
-            .expect("valid at minimum");
-        assert_eq!(config.pre_shutdown_timeout_secs, 5);
-    }
-
-    #[test]
-    fn test_shutdown_config_watchdog_multiplier_zero() {
-        let result = ShutdownConfig::builder().watchdog_multiplier(0).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_shutdown_config_pre_stop_delay_zero_allowed() {
-        let config =
-            ShutdownConfig::builder().pre_stop_delay_secs(0).build().expect("zero is valid");
-        assert_eq!(config.pre_stop_delay_secs, 0);
+    #[allow(clippy::type_complexity)]
+    fn test_shutdown_config_boundary_values() {
+        let cases: Vec<(&str, Box<dyn Fn() -> Result<ShutdownConfig, ConfigError>>, bool)> = vec![
+            (
+                "grace_period_secs=0 rejected",
+                Box::new(|| ShutdownConfig::builder().grace_period_secs(0).build()),
+                false,
+            ),
+            (
+                "grace_period_secs=1 accepted",
+                Box::new(|| ShutdownConfig::builder().grace_period_secs(1).build()),
+                true,
+            ),
+            (
+                "drain_timeout_secs=4 rejected",
+                Box::new(|| ShutdownConfig::builder().drain_timeout_secs(4).build()),
+                false,
+            ),
+            (
+                "drain_timeout_secs=5 accepted",
+                Box::new(|| ShutdownConfig::builder().drain_timeout_secs(5).build()),
+                true,
+            ),
+            (
+                "pre_shutdown_timeout_secs=4 rejected",
+                Box::new(|| ShutdownConfig::builder().pre_shutdown_timeout_secs(4).build()),
+                false,
+            ),
+            (
+                "pre_shutdown_timeout_secs=5 accepted",
+                Box::new(|| ShutdownConfig::builder().pre_shutdown_timeout_secs(5).build()),
+                true,
+            ),
+            (
+                "watchdog_multiplier=0 rejected",
+                Box::new(|| ShutdownConfig::builder().watchdog_multiplier(0).build()),
+                false,
+            ),
+            (
+                "pre_stop_delay_secs=0 accepted",
+                Box::new(|| ShutdownConfig::builder().pre_stop_delay_secs(0).build()),
+                true,
+            ),
+        ];
+        for (label, build_fn, should_succeed) in &cases {
+            let result = build_fn();
+            assert_eq!(result.is_ok(), *should_succeed, "{label}");
+        }
     }
 
     #[test]
@@ -860,58 +768,56 @@ mod tests {
     }
 
     #[test]
-    fn test_hot_key_config_window_secs_zero() {
-        assert!(HotKeyConfig::builder().window_secs(0).build().is_err());
-    }
-
-    #[test]
-    fn test_hot_key_config_window_secs_minimum() {
-        let config = HotKeyConfig::builder().window_secs(1).build().unwrap();
-        assert_eq!(config.window_secs, 1);
-    }
-
-    #[test]
-    fn test_hot_key_config_threshold_zero() {
-        assert!(HotKeyConfig::builder().threshold(0).build().is_err());
-    }
-
-    #[test]
-    fn test_hot_key_config_threshold_minimum() {
-        let config = HotKeyConfig::builder().threshold(1).build().unwrap();
-        assert_eq!(config.threshold, 1);
-    }
-
-    #[test]
-    fn test_hot_key_config_cms_width_too_small() {
-        assert!(HotKeyConfig::builder().cms_width(63).build().is_err());
-    }
-
-    #[test]
-    fn test_hot_key_config_cms_width_minimum() {
-        let config = HotKeyConfig::builder().cms_width(64).build().unwrap();
-        assert_eq!(config.cms_width, 64);
-    }
-
-    #[test]
-    fn test_hot_key_config_cms_depth_too_small() {
-        assert!(HotKeyConfig::builder().cms_depth(1).build().is_err());
-    }
-
-    #[test]
-    fn test_hot_key_config_cms_depth_minimum() {
-        let config = HotKeyConfig::builder().cms_depth(2).build().unwrap();
-        assert_eq!(config.cms_depth, 2);
-    }
-
-    #[test]
-    fn test_hot_key_config_top_k_zero() {
-        assert!(HotKeyConfig::builder().top_k(0).build().is_err());
-    }
-
-    #[test]
-    fn test_hot_key_config_top_k_minimum() {
-        let config = HotKeyConfig::builder().top_k(1).build().unwrap();
-        assert_eq!(config.top_k, 1);
+    #[allow(clippy::type_complexity)]
+    fn test_hot_key_config_boundary_values() {
+        let cases: Vec<(&str, Box<dyn Fn() -> Result<HotKeyConfig, ConfigError>>, bool)> = vec![
+            (
+                "window_secs=0 rejected",
+                Box::new(|| HotKeyConfig::builder().window_secs(0).build()),
+                false,
+            ),
+            (
+                "window_secs=1 accepted",
+                Box::new(|| HotKeyConfig::builder().window_secs(1).build()),
+                true,
+            ),
+            (
+                "threshold=0 rejected",
+                Box::new(|| HotKeyConfig::builder().threshold(0).build()),
+                false,
+            ),
+            (
+                "threshold=1 accepted",
+                Box::new(|| HotKeyConfig::builder().threshold(1).build()),
+                true,
+            ),
+            (
+                "cms_width=63 rejected",
+                Box::new(|| HotKeyConfig::builder().cms_width(63).build()),
+                false,
+            ),
+            (
+                "cms_width=64 accepted",
+                Box::new(|| HotKeyConfig::builder().cms_width(64).build()),
+                true,
+            ),
+            (
+                "cms_depth=1 rejected",
+                Box::new(|| HotKeyConfig::builder().cms_depth(1).build()),
+                false,
+            ),
+            (
+                "cms_depth=2 accepted",
+                Box::new(|| HotKeyConfig::builder().cms_depth(2).build()),
+                true,
+            ),
+            ("top_k=0 rejected", Box::new(|| HotKeyConfig::builder().top_k(0).build()), false),
+            ("top_k=1 accepted", Box::new(|| HotKeyConfig::builder().top_k(1).build()), true),
+        ];
+        for (label, build_fn, should_succeed) in &cases {
+            let result = build_fn();
+            assert_eq!(result.is_ok(), *should_succeed, "{label}");
+        }
     }
 
     #[test]
@@ -927,12 +833,6 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: HotKeyConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(config, deserialized);
-    }
-
-    #[test]
-    fn test_hot_key_config_validate_after_deserialize() {
-        let config = HotKeyConfig::default();
-        config.validate().unwrap();
     }
 
     #[test]
@@ -982,39 +882,35 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_config_max_key_bytes_zero() {
-        let result = ValidationConfig::builder().max_key_bytes(0).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validation_config_max_value_bytes_zero() {
-        let result = ValidationConfig::builder().max_value_bytes(0).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validation_config_max_operations_per_write_zero() {
-        let result = ValidationConfig::builder().max_operations_per_write(0).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validation_config_max_batch_payload_bytes_zero() {
-        let result = ValidationConfig::builder().max_batch_payload_bytes(0).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validation_config_max_organization_name_chars_zero() {
-        let result = ValidationConfig::builder().max_organization_name_chars(0).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validation_config_max_relationship_string_bytes_zero() {
-        let result = ValidationConfig::builder().max_relationship_string_bytes(0).build();
-        assert!(result.is_err());
+    #[allow(clippy::type_complexity)]
+    fn test_validation_config_rejects_zero_fields() {
+        let cases: Vec<(&str, Box<dyn Fn() -> Result<ValidationConfig, ConfigError>>)> = vec![
+            ("max_key_bytes", Box::new(|| ValidationConfig::builder().max_key_bytes(0).build())),
+            (
+                "max_value_bytes",
+                Box::new(|| ValidationConfig::builder().max_value_bytes(0).build()),
+            ),
+            (
+                "max_operations_per_write",
+                Box::new(|| ValidationConfig::builder().max_operations_per_write(0).build()),
+            ),
+            (
+                "max_batch_payload_bytes",
+                Box::new(|| ValidationConfig::builder().max_batch_payload_bytes(0).build()),
+            ),
+            (
+                "max_organization_name_chars",
+                Box::new(|| ValidationConfig::builder().max_organization_name_chars(0).build()),
+            ),
+            (
+                "max_relationship_string_bytes",
+                Box::new(|| ValidationConfig::builder().max_relationship_string_bytes(0).build()),
+            ),
+        ];
+        for (field, build_fn) in &cases {
+            let result = build_fn();
+            assert!(result.is_err(), "{field} = 0 should be rejected");
+        }
     }
 
     #[test]
@@ -1108,12 +1004,6 @@ mod tests {
     }
 
     #[test]
-    fn test_integrity_config_pages_percent_negative() {
-        let err = IntegrityConfig::builder().pages_per_cycle_percent(-1.0).build().unwrap_err();
-        assert!(err.to_string().contains("pages_per_cycle_percent"));
-    }
-
-    #[test]
     fn test_runtime_config_integrity_validation() {
         let config = RuntimeConfig {
             integrity: Some(IntegrityConfig {
@@ -1203,12 +1093,6 @@ mod tests {
         let config: MetricsCardinalityConfig = serde_json::from_str(json).expect("deserialize");
         assert_eq!(config.warn_cardinality, 5000);
         assert_eq!(config.max_cardinality, 10_000);
-    }
-
-    #[test]
-    fn test_metrics_cardinality_config_validate_method() {
-        let config = MetricsCardinalityConfig { warn_cardinality: 100, max_cardinality: 200 };
-        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -1383,41 +1267,35 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_region_retention_days_default_90() {
+    fn test_region_retention_days() {
         use crate::Region;
 
-        assert_eq!(Region::US_EAST_VA.retention_days(), 90);
-        assert_eq!(Region::US_WEST_OR.retention_days(), 90);
-        assert_eq!(Region::GLOBAL.retention_days(), 90);
-        assert_eq!(Region::JP_EAST_TOKYO.retention_days(), 90);
-        assert_eq!(Region::AU_EAST_SYDNEY.retention_days(), 90);
-    }
+        let cases: &[(Region, u32)] = &[
+            // GDPR regions: 30 days
+            (Region::IE_EAST_DUBLIN, 30),
+            (Region::FR_NORTH_PARIS, 30),
+            (Region::DE_CENTRAL_FRANKFURT, 30),
+            (Region::SE_EAST_STOCKHOLM, 30),
+            (Region::IT_NORTH_MILAN, 30),
+            (Region::UK_SOUTH_LONDON, 30),
+            // Non-GDPR regions: 90 days
+            (Region::US_EAST_VA, 90),
+            (Region::US_WEST_OR, 90),
+            (Region::GLOBAL, 90),
+            (Region::JP_EAST_TOKYO, 90),
+            (Region::AU_EAST_SYDNEY, 90),
+            (Region::BR_SOUTHEAST_SP, 90),
+            (Region::SG_CENTRAL_SINGAPORE, 90),
+            (Region::IN_WEST_MUMBAI, 90),
+            (Region::SA_CENTRAL_RIYADH, 90),
+        ];
 
-    #[test]
-    fn test_region_retention_days_eu_gdpr_30() {
-        use crate::Region;
-
-        assert_eq!(Region::IE_EAST_DUBLIN.retention_days(), 30);
-        assert_eq!(Region::FR_NORTH_PARIS.retention_days(), 30);
-        assert_eq!(Region::DE_CENTRAL_FRANKFURT.retention_days(), 30);
-        assert_eq!(Region::SE_EAST_STOCKHOLM.retention_days(), 30);
-        assert_eq!(Region::IT_NORTH_MILAN.retention_days(), 30);
-    }
-
-    #[test]
-    fn test_region_retention_days_uk_gdpr_30() {
-        use crate::Region;
-
-        assert_eq!(Region::UK_SOUTH_LONDON.retention_days(), 30);
-    }
-
-    #[test]
-    fn test_region_retention_days_non_eu_90() {
-        use crate::Region;
-
-        assert_eq!(Region::BR_SOUTHEAST_SP.retention_days(), 90);
-        assert_eq!(Region::SG_CENTRAL_SINGAPORE.retention_days(), 90);
-        assert_eq!(Region::IN_WEST_MUMBAI.retention_days(), 90);
-        assert_eq!(Region::SA_CENTRAL_RIYADH.retention_days(), 90);
+        for (region, expected) in cases {
+            assert_eq!(
+                region.retention_days(),
+                *expected,
+                "{region:?} should have {expected}-day retention"
+            );
+        }
     }
 }

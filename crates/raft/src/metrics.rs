@@ -1248,70 +1248,6 @@ mod tests {
     }
 
     #[test]
-    fn test_metrics_dont_panic() {
-        // These should not panic even without a recorder installed
-        record_write(true, 0.001);
-        record_read(true, 0.001);
-        record_raft_proposal();
-        set_raft_commit_index(100);
-        set_is_leader(true);
-        record_idempotency_hit();
-        record_grpc_request("WriteService", "write", "OK", "none", 0.001, "global");
-    }
-
-    #[test]
-    fn test_read_forward_metrics_dont_panic() {
-        record_read_forward("read");
-        record_read_forward("batch_read");
-        record_read_forward("verified_read");
-        record_read_forward("historical_read");
-        record_read_forward("get_block");
-        record_read_forward("get_block_range");
-        record_read_forward("get_tip");
-        record_read_forward("get_client_state");
-        record_read_forward("list_relationships");
-        record_read_forward("list_resources");
-        record_read_forward("list_entities");
-        record_read_forward("watch_blocks");
-    }
-
-    #[test]
-    fn test_sli_metrics_dont_panic() {
-        // SLI/SLO metrics should not panic without a recorder
-        set_batch_queue_depth(42, "global");
-        set_rate_limit_queue_depth(10, "global");
-        set_cluster_quorum_status(true);
-        set_cluster_quorum_status(false);
-        record_leader_election();
-        record_grpc_request("WriteService", "write", "Internal", "internal", 0.5, "us-east-va");
-        record_grpc_request("ReadService", "read", "DeadlineExceeded", "timeout", 1.0, "global");
-        record_grpc_request(
-            "AdminService",
-            "create",
-            "InvalidArgument",
-            "validation",
-            0.01,
-            "global",
-        );
-        record_grpc_request(
-            "WriteService",
-            "write",
-            "ResourceExhausted",
-            "rate_limited",
-            0.1,
-            "ie-east-dublin",
-        );
-        record_grpc_request(
-            "WriteService",
-            "write",
-            "Unavailable",
-            "unavailable",
-            0.05,
-            "de-central-frankfurt",
-        );
-    }
-
-    #[test]
     fn test_error_class_from_grpc_code() {
         assert_eq!(error_class_from_grpc_code(tonic::Code::Ok), "none");
         assert_eq!(error_class_from_grpc_code(tonic::Code::DeadlineExceeded), "timeout");
@@ -1346,18 +1282,6 @@ mod tests {
     }
 
     #[test]
-    fn test_background_job_metrics_dont_panic() {
-        // All five background job types with both success and failure outcomes
-        for job in &["gc", "compaction", "integrity_scrub", "auto_recovery", "backup"] {
-            record_background_job_duration(job, 1.234);
-            record_background_job_run(job, "success");
-            record_background_job_run(job, "failure");
-            record_background_job_items(job, 42);
-            record_background_job_items(job, 0);
-        }
-    }
-
-    #[test]
     fn test_background_job_metric_names() {
         // Verify metric name constants follow naming conventions
         assert!(BACKGROUND_JOB_DURATION_SECONDS.starts_with("ledger_"));
@@ -1369,29 +1293,9 @@ mod tests {
     }
 
     #[test]
-    fn test_cardinality_overflow_doesnt_panic() {
-        record_cardinality_overflow("test_metric");
-        record_cardinality_overflow("another_metric");
-    }
-
-    #[test]
     fn test_cardinality_overflow_metric_name() {
         assert!(CARDINALITY_OVERFLOW_TOTAL.starts_with("ledger_"));
         assert!(CARDINALITY_OVERFLOW_TOTAL.ends_with("_total"));
-    }
-
-    #[test]
-    fn test_cross_region_forward_metrics_dont_panic() {
-        record_cross_region_forward("write", "us-east-va", "ie-east-dublin", 0.123);
-        record_cross_region_forward("read", "global", "ca-central-qc", 0.456);
-        record_cross_region_forward("batch_write", "us-west-or", "de-central-frankfurt", 0.789);
-    }
-
-    #[test]
-    fn test_data_residency_violation_metrics_dont_panic() {
-        record_data_residency_violation("ie-east-dublin");
-        record_data_residency_violation("de-central-frankfurt");
-        record_data_residency_violation("ca-central-qc");
     }
 
     #[test]
@@ -1402,25 +1306,5 @@ mod tests {
         assert!(CROSS_REGION_FORWARD_LATENCY.ends_with("_seconds"));
         assert!(DATA_RESIDENCY_VIOLATION_TOTAL.starts_with("ledger_"));
         assert!(DATA_RESIDENCY_VIOLATION_TOTAL.ends_with("_total"));
-    }
-
-    #[test]
-    fn test_resource_saturation_metrics_with_region_dont_panic() {
-        set_disk_bytes(1_000_000_000, 500_000_000, "global");
-        set_disk_bytes(2_000_000_000, 1_000_000_000, "us-east-va");
-        set_page_cache_metrics(100, 50, 75, "global");
-        set_page_cache_metrics(200, 100, 150, "ie-east-dublin");
-        set_btree_depth("entities", 3, "global");
-        set_btree_depth("relationships", 2, "us-east-va");
-        set_btree_page_splits(42, "global");
-        set_btree_page_splits(10, "de-central-frankfurt");
-        set_compaction_lag_blocks(10, "global");
-        set_compaction_lag_blocks(5, "ca-central-qc");
-        set_snapshot_disk_bytes(1_048_576, "global");
-        set_snapshot_disk_bytes(2_097_152, "us-west-or");
-        set_batch_queue_depth(42, "global");
-        set_batch_queue_depth(10, "us-east-va");
-        set_rate_limit_queue_depth(10, "global");
-        set_rate_limit_queue_depth(5, "ie-east-dublin");
     }
 }

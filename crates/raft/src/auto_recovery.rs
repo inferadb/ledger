@@ -667,22 +667,4 @@ mod tests {
         assert_eq!(config.max_retry_delay, Duration::from_secs(600));
         assert!(!config.enabled);
     }
-
-    #[test]
-    fn test_auto_recovery_config_builder_matches_default() {
-        let from_builder = AutoRecoveryConfig::builder().build();
-        let from_default = AutoRecoveryConfig::default();
-        assert_eq!(from_builder.scan_interval, from_default.scan_interval);
-        assert_eq!(from_builder.base_retry_delay, from_default.base_retry_delay);
-        assert_eq!(from_builder.max_retry_delay, from_default.max_retry_delay);
-        assert_eq!(from_builder.enabled, from_default.enabled);
-    }
-
-    #[test]
-    fn test_recovery_result_variants() {
-        assert_eq!(RecoveryResult::Success, RecoveryResult::Success);
-        assert_ne!(RecoveryResult::Success, RecoveryResult::TransientFailure("error".to_string()));
-        assert_ne!(RecoveryResult::Success, RecoveryResult::DeterminismBug);
-        assert_ne!(RecoveryResult::Success, RecoveryResult::MaxAttemptsExceeded);
-    }
 }

@@ -600,14 +600,6 @@ mod tests {
     }
 
     #[test]
-    fn test_health_state_mark_ready_only_from_starting() {
-        let state = HealthState::new();
-        assert!(state.mark_ready());
-        // Cannot go back to Ready from Ready
-        assert!(!state.mark_ready());
-    }
-
-    #[test]
     fn test_health_state_mark_shutting_down() {
         let state = HealthState::new();
         state.mark_ready();
@@ -636,14 +628,6 @@ mod tests {
     }
 
     #[test]
-    fn test_health_state_cannot_mark_ready_after_shutdown() {
-        let state = HealthState::new();
-        state.mark_shutting_down();
-        assert!(!state.mark_ready());
-        assert_eq!(state.phase(), NodePhase::ShuttingDown);
-    }
-
-    #[test]
     fn test_health_state_mark_draining() {
         let state = HealthState::new();
         assert!(state.mark_ready());
@@ -653,22 +637,6 @@ mod tests {
         assert!(state.liveness_check()); // still alive
         assert!(!state.readiness_check()); // not accepting traffic
         assert!(!state.is_accepting_proposals()); // not accepting proposals
-    }
-
-    #[test]
-    fn test_health_state_mark_draining_only_from_ready() {
-        let state = HealthState::new();
-        // Cannot drain from Starting
-        assert!(!state.mark_draining());
-        assert_eq!(state.phase(), NodePhase::Starting);
-    }
-
-    #[test]
-    fn test_health_state_mark_draining_not_from_shutting_down() {
-        let state = HealthState::new();
-        state.mark_shutting_down();
-        assert!(!state.mark_draining());
-        assert_eq!(state.phase(), NodePhase::ShuttingDown);
     }
 
     #[test]
@@ -682,13 +650,67 @@ mod tests {
         assert!(!state.is_accepting_proposals());
     }
 
+    /// Table-driven test for all invalid state transitions.
+    ///
+    /// Each case sets up a starting phase, attempts a transition, and verifies
+    /// that the transition is rejected and the phase remains unchanged.
+    #[allow(clippy::type_complexity)]
     #[test]
-    fn test_health_state_cannot_mark_ready_after_draining() {
-        let state = HealthState::new();
-        assert!(state.mark_ready());
-        assert!(state.mark_draining());
-        assert!(!state.mark_ready());
-        assert_eq!(state.phase(), NodePhase::Draining);
+    fn test_invalid_state_transitions() {
+        let cases: Vec<(
+            &str,
+            Box<dyn Fn(&HealthState)>,
+            Box<dyn Fn(&HealthState) -> bool>,
+            NodePhase,
+        )> = vec![
+            (
+                "Ready -> Ready (duplicate mark_ready)",
+                Box::new(|s| {
+                    assert!(s.mark_ready());
+                }),
+                Box::new(|s| s.mark_ready()),
+                NodePhase::Ready,
+            ),
+            (
+                "ShuttingDown -> Ready (mark_ready after shutdown)",
+                Box::new(|s| {
+                    s.mark_shutting_down();
+                }),
+                Box::new(|s| s.mark_ready()),
+                NodePhase::ShuttingDown,
+            ),
+            (
+                "Draining -> Ready (mark_ready after draining)",
+                Box::new(|s| {
+                    assert!(s.mark_ready());
+                    assert!(s.mark_draining());
+                }),
+                Box::new(|s| s.mark_ready()),
+                NodePhase::Draining,
+            ),
+            (
+                "Starting -> Draining (mark_draining from starting)",
+                Box::new(|_| {}),
+                Box::new(|s| s.mark_draining()),
+                NodePhase::Starting,
+            ),
+            (
+                "ShuttingDown -> Draining (mark_draining after shutdown)",
+                Box::new(|s| {
+                    s.mark_shutting_down();
+                }),
+                Box::new(|s| s.mark_draining()),
+                NodePhase::ShuttingDown,
+            ),
+        ];
+
+        for (label, setup, transition, expected_phase) in &cases {
+            let state = HealthState::new();
+            setup(&state);
+            let result = transition(&state);
+            assert!(!result, "{label}: transition should have been rejected");
+            assert_eq!(state.phase(), *expected_phase, "{label}: phase should be unchanged");
+        }
     }
 
     #[test]

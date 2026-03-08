@@ -306,20 +306,6 @@ mod tests {
 
     // ─── DependencyCheckResult Tests ────────────────────────────
 
-    #[test]
-    fn test_check_result_healthy() {
-        let result = DependencyCheckResult { healthy: true, detail: "ok".to_string() };
-        assert!(result.healthy);
-        assert_eq!(result.detail, "ok");
-    }
-
-    #[test]
-    fn test_check_result_unhealthy() {
-        let result = DependencyCheckResult { healthy: false, detail: "disk full".to_string() };
-        assert!(!result.healthy);
-        assert_eq!(result.detail, "disk full");
-    }
-
     // ─── Disk Check Tests ───────────────────────────────────────
 
     #[test]
@@ -386,14 +372,6 @@ mod tests {
         let all_healthy = details.values().all(|r| r.healthy);
         let health = DependencyHealth { all_healthy, details };
         assert!(!health.all_healthy);
-    }
-
-    #[test]
-    fn test_dependency_health_empty_is_healthy() {
-        let details: HashMap<String, DependencyCheckResult> = HashMap::new();
-        let all_healthy = details.values().all(|r| r.healthy);
-        let health = DependencyHealth { all_healthy, details };
-        assert!(health.all_healthy);
     }
 
     // ─── Config Validation Tests ────────────────────────────────

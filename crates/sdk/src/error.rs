@@ -641,122 +641,185 @@ fn decode_error_details(details: &[u8]) -> Option<ServerErrorDetails> {
 mod tests {
     use super::*;
 
+    /// Table-driven test covering is_retryable() for all SdkError variants.
     #[test]
-    fn test_rpc_error_retryable_unavailable() {
-        let err = SdkError::Rpc {
-            code: Code::Unavailable,
-            message: "server unavailable".to_owned(),
-            request_id: None,
-            trace_id: None,
-            error_details: None,
-        };
-        assert!(err.is_retryable());
+    fn test_is_retryable_all_variants() {
+        let cases: Vec<(SdkError, bool, &str)> = vec![
+            // Retryable RPC codes
+            (
+                SdkError::Rpc {
+                    code: Code::Unavailable,
+                    message: "down".into(),
+                    request_id: None,
+                    trace_id: None,
+                    error_details: None,
+                },
+                true,
+                "Rpc/Unavailable",
+            ),
+            (
+                SdkError::Rpc {
+                    code: Code::DeadlineExceeded,
+                    message: "timeout".into(),
+                    request_id: None,
+                    trace_id: None,
+                    error_details: None,
+                },
+                true,
+                "Rpc/DeadlineExceeded",
+            ),
+            (
+                SdkError::Rpc {
+                    code: Code::ResourceExhausted,
+                    message: "limited".into(),
+                    request_id: None,
+                    trace_id: None,
+                    error_details: None,
+                },
+                true,
+                "Rpc/ResourceExhausted",
+            ),
+            (
+                SdkError::Rpc {
+                    code: Code::Aborted,
+                    message: "conflict".into(),
+                    request_id: None,
+                    trace_id: None,
+                    error_details: None,
+                },
+                true,
+                "Rpc/Aborted",
+            ),
+            // Non-retryable RPC codes
+            (
+                SdkError::Rpc {
+                    code: Code::InvalidArgument,
+                    message: "bad".into(),
+                    request_id: None,
+                    trace_id: None,
+                    error_details: None,
+                },
+                false,
+                "Rpc/InvalidArgument",
+            ),
+            (
+                SdkError::Rpc {
+                    code: Code::PermissionDenied,
+                    message: "denied".into(),
+                    request_id: None,
+                    trace_id: None,
+                    error_details: None,
+                },
+                false,
+                "Rpc/PermissionDenied",
+            ),
+            (
+                SdkError::Rpc {
+                    code: Code::Unauthenticated,
+                    message: "noauth".into(),
+                    request_id: None,
+                    trace_id: None,
+                    error_details: None,
+                },
+                false,
+                "Rpc/Unauthenticated",
+            ),
+            (
+                SdkError::Rpc {
+                    code: Code::NotFound,
+                    message: "missing".into(),
+                    request_id: None,
+                    trace_id: None,
+                    error_details: None,
+                },
+                false,
+                "Rpc/NotFound",
+            ),
+            (
+                SdkError::Rpc {
+                    code: Code::Internal,
+                    message: "err".into(),
+                    request_id: None,
+                    trace_id: None,
+                    error_details: None,
+                },
+                false,
+                "Rpc/Internal",
+            ),
+            // Transport-level errors (all retryable)
+            (SdkError::Connection { message: "refused".into() }, true, "Connection"),
+            (SdkError::Timeout { duration_ms: 1000 }, true, "Timeout"),
+            (SdkError::Unavailable { message: "down".into() }, true, "Unavailable"),
+            (
+                SdkError::RateLimited {
+                    message: "throttled".into(),
+                    retry_after: std::time::Duration::from_secs(1),
+                    request_id: None,
+                    trace_id: None,
+                    error_details: None,
+                },
+                true,
+                "RateLimited",
+            ),
+            (
+                SdkError::OrganizationMigrating {
+                    source_region: Region::US_EAST_VA,
+                    target_region: Region::IE_EAST_DUBLIN,
+                    retry_after: std::time::Duration::from_secs(30),
+                },
+                true,
+                "OrganizationMigrating",
+            ),
+            (
+                SdkError::UserMigrating {
+                    source_region: Region::US_EAST_VA,
+                    target_region: Region::IE_EAST_DUBLIN,
+                    retry_after: std::time::Duration::from_secs(30),
+                },
+                true,
+                "UserMigrating",
+            ),
+            // Non-retryable variants
+            (SdkError::Config { message: "bad".into() }, false, "Config"),
+            (
+                SdkError::Idempotency {
+                    message: "reused".into(),
+                    conflict_key: None,
+                    original_tx_id: None,
+                },
+                false,
+                "Idempotency",
+            ),
+            (
+                SdkError::AlreadyCommitted { tx_id: "tx-1".into(), block_height: 1 },
+                false,
+                "AlreadyCommitted",
+            ),
+            (SdkError::Cancelled, false, "Cancelled"),
+            (
+                SdkError::CircuitOpen {
+                    endpoint: "ep".into(),
+                    retry_after: std::time::Duration::from_secs(5),
+                },
+                false,
+                "CircuitOpen",
+            ),
+        ];
+
+        for (err, expected, label) in &cases {
+            assert_eq!(
+                err.is_retryable(),
+                *expected,
+                "{label}: expected is_retryable={expected}, got {}",
+                err.is_retryable()
+            );
+        }
     }
 
-    #[test]
-    fn test_rpc_error_retryable_deadline_exceeded() {
-        let err = SdkError::Rpc {
-            code: Code::DeadlineExceeded,
-            message: "timeout".to_owned(),
-            request_id: None,
-            trace_id: None,
-            error_details: None,
-        };
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_rpc_error_retryable_resource_exhausted() {
-        let err = SdkError::Rpc {
-            code: Code::ResourceExhausted,
-            message: "rate limited".to_owned(),
-            request_id: None,
-            trace_id: None,
-            error_details: None,
-        };
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_rpc_error_retryable_aborted() {
-        let err = SdkError::Rpc {
-            code: Code::Aborted,
-            message: "transaction conflict".to_owned(),
-            request_id: None,
-            trace_id: None,
-            error_details: None,
-        };
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_rpc_error_non_retryable_invalid_argument() {
-        let err = SdkError::Rpc {
-            code: Code::InvalidArgument,
-            message: "bad request".to_owned(),
-            request_id: None,
-            trace_id: None,
-            error_details: None,
-        };
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_rpc_error_non_retryable_permission_denied() {
-        let err = SdkError::Rpc {
-            code: Code::PermissionDenied,
-            message: "access denied".to_owned(),
-            request_id: None,
-            trace_id: None,
-            error_details: None,
-        };
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_rpc_error_non_retryable_unauthenticated() {
-        let err = SdkError::Rpc {
-            code: Code::Unauthenticated,
-            message: "not authenticated".to_owned(),
-            request_id: None,
-            trace_id: None,
-            error_details: None,
-        };
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_transport_error_is_retryable() {
-        let err = SdkError::Connection { message: "connection refused".to_owned() };
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_idempotency_key_reused_not_retryable() {
-        let err = SdkError::Idempotency {
-            message: "key reused".to_owned(),
-            conflict_key: None,
-            original_tx_id: None,
-        };
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_config_error_not_retryable() {
-        let err = SdkError::Config { message: "invalid config".to_owned() };
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status() {
-        let status = tonic::Status::unavailable("server down");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::Unavailable, .. }));
-        assert!(err.is_retryable());
-    }
-
+    /// code() returns the gRPC code for Rpc/RateLimited, None for other variants.
     #[test]
     fn test_code_accessor() {
+        // Rpc variant returns its code
         let err = SdkError::Rpc {
             code: Code::NotFound,
             message: "not found".to_owned(),
@@ -766,16 +829,24 @@ mod tests {
         };
         assert_eq!(err.code(), Some(Code::NotFound));
 
-        let err2 = SdkError::Timeout { duration_ms: 1000 };
-        assert_eq!(err2.code(), None);
+        // RateLimited maps to ResourceExhausted
+        let err = SdkError::RateLimited {
+            message: "throttled".into(),
+            retry_after: std::time::Duration::from_secs(1),
+            request_id: None,
+            trace_id: None,
+            error_details: None,
+        };
+        assert_eq!(err.code(), Some(Code::ResourceExhausted));
+
+        // Non-RPC variants return None
+        let err = SdkError::Timeout { duration_ms: 1000 };
+        assert_eq!(err.code(), None);
+        assert_eq!(err.request_id(), None);
+        assert_eq!(err.trace_id(), None);
     }
 
-    #[test]
-    fn test_already_committed_not_retryable() {
-        let err = SdkError::AlreadyCommitted { tx_id: "tx-123".to_owned(), block_height: 42 };
-        assert!(!err.is_retryable());
-    }
-
+    /// AlreadyCommitted Display includes tx_id and block_height.
     #[test]
     fn test_already_committed_display() {
         let err = SdkError::AlreadyCommitted { tx_id: "tx-abc".to_owned(), block_height: 100 };
@@ -784,183 +855,63 @@ mod tests {
         assert!(msg.contains("100"));
     }
 
-    // Tests for From<tonic::Status> covering all gRPC status codes
+    /// Table-driven test: From<tonic::Status> maps all gRPC codes to correct SdkError::Rpc
+    /// variant and preserves the message string.
     #[test]
-    fn test_from_tonic_status_ok() {
-        let status = tonic::Status::ok("success");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::Ok, .. }));
-    }
+    fn test_from_tonic_status_all_codes() {
+        // (status, expected_code, expected_retryable)
+        let cases: Vec<(tonic::Status, Code, bool)> = vec![
+            (tonic::Status::ok("success"), Code::Ok, false),
+            (tonic::Status::cancelled("cancelled"), Code::Cancelled, false),
+            (tonic::Status::unknown("unknown"), Code::Unknown, false),
+            (tonic::Status::invalid_argument("bad"), Code::InvalidArgument, false),
+            (tonic::Status::deadline_exceeded("timeout"), Code::DeadlineExceeded, true),
+            (tonic::Status::not_found("missing"), Code::NotFound, false),
+            (tonic::Status::already_exists("dup"), Code::AlreadyExists, false),
+            (tonic::Status::permission_denied("denied"), Code::PermissionDenied, false),
+            (tonic::Status::resource_exhausted("quota"), Code::ResourceExhausted, true),
+            (tonic::Status::failed_precondition("precond"), Code::FailedPrecondition, false),
+            (tonic::Status::aborted("aborted"), Code::Aborted, true),
+            (tonic::Status::out_of_range("range"), Code::OutOfRange, false),
+            (tonic::Status::unimplemented("noimpl"), Code::Unimplemented, false),
+            (tonic::Status::internal("internal"), Code::Internal, false),
+            (tonic::Status::unavailable("down"), Code::Unavailable, true),
+            (tonic::Status::data_loss("lost"), Code::DataLoss, false),
+            (tonic::Status::unauthenticated("noauth"), Code::Unauthenticated, false),
+        ];
 
-    #[test]
-    fn test_from_tonic_status_cancelled() {
-        let status = tonic::Status::cancelled("operation cancelled");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::Cancelled, .. }));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_unknown() {
-        let status = tonic::Status::unknown("unknown error");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::Unknown, .. }));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_invalid_argument() {
-        let status = tonic::Status::invalid_argument("bad input");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::InvalidArgument, .. }));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_deadline_exceeded() {
-        let status = tonic::Status::deadline_exceeded("timed out");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::DeadlineExceeded, .. }));
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_not_found() {
-        let status = tonic::Status::not_found("resource missing");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::NotFound, .. }));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_already_exists() {
-        let status = tonic::Status::already_exists("duplicate");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::AlreadyExists, .. }));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_permission_denied() {
-        let status = tonic::Status::permission_denied("forbidden");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::PermissionDenied, .. }));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_resource_exhausted() {
-        let status = tonic::Status::resource_exhausted("quota exceeded");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::ResourceExhausted, .. }));
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_failed_precondition() {
-        let status = tonic::Status::failed_precondition("precondition failed");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::FailedPrecondition, .. }));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_aborted() {
-        let status = tonic::Status::aborted("transaction aborted");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::Aborted, .. }));
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_out_of_range() {
-        let status = tonic::Status::out_of_range("value out of range");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::OutOfRange, .. }));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_unimplemented() {
-        let status = tonic::Status::unimplemented("not implemented");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::Unimplemented, .. }));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_internal() {
-        let status = tonic::Status::internal("server error");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::Internal, .. }));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_unavailable() {
-        let status = tonic::Status::unavailable("service down");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::Unavailable, .. }));
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_data_loss() {
-        let status = tonic::Status::data_loss("data corrupted");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::DataLoss, .. }));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_unauthenticated() {
-        let status = tonic::Status::unauthenticated("no credentials");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::Unauthenticated, .. }));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_from_tonic_status_preserves_message() {
-        let status = tonic::Status::internal("detailed error message");
-        let err: SdkError = status.into();
-        match err {
-            SdkError::Rpc { message, .. } => {
-                assert_eq!(message, "detailed error message");
-            },
-            _ => panic!("Expected Rpc variant"),
+        for (status, expected_code, expected_retryable) in cases {
+            let msg = status.message().to_owned();
+            let err: SdkError = status.into();
+            match &err {
+                SdkError::Rpc { code, message, .. } => {
+                    assert_eq!(*code, expected_code, "code mismatch for {expected_code:?}");
+                    assert_eq!(message, &msg, "message not preserved for {expected_code:?}");
+                },
+                _ => panic!("Expected Rpc variant for {expected_code:?}, got {err:?}"),
+            }
+            assert_eq!(
+                err.is_retryable(),
+                expected_retryable,
+                "retryable mismatch for {expected_code:?}"
+            );
         }
     }
 
+    /// Unavailable variant (not Rpc) includes message in display.
     #[test]
-    fn test_unavailable_error_is_retryable() {
+    fn test_unavailable_variant_display() {
         let err = SdkError::Unavailable { message: "service down".to_string() };
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_unavailable_error_display() {
-        let err = SdkError::Unavailable { message: "service down".to_string() };
-        let display = format!("{}", err);
+        let display = format!("{err}");
         assert!(display.contains("Service unavailable"));
         assert!(display.contains("service down"));
     }
 
+    /// Cancelled variant display and code() accessor.
     #[test]
-    fn test_cancelled_not_retryable() {
-        let err = SdkError::Cancelled;
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_cancelled_display() {
+    fn test_cancelled_variant() {
         let err = SdkError::Cancelled;
         assert_eq!(format!("{err}"), "Request cancelled");
-    }
-
-    #[test]
-    fn test_cancelled_has_no_code() {
-        let err = SdkError::Cancelled;
         assert_eq!(err.code(), None);
     }
 
@@ -1122,25 +1073,6 @@ mod tests {
         let display = format!("{err}");
         assert!(display.contains("Rate limited"));
         assert!(display.contains("retry after 2500ms"));
-    }
-
-    #[test]
-    fn test_rate_limited_code_is_resource_exhausted() {
-        let err = SdkError::RateLimited {
-            message: "throttled".to_owned(),
-            retry_after: std::time::Duration::from_secs(1),
-            request_id: None,
-            trace_id: None,
-            error_details: None,
-        };
-        assert_eq!(err.code(), Some(Code::ResourceExhausted));
-    }
-
-    #[test]
-    fn test_non_rpc_errors_have_no_request_id() {
-        let err = SdkError::Timeout { duration_ms: 1000 };
-        assert_eq!(err.request_id(), None);
-        assert_eq!(err.trace_id(), None);
     }
 
     // --- ErrorDetails decoding tests ---
@@ -1308,27 +1240,7 @@ mod tests {
         assert_eq!(decoded.suggested_action.as_deref(), Some("Wait and retry"));
     }
 
-    // --- OrganizationMigrating tests ---
-
-    #[test]
-    fn test_organization_migrating_is_retryable() {
-        let err = SdkError::OrganizationMigrating {
-            source_region: Region::US_EAST_VA,
-            target_region: Region::IE_EAST_DUBLIN,
-            retry_after: std::time::Duration::from_secs(30),
-        };
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_organization_migrating_error_type() {
-        let err = SdkError::OrganizationMigrating {
-            source_region: Region::GLOBAL,
-            target_region: Region::US_EAST_VA,
-            retry_after: std::time::Duration::from_secs(10),
-        };
-        assert_eq!(err.error_type(), "organization_migrating");
-    }
+    // --- Migrating variant deserialization tests ---
 
     #[test]
     fn test_organization_migrating_from_status() {
@@ -1363,28 +1275,6 @@ mod tests {
             _ => panic!("Expected OrganizationMigrating variant, got {:?}", err),
         }
         assert!(err.is_retryable());
-    }
-
-    // --- UserMigrating tests ---
-
-    #[test]
-    fn test_user_migrating_is_retryable() {
-        let err = SdkError::UserMigrating {
-            source_region: Region::US_EAST_VA,
-            target_region: Region::IE_EAST_DUBLIN,
-            retry_after: std::time::Duration::from_secs(30),
-        };
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_user_migrating_error_type() {
-        let err = SdkError::UserMigrating {
-            source_region: Region::GLOBAL,
-            target_region: Region::US_EAST_VA,
-            retry_after: std::time::Duration::from_secs(10),
-        };
-        assert_eq!(err.error_type(), "user_migrating");
     }
 
     #[test]
@@ -1422,42 +1312,52 @@ mod tests {
         assert!(err.is_retryable());
     }
 
+    /// Table-driven: is_cas_conflict() only true for FailedPrecondition RPC errors.
     #[test]
-    fn test_is_cas_conflict_failed_precondition() {
-        let err = SdkError::Rpc {
-            code: Code::FailedPrecondition,
-            message: "condition not met".to_owned(),
-            request_id: None,
-            trace_id: None,
-            error_details: None,
-        };
-        assert!(err.is_cas_conflict());
-    }
+    fn test_is_cas_conflict_all_cases() {
+        let cases: Vec<(SdkError, bool, &str)> = vec![
+            (
+                SdkError::Rpc {
+                    code: Code::FailedPrecondition,
+                    message: "cond".into(),
+                    request_id: None,
+                    trace_id: None,
+                    error_details: None,
+                },
+                true,
+                "FailedPrecondition",
+            ),
+            (
+                SdkError::Rpc {
+                    code: Code::Aborted,
+                    message: "abort".into(),
+                    request_id: None,
+                    trace_id: None,
+                    error_details: None,
+                },
+                false,
+                "Aborted",
+            ),
+            (
+                SdkError::Rpc {
+                    code: Code::NotFound,
+                    message: "nf".into(),
+                    request_id: None,
+                    trace_id: None,
+                    error_details: None,
+                },
+                false,
+                "NotFound",
+            ),
+            (SdkError::Connection { message: "down".into() }, false, "Connection"),
+        ];
 
-    #[test]
-    fn test_is_cas_conflict_aborted_is_false() {
-        let err = SdkError::Rpc {
-            code: Code::Aborted,
-            message: "transaction conflict".to_owned(),
-            request_id: None,
-            trace_id: None,
-            error_details: None,
-        };
-        assert!(!err.is_cas_conflict());
-    }
-
-    #[test]
-    fn test_is_cas_conflict_other_errors_are_false() {
-        let err = SdkError::Connection { message: "network down".to_owned() };
-        assert!(!err.is_cas_conflict());
-
-        let err = SdkError::Rpc {
-            code: Code::NotFound,
-            message: "not found".to_owned(),
-            request_id: None,
-            trace_id: None,
-            error_details: None,
-        };
-        assert!(!err.is_cas_conflict());
+        for (err, expected, label) in &cases {
+            assert_eq!(
+                err.is_cas_conflict(),
+                *expected,
+                "{label}: expected is_cas_conflict={expected}"
+            );
+        }
     }
 }

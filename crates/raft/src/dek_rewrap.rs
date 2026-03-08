@@ -349,27 +349,9 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrap_progress_default() {
-        let progress = RewrapProgress::default();
-        assert!(progress.complete.load(Ordering::Acquire));
-    }
-
-    #[test]
     fn test_config_to_job_params() {
         let config = RewrapConfig::builder().batch_size(500_usize).interval_secs(60_u64).build();
         assert_eq!(config.batch_size, 500);
         assert_eq!(config.interval_secs, 60);
-    }
-
-    #[test]
-    fn test_rewrap_metrics_signatures() {
-        // Verify metric recording functions accept expected arguments.
-        // No-ops without a recorder — confirms call signatures.
-        record_rewrap_pages(42);
-        record_rewrap_remaining(100);
-        record_rewrap_duration(1.5);
-        record_background_job_duration("dek_rewrap", 2.0);
-        record_background_job_run("dek_rewrap", "success");
-        record_background_job_items("dek_rewrap", 42);
     }
 }

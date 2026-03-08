@@ -2515,26 +2515,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_mock_server_entity_with_options() {
-            let server = MockLedgerServer::start().await.unwrap();
-
-            server.set_entity_with_options(ORG, VAULT, "test-key", b"value", 42, Some(1000000));
-
-            // Entity should be stored (we can't directly read it without a client, but we verify no
-            // panic)
-        }
-
-        #[tokio::test]
-        async fn test_mock_server_remove_entity() {
-            let server = MockLedgerServer::start().await.unwrap();
-
-            server.set_entity(ORG, VAULT, "test-key", b"test-value");
-            server.remove_entity(ORG, VAULT, "test-key");
-
-            // Entity should be removed (verify no panic)
-        }
-
-        #[tokio::test]
         async fn test_mock_server_client_state() {
             let server = MockLedgerServer::start().await.unwrap();
 
@@ -2550,69 +2530,12 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_mock_server_inject_unavailable() {
-            let server = MockLedgerServer::start().await.unwrap();
-
-            // Inject 3 unavailable errors
-            server.inject_unavailable(3);
-
-            // The state tracks this (we can't test the actual injection without a client)
-            // but we verify the counter was set
-        }
-
-        #[tokio::test]
-        async fn test_mock_server_inject_delay() {
-            let server = MockLedgerServer::start().await.unwrap();
-
-            // Inject 100ms delay
-            server.inject_delay(100);
-
-            // The state tracks this (verify no panic)
-        }
-
-        #[tokio::test]
         async fn test_mock_server_counters() {
             let server = MockLedgerServer::start().await.unwrap();
 
             assert_eq!(server.write_count(), 0);
             assert_eq!(server.read_count(), 0);
             assert_eq!(server.block_height(), 1);
-        }
-
-        #[tokio::test]
-        async fn test_mock_server_add_relationship() {
-            let server = MockLedgerServer::start().await.unwrap();
-
-            server.add_relationship(ORG, VAULT, "doc:1", "viewer", "user:alice");
-
-            // Relationship should be stored (verify no panic)
-        }
-
-        #[tokio::test]
-        async fn test_mock_server_add_organization() {
-            let server = MockLedgerServer::start().await.unwrap();
-
-            server.add_organization(ORG, "test-organization", Region::US_EAST_VA);
-
-            // Organization should be stored (verify no panic)
-        }
-
-        #[tokio::test]
-        async fn test_mock_server_add_vault() {
-            let server = MockLedgerServer::start().await.unwrap();
-
-            server.add_vault(ORG, VAULT);
-
-            // Vault should be stored (verify no panic)
-        }
-
-        #[tokio::test]
-        async fn test_mock_server_add_peer() {
-            let server = MockLedgerServer::start().await.unwrap();
-
-            server.add_peer("node-1", vec!["10.0.0.1".to_string()], 5000);
-
-            // Peer should be stored (verify no panic)
         }
 
         #[tokio::test]

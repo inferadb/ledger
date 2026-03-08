@@ -7082,18 +7082,17 @@ mod tests {
     }
 
     // =========================================================================
-    // Read Operation Integration Tests
+    // Connection Failure Integration Tests
     // =========================================================================
     //
     // These tests verify error handling when connecting to unreachable endpoints.
     // They don't require a running server - they test the retry/error paths.
 
-    #[tokio::test]
-    async fn test_read_returns_error_on_connection_failure() {
-        // Configure minimal retry to make test fast
+    /// Creates a client configured for fast failure against an unreachable endpoint.
+    async fn make_unreachable_client() -> LedgerClient {
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
-            .client_id("test-client")
+            .client_id("conn-failure-test")
             .retry_policy(
                 RetryPolicy::builder()
                     .max_attempts(1)
@@ -7103,231 +7102,416 @@ mod tests {
             .connect_timeout(Duration::from_millis(100))
             .build()
             .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        let result = client.read(ORG, Some(VaultSlug::new(0)), "test-key", None, None).await;
-        assert!(result.is_err(), "expected connection error");
+        LedgerClient::new(config).await.expect("client creation")
     }
 
+    #[allow(clippy::type_complexity)]
     #[tokio::test]
-    async fn test_read_with_linearizable_consistency_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59998"]))
-            .client_id("test-client")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
+    async fn test_all_operations_return_error_on_connection_failure() {
+        use std::{future::Future, pin::Pin};
 
-        let client = LedgerClient::new(config).await.expect("client creation");
+        let cases: Vec<(
+            &str,
+            Box<dyn FnOnce(LedgerClient) -> Pin<Box<dyn Future<Output = bool>>>>,
+        )> = vec![
+            (
+                "read",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        c.read(ORG, Some(VaultSlug::new(0)), "test-key", None, None).await.is_err()
+                    })
+                }),
+            ),
+            (
+                "read (linearizable)",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        c.read(
+                            ORG,
+                            Some(VaultSlug::new(0)),
+                            "test-key",
+                            Some(ReadConsistency::Linearizable),
+                            None,
+                        )
+                        .await
+                        .is_err()
+                    })
+                }),
+            ),
+            (
+                "read (none vault)",
+                Box::new(|c| {
+                    Box::pin(
+                        async move { c.read(ORG, None, "user:123", None, None).await.is_err() },
+                    )
+                }),
+            ),
+            (
+                "batch_read",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        c.batch_read(
+                            ORG,
+                            Some(VaultSlug::new(0)),
+                            vec!["key1", "key2", "key3"],
+                            None,
+                            None,
+                        )
+                        .await
+                        .is_err()
+                    })
+                }),
+            ),
+            (
+                "batch_read (linearizable)",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        c.batch_read(
+                            ORG,
+                            Some(VaultSlug::new(0)),
+                            vec!["key1", "key2"],
+                            Some(ReadConsistency::Linearizable),
+                            None,
+                        )
+                        .await
+                        .is_err()
+                    })
+                }),
+            ),
+            (
+                "write",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        let ops = vec![Operation::set_entity("key", b"value".to_vec(), None, None)];
+                        c.write(ORG, Some(VaultSlug::new(0)), ops, None).await.is_err()
+                    })
+                }),
+            ),
+            (
+                "write (multiple ops)",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        let ops = vec![
+                            Operation::set_entity("user:1", b"alice".to_vec(), None, None),
+                            Operation::set_entity("user:2", b"bob".to_vec(), None, None),
+                            Operation::create_relationship("doc:1", "viewer", "user:1"),
+                            Operation::create_relationship("doc:1", "editor", "user:2"),
+                        ];
+                        c.write(ORG, Some(VaultSlug::new(0)), ops, None).await.is_err()
+                    })
+                }),
+            ),
+            (
+                "batch_write",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        let batches =
+                            vec![vec![Operation::set_entity("key", b"value".to_vec(), None, None)]];
+                        c.batch_write(ORG, Some(VaultSlug::new(0)), batches, None).await.is_err()
+                    })
+                }),
+            ),
+            (
+                "batch_write (multiple groups)",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        let batches = vec![
+                            vec![Operation::set_entity("user:123", b"alice".to_vec(), None, None)],
+                            vec![
+                                Operation::create_relationship("doc:456", "viewer", "user:123"),
+                                Operation::create_relationship("folder:789", "editor", "user:123"),
+                            ],
+                        ];
+                        c.batch_write(ORG, Some(VaultSlug::new(0)), batches, None).await.is_err()
+                    })
+                }),
+            ),
+            (
+                "watch_blocks",
+                Box::new(|c| {
+                    Box::pin(
+                        async move { c.watch_blocks(ORG, VaultSlug::new(0), 1).await.is_err() },
+                    )
+                }),
+            ),
+            (
+                "watch_blocks (different vaults)",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        c.watch_blocks(ORG, VaultSlug::new(1), 1).await.is_err()
+                            && c.watch_blocks(ORG, VaultSlug::new(2), 1).await.is_err()
+                    })
+                }),
+            ),
+            (
+                "watch_blocks (start heights)",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        c.watch_blocks(ORG, VaultSlug::new(0), 1).await.is_err()
+                            && c.watch_blocks(ORG, VaultSlug::new(0), 100).await.is_err()
+                    })
+                }),
+            ),
+            (
+                "create_organization",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        c.create_organization(
+                            "test-ns",
+                            Region::US_EAST_VA,
+                            UserSlug::new(0),
+                            OrganizationTier::Free,
+                        )
+                        .await
+                        .is_err()
+                    })
+                }),
+            ),
+            (
+                "get_organization",
+                Box::new(|c| {
+                    Box::pin(
+                        async move { c.get_organization(ORG, UserSlug::new(0)).await.is_err() },
+                    )
+                }),
+            ),
+            (
+                "list_organizations",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        c.list_organizations(UserSlug::new(0), 0, None).await.is_err()
+                    })
+                }),
+            ),
+            (
+                "create_vault",
+                Box::new(|c| Box::pin(async move { c.create_vault(ORG).await.is_err() })),
+            ),
+            (
+                "get_vault",
+                Box::new(|c| {
+                    Box::pin(async move { c.get_vault(ORG, VaultSlug::new(1)).await.is_err() })
+                }),
+            ),
+            (
+                "list_vaults",
+                Box::new(|c| Box::pin(async move { c.list_vaults(0, None).await.is_err() })),
+            ),
+            (
+                "health_check",
+                Box::new(|c| Box::pin(async move { c.health_check().await.is_err() })),
+            ),
+            (
+                "health_check_detailed",
+                Box::new(|c| Box::pin(async move { c.health_check_detailed().await.is_err() })),
+            ),
+            (
+                "health_check_vault",
+                Box::new(|c| {
+                    Box::pin(
+                        async move { c.health_check_vault(ORG, VaultSlug::new(0)).await.is_err() },
+                    )
+                }),
+            ),
+            (
+                "verified_read",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        c.verified_read(ORG, Some(VaultSlug::new(0)), "key", VerifyOpts::new())
+                            .await
+                            .is_err()
+                    })
+                }),
+            ),
+            (
+                "list_entities",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        c.list_entities(ORG, ListEntitiesOpts::with_prefix("user:")).await.is_err()
+                    })
+                }),
+            ),
+            (
+                "list_entities (with options)",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        let opts = ListEntitiesOpts::with_prefix("session:")
+                            .at_height(100)
+                            .include_expired()
+                            .limit(50)
+                            .linearizable();
+                        c.list_entities(ORG, opts).await.is_err()
+                    })
+                }),
+            ),
+            (
+                "list_relationships",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        c.list_relationships(ORG, VaultSlug::new(0), ListRelationshipsOpts::new())
+                            .await
+                            .is_err()
+                    })
+                }),
+            ),
+            (
+                "list_relationships (with filters)",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        let opts = ListRelationshipsOpts::new()
+                            .resource("document:1")
+                            .relation("viewer")
+                            .limit(100);
+                        c.list_relationships(ORG, VaultSlug::new(0), opts).await.is_err()
+                    })
+                }),
+            ),
+            (
+                "list_resources",
+                Box::new(|c| {
+                    Box::pin(async move {
+                        c.list_resources(
+                            ORG,
+                            VaultSlug::new(0),
+                            ListResourcesOpts::with_type("document"),
+                        )
+                        .await
+                        .is_err()
+                    })
+                }),
+            ),
+        ];
 
-        let result = client
-            .read(
-                ORG,
-                Some(VaultSlug::new(0)),
-                "test-key",
-                Some(ReadConsistency::Linearizable),
-                None,
-            )
-            .await;
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_batch_read_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59997"]))
-            .client_id("test-client")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        let result = client
-            .batch_read(ORG, Some(VaultSlug::new(0)), vec!["key1", "key2", "key3"], None, None)
-            .await;
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_batch_read_with_linearizable_consistency_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59996"]))
-            .client_id("test-client")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        let result = client
-            .batch_read(
-                ORG,
-                Some(VaultSlug::new(0)),
-                vec!["key1", "key2"],
-                Some(ReadConsistency::Linearizable),
-                None,
-            )
-            .await;
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_read_with_none_vault() {
-        // Test that read works with None vault (organization-level reads)
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59995"]))
-            .client_id("test-client")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        // This tests the API signature - None for vault should work
-        let result = client.read(ORG, None, "user:123", None, None).await;
-        assert!(result.is_err(), "expected connection error");
+        for (label, call_fn) in cases {
+            let client = make_unreachable_client().await;
+            assert!(call_fn(client).await, "{label}: expected connection error");
+        }
     }
 
     // =========================================================================
     // Operation Builder Tests
     // =========================================================================
 
+    #[allow(clippy::type_complexity)]
     #[test]
-    fn test_operation_set_entity() {
-        let op = Operation::set_entity("user:123", b"data".to_vec(), None, None);
-        match op {
-            Operation::SetEntity { key, value, expires_at, condition } => {
-                assert_eq!(key, "user:123");
-                assert_eq!(value, b"data");
-                assert!(expires_at.is_none());
-                assert!(condition.is_none());
-            },
-            _ => panic!("Expected SetEntity"),
-        }
-    }
+    fn test_operation_construction() {
+        // Each case: (label, operation, validation fn)
+        let cases: Vec<(&str, Operation, Box<dyn Fn(&Operation)>)> = vec![
+            (
+                "set_entity basic",
+                Operation::set_entity("user:123", b"data".to_vec(), None, None),
+                Box::new(|op| match op {
+                    Operation::SetEntity { key, value, expires_at, condition } => {
+                        assert_eq!(key, "user:123");
+                        assert_eq!(value, b"data");
+                        assert!(expires_at.is_none());
+                        assert!(condition.is_none());
+                    },
+                    _ => panic!("Expected SetEntity"),
+                }),
+            ),
+            (
+                "set_entity with expiry",
+                Operation::set_entity("session:abc", b"token".to_vec(), Some(1700000000), None),
+                Box::new(|op| match op {
+                    Operation::SetEntity { key, value, expires_at, condition } => {
+                        assert_eq!(key, "session:abc");
+                        assert_eq!(value, b"token");
+                        assert_eq!(*expires_at, Some(1700000000));
+                        assert!(condition.is_none());
+                    },
+                    _ => panic!("Expected SetEntity"),
+                }),
+            ),
+            (
+                "set_entity if not exists",
+                Operation::set_entity(
+                    "lock:xyz",
+                    b"owner".to_vec(),
+                    None,
+                    Some(SetCondition::NotExists),
+                ),
+                Box::new(|op| match op {
+                    Operation::SetEntity {
+                        key, condition: Some(SetCondition::NotExists), ..
+                    } => {
+                        assert_eq!(key, "lock:xyz");
+                    },
+                    _ => panic!("Expected SetEntity with NotExists condition"),
+                }),
+            ),
+            (
+                "set_entity if version",
+                Operation::set_entity(
+                    "counter",
+                    b"42".to_vec(),
+                    None,
+                    Some(SetCondition::Version(100)),
+                ),
+                Box::new(|op| match op {
+                    Operation::SetEntity { condition: Some(SetCondition::Version(v)), .. } => {
+                        assert_eq!(*v, 100);
+                    },
+                    _ => panic!("Expected SetEntity with Version condition"),
+                }),
+            ),
+            (
+                "set_entity if value equals",
+                Operation::set_entity(
+                    "data",
+                    b"new".to_vec(),
+                    None,
+                    Some(SetCondition::ValueEquals(b"old".to_vec())),
+                ),
+                Box::new(|op| match op {
+                    Operation::SetEntity {
+                        condition: Some(SetCondition::ValueEquals(v)), ..
+                    } => {
+                        assert_eq!(v, b"old");
+                    },
+                    _ => panic!("Expected SetEntity with ValueEquals condition"),
+                }),
+            ),
+            (
+                "delete_entity",
+                Operation::delete_entity("obsolete:key"),
+                Box::new(|op| match op {
+                    Operation::DeleteEntity { key } => {
+                        assert_eq!(key, "obsolete:key");
+                    },
+                    _ => panic!("Expected DeleteEntity"),
+                }),
+            ),
+            (
+                "create_relationship",
+                Operation::create_relationship("doc:456", "viewer", "user:123"),
+                Box::new(|op| match op {
+                    Operation::CreateRelationship { resource, relation, subject } => {
+                        assert_eq!(resource, "doc:456");
+                        assert_eq!(relation, "viewer");
+                        assert_eq!(subject, "user:123");
+                    },
+                    _ => panic!("Expected CreateRelationship"),
+                }),
+            ),
+            (
+                "delete_relationship",
+                Operation::delete_relationship("doc:456", "editor", "team:admins#member"),
+                Box::new(|op| match op {
+                    Operation::DeleteRelationship { resource, relation, subject } => {
+                        assert_eq!(resource, "doc:456");
+                        assert_eq!(relation, "editor");
+                        assert_eq!(subject, "team:admins#member");
+                    },
+                    _ => panic!("Expected DeleteRelationship"),
+                }),
+            ),
+        ];
 
-    #[test]
-    fn test_operation_set_entity_with_expiry() {
-        let op = Operation::set_entity("session:abc", b"token".to_vec(), Some(1700000000), None);
-        match op {
-            Operation::SetEntity { key, value, expires_at, condition } => {
-                assert_eq!(key, "session:abc");
-                assert_eq!(value, b"token");
-                assert_eq!(expires_at, Some(1700000000));
-                assert!(condition.is_none());
-            },
-            _ => panic!("Expected SetEntity"),
-        }
-    }
-
-    #[test]
-    fn test_operation_set_entity_if_not_exists() {
-        let op = Operation::set_entity(
-            "lock:xyz",
-            b"owner".to_vec(),
-            None,
-            Some(SetCondition::NotExists),
-        );
-        match op {
-            Operation::SetEntity { key, condition: Some(SetCondition::NotExists), .. } => {
-                assert_eq!(key, "lock:xyz");
-            },
-            _ => panic!("Expected SetEntity with NotExists condition"),
-        }
-    }
-
-    #[test]
-    fn test_operation_set_entity_if_version() {
-        let op = Operation::set_entity(
-            "counter",
-            b"42".to_vec(),
-            None,
-            Some(SetCondition::Version(100)),
-        );
-        match op {
-            Operation::SetEntity { condition: Some(SetCondition::Version(v)), .. } => {
-                assert_eq!(v, 100);
-            },
-            _ => panic!("Expected SetEntity with Version condition"),
-        }
-    }
-
-    #[test]
-    fn test_operation_set_entity_if_value_equals() {
-        let op = Operation::set_entity(
-            "data",
-            b"new".to_vec(),
-            None,
-            Some(SetCondition::ValueEquals(b"old".to_vec())),
-        );
-        match op {
-            Operation::SetEntity { condition: Some(SetCondition::ValueEquals(v)), .. } => {
-                assert_eq!(v, b"old");
-            },
-            _ => panic!("Expected SetEntity with ValueEquals condition"),
-        }
-    }
-
-    #[test]
-    fn test_operation_delete_entity() {
-        let op = Operation::delete_entity("obsolete:key");
-        match op {
-            Operation::DeleteEntity { key } => {
-                assert_eq!(key, "obsolete:key");
-            },
-            _ => panic!("Expected DeleteEntity"),
-        }
-    }
-
-    #[test]
-    fn test_operation_create_relationship() {
-        let op = Operation::create_relationship("doc:456", "viewer", "user:123");
-        match op {
-            Operation::CreateRelationship { resource, relation, subject } => {
-                assert_eq!(resource, "doc:456");
-                assert_eq!(relation, "viewer");
-                assert_eq!(subject, "user:123");
-            },
-            _ => panic!("Expected CreateRelationship"),
-        }
-    }
-
-    #[test]
-    fn test_operation_delete_relationship() {
-        let op = Operation::delete_relationship("doc:456", "editor", "team:admins#member");
-        match op {
-            Operation::DeleteRelationship { resource, relation, subject } => {
-                assert_eq!(resource, "doc:456");
-                assert_eq!(relation, "editor");
-                assert_eq!(subject, "team:admins#member");
-            },
-            _ => panic!("Expected DeleteRelationship"),
+        for (label, op, validate) in &cases {
+            validate(op);
+            // Verify the label is non-empty (forces use of label binding)
+            assert!(!label.is_empty());
         }
     }
 
@@ -7442,127 +7626,8 @@ mod tests {
         assert_eq!(hex, "");
     }
 
-    // =========================================================================
-    // Write Operation Integration Tests
-    // =========================================================================
-    //
-    // These tests verify error handling when connecting to unreachable endpoints.
-    // They don't require a running server - they test the retry/error paths.
-
-    #[tokio::test]
-    async fn test_write_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59994"]))
-            .client_id("write-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        let operations = vec![Operation::set_entity("key", b"value".to_vec(), None, None)];
-        let result = client.write(ORG, Some(VaultSlug::new(0)), operations, None).await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_write_with_multiple_operations() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59990"]))
-            .client_id("multi-op-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        // Multiple operations should be grouped in a single write
-        let operations = vec![
-            Operation::set_entity("user:1", b"alice".to_vec(), None, None),
-            Operation::set_entity("user:2", b"bob".to_vec(), None, None),
-            Operation::create_relationship("doc:1", "viewer", "user:1"),
-            Operation::create_relationship("doc:1", "editor", "user:2"),
-        ];
-
-        let result = client.write(ORG, Some(VaultSlug::new(0)), operations, None).await;
-
-        // Should fail due to connection (not due to multiple ops)
-        assert!(result.is_err());
-    }
-
-    // =========================================================================
-    // Batch Write Operation Tests
-    // =========================================================================
-
-    #[tokio::test]
-    async fn test_batch_write_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59989"]))
-            .client_id("batch-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        let batches = vec![vec![Operation::set_entity("key", b"value".to_vec(), None, None)]];
-        let result = client.batch_write(ORG, Some(VaultSlug::new(0)), batches, None).await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_batch_write_with_multiple_operation_groups() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59984"]))
-            .client_id("batch-groups-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        // Atomic transaction with multiple groups
-        let batches = vec![
-            // First group: create user
-            vec![Operation::set_entity("user:123", b"alice".to_vec(), None, None)],
-            // Second group: grant permissions
-            vec![
-                Operation::create_relationship("doc:456", "viewer", "user:123"),
-                Operation::create_relationship("folder:789", "editor", "user:123"),
-            ],
-        ];
-
-        let result = client.batch_write(ORG, Some(VaultSlug::new(0)), batches, None).await;
-
-        // Should fail due to connection (not due to batch structure)
-        assert!(result.is_err());
-    }
+    // (write/batch_write connection failure tests consolidated into
+    // test_all_operations_return_error_on_connection_failure above)
 
     // =========================================================================
     // BlockAnnouncement Tests
@@ -7651,82 +7716,8 @@ mod tests {
         assert_eq!(original, cloned);
     }
 
-    // =========================================================================
-    // WatchBlocks Integration Tests
-    // =========================================================================
-
-    #[tokio::test]
-    async fn test_watch_blocks_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59982"]))
-            .client_id("watch-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        let result = client.watch_blocks(ORG, VaultSlug::new(0), 1).await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_watch_blocks_different_vaults() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59981"]))
-            .client_id("multi-vault-watch")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        // Both should fail with connection error (testing different vaults work)
-        let result1 = client.watch_blocks(ORG, VaultSlug::new(1), 1).await;
-        let result2 = client.watch_blocks(ORG, VaultSlug::new(2), 1).await;
-
-        assert!(result1.is_err());
-        assert!(result2.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_watch_blocks_start_height_parameter() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59980"]))
-            .client_id("height-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        // Test with different start heights
-        let result_h1 = client.watch_blocks(ORG, VaultSlug::new(0), 1).await;
-        let result_h100 = client.watch_blocks(ORG, VaultSlug::new(0), 100).await;
-
-        // Both should fail due to connection (not invalid height)
-        assert!(result_h1.is_err());
-        assert!(result_h100.is_err());
-    }
+    // (watch_blocks connection failure tests consolidated into
+    // test_all_operations_return_error_on_connection_failure above)
 
     // =========================================================================
     // Admin Operation Tests
@@ -7956,138 +7947,8 @@ mod tests {
         assert_eq!(info1, info2);
     }
 
-    #[tokio::test]
-    async fn test_create_organization_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59970"]))
-            .client_id("admin-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client
-            .create_organization(
-                "test-ns",
-                Region::US_EAST_VA,
-                UserSlug::new(0),
-                OrganizationTier::Free,
-            )
-            .await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_get_organization_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59971"]))
-            .client_id("admin-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client.get_organization(ORG, UserSlug::new(0)).await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_list_organizations_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59972"]))
-            .client_id("admin-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client.list_organizations(UserSlug::new(0), 0, None).await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_create_vault_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59973"]))
-            .client_id("admin-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client.create_vault(ORG).await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_get_vault_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59974"]))
-            .client_id("admin-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client.get_vault(ORG, VaultSlug::new(1)).await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_list_vaults_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59975"]))
-            .client_id("admin-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client.list_vaults(0, None).await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
+    // (admin connection failure tests consolidated into
+    // test_all_operations_return_error_on_connection_failure above)
 
     // =========================================================================
     // HealthStatus Tests
@@ -8192,68 +8053,8 @@ mod tests {
     // Health Check Integration Tests
     // =========================================================================
 
-    #[tokio::test]
-    async fn test_health_check_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59976"]))
-            .client_id("health-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client.health_check().await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_health_check_detailed_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59977"]))
-            .client_id("health-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client.health_check_detailed().await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_health_check_vault_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59978"]))
-            .client_id("health-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client.health_check_vault(ORG, VaultSlug::new(0)).await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
+    // (health connection failure tests consolidated into
+    // test_all_operations_return_error_on_connection_failure above)
 
     // =========================================================================
     // Verified Read Tests
@@ -8861,27 +8662,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn test_verified_read_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
-            .client_id("verified-read-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let result =
-            client.verified_read(ORG, Some(VaultSlug::new(0)), "key", VerifyOpts::new()).await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
+    // (verified_read connection failure test consolidated into
+    // test_all_operations_return_error_on_connection_failure above)
 
     // =========================================================================
     // Query Types Tests
@@ -9246,129 +9028,8 @@ mod tests {
         assert_eq!(from_builder.consistency, from_default.consistency);
     }
 
-    // =========================================================================
-    // Query Operations Integration Tests
-    // =========================================================================
-
-    #[tokio::test]
-    async fn test_list_entities_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
-            .client_id("list-entities-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client.list_entities(ORG, ListEntitiesOpts::with_prefix("user:")).await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_list_relationships_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
-            .client_id("list-rels-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let result =
-            client.list_relationships(ORG, VaultSlug::new(0), ListRelationshipsOpts::new()).await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_list_resources_returns_error_on_connection_failure() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
-            .client_id("list-resources-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client
-            .list_resources(ORG, VaultSlug::new(0), ListResourcesOpts::with_type("document"))
-            .await;
-
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_list_entities_with_different_options() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
-            .client_id("list-entities-opts-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        // Test with various options - should still fail on connection but validates options are
-        // passed
-        let opts = ListEntitiesOpts::with_prefix("session:")
-            .at_height(100)
-            .include_expired()
-            .limit(50)
-            .linearizable();
-
-        let result = client.list_entities(ORG, opts).await;
-        assert!(result.is_err(), "expected connection error");
-    }
-
-    #[tokio::test]
-    async fn test_list_relationships_with_filters() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
-            .client_id("list-rels-filter-test")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        // Test with filters
-        let opts =
-            ListRelationshipsOpts::new().resource("document:1").relation("viewer").limit(100);
-
-        let result = client.list_relationships(ORG, VaultSlug::new(0), opts).await;
-        assert!(result.is_err(), "expected connection error");
-    }
+    // (query operation connection failure tests consolidated into
+    // test_all_operations_return_error_on_connection_failure above)
 
     // =========================================================================
     // Shutdown Tests
@@ -9427,8 +9088,11 @@ mod tests {
         assert!(client2.is_shutdown(), "cloned client should share shutdown state");
     }
 
+    #[allow(clippy::type_complexity)]
     #[tokio::test]
-    async fn test_read_returns_shutdown_error_after_shutdown() {
+    async fn test_all_operations_return_shutdown_error() {
+        use std::{future::Future, pin::Pin};
+
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
@@ -9443,264 +9107,213 @@ mod tests {
             .expect("valid config");
 
         let client = LedgerClient::new(config).await.expect("client creation");
-
-        // Shutdown the client
         client.shutdown().await;
 
-        // All operations should return Shutdown error
-        let result = client.read(ORG, Some(VaultSlug::new(0)), "key", None, None).await;
-        assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
-    }
+        let cases: Vec<(&str, Pin<Box<dyn Future<Output = bool> + '_>>)> = vec![
+            (
+                "read",
+                Box::pin(async {
+                    matches!(
+                        client.read(ORG, Some(VaultSlug::new(0)), "key", None, None).await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "write",
+                Box::pin(async {
+                    matches!(
+                        client
+                            .write(
+                                ORG,
+                                Some(VaultSlug::new(0)),
+                                vec![Operation::set_entity("key", vec![1, 2, 3], None, None)],
+                                None
+                            )
+                            .await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "batch_write",
+                Box::pin(async {
+                    matches!(
+                        client
+                            .batch_write(
+                                ORG,
+                                Some(VaultSlug::new(0)),
+                                vec![vec![Operation::set_entity("key", vec![1, 2, 3], None, None)]],
+                                None
+                            )
+                            .await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "batch_read",
+                Box::pin(async {
+                    matches!(
+                        client
+                            .batch_read(
+                                ORG,
+                                Some(VaultSlug::new(0)),
+                                vec!["key1".to_string(), "key2".to_string()],
+                                None,
+                                None
+                            )
+                            .await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "watch_blocks",
+                Box::pin(async {
+                    matches!(
+                        client.watch_blocks(ORG, VaultSlug::new(0), 1).await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "create_organization",
+                Box::pin(async {
+                    matches!(
+                        client
+                            .create_organization(
+                                "test",
+                                Region::US_EAST_VA,
+                                UserSlug::new(0),
+                                OrganizationTier::Free
+                            )
+                            .await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "get_organization",
+                Box::pin(async {
+                    matches!(
+                        client.get_organization(ORG, UserSlug::new(0)).await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "list_organizations",
+                Box::pin(async {
+                    matches!(
+                        client.list_organizations(UserSlug::new(0), 0, None).await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "create_vault",
+                Box::pin(async {
+                    matches!(client.create_vault(ORG).await, Err(crate::error::SdkError::Shutdown))
+                }),
+            ),
+            (
+                "get_vault",
+                Box::pin(async {
+                    matches!(
+                        client.get_vault(ORG, VaultSlug::new(0)).await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "list_vaults",
+                Box::pin(async {
+                    matches!(
+                        client.list_vaults(0, None).await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "health_check",
+                Box::pin(async {
+                    matches!(client.health_check().await, Err(crate::error::SdkError::Shutdown))
+                }),
+            ),
+            (
+                "health_check_detailed",
+                Box::pin(async {
+                    matches!(
+                        client.health_check_detailed().await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "health_check_vault",
+                Box::pin(async {
+                    matches!(
+                        client.health_check_vault(ORG, VaultSlug::new(0)).await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "verified_read",
+                Box::pin(async {
+                    matches!(
+                        client
+                            .verified_read(ORG, Some(VaultSlug::new(0)), "key", VerifyOpts::new())
+                            .await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "list_entities",
+                Box::pin(async {
+                    matches!(
+                        client.list_entities(ORG, ListEntitiesOpts::with_prefix("key")).await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "list_relationships",
+                Box::pin(async {
+                    matches!(
+                        client
+                            .list_relationships(
+                                ORG,
+                                VaultSlug::new(0),
+                                ListRelationshipsOpts::new()
+                            )
+                            .await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+            (
+                "list_resources",
+                Box::pin(async {
+                    matches!(
+                        client
+                            .list_resources(
+                                ORG,
+                                VaultSlug::new(0),
+                                ListResourcesOpts::with_type("doc")
+                            )
+                            .await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
+                }),
+            ),
+        ];
 
-    #[tokio::test]
-    async fn test_write_returns_shutdown_error_after_shutdown() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://localhost:50051"]))
-            .client_id("test-client")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        client.shutdown().await;
-
-        let result = client
-            .write(
-                ORG,
-                Some(VaultSlug::new(0)),
-                vec![Operation::set_entity("key", vec![1, 2, 3], None, None)],
-                None,
-            )
-            .await;
-        assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
-    }
-
-    #[tokio::test]
-    async fn test_batch_write_returns_shutdown_error_after_shutdown() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://localhost:50051"]))
-            .client_id("test-client")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        client.shutdown().await;
-
-        let result = client
-            .batch_write(
-                ORG,
-                Some(VaultSlug::new(0)),
-                vec![vec![Operation::set_entity("key", vec![1, 2, 3], None, None)]],
-                None,
-            )
-            .await;
-        assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
-    }
-
-    #[tokio::test]
-    async fn test_batch_read_returns_shutdown_error_after_shutdown() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://localhost:50051"]))
-            .client_id("test-client")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        client.shutdown().await;
-
-        let result = client
-            .batch_read(
-                ORG,
-                Some(VaultSlug::new(0)),
-                vec!["key1".to_string(), "key2".to_string()],
-                None,
-                None,
-            )
-            .await;
-        assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
-    }
-
-    #[tokio::test]
-    async fn test_watch_blocks_returns_shutdown_error_after_shutdown() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://localhost:50051"]))
-            .client_id("test-client")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        client.shutdown().await;
-
-        let result = client.watch_blocks(ORG, VaultSlug::new(0), 1).await;
-        assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
-    }
-
-    #[tokio::test]
-    async fn test_admin_operations_return_shutdown_error_after_shutdown() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://localhost:50051"]))
-            .client_id("test-client")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        client.shutdown().await;
-
-        // Test various admin operations
-        assert!(matches!(
-            client
-                .create_organization(
-                    "test",
-                    Region::US_EAST_VA,
-                    UserSlug::new(0),
-                    OrganizationTier::Free
-                )
-                .await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
-        assert!(matches!(
-            client.get_organization(ORG, UserSlug::new(0)).await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
-        assert!(matches!(
-            client.list_organizations(UserSlug::new(0), 0, None).await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
-        assert!(matches!(client.create_vault(ORG).await, Err(crate::error::SdkError::Shutdown)));
-        assert!(matches!(
-            client.get_vault(ORG, VaultSlug::new(0)).await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
-        assert!(matches!(client.list_vaults(0, None).await, Err(crate::error::SdkError::Shutdown)));
-    }
-
-    #[tokio::test]
-    async fn test_health_check_returns_shutdown_error_after_shutdown() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://localhost:50051"]))
-            .client_id("test-client")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        client.shutdown().await;
-
-        assert!(matches!(client.health_check().await, Err(crate::error::SdkError::Shutdown)));
-        assert!(matches!(
-            client.health_check_detailed().await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
-        assert!(matches!(
-            client.health_check_vault(ORG, VaultSlug::new(0)).await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_verified_read_returns_shutdown_error_after_shutdown() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://localhost:50051"]))
-            .client_id("test-client")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        client.shutdown().await;
-
-        assert!(matches!(
-            client.verified_read(ORG, Some(VaultSlug::new(0)), "key", VerifyOpts::new()).await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_query_operations_return_shutdown_error_after_shutdown() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://localhost:50051"]))
-            .client_id("test-client")
-            .retry_policy(
-                RetryPolicy::builder()
-                    .max_attempts(1)
-                    .initial_backoff(Duration::from_millis(1))
-                    .build(),
-            )
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-
-        client.shutdown().await;
-
-        assert!(matches!(
-            client.list_entities(ORG, ListEntitiesOpts::with_prefix("key")).await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
-        assert!(matches!(
-            client.list_relationships(ORG, VaultSlug::new(0), ListRelationshipsOpts::new()).await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
-        assert!(matches!(
-            client
-                .list_resources(ORG, VaultSlug::new(0), ListResourcesOpts::with_type("doc"))
-                .await,
-            Err(crate::error::SdkError::Shutdown)
-        ));
+        for (label, fut) in cases {
+            assert!(fut.await, "{label}: expected Shutdown error");
+        }
     }
 
     #[tokio::test]
@@ -9748,8 +9361,11 @@ mod tests {
         assert!(child.is_cancelled());
     }
 
+    #[allow(clippy::type_complexity)]
     #[tokio::test]
-    async fn test_read_with_pre_cancelled_token() {
+    async fn test_pre_cancelled_token_returns_cancelled() {
+        use std::{future::Future, pin::Pin};
+
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
@@ -9758,70 +9374,75 @@ mod tests {
             .expect("valid config");
 
         let client = LedgerClient::new(config).await.expect("client creation");
-        let token = tokio_util::sync::CancellationToken::new();
-        token.cancel();
 
-        let result = client.read(ORG, None, "key", None, Some(token)).await;
-        assert!(matches!(result, Err(crate::error::SdkError::Cancelled)));
-    }
+        let cases: Vec<(
+            &str,
+            Box<
+                dyn FnOnce(
+                    LedgerClient,
+                    tokio_util::sync::CancellationToken,
+                ) -> Pin<Box<dyn Future<Output = bool>>>,
+            >,
+        )> = vec![
+            (
+                "read",
+                Box::new(|c, t| {
+                    Box::pin(async move {
+                        matches!(
+                            c.read(ORG, None, "key", None, Some(t)).await,
+                            Err(crate::error::SdkError::Cancelled)
+                        )
+                    })
+                }),
+            ),
+            (
+                "write",
+                Box::new(|c, t| {
+                    Box::pin(async move {
+                        matches!(
+                            c.write(
+                                ORG,
+                                None,
+                                vec![Operation::set_entity("key", b"val".to_vec(), None, None)],
+                                Some(t),
+                            )
+                            .await,
+                            Err(crate::error::SdkError::Cancelled)
+                        )
+                    })
+                }),
+            ),
+            (
+                "batch_read",
+                Box::new(|c, t| {
+                    Box::pin(async move {
+                        matches!(
+                            c.batch_read(ORG, None, vec!["key1", "key2"], None, Some(t)).await,
+                            Err(crate::error::SdkError::Cancelled)
+                        )
+                    })
+                }),
+            ),
+            (
+                "batch_write",
+                Box::new(|c, t| {
+                    Box::pin(async move {
+                        let ops =
+                            vec![vec![Operation::set_entity("key", b"val".to_vec(), None, None)]];
+                        matches!(
+                            c.batch_write(ORG, None, ops, Some(t)).await,
+                            Err(crate::error::SdkError::Cancelled)
+                        )
+                    })
+                }),
+            ),
+        ];
 
-    #[tokio::test]
-    async fn test_write_with_pre_cancelled_token() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://localhost:50051"]))
-            .client_id("test-client")
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let token = tokio_util::sync::CancellationToken::new();
-        token.cancel();
-
-        let result = client
-            .write(
-                ORG,
-                None,
-                vec![Operation::set_entity("key", b"val".to_vec(), None, None)],
-                Some(token),
-            )
-            .await;
-        assert!(matches!(result, Err(crate::error::SdkError::Cancelled)));
-    }
-
-    #[tokio::test]
-    async fn test_batch_read_with_pre_cancelled_token() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://localhost:50051"]))
-            .client_id("test-client")
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let token = tokio_util::sync::CancellationToken::new();
-        token.cancel();
-
-        let result = client.batch_read(ORG, None, vec!["key1", "key2"], None, Some(token)).await;
-        assert!(matches!(result, Err(crate::error::SdkError::Cancelled)));
-    }
-
-    #[tokio::test]
-    async fn test_batch_write_with_pre_cancelled_token() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://localhost:50051"]))
-            .client_id("test-client")
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid config");
-
-        let client = LedgerClient::new(config).await.expect("client creation");
-        let token = tokio_util::sync::CancellationToken::new();
-        token.cancel();
-
-        let ops = vec![vec![Operation::set_entity("key", b"val".to_vec(), None, None)]];
-        let result = client.batch_write(ORG, None, ops, Some(token)).await;
-        assert!(matches!(result, Err(crate::error::SdkError::Cancelled)));
+        for (label, call_fn) in cases {
+            let token = tokio_util::sync::CancellationToken::new();
+            token.cancel();
+            assert!(call_fn(client.clone(), token).await, "{label}: expected Cancelled error");
+        }
     }
 
     #[tokio::test]

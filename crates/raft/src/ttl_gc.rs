@@ -212,28 +212,3 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
         })
     }
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
-mod tests {
-    // Note: Full integration tests require a running Raft cluster.
-    // These unit tests verify the filtering logic.
-
-    #[test]
-    fn test_expiration_check() {
-        let now =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-
-        // Entity expired 1 hour ago
-        let expired_at = now - 3600;
-        assert!(expired_at > 0 && expired_at < now);
-
-        // Entity expires in 1 hour
-        let future_expires = now + 3600;
-        assert!(!(future_expires > 0 && future_expires < now));
-
-        // Entity never expires
-        let never_expires = 0u64;
-        assert!(!(never_expires > 0 && never_expires < now));
-    }
-}

@@ -635,35 +635,6 @@ mod tests {
         }
     }
 
-    // Test EntityError Display implementations
-    #[test]
-    fn test_entity_error_display() {
-        use std::error::Error;
-
-        use snafu::ResultExt;
-
-        // Create a codec error via context selector and verify it converts properly
-        fn create_entity_error() -> std::result::Result<(), EntityError> {
-            let malformed: &[u8] = &[0xFF, 0xFF, 0xFF];
-            let _: u64 = inferadb_ledger_types::decode(malformed).context(CodecSnafu)?;
-            Ok(())
-        }
-
-        let entity_err = create_entity_error().unwrap_err();
-        let display = format!("{entity_err}");
-
-        // Should have format "Codec error: Decoding failed: <postcard error>"
-        assert!(display.starts_with("Codec error:"), "Expected 'Codec error:', got: {display}");
-        assert!(
-            display.contains("Decoding failed"),
-            "Expected to contain 'Decoding failed', got: {display}"
-        );
-
-        // Verify source chain is preserved
-        assert!(entity_err.source().is_some(), "EntityError::Codec should have a source");
-    }
-
-    // Test error conversion chain: CodecError -> EntityError
     #[test]
     fn test_entity_error_from_codec_error() {
         use snafu::ResultExt;

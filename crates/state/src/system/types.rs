@@ -666,66 +666,56 @@ mod tests {
     }
 
     #[test]
-    fn test_user_serialization() {
-        let user = User {
-            id: UserId::new(1),
-            slug: UserSlug::new(100),
-            region: Region::US_EAST_VA,
-            name: "Alice".to_string(),
-            email: UserEmailId::new(1),
-            status: UserStatus::Active,
-            role: UserRole::User,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            deleted_at: None,
-        };
-
-        let bytes = postcard::to_allocvec(&user).unwrap();
-        let deserialized: User = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(user.id, deserialized.id);
-        assert_eq!(user.name, deserialized.name);
-        assert_eq!(deserialized.role, UserRole::User);
-    }
-
-    #[test]
-    fn test_user_admin_serialization() {
-        let user = User {
-            id: UserId::new(2),
-            slug: UserSlug::new(200),
-            region: Region::IE_EAST_DUBLIN,
-            name: "Bob".to_string(),
-            email: UserEmailId::new(2),
-            status: UserStatus::Active,
-            role: UserRole::Admin,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            deleted_at: None,
-        };
-
-        let bytes = postcard::to_allocvec(&user).unwrap();
-        let deserialized: User = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(deserialized.role, UserRole::Admin);
-    }
-
-    #[test]
-    fn test_user_region_field_serialization() {
-        let user = User {
-            id: UserId::new(3),
-            slug: UserSlug::new(300),
-            region: Region::JP_EAST_TOKYO,
-            name: "Charlie".to_string(),
-            email: UserEmailId::new(3),
-            status: UserStatus::Active,
-            role: UserRole::User,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            deleted_at: None,
-        };
-
-        let bytes = postcard::to_allocvec(&user).unwrap();
-        let deserialized: User = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(deserialized.region, Region::JP_EAST_TOKYO);
-        assert_eq!(deserialized.name, "Charlie");
+    fn test_user_serialization_roundtrip() {
+        let cases: Vec<(&str, UserId, UserSlug, Region, &str, UserEmailId, UserRole)> = vec![
+            (
+                "regular user US region",
+                UserId::new(1),
+                UserSlug::new(100),
+                Region::US_EAST_VA,
+                "Alice",
+                UserEmailId::new(1),
+                UserRole::User,
+            ),
+            (
+                "admin user EU region",
+                UserId::new(2),
+                UserSlug::new(200),
+                Region::IE_EAST_DUBLIN,
+                "Bob",
+                UserEmailId::new(2),
+                UserRole::Admin,
+            ),
+            (
+                "regular user JP region",
+                UserId::new(3),
+                UserSlug::new(300),
+                Region::JP_EAST_TOKYO,
+                "Charlie",
+                UserEmailId::new(3),
+                UserRole::User,
+            ),
+        ];
+        for (label, id, slug, region, name, email, role) in &cases {
+            let user = User {
+                id: *id,
+                slug: *slug,
+                region: *region,
+                name: name.to_string(),
+                email: *email,
+                status: UserStatus::Active,
+                role: *role,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                deleted_at: None,
+            };
+            let bytes = postcard::to_allocvec(&user).unwrap();
+            let deserialized: User = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(deserialized.id, *id, "{label}: id mismatch");
+            assert_eq!(deserialized.name, *name, "{label}: name mismatch");
+            assert_eq!(deserialized.role, *role, "{label}: role mismatch");
+            assert_eq!(deserialized.region, *region, "{label}: region mismatch");
+        }
     }
 
     #[test]

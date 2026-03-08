@@ -1053,39 +1053,58 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_condition_must_not_exist() {
-        let condition = inferadb_ledger_types::SetCondition::MustNotExist;
-        let proto: proto::SetCondition = (&condition).into();
+    #[allow(clippy::type_complexity)]
+    fn test_set_condition_to_proto() {
+        let cases: &[(
+            &str,
+            inferadb_ledger_types::SetCondition,
+            Box<dyn Fn(&proto::SetCondition)>,
+        )] = &[
+            (
+                "MustNotExist",
+                inferadb_ledger_types::SetCondition::MustNotExist,
+                Box::new(|p| {
+                    assert!(
+                        matches!(p.condition, Some(proto::set_condition::Condition::NotExists(true)))
+                    );
+                }),
+            ),
+            (
+                "MustExist",
+                inferadb_ledger_types::SetCondition::MustExist,
+                Box::new(|p| {
+                    assert!(matches!(
+                        p.condition,
+                        Some(proto::set_condition::Condition::MustExists(true))
+                    ));
+                }),
+            ),
+            (
+                "VersionEquals(42)",
+                inferadb_ledger_types::SetCondition::VersionEquals(42),
+                Box::new(|p| {
+                    assert!(
+                        matches!(p.condition, Some(proto::set_condition::Condition::Version(42)))
+                    );
+                }),
+            ),
+            (
+                "ValueEquals([1,2,3,4])",
+                inferadb_ledger_types::SetCondition::ValueEquals(vec![1, 2, 3, 4]),
+                Box::new(|p| match &p.condition {
+                    Some(proto::set_condition::Condition::ValueEquals(bytes)) => {
+                        assert_eq!(bytes, &[1, 2, 3, 4]);
+                    },
+                    other => panic!("expected ValueEquals, got {other:?}"),
+                }),
+            ),
+        ];
 
-        assert!(matches!(proto.condition, Some(proto::set_condition::Condition::NotExists(true))));
-    }
-
-    #[test]
-    fn test_condition_must_exist() {
-        let condition = inferadb_ledger_types::SetCondition::MustExist;
-        let proto: proto::SetCondition = (&condition).into();
-
-        assert!(matches!(proto.condition, Some(proto::set_condition::Condition::MustExists(true))));
-    }
-
-    #[test]
-    fn test_condition_version_equals() {
-        let condition = inferadb_ledger_types::SetCondition::VersionEquals(42);
-        let proto: proto::SetCondition = (&condition).into();
-
-        assert!(matches!(proto.condition, Some(proto::set_condition::Condition::Version(42))));
-    }
-
-    #[test]
-    fn test_condition_value_equals() {
-        let condition = inferadb_ledger_types::SetCondition::ValueEquals(vec![1, 2, 3, 4]);
-        let proto: proto::SetCondition = (&condition).into();
-
-        match proto.condition {
-            Some(proto::set_condition::Condition::ValueEquals(bytes)) => {
-                assert_eq!(bytes, vec![1, 2, 3, 4]);
-            },
-            _ => panic!("Expected ValueEquals condition"),
+        for (label, condition, check) in cases {
+            let proto: proto::SetCondition = condition.into();
+            check(&proto);
+            // Label used for diagnostics on failure
+            let _ = label;
         }
     }
 
@@ -1424,62 +1443,50 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_proto_to_condition_not_exists() {
-        let proto = proto::SetCondition {
-            condition: Some(proto::set_condition::Condition::NotExists(true)),
-        };
-        let result: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
-        assert_eq!(result, Some(inferadb_ledger_types::SetCondition::MustNotExist));
-    }
+    fn test_proto_to_set_condition() {
+        let cases: &[(&str, Option<proto::set_condition::Condition>, Option<inferadb_ledger_types::SetCondition>)] = &[
+            (
+                "NotExists(true) → MustNotExist",
+                Some(proto::set_condition::Condition::NotExists(true)),
+                Some(inferadb_ledger_types::SetCondition::MustNotExist),
+            ),
+            (
+                "MustExists(true) → MustExist",
+                Some(proto::set_condition::Condition::MustExists(true)),
+                Some(inferadb_ledger_types::SetCondition::MustExist),
+            ),
+            (
+                "Version(42) → VersionEquals(42)",
+                Some(proto::set_condition::Condition::Version(42)),
+                Some(inferadb_ledger_types::SetCondition::VersionEquals(42)),
+            ),
+            (
+                "ValueEquals([1,2,3]) → ValueEquals([1,2,3])",
+                Some(proto::set_condition::Condition::ValueEquals(vec![1, 2, 3])),
+                Some(inferadb_ledger_types::SetCondition::ValueEquals(vec![1, 2, 3])),
+            ),
+            (
+                "None → None",
+                None,
+                None,
+            ),
+            (
+                "NotExists(false) → MustExist (inverted)",
+                Some(proto::set_condition::Condition::NotExists(false)),
+                Some(inferadb_ledger_types::SetCondition::MustExist),
+            ),
+            (
+                "MustExists(false) → MustNotExist (inverted)",
+                Some(proto::set_condition::Condition::MustExists(false)),
+                Some(inferadb_ledger_types::SetCondition::MustNotExist),
+            ),
+        ];
 
-    #[test]
-    fn test_proto_to_condition_must_exists() {
-        let proto = proto::SetCondition {
-            condition: Some(proto::set_condition::Condition::MustExists(true)),
-        };
-        let result: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
-        assert_eq!(result, Some(inferadb_ledger_types::SetCondition::MustExist));
-    }
-
-    #[test]
-    fn test_proto_to_condition_version() {
-        let proto =
-            proto::SetCondition { condition: Some(proto::set_condition::Condition::Version(42)) };
-        let result: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
-        assert_eq!(result, Some(inferadb_ledger_types::SetCondition::VersionEquals(42)));
-    }
-
-    #[test]
-    fn test_proto_to_condition_value_equals() {
-        let proto = proto::SetCondition {
-            condition: Some(proto::set_condition::Condition::ValueEquals(vec![1, 2, 3])),
-        };
-        let result: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
-        assert_eq!(result, Some(inferadb_ledger_types::SetCondition::ValueEquals(vec![1, 2, 3])));
-    }
-
-    #[test]
-    fn test_proto_to_condition_none_returns_none() {
-        let proto = proto::SetCondition { condition: None };
-        let result: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_proto_to_condition_inverted_booleans() {
-        // NotExists(false) should map to MustExist
-        let proto = proto::SetCondition {
-            condition: Some(proto::set_condition::Condition::NotExists(false)),
-        };
-        let result: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
-        assert_eq!(result, Some(inferadb_ledger_types::SetCondition::MustExist));
-
-        // MustExists(false) should map to MustNotExist
-        let proto = proto::SetCondition {
-            condition: Some(proto::set_condition::Condition::MustExists(false)),
-        };
-        let result: Option<inferadb_ledger_types::SetCondition> = (&proto).into();
-        assert_eq!(result, Some(inferadb_ledger_types::SetCondition::MustNotExist));
+        for (label, proto_condition, expected) in cases {
+            let proto_sc = proto::SetCondition { condition: proto_condition.clone() };
+            let result: Option<inferadb_ledger_types::SetCondition> = (&proto_sc).into();
+            assert_eq!(result, *expected, "case: {label}");
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -1681,26 +1688,37 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_event_scope_system_to_proto() {
-        let proto_scope = proto::EventScope::from(EventScope::System);
-        assert_eq!(proto_scope, proto::EventScope::System);
-    }
+    fn test_event_scope_to_proto() {
+        let cases: &[(&str, EventScope, proto::EventScope)] = &[
+            ("System", EventScope::System, proto::EventScope::System),
+            ("Organization", EventScope::Organization, proto::EventScope::Organization),
+        ];
 
-    #[test]
-    fn test_event_scope_organization_to_proto() {
-        let proto_scope = proto::EventScope::from(EventScope::Organization);
-        assert_eq!(proto_scope, proto::EventScope::Organization);
+        for (label, domain, expected) in cases {
+            let proto_scope = proto::EventScope::from(*domain);
+            assert_eq!(proto_scope, *expected, "case: {label}");
+        }
     }
 
     #[test]
     fn test_event_scope_proto_to_domain() {
-        assert_eq!(EventScope::from(proto::EventScope::System), EventScope::System);
-        assert_eq!(EventScope::from(proto::EventScope::Organization), EventScope::Organization);
-    }
+        let cases: &[(&str, proto::EventScope, EventScope)] = &[
+            ("System → System", proto::EventScope::System, EventScope::System),
+            (
+                "Organization → Organization",
+                proto::EventScope::Organization,
+                EventScope::Organization,
+            ),
+            (
+                "Unspecified → Organization (default)",
+                proto::EventScope::Unspecified,
+                EventScope::Organization,
+            ),
+        ];
 
-    #[test]
-    fn test_event_scope_unspecified_defaults_to_organization() {
-        assert_eq!(EventScope::from(proto::EventScope::Unspecified), EventScope::Organization);
+        for (label, proto_scope, expected) in cases {
+            assert_eq!(EventScope::from(*proto_scope), *expected, "case: {label}");
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -1708,24 +1726,28 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_event_outcome_success_to_proto() {
-        let proto_outcome = proto::EventOutcome::from(&EventOutcome::Success);
-        assert_eq!(proto_outcome, proto::EventOutcome::Success);
-    }
+    fn test_event_outcome_to_proto() {
+        let cases: &[(&str, EventOutcome, proto::EventOutcome)] = &[
+            ("Success", EventOutcome::Success, proto::EventOutcome::Success),
+            (
+                "Failed",
+                EventOutcome::Failed {
+                    code: "E1001".to_string(),
+                    detail: "disk full".to_string(),
+                },
+                proto::EventOutcome::Failed,
+            ),
+            (
+                "Denied",
+                EventOutcome::Denied { reason: "rate limited".to_string() },
+                proto::EventOutcome::Denied,
+            ),
+        ];
 
-    #[test]
-    fn test_event_outcome_failed_to_proto() {
-        let outcome =
-            EventOutcome::Failed { code: "E1001".to_string(), detail: "disk full".to_string() };
-        let proto_outcome = proto::EventOutcome::from(&outcome);
-        assert_eq!(proto_outcome, proto::EventOutcome::Failed);
-    }
-
-    #[test]
-    fn test_event_outcome_denied_to_proto() {
-        let outcome = EventOutcome::Denied { reason: "rate limited".to_string() };
-        let proto_outcome = proto::EventOutcome::from(&outcome);
-        assert_eq!(proto_outcome, proto::EventOutcome::Denied);
+        for (label, outcome, expected) in cases {
+            let proto_outcome = proto::EventOutcome::from(outcome);
+            assert_eq!(proto_outcome, *expected, "case: {label}");
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -2086,27 +2108,19 @@ mod tests {
     }
 
     #[test]
-    fn test_region_from_i32_unspecified_returns_error() {
-        let result = super::region_from_i32(0);
-        let err = result.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("region must be specified"));
-    }
+    fn test_region_from_i32_invalid_returns_error() {
+        let cases: &[(&str, i32, &str)] = &[
+            ("unspecified (0)", 0, "region must be specified"),
+            ("unknown (999)", 999, "unknown region value: 999"),
+            ("negative (-1)", -1, "unknown region value: -1"),
+        ];
 
-    #[test]
-    fn test_region_from_i32_unknown_returns_error() {
-        let result = super::region_from_i32(999);
-        let err = result.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("unknown region value: 999"));
-    }
-
-    #[test]
-    fn test_region_from_i32_negative_returns_error() {
-        let result = super::region_from_i32(-1);
-        let err = result.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("unknown region value: -1"));
+        for (label, value, expected_msg) in cases {
+            let result = super::region_from_i32(*value);
+            let err = result.unwrap_err();
+            assert_eq!(err.code(), tonic::Code::InvalidArgument, "case: {label}");
+            assert!(err.message().contains(expected_msg), "case: {label}");
+        }
     }
 
     #[test]

@@ -579,15 +579,6 @@ mod tests {
     }
 
     #[test]
-    fn test_router_config_builder_matches_default() {
-        let from_builder = RouterConfig::builder().build();
-        let from_default = RouterConfig::default();
-        assert_eq!(from_builder.cache_ttl, from_default.cache_ttl);
-        assert_eq!(from_builder.connect_timeout, from_default.connect_timeout);
-        assert_eq!(from_builder.grpc_port, from_default.grpc_port);
-    }
-
-    #[test]
     fn test_cache_entry_staleness() {
         let entry = CacheEntry {
             region: Region::GLOBAL,

@@ -425,13 +425,6 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_jitter_zero_factor() {
-        let dur = Duration::from_millis(100);
-        let result = apply_jitter(dur, 0.0);
-        assert_eq!(result, dur);
-    }
-
-    #[test]
     fn test_apply_jitter_within_bounds() {
         let dur = Duration::from_millis(100);
         let factor = 0.25;

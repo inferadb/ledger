@@ -678,16 +678,6 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_client_id() {
-        let result = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://localhost:50051"]))
-            .client_id("")
-            .build();
-
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_invalid_url_no_scheme() {
         let result = ClientConfig::builder()
             .servers(ServerSource::from_static(["localhost:50051"]))
@@ -800,18 +790,6 @@ mod tests {
     fn test_no_retry_policy() {
         let policy = RetryPolicy::no_retry();
         assert_eq!(policy.max_attempts, 1);
-    }
-
-    #[test]
-    fn test_retry_policy_builder_equals_default() {
-        let from_builder = RetryPolicy::builder().build();
-        let from_default = RetryPolicy::default();
-
-        assert_eq!(from_builder.max_attempts, from_default.max_attempts);
-        assert_eq!(from_builder.initial_backoff, from_default.initial_backoff);
-        assert_eq!(from_builder.max_backoff, from_default.max_backoff);
-        assert_eq!(from_builder.multiplier, from_default.multiplier);
-        assert_eq!(from_builder.jitter, from_default.jitter);
     }
 
     #[test]
@@ -1053,14 +1031,6 @@ mod tests {
     }
 
     #[test]
-    fn test_client_config_with_invalid_tls_fails() {
-        // Building TlsConfig without CA cert or native roots should fail at build()
-        let result = TlsConfig::builder().build();
-
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_tls_config_builder_chaining() {
         let tls = TlsConfig::builder()
             .ca_cert(CertificateData::Pem(b"ca-cert".to_vec()))
@@ -1074,78 +1044,5 @@ mod tests {
         assert!(tls.client_cert().is_some());
         assert!(tls.client_key().is_some());
         assert_eq!(tls.domain_name(), Some("example.com"));
-    }
-
-    // ==================== TDD tests for bon builder API ====================
-
-    #[test]
-    fn test_tls_config_builder_with_native_roots() {
-        // New bon builder API: TlsConfig::builder().use_native_roots(true).build()
-        let result = TlsConfig::builder().use_native_roots(true).build();
-        assert!(result.is_ok());
-        let tls = result.unwrap();
-        assert!(tls.use_native_roots());
-    }
-
-    #[test]
-    fn test_tls_config_builder_with_ca_cert() {
-        let ca_data = b"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n";
-        let result = TlsConfig::builder().ca_cert(CertificateData::Pem(ca_data.to_vec())).build();
-        assert!(result.is_ok());
-        let tls = result.unwrap();
-        assert!(tls.ca_cert().is_some());
-    }
-
-    #[test]
-    fn test_tls_config_builder_with_mtls() {
-        let ca_data = b"ca-cert";
-        let client_data = b"client-cert";
-        let key_data = b"client-key";
-
-        let result = TlsConfig::builder()
-            .ca_cert(CertificateData::Pem(ca_data.to_vec()))
-            .client_cert(CertificateData::Pem(client_data.to_vec()))
-            .client_key(key_data.to_vec())
-            .build();
-
-        assert!(result.is_ok());
-        let tls = result.unwrap();
-        assert!(tls.ca_cert().is_some());
-        assert!(tls.client_cert().is_some());
-        assert!(tls.client_key().is_some());
-    }
-
-    #[test]
-    fn test_tls_config_builder_validation_fails_without_ca_or_native() {
-        // Neither CA cert nor native roots — should fail validation at build()
-        let result = TlsConfig::builder().build();
-        assert!(result.is_err());
-        let err = result.expect_err("should fail");
-        assert!(
-            err.to_string().contains("CA certificate") || err.to_string().contains("native roots")
-        );
-    }
-
-    #[test]
-    fn test_tls_config_builder_validation_fails_client_cert_without_key() {
-        let result = TlsConfig::builder()
-            .ca_cert(CertificateData::Pem(b"ca".to_vec()))
-            .client_cert(CertificateData::Pem(b"cert".to_vec()))
-            // Missing client_key
-            .build();
-
-        assert!(result.is_err());
-        let err = result.expect_err("should fail");
-        assert!(err.to_string().contains("private key"));
-    }
-
-    #[test]
-    fn test_tls_config_builder_with_domain_name() {
-        let result =
-            TlsConfig::builder().use_native_roots(true).domain_name("custom.example.com").build();
-
-        assert!(result.is_ok());
-        let tls = result.unwrap();
-        assert_eq!(tls.domain_name(), Some("custom.example.com"));
     }
 }

@@ -316,26 +316,6 @@ mod tests {
     }
 
     #[test]
-    fn test_background_job_metrics_emitted_on_scrub() {
-        // Verify that scrubber metric recording functions accept expected arguments
-        // Without a recorder, these are no-ops — the test confirms the function
-        // signatures match what run_cycle() calls.
-        use crate::metrics::{
-            record_background_job_duration, record_background_job_items, record_background_job_run,
-        };
-
-        // Simulate success path
-        record_background_job_duration("integrity_scrub", 0.05);
-        record_background_job_run("integrity_scrub", "success");
-        record_background_job_items("integrity_scrub", 10);
-
-        // Simulate failure path (corruption detected)
-        record_background_job_duration("integrity_scrub", 0.12);
-        record_background_job_run("integrity_scrub", "failure");
-        record_background_job_items("integrity_scrub", 5);
-    }
-
-    #[test]
     fn test_scrubber_detects_corruption() {
         let db = create_test_db();
         let roots = db.table_root_pages();

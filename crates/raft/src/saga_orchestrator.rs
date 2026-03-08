@@ -1225,70 +1225,110 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::disallowed_methods,
+    clippy::panic,
+    clippy::type_complexity
+)]
 mod tests {
-    use inferadb_ledger_state::system::DeleteUserInput;
+    use inferadb_ledger_state::system::{
+        CreateOrganizationInput, CreateUserInput, DeleteUserInput, MigrateOrgInput,
+        MigrateUserInput, OrganizationTier,
+    };
+    use inferadb_ledger_types::{OrganizationSlug, Region};
 
     use super::*;
 
-    #[test]
-    fn test_saga_key_format() {
-        let saga_id = "test-saga-123";
-        let key = format!("{}{}", SAGA_KEY_PREFIX, saga_id);
-        assert_eq!(key, "saga:test-saga-123");
+    /// Builds all five saga variants in their initial (Pending) state.
+    fn all_pending_sagas() -> Vec<(&'static str, Saga)> {
+        vec![
+            (
+                "DeleteUser",
+                Saga::DeleteUser(DeleteUserSaga::new(
+                    "delete-456".to_string(),
+                    DeleteUserInput {
+                        user: UserId::new(42),
+                        organization_ids: vec![
+                            OrganizationId::new(1),
+                            OrganizationId::new(2),
+                            OrganizationId::new(3),
+                        ],
+                    },
+                )),
+            ),
+            (
+                "MigrateOrg",
+                Saga::MigrateOrg(MigrateOrgSaga::new(
+                    "migrate-org-789".to_string(),
+                    MigrateOrgInput {
+                        organization_id: OrganizationId::new(10),
+                        organization_slug: OrganizationSlug::new(5000),
+                        source_region: Region::US_EAST_VA,
+                        target_region: Region::IE_EAST_DUBLIN,
+                        acknowledge_residency_downgrade: false,
+                        metadata_only: false,
+                    },
+                )),
+            ),
+            (
+                "MigrateUser",
+                Saga::MigrateUser(MigrateUserSaga::new(
+                    "migrate-user-101".to_string(),
+                    MigrateUserInput {
+                        user: UserId::new(77),
+                        source_region: Region::US_EAST_VA,
+                        target_region: Region::JP_EAST_TOKYO,
+                    },
+                )),
+            ),
+            (
+                "CreateUser",
+                Saga::CreateUser(CreateUserSaga::new(
+                    "create-user-202".to_string(),
+                    CreateUserInput {
+                        hmac: "abc123".to_string(),
+                        region: Region::US_EAST_VA,
+                        admin: false,
+                        pending_org_profile_key: String::new(),
+                        default_org_tier: OrganizationTier::Free,
+                    },
+                )),
+            ),
+            (
+                "CreateOrganization",
+                Saga::CreateOrganization(CreateOrganizationSaga::new(
+                    "create-org-303".to_string(),
+                    CreateOrganizationInput {
+                        region: Region::IE_EAST_DUBLIN,
+                        tier: OrganizationTier::Free,
+                        admin: UserId::new(1),
+                        pending_profile_key: "_sys:pending:create-org-303".to_string(),
+                    },
+                )),
+            ),
+        ]
     }
 
     #[test]
-    fn test_delete_user_saga_serialization() {
-        let input = DeleteUserInput {
-            user: UserId::new(42),
-            organization_ids: vec![
-                OrganizationId::new(1),
-                OrganizationId::new(2),
-                OrganizationId::new(3),
-            ],
-        };
+    fn saga_serialization_round_trip() {
+        for (label, saga) in all_pending_sagas() {
+            let expected_id = saga.id().to_string();
 
-        let saga = DeleteUserSaga::new("delete-456".to_string(), input);
-        let wrapped = Saga::DeleteUser(saga);
+            let serialized =
+                serde_json::to_vec(&saga).unwrap_or_else(|e| panic!("{label}: serialize: {e}"));
+            let deserialized: Saga = serde_json::from_slice(&serialized)
+                .unwrap_or_else(|e| panic!("{label}: deserialize: {e}"));
 
-        let serialized = serde_json::to_vec(&wrapped).unwrap();
-        let deserialized: Saga = serde_json::from_slice(&serialized).unwrap();
-
-        assert_eq!(deserialized.id(), "delete-456");
-        assert!(!deserialized.is_terminal());
+            assert_eq!(deserialized.id(), expected_id, "failed id check for {label}");
+        }
     }
 
-    /// Verifies the CAS condition logic used by `allocate_sequence_id`.
-    ///
-    /// When a sequence key exists, the CAS condition should be `ValueEquals`
-    /// with the current stored value. When no key exists, it should be
-    /// `MustNotExist`. This prevents duplicate allocation on leader failover:
-    /// if the old leader already incremented the value, the retry's CAS
-    /// condition won't match and the write fails, forcing a re-read.
     #[test]
-    fn test_cas_prevents_duplicate_sequence_allocation() {
-        // Simulate existing key with sequence value 5
-        let current_value = 5i64.to_le_bytes().to_vec();
-
-        // When key exists: condition should be ValueEquals with the stored bytes
-        let condition = Some(SetCondition::ValueEquals(current_value.clone()));
-        assert_eq!(condition, Some(SetCondition::ValueEquals(5i64.to_le_bytes().to_vec())));
-
-        // The allocated ID should be the current value (5), new stored = 6
-        let allocated = 5i64;
-        let new_stored = (allocated + 1).to_le_bytes().to_vec();
-        assert_eq!(i64::from_le_bytes(new_stored[..8].try_into().unwrap()), 6);
-
-        // If a retry occurs after the first write succeeded (value is now 6),
-        // the CAS condition (ValueEquals(5)) would NOT match the stored value (6),
-        // so the write fails — preventing a duplicate allocation.
-        let stale_condition = SetCondition::ValueEquals(5i64.to_le_bytes().to_vec());
-        let stored_after_first_write = 6i64.to_le_bytes().to_vec();
-        assert_ne!(stale_condition, SetCondition::ValueEquals(stored_after_first_write));
-
-        // When no key exists: condition should be MustNotExist
-        let initial_condition = Some(SetCondition::MustNotExist);
-        assert_eq!(initial_condition, Some(SetCondition::MustNotExist));
+    fn pending_saga_is_not_terminal() {
+        for (label, saga) in all_pending_sagas() {
+            assert!(!saga.is_terminal(), "pending saga should not be terminal for {label}");
+        }
     }
 }

@@ -148,34 +148,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config_values() {
-        assert_eq!(DEFAULT_COMPACTION_INTERVAL, Duration::from_secs(3600));
-        assert!((DEFAULT_MIN_FILL_FACTOR - 0.4).abs() < f64::EPSILON);
-    }
-
-    #[test]
     fn test_config_interval_conversion() {
         let config = BTreeCompactionConfig::default();
         let duration = Duration::from_secs(config.interval_secs);
         assert_eq!(duration, Duration::from_secs(3600));
-    }
-
-    #[test]
-    fn test_background_job_metrics_emitted_on_compaction() {
-        // Verify metric recording functions accept expected arguments for compaction.
-        // These are no-ops without a recorder — the test confirms call signatures
-        // match what run_cycle() uses.
-        use crate::metrics::{
-            record_background_job_duration, record_background_job_items, record_background_job_run,
-        };
-
-        // Success path: pages were merged
-        record_background_job_duration("compaction", 2.5);
-        record_background_job_run("compaction", "success");
-        record_background_job_items("compaction", 16);
-
-        // Failure path
-        record_background_job_duration("compaction", 0.01);
-        record_background_job_run("compaction", "failure");
     }
 }

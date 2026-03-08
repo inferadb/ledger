@@ -649,18 +649,6 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_batch_config_builder_with_defaults() {
-        // builder().build() should produce the same result as Default::default()
-        let from_builder = BatchWriterConfig::builder().build();
-        let from_default = BatchWriterConfig::default();
-
-        assert_eq!(from_builder.max_batch_size, from_default.max_batch_size);
-        assert_eq!(from_builder.batch_timeout, from_default.batch_timeout);
-        assert_eq!(from_builder.tick_interval, from_default.tick_interval);
-        assert_eq!(from_builder.eager_commit, from_default.eager_commit);
-    }
-
-    #[test]
     fn test_batch_config_builder_custom_values() {
         let config = BatchWriterConfig::builder()
             .max_batch_size(500)

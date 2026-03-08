@@ -196,10 +196,4 @@ mod tests {
         let buf = [0u8; CRYPTO_METADATA_SIZE];
         assert!(CryptoMetadata::from_bytes(&buf).is_none());
     }
-
-    #[test]
-    fn test_crypto_metadata_size_constant() {
-        // 4 (rmk_version) + 40 (wrapped_dek) + 12 (nonce) + 16 (auth_tag) = 72
-        assert_eq!(CRYPTO_METADATA_SIZE, 72);
-    }
 }

@@ -184,145 +184,79 @@ impl TryFrom<u8> for PageType {
 mod tests {
     use super::*;
 
+    /// Every Error variant must produce the expected Display string.
     #[test]
-    fn test_error_display_io() {
-        let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
-        let err = Error::from(io_err);
-        let display = format!("{err}");
-        assert!(display.starts_with("I/O error:"), "got: {display}");
-    }
+    fn test_error_display_all_variants() {
+        // (error, expected display substring or exact match)
+        let cases: Vec<(Error, &str)> = vec![
+            (Error::Corrupted { reason: "bad header".into() }, "Corrupted database: bad header"),
+            (Error::HeaderChecksumMismatch, "Header checksum mismatch"),
+            (Error::PageChecksumMismatch { page_id: 42 }, "Page 42 checksum mismatch"),
+            (Error::InvalidMagic, "Invalid database magic number"),
+            (Error::UnsupportedVersion { version: 99 }, "Unsupported format version: 99"),
+            (Error::KeyNotFound, "Key not found"),
+            (Error::PageNotFound { page_id: 123 }, "Page 123 not found"),
+            (Error::OutOfSpace, "Out of space: cannot allocate more pages"),
+            (Error::WriteTransactionInProgress, "Write transaction already in progress"),
+            (Error::TransactionAborted, "Transaction aborted"),
+            (Error::InvalidTableId { id: 255 }, "Invalid table ID: 255"),
+            (Error::KeyTooLarge { size: 1000, max: 500 }, "Key too large: 1000 bytes (max 500)"),
+            (
+                Error::ValueTooLarge { size: 2000, max: 1000 },
+                "Value too large: 2000 bytes (max 1000)",
+            ),
+            (Error::ReadOnly, "Database is read-only"),
+            (Error::RecoveryRequired, "Recovery required"),
+            (Error::Poisoned, "Internal lock poisoned"),
+            (Error::PageFull, "Page is full"),
+            (Error::Encryption { reason: "bad key".into() }, "Encryption error: bad key"),
+            (
+                Error::AuthenticationFailed { page_id: 7 },
+                "Authentication failed for page 7: data may be tampered or wrong key",
+            ),
+        ];
 
-    #[test]
-    fn test_error_display_corrupted() {
-        let err = Error::Corrupted { reason: "bad header".to_string() };
-        assert_eq!(format!("{err}"), "Corrupted database: bad header");
-    }
-
-    #[test]
-    fn test_error_display_header_checksum_mismatch() {
-        let err = Error::HeaderChecksumMismatch;
-        assert_eq!(format!("{err}"), "Header checksum mismatch");
-    }
-
-    #[test]
-    fn test_error_display_page_checksum_mismatch() {
-        let err = Error::PageChecksumMismatch { page_id: 42 };
-        assert_eq!(format!("{err}"), "Page 42 checksum mismatch");
-    }
-
-    #[test]
-    fn test_error_display_invalid_magic() {
-        let err = Error::InvalidMagic;
-        assert_eq!(format!("{err}"), "Invalid database magic number");
-    }
-
-    #[test]
-    fn test_error_display_unsupported_version() {
-        let err = Error::UnsupportedVersion { version: 99 };
-        assert_eq!(format!("{err}"), "Unsupported format version: 99");
-    }
-
-    #[test]
-    fn test_error_display_page_type_mismatch() {
-        let err =
-            Error::PageTypeMismatch { expected: PageType::BTreeLeaf, found: PageType::BTreeBranch };
-        let display = format!("{err}");
-        assert!(display.contains("BTreeLeaf"), "got: {display}");
-        assert!(display.contains("BTreeBranch"), "got: {display}");
-    }
-
-    #[test]
-    fn test_error_display_key_not_found() {
-        let err = Error::KeyNotFound;
-        assert_eq!(format!("{err}"), "Key not found");
-    }
-
-    #[test]
-    fn test_error_display_page_not_found() {
-        let err = Error::PageNotFound { page_id: 123 };
-        assert_eq!(format!("{err}"), "Page 123 not found");
-    }
-
-    #[test]
-    fn test_error_display_out_of_space() {
-        let err = Error::OutOfSpace;
-        assert_eq!(format!("{err}"), "Out of space: cannot allocate more pages");
-    }
-
-    #[test]
-    fn test_error_display_write_transaction_in_progress() {
-        let err = Error::WriteTransactionInProgress;
-        assert_eq!(format!("{err}"), "Write transaction already in progress");
-    }
-
-    #[test]
-    fn test_error_display_transaction_aborted() {
-        let err = Error::TransactionAborted;
-        assert_eq!(format!("{err}"), "Transaction aborted");
-    }
-
-    #[test]
-    fn test_error_display_invalid_table_id() {
-        let err = Error::InvalidTableId { id: 255 };
-        assert_eq!(format!("{err}"), "Invalid table ID: 255");
-    }
-
-    #[test]
-    fn test_error_display_key_too_large() {
-        let err = Error::KeyTooLarge { size: 1000, max: 500 };
-        assert_eq!(format!("{err}"), "Key too large: 1000 bytes (max 500)");
-    }
-
-    #[test]
-    fn test_error_display_value_too_large() {
-        let err = Error::ValueTooLarge { size: 2000, max: 1000 };
-        assert_eq!(format!("{err}"), "Value too large: 2000 bytes (max 1000)");
-    }
-
-    #[test]
-    fn test_error_display_read_only() {
-        let err = Error::ReadOnly;
-        assert_eq!(format!("{err}"), "Database is read-only");
-    }
-
-    #[test]
-    fn test_error_display_recovery_required() {
-        let err = Error::RecoveryRequired;
-        assert_eq!(format!("{err}"), "Recovery required");
-    }
-
-    #[test]
-    fn test_error_display_poisoned() {
-        let err = Error::Poisoned;
-        assert_eq!(format!("{err}"), "Internal lock poisoned");
-    }
-
-    #[test]
-    fn test_error_display_page_full() {
-        let err = Error::PageFull;
-        assert_eq!(format!("{err}"), "Page is full");
-    }
-
-    #[test]
-    fn test_from_io_error() {
-        let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
-        let err: Error = io_err.into();
-        // Verify we can use ? operator result
-        match err {
-            Error::Io { source } => assert_eq!(source.kind(), io::ErrorKind::PermissionDenied),
-            _ => panic!("Expected Io variant"),
+        for (err, expected) in &cases {
+            let display = format!("{err}");
+            assert!(
+                display.contains(expected),
+                "Error variant {err:?} displayed as {display:?}, expected to contain {expected:?}"
+            );
         }
     }
 
+    /// I/O Error variant Display starts with the expected prefix.
     #[test]
-    fn test_error_source_chain() {
+    fn test_error_display_io_prefix() {
+        let err = Error::from(io::Error::new(io::ErrorKind::NotFound, "file not found"));
+        assert!(format!("{err}").starts_with("I/O error:"));
+    }
+
+    /// PageTypeMismatch Display includes both expected and found type names.
+    #[test]
+    fn test_error_display_page_type_mismatch_includes_both_types() {
+        let err =
+            Error::PageTypeMismatch { expected: PageType::BTreeLeaf, found: PageType::BTreeBranch };
+        let display = format!("{err}");
+        assert!(display.contains("BTreeLeaf"), "missing expected type in: {display}");
+        assert!(display.contains("BTreeBranch"), "missing found type in: {display}");
+    }
+
+    /// From<io::Error> preserves the original error kind.
+    #[test]
+    fn test_from_io_error_preserves_kind() {
+        let err: Error = io::Error::new(io::ErrorKind::PermissionDenied, "access denied").into();
+        match err {
+            Error::Io { source } => assert_eq!(source.kind(), io::ErrorKind::PermissionDenied),
+            other => panic!("Expected Io variant, got {other:?}"),
+        }
+    }
+
+    /// Error::Io preserves the source chain for error reporting.
+    #[test]
+    fn test_io_error_has_source() {
         use std::error::Error as StdError;
-
-        let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
-        let err = Error::from(io_err);
-
-        // snafu should preserve the source chain
-        let source = err.source();
-        assert!(source.is_some(), "Error::Io should have a source");
+        let err = Error::from(io::Error::new(io::ErrorKind::NotFound, "file not found"));
+        assert!(err.source().is_some(), "Error::Io should have a source");
     }
 }

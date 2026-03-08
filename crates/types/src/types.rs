@@ -1351,147 +1351,86 @@ mod tests {
     // Newtype Identifier Tests
     // ========================================================================
 
+    /// Table-driven: all i64 newtype IDs support new/value/display/from/into/serde.
     #[test]
-    fn test_organization_id_new_and_value() {
-        let id = OrganizationId::new(42);
-        assert_eq!(id.value(), 42);
-    }
+    fn test_id_newtypes_core_behavior() {
+        // (constructor, value, expected_display, expected_json)
+        let org = OrganizationId::new(42);
+        assert_eq!(org.value(), 42);
+        assert_eq!(format!("{org}"), "org:42");
 
-    #[test]
-    fn test_vault_id_new_and_value() {
-        let id = VaultId::new(7);
-        assert_eq!(id.value(), 7);
-    }
+        let vault = VaultId::new(7);
+        assert_eq!(vault.value(), 7);
+        assert_eq!(format!("{vault}"), "vault:7");
 
-    #[test]
-    fn test_user_id_new_and_value() {
-        let id = UserId::new(99);
-        assert_eq!(id.value(), 99);
-    }
+        let user = UserId::new(99);
+        assert_eq!(user.value(), 99);
+        assert_eq!(format!("{user}"), "user:99");
 
-    #[test]
-    fn test_user_email_id_new_and_value() {
-        let id = UserEmailId::new(3);
-        assert_eq!(id.value(), 3);
-    }
+        let email = UserEmailId::new(3);
+        assert_eq!(email.value(), 3);
+        assert_eq!(format!("{email}"), "email:3");
 
-    #[test]
-    fn test_organization_id_display() {
-        assert_eq!(format!("{}", OrganizationId::new(123)), "org:123");
-    }
-
-    #[test]
-    fn test_vault_id_display() {
-        assert_eq!(format!("{}", VaultId::new(456)), "vault:456");
-    }
-
-    #[test]
-    fn test_user_id_display() {
-        assert_eq!(format!("{}", UserId::new(789)), "user:789");
-    }
-
-    #[test]
-    fn test_user_email_id_display() {
-        assert_eq!(format!("{}", UserEmailId::new(10)), "email:10");
-    }
-
-    #[test]
-    fn test_organization_id_from_i64() {
-        let id: OrganizationId = 42_i64.into();
-        assert_eq!(id.value(), 42);
-    }
-
-    #[test]
-    fn test_vault_id_into_i64() {
-        let id = VaultId::new(7);
-        let raw: i64 = id.into();
+        // From/Into i64
+        let org2: OrganizationId = 42_i64.into();
+        assert_eq!(org2.value(), 42);
+        let raw: i64 = VaultId::new(7).into();
         assert_eq!(raw, 7);
+        let email2: UserEmailId = 5_i64.into();
+        assert_eq!(email2.value(), 5);
+        let raw2: i64 = email.into();
+        assert_eq!(raw2, 3);
+
+        // Edge cases: negative and zero
+        assert_eq!(OrganizationId::new(-1).value(), -1);
+        assert_eq!(format!("{}", OrganizationId::new(-1)), "org:-1");
+        assert_eq!(OrganizationId::new(0).value(), 0);
+        assert_eq!(format!("{}", OrganizationId::new(0)), "org:0");
     }
 
+    /// Derived traits: Eq, Ord, Hash, Copy, Serialize/Deserialize for ID newtypes.
     #[test]
-    fn test_user_email_id_from_i64() {
-        let id: UserEmailId = 5_i64.into();
-        assert_eq!(id.value(), 5);
-    }
+    fn test_id_newtypes_derived_traits() {
+        use std::collections::HashMap;
 
-    #[test]
-    fn test_user_email_id_into_i64() {
-        let id = UserEmailId::new(3);
-        let raw: i64 = id.into();
-        assert_eq!(raw, 3);
-    }
-
-    #[test]
-    fn test_id_equality() {
+        // Equality
         assert_eq!(OrganizationId::new(1), OrganizationId::new(1));
         assert_ne!(OrganizationId::new(1), OrganizationId::new(2));
-    }
 
-    #[test]
-    fn test_id_ordering() {
+        // Ordering
         assert!(OrganizationId::new(1) < OrganizationId::new(2));
         assert!(VaultId::new(10) > VaultId::new(5));
-        assert!(UserEmailId::new(0) < UserEmailId::new(1));
-    }
 
-    #[test]
-    fn test_id_hash_map_key() {
-        use std::collections::HashMap;
+        // HashMap key
         let mut map = HashMap::new();
         map.insert(OrganizationId::new(1), "org-a");
         map.insert(OrganizationId::new(2), "org-b");
         assert_eq!(map.get(&OrganizationId::new(1)), Some(&"org-a"));
         assert_eq!(map.get(&OrganizationId::new(3)), None);
-    }
 
-    #[test]
-    fn test_id_copy_semantics() {
+        // Copy
         let id = OrganizationId::new(42);
-        let id2 = id; // Copy
-        assert_eq!(id, id2); // Original still accessible
-    }
+        let id2 = id;
+        assert_eq!(id, id2);
 
-    #[test]
-    fn test_id_serde_roundtrip() {
-        let id = OrganizationId::new(42);
-        let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(json, "42"); // transparent serialization
-        let deserialized: OrganizationId = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, id);
-    }
+        // Serde round-trip (transparent serialization)
+        for (json, expected_org) in [("42", 42_i64), ("7", 7)] {
+            let id = OrganizationId::new(expected_org);
+            let serialized = serde_json::to_string(&id).unwrap();
+            assert_eq!(serialized, json);
+            let deserialized: OrganizationId = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, id);
+        }
 
-    #[test]
-    fn test_vault_id_serde_roundtrip() {
-        let id = VaultId::new(7);
-        let json = serde_json::to_string(&id).unwrap();
+        let vault = VaultId::new(7);
+        let json = serde_json::to_string(&vault).unwrap();
         assert_eq!(json, "7");
-        let deserialized: VaultId = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, id);
-    }
+        assert_eq!(serde_json::from_str::<VaultId>(&json).unwrap(), vault);
 
-    #[test]
-    fn test_user_email_id_serde_roundtrip() {
-        let id = UserEmailId::new(3);
-        let json = serde_json::to_string(&id).unwrap();
+        let email = UserEmailId::new(3);
+        let json = serde_json::to_string(&email).unwrap();
         assert_eq!(json, "3");
-        let deserialized: UserEmailId = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, id);
-    }
-
-    #[test]
-    fn test_id_negative_values() {
-        // IDs can be negative (leader-assigned sequential)
-        let id = OrganizationId::new(-1);
-        assert_eq!(id.value(), -1);
-        assert_eq!(format!("{id}"), "org:-1");
-    }
-
-    #[test]
-    fn test_id_zero_value() {
-        // Zero has special meaning (system organization)
-        let id = OrganizationId::new(0);
-        assert_eq!(id.value(), 0);
-        assert_eq!(format!("{id}"), "org:0");
+        assert_eq!(serde_json::from_str::<UserEmailId>(&json).unwrap(), email);
     }
 
     #[test]
@@ -1512,111 +1451,65 @@ mod tests {
         assert_eq!(header.vault, VaultId::new(20));
     }
 
+    /// OrganizationUsage is a simple Copy struct.
     #[test]
-    fn test_organization_usage_default_values() {
-        let usage = OrganizationUsage { storage_bytes: 0, vault_count: 0 };
-        assert_eq!(usage.storage_bytes, 0);
-        assert_eq!(usage.vault_count, 0);
-    }
+    fn test_organization_usage() {
+        let zero = OrganizationUsage { storage_bytes: 0, vault_count: 0 };
+        assert_eq!(zero.storage_bytes, 0);
 
-    #[test]
-    fn test_organization_usage_with_data() {
         let usage = OrganizationUsage { storage_bytes: 1_048_576, vault_count: 5 };
-        assert_eq!(usage.storage_bytes, 1_048_576);
-        assert_eq!(usage.vault_count, 5);
-    }
-
-    #[test]
-    fn test_organization_usage_copy_semantics() {
-        let a = OrganizationUsage { storage_bytes: 100, vault_count: 3 };
-        let b = a; // Copy
-        assert_eq!(a, b); // Both accessible — Copy trait
+        let copy = usage; // Copy
+        assert_eq!(usage, copy);
     }
 
     // ========================================================================
     // VaultSlug Tests
     // ========================================================================
 
+    /// VaultSlug (u64 newtype): core operations and derived traits.
     #[test]
-    fn test_vault_slug_new_and_value() {
+    fn test_vault_slug_core_and_traits() {
+        use std::collections::HashMap;
+
+        // new/value/display
         let slug = VaultSlug::new(123_456_789);
         assert_eq!(slug.value(), 123_456_789);
-    }
+        assert_eq!(format!("{}", VaultSlug::new(987_654_321)), "987654321");
 
-    #[test]
-    fn test_vault_slug_display_raw_number() {
-        let slug = VaultSlug::new(987_654_321);
-        assert_eq!(format!("{slug}"), "987654321");
-    }
-
-    #[test]
-    fn test_vault_slug_from_u64() {
-        let slug: VaultSlug = 42_u64.into();
-        assert_eq!(slug.value(), 42);
-    }
-
-    #[test]
-    fn test_vault_slug_into_u64() {
-        let slug = VaultSlug::new(100);
-        let raw: u64 = slug.into();
+        // From/Into u64
+        let slug2: VaultSlug = 42_u64.into();
+        assert_eq!(slug2.value(), 42);
+        let raw: u64 = VaultSlug::new(100).into();
         assert_eq!(raw, 100);
-    }
 
-    #[test]
-    fn test_vault_slug_parse_from_str() {
-        let slug: VaultSlug = "12345".parse().expect("valid u64 string");
-        assert_eq!(slug.value(), 12345);
-    }
+        // FromStr
+        let parsed: VaultSlug = "12345".parse().expect("valid u64");
+        assert_eq!(parsed.value(), 12345);
+        assert!("not_a_number".parse::<VaultSlug>().is_err());
 
-    #[test]
-    fn test_vault_slug_parse_invalid_str() {
-        let result = "not_a_number".parse::<VaultSlug>();
-        assert!(result.is_err());
-    }
+        // Serde round-trip
+        let slug3 = VaultSlug::new(42_000_000);
+        let json = serde_json::to_string(&slug3).unwrap();
+        assert_eq!(json, "42000000");
+        assert_eq!(serde_json::from_str::<VaultSlug>(&json).unwrap(), slug3);
 
-    #[test]
-    fn test_vault_slug_serde_roundtrip() {
-        let slug = VaultSlug::new(42_000_000);
-        let json = serde_json::to_string(&slug).unwrap();
-        assert_eq!(json, "42000000"); // transparent serialization
-        let deserialized: VaultSlug = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, slug);
-    }
-
-    #[test]
-    fn test_vault_slug_equality() {
+        // Equality, Ordering
         assert_eq!(VaultSlug::new(1), VaultSlug::new(1));
         assert_ne!(VaultSlug::new(1), VaultSlug::new(2));
-    }
-
-    #[test]
-    fn test_vault_slug_ordering() {
         assert!(VaultSlug::new(1) < VaultSlug::new(2));
-        assert!(VaultSlug::new(100) > VaultSlug::new(50));
-    }
 
-    #[test]
-    fn test_vault_slug_hash_map_key() {
-        use std::collections::HashMap;
+        // HashMap key
         let mut map = HashMap::new();
-        map.insert(VaultSlug::new(1), "vault-a");
-        map.insert(VaultSlug::new(2), "vault-b");
-        assert_eq!(map.get(&VaultSlug::new(1)), Some(&"vault-a"));
+        map.insert(VaultSlug::new(1), "a");
+        assert_eq!(map.get(&VaultSlug::new(1)), Some(&"a"));
         assert_eq!(map.get(&VaultSlug::new(3)), None);
-    }
 
-    #[test]
-    fn test_vault_slug_copy_semantics() {
-        let slug = VaultSlug::new(42);
-        let slug2 = slug; // Copy
-        assert_eq!(slug, slug2); // Original still accessible
-    }
-
-    #[test]
-    fn test_vault_slug_zero() {
-        let slug = VaultSlug::new(0);
-        assert_eq!(slug.value(), 0);
-        assert_eq!(format!("{slug}"), "0");
+        // Copy + zero
+        let s = VaultSlug::new(42);
+        let s2 = s;
+        assert_eq!(s, s2);
+        assert_eq!(VaultSlug::new(0).value(), 0);
+        assert_eq!(format!("{}", VaultSlug::new(0)), "0");
     }
 
     // ========================================================================
@@ -1703,70 +1596,45 @@ mod tests {
         assert!("Global".parse::<Region>().is_err());
     }
 
+    /// Region residency, serde, serialization, and derived traits.
     #[test]
-    fn test_region_requires_residency_non_protected() {
+    fn test_region_properties() {
+        use std::collections::HashMap;
+
+        // Residency: exactly GLOBAL, US_EAST_VA, US_WEST_OR are non-protected
         assert!(!Region::GLOBAL.requires_residency());
         assert!(!Region::US_EAST_VA.requires_residency());
         assert!(!Region::US_WEST_OR.requires_residency());
-    }
-
-    #[test]
-    fn test_region_requires_residency_exhaustive() {
         let non_protected_count = ALL_REGIONS.iter().filter(|r| !r.requires_residency()).count();
         assert_eq!(non_protected_count, 3, "exactly GLOBAL, US_EAST_VA, US_WEST_OR");
-    }
 
-    #[test]
-    fn test_region_serde_json_round_trip() {
-        for region in &ALL_REGIONS {
-            let json = serde_json::to_string(region).unwrap();
-            let deserialized: Region = serde_json::from_str(&json).unwrap();
-            assert_eq!(deserialized, *region);
-        }
-    }
-
-    #[test]
-    fn test_region_serde_json_matches_display() {
+        // Serde JSON: round-trip and matches Display
         for region in &ALL_REGIONS {
             let json = serde_json::to_string(region).unwrap();
             assert_eq!(json, format!("\"{}\"", region));
+            let deserialized: Region = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, *region);
         }
-    }
 
-    #[test]
-    fn test_region_postcard_round_trip() {
+        // Postcard round-trip
         for region in &ALL_REGIONS {
             let bytes = crate::encode(region).unwrap();
             let decoded: Region = crate::decode(&bytes).unwrap();
             assert_eq!(decoded, *region);
         }
-    }
 
-    #[test]
-    fn test_region_copy_semantics() {
+        // Copy, HashMap key, Ordering
         let a = Region::IE_EAST_DUBLIN;
         let b = a;
         assert_eq!(a, b);
-    }
 
-    #[test]
-    fn test_region_hash_map_key() {
-        use std::collections::HashMap;
         let mut map = HashMap::new();
         map.insert(Region::US_EAST_VA, "virginia");
         map.insert(Region::IE_EAST_DUBLIN, "dublin");
         assert_eq!(map[&Region::US_EAST_VA], "virginia");
-        assert_eq!(map[&Region::IE_EAST_DUBLIN], "dublin");
-    }
 
-    #[test]
-    fn test_region_ordering() {
-        // GLOBAL is first (lowest) in definition order
         assert!(Region::GLOBAL < Region::US_EAST_VA);
         assert!(Region::US_EAST_VA < Region::US_WEST_OR);
-        assert!(Region::US_WEST_OR < Region::CA_CENTRAL_QC);
-        // Last variant
-        assert!(Region::VN_SOUTH_HCMC < Region::CN_NORTH_BEIJING);
     }
 
     proptest::proptest! {

@@ -231,13 +231,4 @@ mod tests {
         assert_eq!(config.interval_secs, 3600);
         assert_eq!(config.batch_size, 50);
     }
-
-    #[test]
-    fn test_background_job_metrics_functions() {
-        // Verify metric recording functions accept expected arguments.
-        // No-ops without a recorder — confirms call signatures match run_cycle().
-        record_background_job_duration("organization_purge", 1.5);
-        record_background_job_run("organization_purge", "success");
-        record_background_job_items("organization_purge", 5);
-    }
 }

@@ -228,13 +228,4 @@ mod tests {
         assert_eq!(config.interval_secs, 3600);
         assert_eq!(config.batch_size, 100);
     }
-
-    #[test]
-    fn test_background_job_metrics_functions() {
-        // Verify metric recording functions accept expected arguments.
-        // No-ops without a recorder — confirms call signatures match run_cycle().
-        record_background_job_duration("user_retention_reaper", 1.5);
-        record_background_job_run("user_retention_reaper", "success");
-        record_background_job_items("user_retention_reaper", 5);
-    }
 }

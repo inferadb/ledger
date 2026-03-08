@@ -421,13 +421,4 @@ mod tests {
         let result = scrubber.verify_page_checksums(&[999_999]);
         assert_eq!(result.pages_checked, 0);
     }
-
-    #[test]
-    fn test_scrub_result_default() {
-        let result = ScrubResult::default();
-        assert_eq!(result.pages_checked, 0);
-        assert_eq!(result.checksum_errors, 0);
-        assert_eq!(result.structural_errors, 0);
-        assert!(result.errors.is_empty());
-    }
 }

@@ -802,6 +802,7 @@ impl From<ConsensusError> for LedgerError {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use std::collections::HashSet;
 
@@ -901,119 +902,74 @@ mod tests {
         assert_eq!(ErrorCode::AppStorage.to_string(), "3000");
     }
 
-    // --- ErrorCode range validation ---
-
+    /// Every ErrorCode falls within its expected numeric range.
     #[test]
-    fn test_storage_codes_in_range() {
-        let storage_codes = [
-            ErrorCode::StorageDatabaseOpen,
-            ErrorCode::StorageTransaction,
-            ErrorCode::StorageTableOperation,
-            ErrorCode::StorageKeyEncoding,
-            ErrorCode::StorageSnapshot,
-            ErrorCode::StorageCorruption,
-        ];
-        for code in storage_codes {
+    fn test_error_code_ranges() {
+        for code in all_error_codes() {
             let n = code.as_u16();
-            assert!((1000..2000).contains(&n), "{code:?} ({n}) not in storage range 1000-1999");
-        }
-    }
-
-    #[test]
-    fn test_consensus_codes_in_range() {
-        let consensus_codes = [
-            ErrorCode::ConsensusNotLeader,
-            ErrorCode::ConsensusLeaderUnknown,
-            ErrorCode::ConsensusProposalFailed,
-            ErrorCode::ConsensusLogStorage,
-            ErrorCode::ConsensusStateMachine,
-            ErrorCode::ConsensusNetwork,
-        ];
-        for code in consensus_codes {
-            let n = code.as_u16();
-            assert!((2000..3000).contains(&n), "{code:?} ({n}) not in consensus range 2000-2999");
-        }
-    }
-
-    #[test]
-    fn test_application_codes_in_range() {
-        let app_codes = [
-            ErrorCode::AppStorage,
-            ErrorCode::AppConsensus,
-            ErrorCode::AppHashMismatch,
-            ErrorCode::AppVaultDiverged,
-            ErrorCode::AppVaultUnavailable,
-            ErrorCode::AppOrganizationNotFound,
-            ErrorCode::AppVaultNotFound,
-            ErrorCode::AppEntityNotFound,
-            ErrorCode::AppPreconditionFailed,
-            ErrorCode::AppAlreadyCommitted,
-            ErrorCode::AppSequenceViolation,
-            ErrorCode::AppSerialization,
-            ErrorCode::AppConfig,
-            ErrorCode::AppIo,
-            ErrorCode::AppInvalidArgument,
-            ErrorCode::AppInternal,
-            ErrorCode::AppQuotaExceeded,
-            ErrorCode::AppInsufficientRegionNodes,
-            ErrorCode::AppInvalidRegionAssignment,
-        ];
-        for code in app_codes {
-            let n = code.as_u16();
-            assert!((3000..4000).contains(&n), "{code:?} ({n}) not in application range 3000-3999");
+            let name = format!("{code:?}");
+            if name.starts_with("Storage") {
+                assert!((1000..2000).contains(&n), "{code:?} ({n}) not in storage range 1000-1999");
+            } else if name.starts_with("Consensus") {
+                assert!(
+                    (2000..3000).contains(&n),
+                    "{code:?} ({n}) not in consensus range 2000-2999"
+                );
+            } else if name.starts_with("App") {
+                assert!(
+                    (3000..4000).contains(&n),
+                    "{code:?} ({n}) not in application range 3000-3999"
+                );
+            } else {
+                panic!("Unknown code prefix: {code:?}");
+            }
         }
     }
 
     // --- ErrorCode::is_retryable ---
 
+    /// Table-driven: every ErrorCode has correct retryability classification.
     #[test]
-    fn test_retryable_codes() {
-        let retryable = [
-            ErrorCode::StorageTransaction,
-            ErrorCode::StorageSnapshot,
-            ErrorCode::ConsensusNotLeader,
-            ErrorCode::ConsensusLeaderUnknown,
-            ErrorCode::ConsensusProposalFailed,
-            ErrorCode::ConsensusNetwork,
-            ErrorCode::AppConsensus,
-            ErrorCode::AppVaultUnavailable,
-            ErrorCode::AppIo,
-            ErrorCode::AppQuotaExceeded,
-            ErrorCode::AppOrganizationMigrating,
-            ErrorCode::AppUserMigrating,
+    fn test_error_code_retryability() {
+        let cases: Vec<(ErrorCode, bool)> = vec![
+            // Retryable
+            (ErrorCode::StorageTransaction, true),
+            (ErrorCode::StorageSnapshot, true),
+            (ErrorCode::ConsensusNotLeader, true),
+            (ErrorCode::ConsensusLeaderUnknown, true),
+            (ErrorCode::ConsensusProposalFailed, true),
+            (ErrorCode::ConsensusNetwork, true),
+            (ErrorCode::AppConsensus, true),
+            (ErrorCode::AppVaultUnavailable, true),
+            (ErrorCode::AppIo, true),
+            (ErrorCode::AppQuotaExceeded, true),
+            (ErrorCode::AppOrganizationMigrating, true),
+            (ErrorCode::AppUserMigrating, true),
+            // Non-retryable
+            (ErrorCode::StorageDatabaseOpen, false),
+            (ErrorCode::StorageTableOperation, false),
+            (ErrorCode::StorageKeyEncoding, false),
+            (ErrorCode::StorageCorruption, false),
+            (ErrorCode::ConsensusLogStorage, false),
+            (ErrorCode::ConsensusStateMachine, false),
+            (ErrorCode::AppStorage, false),
+            (ErrorCode::AppHashMismatch, false),
+            (ErrorCode::AppVaultDiverged, false),
+            (ErrorCode::AppOrganizationNotFound, false),
+            (ErrorCode::AppVaultNotFound, false),
+            (ErrorCode::AppEntityNotFound, false),
+            (ErrorCode::AppPreconditionFailed, false),
+            (ErrorCode::AppAlreadyCommitted, false),
+            (ErrorCode::AppSequenceViolation, false),
+            (ErrorCode::AppSerialization, false),
+            (ErrorCode::AppConfig, false),
+            (ErrorCode::AppInvalidArgument, false),
+            (ErrorCode::AppInternal, false),
+            (ErrorCode::AppInsufficientRegionNodes, false),
+            (ErrorCode::AppInvalidRegionAssignment, false),
         ];
-        for code in retryable {
-            assert!(code.is_retryable(), "{code:?} should be retryable");
-        }
-    }
-
-    #[test]
-    fn test_non_retryable_codes() {
-        let non_retryable = [
-            ErrorCode::StorageDatabaseOpen,
-            ErrorCode::StorageTableOperation,
-            ErrorCode::StorageKeyEncoding,
-            ErrorCode::StorageCorruption,
-            ErrorCode::ConsensusLogStorage,
-            ErrorCode::ConsensusStateMachine,
-            ErrorCode::AppStorage,
-            ErrorCode::AppHashMismatch,
-            ErrorCode::AppVaultDiverged,
-            ErrorCode::AppOrganizationNotFound,
-            ErrorCode::AppVaultNotFound,
-            ErrorCode::AppEntityNotFound,
-            ErrorCode::AppPreconditionFailed,
-            ErrorCode::AppAlreadyCommitted,
-            ErrorCode::AppSequenceViolation,
-            ErrorCode::AppSerialization,
-            ErrorCode::AppConfig,
-            ErrorCode::AppInvalidArgument,
-            ErrorCode::AppInternal,
-            ErrorCode::AppInsufficientRegionNodes,
-            ErrorCode::AppInvalidRegionAssignment,
-        ];
-        for code in non_retryable {
-            assert!(!code.is_retryable(), "{code:?} should not be retryable");
+        for (code, expected) in &cases {
+            assert_eq!(code.is_retryable(), *expected, "{code:?}");
         }
     }
 
@@ -1029,54 +985,72 @@ mod tests {
 
     // --- LedgerError code mapping ---
 
+    /// Table-driven: LedgerError variants map to correct ErrorCode and retryability.
+    /// Also verifies that is_retryable() and suggested_action() delegate to ErrorCode.
     #[test]
-    fn test_ledger_error_storage_code() {
-        let err = LedgerError::Storage {
-            message: "disk full".to_string(),
-            location: snafu::Location::new("test.rs", 1, 1),
-        };
-        assert_eq!(err.code(), ErrorCode::AppStorage);
-    }
+    fn test_ledger_error_code_and_retryability() {
+        let cases: Vec<(LedgerError, ErrorCode, bool)> = vec![
+            (
+                LedgerError::Storage {
+                    message: "disk full".into(),
+                    location: snafu::Location::new("test.rs", 1, 1),
+                },
+                ErrorCode::AppStorage,
+                false,
+            ),
+            (
+                LedgerError::Consensus {
+                    message: "leader lost".into(),
+                    location: snafu::Location::new("test.rs", 1, 1),
+                },
+                ErrorCode::AppConsensus,
+                true,
+            ),
+            (
+                LedgerError::HashMismatch { expected: Hash::default(), actual: Hash::default() },
+                ErrorCode::AppHashMismatch,
+                false,
+            ),
+            (
+                LedgerError::VaultUnavailable {
+                    vault: VaultId::new(1),
+                    reason: "recovering".into(),
+                },
+                ErrorCode::AppVaultUnavailable,
+                true,
+            ),
+            (
+                LedgerError::OrganizationNotFound { organization: OrganizationId::new(1) },
+                ErrorCode::AppOrganizationNotFound,
+                false,
+            ),
+            (
+                LedgerError::InvalidArgument { message: "bad param".into() },
+                ErrorCode::AppInvalidArgument,
+                false,
+            ),
+            (LedgerError::Config { message: "bad".into() }, ErrorCode::AppConfig, false),
+        ];
 
-    #[test]
-    fn test_ledger_error_consensus_code() {
-        let err = LedgerError::Consensus {
-            message: "leader lost".to_string(),
-            location: snafu::Location::new("test.rs", 1, 1),
-        };
-        assert_eq!(err.code(), ErrorCode::AppConsensus);
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_ledger_error_hash_mismatch_code() {
-        let err = LedgerError::HashMismatch { expected: Hash::default(), actual: Hash::default() };
-        assert_eq!(err.code(), ErrorCode::AppHashMismatch);
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_ledger_error_vault_unavailable_retryable() {
-        let err = LedgerError::VaultUnavailable {
-            vault: VaultId::new(1),
-            reason: "recovering".to_string(),
-        };
-        assert_eq!(err.code(), ErrorCode::AppVaultUnavailable);
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_ledger_error_not_found_not_retryable() {
-        let err = LedgerError::OrganizationNotFound { organization: OrganizationId::new(1) };
-        assert_eq!(err.code(), ErrorCode::AppOrganizationNotFound);
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_ledger_error_invalid_argument_code() {
-        let err = LedgerError::InvalidArgument { message: "bad param".to_string() };
-        assert_eq!(err.code(), ErrorCode::AppInvalidArgument);
-        assert!(!err.is_retryable());
+        for (err, expected_code, expected_retryable) in &cases {
+            assert_eq!(err.code(), *expected_code, "code mismatch for {err:?}");
+            assert_eq!(
+                err.is_retryable(),
+                *expected_retryable,
+                "retryability mismatch for {err:?}"
+            );
+            // Verify delegation: LedgerError delegates to ErrorCode
+            assert_eq!(
+                err.is_retryable(),
+                err.code().is_retryable(),
+                "delegation mismatch for {err:?}"
+            );
+            assert_eq!(
+                err.suggested_action(),
+                err.code().suggested_action(),
+                "suggested_action delegation for {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -1235,23 +1209,5 @@ mod tests {
             assert_eq!(rejection_reason.as_deref(), Some("log behind"));
             assert_eq!(rejecting_node_id.as_deref(), Some("node-3"));
         }
-    }
-
-    // --- Retryability consistency ---
-
-    #[test]
-    fn test_ledger_error_retryability_matches_code() {
-        let err =
-            LedgerError::VaultUnavailable { vault: VaultId::new(1), reason: "test".to_string() };
-        assert_eq!(err.is_retryable(), err.code().is_retryable());
-
-        let err2 = LedgerError::InvalidArgument { message: "bad".to_string() };
-        assert_eq!(err2.is_retryable(), err2.code().is_retryable());
-    }
-
-    #[test]
-    fn test_suggested_action_delegates_to_code() {
-        let err = LedgerError::Config { message: "bad".to_string() };
-        assert_eq!(err.suggested_action(), err.code().suggested_action());
     }
 }

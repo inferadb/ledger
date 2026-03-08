@@ -536,31 +536,6 @@ mod tests {
         assert_eq!(count, u64::MAX);
     }
 
-    #[test]
-    fn test_hot_key_info_fields() {
-        let info = HotKeyInfo {
-            vault: VaultId::new(42),
-            key: "entity:user:123".to_string(),
-            ops_per_sec: 150.5,
-        };
-        assert_eq!(info.vault, VaultId::new(42));
-        assert_eq!(info.key, "entity:user:123");
-        assert!((info.ops_per_sec - 150.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_access_result_variants() {
-        let normal = AccessResult::Normal;
-        assert_eq!(normal, AccessResult::Normal);
-
-        let hot = AccessResult::Hot(HotKeyInfo {
-            vault: VaultId::new(1),
-            key: "k".to_string(),
-            ops_per_sec: 200.0,
-        });
-        assert!(matches!(hot, AccessResult::Hot(_)));
-    }
-
     // ── Concurrency Stress Tests ────────────────────────────────────────
 
     /// Stress test: 100 concurrent record_access calls during window rotation.

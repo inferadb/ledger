@@ -295,46 +295,70 @@ mod tests {
         assert!(matches!(check, IdempotencyCheckResult::KeyReused));
     }
 
+    /// Verifies that idempotency keys are isolated across every key dimension.
+    ///
+    /// Each case inserts an entry, then checks with exactly one dimension changed.
+    /// The check must return `NewRequest` — proving that dimension participates in
+    /// the cache key.
     #[test]
-    fn test_different_idempotency_key_not_duplicate() {
-        let cache = IdempotencyCache::new();
-        let result = make_result(100, 1);
-        let idem_key_1 = make_key(1);
-        let idem_key_2 = make_key(2);
-        let request_hash = 12345u64;
+    #[allow(clippy::type_complexity)]
+    fn test_key_isolation_by_dimension() {
+        // (label, insert params, check params)
+        // Params: (org, vault, client_id, idempotency_key, request_hash)
+        let cases: Vec<(&str, (i64, i64, &str, [u8; 16], u64), (i64, i64, &str, [u8; 16], u64))> = vec![
+            (
+                "different idempotency key",
+                (1, 1, "client-1", make_key(1), 12345),
+                (1, 1, "client-1", make_key(2), 12345),
+            ),
+            (
+                "different client ID",
+                (1, 1, "client-1", make_key(1), 12345),
+                (1, 1, "client-2", make_key(1), 12345),
+            ),
+            (
+                "different vault",
+                (1, 1, "client-1", make_key(1), 12345),
+                (1, 2, "client-1", make_key(1), 12345),
+            ),
+            (
+                "different organization",
+                (1, 1, "client-1", make_key(1), 12345),
+                (2, 1, "client-1", make_key(1), 12345),
+            ),
+        ];
 
-        // Insert with key 1
-        cache.insert(org(1), vault(1), "client-1".to_string(), idem_key_1, request_hash, result);
+        for (label, insert, check) in &cases {
+            let cache = IdempotencyCache::new();
+            let result = make_result(100, 1);
 
-        // Check with key 2 should be new request
-        let check = cache.check(org(1), vault(1), "client-1", idem_key_2, request_hash);
-        assert!(matches!(check, IdempotencyCheckResult::NewRequest));
+            cache.insert(
+                org(insert.0),
+                vault(insert.1),
+                insert.2.to_string(),
+                insert.3,
+                insert.4,
+                result,
+            );
+
+            let outcome = cache.check(org(check.0), vault(check.1), check.2, check.3, check.4);
+            assert!(
+                matches!(outcome, IdempotencyCheckResult::NewRequest),
+                "{label}: expected NewRequest, got {outcome:?}"
+            );
+        }
     }
 
+    /// Verifies that two entries sharing the same idempotency key but differing
+    /// in one dimension coexist independently in the cache.
     #[test]
-    fn test_different_client_not_duplicate() {
+    fn test_coexisting_entries_across_dimensions() {
         let cache = IdempotencyCache::new();
-        let result = make_result(100, 1);
         let idem_key = make_key(1);
         let request_hash = 12345u64;
-
-        // Insert for client-1
-        cache.insert(org(1), vault(1), "client-1".to_string(), idem_key, request_hash, result);
-
-        // Same key for different client should be new request
-        let check = cache.check(org(1), vault(1), "client-2", idem_key, request_hash);
-        assert!(matches!(check, IdempotencyCheckResult::NewRequest));
-    }
-
-    /// Test that different vaults are tracked independently.
-    #[test]
-    fn test_different_vault_not_duplicate() {
-        let cache = IdempotencyCache::new();
         let result = make_result(100, 1);
-        let idem_key = make_key(1);
-        let request_hash = 12345u64;
 
-        // Insert for vault 1
+        // Insert for (org=1, vault=1) and (org=1, vault=2)
         cache.insert(
             org(1),
             vault(1),
@@ -343,20 +367,11 @@ mod tests {
             request_hash,
             result.clone(),
         );
-
-        // Same client, same key, but different vault should be new request
-        let check = cache.check(org(1), vault(2), "client-1", idem_key, request_hash);
-        assert!(
-            matches!(check, IdempotencyCheckResult::NewRequest),
-            "different vault should be new request"
-        );
-
-        // Now insert for vault 2
         cache.insert(org(1), vault(2), "client-1".to_string(), idem_key, request_hash, result);
         cache.run_pending_tasks();
+
         assert_eq!(cache.len(), 2, "should have entries for both vaults");
 
-        // Both should now return duplicate
         assert!(matches!(
             cache.check(org(1), vault(1), "client-1", idem_key, request_hash),
             IdempotencyCheckResult::Duplicate(_)
@@ -365,25 +380,6 @@ mod tests {
             cache.check(org(1), vault(2), "client-1", idem_key, request_hash),
             IdempotencyCheckResult::Duplicate(_)
         ));
-    }
-
-    /// Test that different organizations are tracked independently.
-    #[test]
-    fn test_different_organization_not_duplicate() {
-        let cache = IdempotencyCache::new();
-        let result = make_result(100, 1);
-        let idem_key = make_key(1);
-        let request_hash = 12345u64;
-
-        // Insert for organization 1
-        cache.insert(org(1), vault(1), "client-1".to_string(), idem_key, request_hash, result);
-
-        // Same client, same vault, same key, but different organization should be new request
-        let check = cache.check(org(2), vault(1), "client-1", idem_key, request_hash);
-        assert!(
-            matches!(check, IdempotencyCheckResult::NewRequest),
-            "different organization should be new request"
-        );
     }
 
     /// Test that assigned_sequence is properly stored and retrieved.

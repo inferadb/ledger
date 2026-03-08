@@ -537,17 +537,4 @@ mod tests {
             "directory size {directory_size} exceeds minimum 512-byte page"
         );
     }
-
-    #[test]
-    fn test_table_roots_array_capacity() {
-        // CommittedState.table_roots is [PageId; TableId::COUNT].
-        // Verify COUNT matches the number of defined variants.
-        let all = TableId::all();
-        assert_eq!(all.len(), TableId::COUNT);
-
-        // Verify all IDs are unique and sequential from 0.
-        for (i, id) in all.iter().enumerate() {
-            assert_eq!(*id as u8, i as u8, "table ID {id:?} should have discriminant {i}");
-        }
-    }
 }

@@ -497,82 +497,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_user_key() {
-        assert_eq!(SystemKeys::user_key(UserId::new(123)), "user:123");
+    fn test_key_generation() {
+        let cases: Vec<(&str, String, &str)> = vec![
+            ("user_key", SystemKeys::user_key(UserId::new(123)), "user:123"),
+            (
+                "email_index_key (normalized)",
+                SystemKeys::email_index_key("Alice@Example.COM"),
+                "_idx:email:alice@example.com",
+            ),
+            ("organization_key", SystemKeys::organization_key(OrganizationId::new(42)), "org:42"),
+            (
+                "organization_profile_key",
+                SystemKeys::organization_profile_key(OrganizationId::new(42)),
+                "_sys:org_profile:42",
+            ),
+            (
+                "pending_organization_profile_key",
+                SystemKeys::pending_organization_profile_key("saga-abc"),
+                "_sys:pending_org_profile:saga-abc",
+            ),
+            (
+                "organization_slug_key",
+                SystemKeys::organization_slug_key(OrganizationSlug::new(12345)),
+                "_idx:org:slug:12345",
+            ),
+            (
+                "vault_slug_key",
+                SystemKeys::vault_slug_key(VaultSlug::new(67890)),
+                "_idx:vault:slug:67890",
+            ),
+            ("node_key", SystemKeys::node_key(&"node-1".to_string()), "node:node-1"),
+            ("saga_key", SystemKeys::saga_key("create-org-abc123"), "saga:create-org-abc123"),
+            ("user_directory_key", SystemKeys::user_directory_key(UserId::new(42)), "_sys:user:42"),
+            (
+                "user_slug_index_key",
+                SystemKeys::user_slug_index_key(UserSlug::new(99999)),
+                "_idx:user:slug:99999",
+            ),
+        ];
+        for (label, actual, expected) in &cases {
+            assert_eq!(actual, expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn test_parse_key_roundtrips() {
         assert_eq!(SystemKeys::parse_user_key("user:123"), Some(UserId::new(123)));
         assert_eq!(SystemKeys::parse_user_key("invalid:123"), None);
-    }
-
-    #[test]
-    fn test_email_index_key() {
-        // Should normalize to lowercase
-        assert_eq!(
-            SystemKeys::email_index_key("Alice@Example.COM"),
-            "_idx:email:alice@example.com"
-        );
-    }
-
-    #[test]
-    fn test_organization_key() {
-        assert_eq!(SystemKeys::organization_key(OrganizationId::new(42)), "org:42");
         assert_eq!(SystemKeys::parse_organization_key("org:42"), Some(OrganizationId::new(42)));
-    }
-
-    #[test]
-    fn test_organization_profile_key() {
-        assert_eq!(
-            SystemKeys::organization_profile_key(OrganizationId::new(42)),
-            "_sys:org_profile:42"
-        );
-        assert!(
-            SystemKeys::organization_profile_key(OrganizationId::new(1))
-                .starts_with(SystemKeys::ORG_PROFILE_PREFIX)
-        );
-        assert!(
-            SystemKeys::organization_profile_key(OrganizationId::new(1))
-                .starts_with(SystemKeys::SYS_PREFIX)
-        );
-    }
-
-    #[test]
-    fn test_pending_organization_profile_key() {
-        assert_eq!(
-            SystemKeys::pending_organization_profile_key("saga-abc"),
-            "_sys:pending_org_profile:saga-abc"
-        );
-        assert!(
-            SystemKeys::pending_organization_profile_key("x")
-                .starts_with(SystemKeys::PENDING_ORG_PROFILE_PREFIX)
-        );
-        assert!(
-            SystemKeys::pending_organization_profile_key("x").starts_with(SystemKeys::SYS_PREFIX)
-        );
-    }
-
-    #[test]
-    fn test_org_profile_does_not_collide_with_pending() {
-        let profile_key = SystemKeys::organization_profile_key(OrganizationId::new(42));
-        let pending_key = SystemKeys::pending_organization_profile_key("42");
-        assert_ne!(profile_key, pending_key);
-    }
-
-    #[test]
-    fn test_organization_slug_key() {
-        assert_eq!(
-            SystemKeys::organization_slug_key(OrganizationSlug::new(12345)),
-            "_idx:org:slug:12345"
-        );
-    }
-
-    #[test]
-    fn test_vault_slug_key() {
-        assert_eq!(SystemKeys::vault_slug_key(VaultSlug::new(67890)), "_idx:vault:slug:67890");
-    }
-
-    #[test]
-    fn test_node_key() {
-        assert_eq!(SystemKeys::node_key(&"node-1".to_string()), "node:node-1");
         assert_eq!(SystemKeys::parse_node_key("node:node-1"), Some("node-1".to_string()));
+        assert_eq!(SystemKeys::parse_user_directory_key("_sys:user:42"), Some(UserId::new(42)));
+        assert_eq!(SystemKeys::parse_user_directory_key("user:42"), None);
+        assert_eq!(SystemKeys::parse_user_directory_key("_sys:user:abc"), None);
     }
 
     #[test]
@@ -582,47 +558,48 @@ mod tests {
     }
 
     #[test]
-    fn test_saga_key() {
-        assert_eq!(SystemKeys::saga_key("create-org-abc123"), "saga:create-org-abc123");
+    fn test_prefix_consistency() {
+        let cases: Vec<(&str, String, &[&str])> = vec![
+            ("user_key", SystemKeys::user_key(UserId::new(1)), &[SystemKeys::USER_PREFIX]),
+            (
+                "organization_key",
+                SystemKeys::organization_key(OrganizationId::new(1)),
+                &[SystemKeys::ORG_PREFIX],
+            ),
+            ("node_key", SystemKeys::node_key(&"n".to_string()), &[SystemKeys::NODE_PREFIX]),
+            (
+                "organization_profile_key",
+                SystemKeys::organization_profile_key(OrganizationId::new(1)),
+                &[SystemKeys::ORG_PROFILE_PREFIX, SystemKeys::SYS_PREFIX],
+            ),
+            (
+                "pending_organization_profile_key",
+                SystemKeys::pending_organization_profile_key("x"),
+                &[SystemKeys::PENDING_ORG_PROFILE_PREFIX, SystemKeys::SYS_PREFIX],
+            ),
+            (
+                "user_directory_key",
+                SystemKeys::user_directory_key(UserId::new(1)),
+                &[SystemKeys::USER_DIRECTORY_PREFIX, SystemKeys::SYS_PREFIX],
+            ),
+            (
+                "user_slug_index_key",
+                SystemKeys::user_slug_index_key(UserSlug::new(1)),
+                &[SystemKeys::USER_SLUG_INDEX_PREFIX, SystemKeys::INDEX_PREFIX],
+            ),
+        ];
+        for (label, key, prefixes) in &cases {
+            for prefix in *prefixes {
+                assert!(key.starts_with(prefix), "{label} should start with {prefix}");
+            }
+        }
     }
 
     #[test]
-    fn test_prefixes() {
-        assert!(SystemKeys::user_key(UserId::new(1)).starts_with(SystemKeys::USER_PREFIX));
-        assert!(
-            SystemKeys::organization_key(OrganizationId::new(1))
-                .starts_with(SystemKeys::ORG_PREFIX)
-        );
-        assert!(SystemKeys::node_key(&"n".to_string()).starts_with(SystemKeys::NODE_PREFIX));
-    }
-
-    #[test]
-    fn test_user_directory_key() {
-        assert_eq!(SystemKeys::user_directory_key(UserId::new(42)), "_sys:user:42");
-        assert_eq!(SystemKeys::parse_user_directory_key("_sys:user:42"), Some(UserId::new(42)));
-        assert_eq!(SystemKeys::parse_user_directory_key("user:42"), None);
-        assert_eq!(SystemKeys::parse_user_directory_key("_sys:user:abc"), None);
-    }
-
-    #[test]
-    fn test_user_slug_index_key() {
-        assert_eq!(SystemKeys::user_slug_index_key(UserSlug::new(99999)), "_idx:user:slug:99999");
-    }
-
-    #[test]
-    fn test_user_directory_prefixes() {
-        assert!(
-            SystemKeys::user_directory_key(UserId::new(1))
-                .starts_with(SystemKeys::USER_DIRECTORY_PREFIX)
-        );
-        assert!(SystemKeys::user_directory_key(UserId::new(1)).starts_with(SystemKeys::SYS_PREFIX));
-        assert!(
-            SystemKeys::user_slug_index_key(UserSlug::new(1))
-                .starts_with(SystemKeys::USER_SLUG_INDEX_PREFIX)
-        );
-        assert!(
-            SystemKeys::user_slug_index_key(UserSlug::new(1)).starts_with(SystemKeys::INDEX_PREFIX)
-        );
+    fn test_org_profile_does_not_collide_with_pending() {
+        let profile_key = SystemKeys::organization_profile_key(OrganizationId::new(42));
+        let pending_key = SystemKeys::pending_organization_profile_key("42");
+        assert_ne!(profile_key, pending_key);
     }
 
     #[test]
@@ -684,80 +661,93 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_app_key() {
-        let key = SystemKeys::app_key(OrganizationId::new(5), AppId::new(42));
-        assert_eq!(key, "_sys:app:5:42");
-        assert!(key.starts_with(SystemKeys::APP_PREFIX));
+    fn test_app_key_generation() {
+        let cases: Vec<(&str, String, &str)> = vec![
+            (
+                "app_key",
+                SystemKeys::app_key(OrganizationId::new(5), AppId::new(42)),
+                "_sys:app:5:42",
+            ),
+            ("app_prefix", SystemKeys::app_prefix(OrganizationId::new(5)), "_sys:app:5:"),
+            ("app_slug_key", SystemKeys::app_slug_key(AppSlug::new(9999)), "_idx:app:slug:9999"),
+            (
+                "app_name_index_key",
+                SystemKeys::app_name_index_key(OrganizationId::new(3), "my-app"),
+                "_idx:app:name:3:my-app",
+            ),
+            (
+                "app_name_index_prefix",
+                SystemKeys::app_name_index_prefix(OrganizationId::new(3)),
+                "_idx:app:name:3:",
+            ),
+            (
+                "app_assertion_key",
+                SystemKeys::app_assertion_key(
+                    OrganizationId::new(1),
+                    AppId::new(2),
+                    ClientAssertionId::new(3),
+                ),
+                "_sys:app_assertion:1:2:3",
+            ),
+            (
+                "app_assertion_prefix",
+                SystemKeys::app_assertion_prefix(OrganizationId::new(1), AppId::new(2)),
+                "_sys:app_assertion:1:2:",
+            ),
+            (
+                "app_vault_key",
+                SystemKeys::app_vault_key(OrganizationId::new(1), AppId::new(2), VaultId::new(3)),
+                "_sys:app_vault:1:2:3",
+            ),
+            (
+                "app_vault_prefix",
+                SystemKeys::app_vault_prefix(OrganizationId::new(1), AppId::new(2)),
+                "_sys:app_vault:1:2:",
+            ),
+        ];
+        for (label, actual, expected) in &cases {
+            assert_eq!(actual, expected, "{label}");
+        }
     }
 
     #[test]
-    fn test_app_prefix() {
-        let prefix = SystemKeys::app_prefix(OrganizationId::new(5));
-        assert_eq!(prefix, "_sys:app:5:");
-        assert!(prefix.starts_with(SystemKeys::APP_PREFIX));
-        // Key should start with the prefix
-        let key = SystemKeys::app_key(OrganizationId::new(5), AppId::new(42));
-        assert!(key.starts_with(&prefix));
-    }
-
-    #[test]
-    fn test_app_slug_key() {
-        let key = SystemKeys::app_slug_key(AppSlug::new(9999));
-        assert_eq!(key, "_idx:app:slug:9999");
-        assert!(key.starts_with(SystemKeys::APP_SLUG_INDEX_PREFIX));
-    }
-
-    #[test]
-    fn test_app_name_index_key() {
-        let key = SystemKeys::app_name_index_key(OrganizationId::new(3), "my-app");
-        assert_eq!(key, "_idx:app:name:3:my-app");
-        assert!(key.starts_with(SystemKeys::APP_NAME_INDEX_PREFIX));
-    }
-
-    #[test]
-    fn test_app_name_index_prefix() {
-        let prefix = SystemKeys::app_name_index_prefix(OrganizationId::new(3));
-        assert_eq!(prefix, "_idx:app:name:3:");
-        let key = SystemKeys::app_name_index_key(OrganizationId::new(3), "my-app");
-        assert!(key.starts_with(&prefix));
-    }
-
-    #[test]
-    fn test_app_assertion_key() {
-        let key = SystemKeys::app_assertion_key(
-            OrganizationId::new(1),
-            AppId::new(2),
-            ClientAssertionId::new(3),
-        );
-        assert_eq!(key, "_sys:app_assertion:1:2:3");
-        assert!(key.starts_with(SystemKeys::APP_ASSERTION_PREFIX));
-    }
-
-    #[test]
-    fn test_app_assertion_prefix() {
-        let prefix = SystemKeys::app_assertion_prefix(OrganizationId::new(1), AppId::new(2));
-        assert_eq!(prefix, "_sys:app_assertion:1:2:");
-        let key = SystemKeys::app_assertion_key(
-            OrganizationId::new(1),
-            AppId::new(2),
-            ClientAssertionId::new(7),
-        );
-        assert!(key.starts_with(&prefix));
-    }
-
-    #[test]
-    fn test_app_vault_key() {
-        let key = SystemKeys::app_vault_key(OrganizationId::new(1), AppId::new(2), VaultId::new(3));
-        assert_eq!(key, "_sys:app_vault:1:2:3");
-        assert!(key.starts_with(SystemKeys::APP_VAULT_PREFIX));
-    }
-
-    #[test]
-    fn test_app_vault_prefix() {
-        let prefix = SystemKeys::app_vault_prefix(OrganizationId::new(1), AppId::new(2));
-        assert_eq!(prefix, "_sys:app_vault:1:2:");
-        let key = SystemKeys::app_vault_key(OrganizationId::new(1), AppId::new(2), VaultId::new(9));
-        assert!(key.starts_with(&prefix));
+    fn test_app_prefix_consistency() {
+        let cases: Vec<(&str, String, &[&str])> = vec![
+            (
+                "app_key",
+                SystemKeys::app_key(OrganizationId::new(5), AppId::new(42)),
+                &[SystemKeys::APP_PREFIX, "_sys:app:5:"],
+            ),
+            (
+                "app_slug_key",
+                SystemKeys::app_slug_key(AppSlug::new(9999)),
+                &[SystemKeys::APP_SLUG_INDEX_PREFIX],
+            ),
+            (
+                "app_name_index_key",
+                SystemKeys::app_name_index_key(OrganizationId::new(3), "my-app"),
+                &[SystemKeys::APP_NAME_INDEX_PREFIX, "_idx:app:name:3:"],
+            ),
+            (
+                "app_assertion_key",
+                SystemKeys::app_assertion_key(
+                    OrganizationId::new(1),
+                    AppId::new(2),
+                    ClientAssertionId::new(7),
+                ),
+                &[SystemKeys::APP_ASSERTION_PREFIX, "_sys:app_assertion:1:2:"],
+            ),
+            (
+                "app_vault_key",
+                SystemKeys::app_vault_key(OrganizationId::new(1), AppId::new(2), VaultId::new(9)),
+                &[SystemKeys::APP_VAULT_PREFIX, "_sys:app_vault:1:2:"],
+            ),
+        ];
+        for (label, key, prefixes) in &cases {
+            for prefix in *prefixes {
+                assert!(key.starts_with(prefix), "{label} should start with {prefix}");
+            }
+        }
     }
 
     #[test]

@@ -1503,15 +1503,6 @@ mod tests {
     }
 
     #[test]
-    fn test_field_overwrite() {
-        let mut ctx = RequestContext::new("WriteService", "write");
-        ctx.set_organization(1);
-        ctx.set_organization(2);
-        assert_eq!(ctx.organization, Some(2));
-        ctx.suppress_emission();
-    }
-
-    #[test]
     fn test_drop_emits_event() {
         let (_, count) = with_test_subscriber(|| {
             let mut ctx = RequestContext::new("WriteService", "write");
@@ -2003,18 +1994,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sampling_config_disabled() {
-        let config = SamplingConfig::disabled();
-        assert!(!config.enabled);
-    }
-
-    #[test]
-    fn test_sampling_config_for_test() {
-        let config = SamplingConfig::for_test();
-        assert!(!config.enabled);
-    }
-
-    #[test]
     fn test_sampler_disabled_always_samples() {
         let sampler = Sampler::disabled();
         let request_id = Uuid::new_v4();
@@ -2431,16 +2410,6 @@ mod tests {
         ctx.suppress_emission();
     }
 
-    #[test]
-    fn test_admin_operation_convenience_method() {
-        let mut ctx = RequestContext::new("AdminService", "delete_vault");
-        ctx.set_admin_operation("delete_vault");
-
-        assert!(matches!(ctx.admin_action, Some("delete_vault")));
-
-        ctx.suppress_emission();
-    }
-
     // === Trace Context Tests ===
 
     #[test]
@@ -2538,82 +2507,6 @@ mod tests {
         assert!(event.contains("\"trace_flags\":1"));
     }
 
-    // === Canonical Log Line Field Tests ===
-
-    #[test]
-    fn test_bytes_read_in_json_output() {
-        let (_, events) = with_json_capturing_subscriber(|| {
-            let mut ctx = RequestContext::new("ReadService", "read");
-            ctx.set_bytes_read(4096);
-            ctx.set_success();
-        });
-
-        assert_eq!(events.len(), 1);
-        let event = &events[0];
-        assert!(event.contains("\"bytes_read\":4096"), "bytes_read field missing: {event}");
-    }
-
-    #[test]
-    fn test_bytes_written_in_json_output() {
-        let (_, events) = with_json_capturing_subscriber(|| {
-            let mut ctx = RequestContext::new("WriteService", "write");
-            ctx.set_bytes_written(2048);
-            ctx.set_success();
-        });
-
-        assert_eq!(events.len(), 1);
-        let event = &events[0];
-        assert!(event.contains("\"bytes_written\":2048"), "bytes_written field missing: {event}");
-    }
-
-    #[test]
-    fn test_raft_round_trips_in_json_output() {
-        let (_, events) = with_json_capturing_subscriber(|| {
-            let mut ctx = RequestContext::new("WriteService", "write");
-            ctx.set_raft_round_trips(3);
-            ctx.set_success();
-        });
-
-        assert_eq!(events.len(), 1);
-        let event = &events[0];
-        assert!(
-            event.contains("\"raft_round_trips\":3"),
-            "raft_round_trips field missing: {event}"
-        );
-    }
-
-    #[test]
-    fn test_sdk_version_in_json_output() {
-        let (_, events) = with_json_capturing_subscriber(|| {
-            let mut ctx = RequestContext::new("ReadService", "read");
-            ctx.set_sdk_version("rust-sdk/0.1.0");
-            ctx.set_success();
-        });
-
-        assert_eq!(events.len(), 1);
-        let event = &events[0];
-        assert!(
-            event.contains("\"sdk_version\":\"rust-sdk/0.1.0\""),
-            "sdk_version field missing: {event}"
-        );
-    }
-
-    #[test]
-    fn test_source_ip_in_json_output() {
-        let (_, events) = with_json_capturing_subscriber(|| {
-            let mut ctx = RequestContext::new("ReadService", "read");
-            ctx.set_source_ip("192.168.1.100");
-            ctx.set_success();
-        });
-
-        assert_eq!(events.len(), 1);
-        let event = &events[0];
-        assert!(
-            event.contains("\"source_ip\":\"192.168.1.100\""),
-            "source_ip field missing: {event}"
-        );
-    }
-
     #[test]
     fn test_end_raft_timer_auto_increments_round_trips() {
         let mut ctx = RequestContext::new("WriteService", "write");
@@ -2685,19 +2578,6 @@ mod tests {
     }
 
     #[test]
-    fn test_canonical_log_line_type_alias() {
-        // CanonicalLogLine is just a type alias for RequestContext
-        let mut ctx: CanonicalLogLine = CanonicalLogLine::new("WriteService", "write");
-        ctx.set_bytes_written(512);
-        ctx.set_sdk_version("rust-sdk/0.1.0");
-        ctx.set_source_ip("127.0.0.1");
-        ctx.set_success();
-
-        // If it compiles and runs, the alias works
-        ctx.suppress_emission();
-    }
-
-    #[test]
     fn test_canonical_log_line_completeness() {
         // Verify that a fully-populated canonical log line emits all field groups.
         let (_, events) = with_json_capturing_subscriber(|| {
@@ -2714,6 +2594,9 @@ mod tests {
             ctx.set_is_leader(true);
             ctx.set_raft_term(5);
             ctx.set_region(Region::CA_CENTRAL_QC);
+
+            // Read metrics
+            ctx.set_bytes_read(2048);
 
             // Write metrics
             ctx.set_operations_count(10);
@@ -2753,6 +2636,9 @@ mod tests {
         assert!(event.contains("\"is_leader\":true"), "missing is_leader");
         assert!(event.contains("\"raft_term\":5"), "missing raft_term");
         assert!(event.contains("\"region\":\"ca-central-qc\""), "missing region");
+
+        // Read metrics
+        assert!(event.contains("\"bytes_read\":2048"), "missing bytes_read");
 
         // Write metrics
         assert!(event.contains("\"operations_count\":10"), "missing operations_count");
