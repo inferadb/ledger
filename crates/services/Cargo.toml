@@ -31,6 +31,7 @@ futures = "0.3"
 
 # Concurrency
 parking_lot.workspace = true
+moka.workspace = true
 
 # Builder pattern
 bon.workspace = true
@@ -39,6 +40,12 @@ bon.workspace = true
 sha2.workspace = true
 seahash.workspace = true
 rand.workspace = true
+bcrypt.workspace = true
+ed25519-dalek.workspace = true
+base64.workspace = true
+
+# Memory safety
+zeroize.workspace = true
 
 # Utilities
 chrono.workspace = true

@@ -39,6 +39,16 @@ pub struct TeamSlug {
     #[prost(uint64, tag = "1")]
     pub slug: u64,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AppSlug {
+    #[prost(uint64, tag = "1")]
+    pub slug: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClientAssertionId {
+    #[prost(int64, tag = "1")]
+    pub id: i64,
+}
 /// Unique node identifier
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct NodeId {
@@ -1969,6 +1979,336 @@ pub struct ClusterMember {
     #[prost(bool, tag = "4")]
     pub is_leader: bool,
 }
+/// App resource as returned by Get/List.
+/// Credentials are included in Get but omitted from List for efficiency.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AppInfo {
+    #[prost(message, optional, tag = "1")]
+    pub slug: ::core::option::Option<AppSlug>,
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "3")]
+    pub description: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, tag = "4")]
+    pub enabled: bool,
+    #[prost(message, optional, tag = "5")]
+    pub credentials: ::core::option::Option<AppCredentialsInfo>,
+    #[prost(message, optional, tag = "6")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "7")]
+    pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+/// Credential configuration state (enabled flags only, no secrets).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AppCredentialsInfo {
+    #[prost(bool, tag = "1")]
+    pub client_secret_enabled: bool,
+    #[prost(bool, tag = "2")]
+    pub mtls_ca_enabled: bool,
+    #[prost(bool, tag = "3")]
+    pub mtls_self_signed_enabled: bool,
+    #[prost(bool, tag = "4")]
+    pub client_assertion_enabled: bool,
+}
+/// Client assertion entry metadata (public info only).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AppClientAssertionInfo {
+    #[prost(message, optional, tag = "1")]
+    pub id: ::core::option::Option<ClientAssertionId>,
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(bool, tag = "3")]
+    pub enabled: bool,
+    #[prost(message, optional, tag = "4")]
+    pub expires_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "5")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+/// Vault connection info.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AppVaultConnectionInfo {
+    #[prost(message, optional, tag = "1")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    #[prost(string, repeated, tag = "2")]
+    pub allowed_scopes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "3")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "4")]
+    pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateAppRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(string, tag = "3")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "4")]
+    pub description: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateAppResponse {
+    #[prost(message, optional, tag = "1")]
+    pub app: ::core::option::Option<AppInfo>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetAppRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetAppResponse {
+    #[prost(message, optional, tag = "1")]
+    pub app: ::core::option::Option<AppInfo>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListAppsRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListAppsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub apps: ::prost::alloc::vec::Vec<AppInfo>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateAppRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+    #[prost(string, optional, tag = "4")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "5")]
+    pub description: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateAppResponse {
+    #[prost(message, optional, tag = "1")]
+    pub app: ::core::option::Option<AppInfo>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeleteAppRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeleteAppResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetAppEnabledRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+    #[prost(bool, tag = "4")]
+    pub enabled: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetAppEnabledResponse {
+    #[prost(message, optional, tag = "1")]
+    pub app: ::core::option::Option<AppInfo>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetAppCredentialEnabledRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+    #[prost(enumeration = "AppCredentialType", tag = "4")]
+    pub credential_type: i32,
+    #[prost(bool, tag = "5")]
+    pub enabled: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetAppCredentialEnabledResponse {
+    #[prost(message, optional, tag = "1")]
+    pub app: ::core::option::Option<AppInfo>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetAppClientSecretRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetAppClientSecretResponse {
+    #[prost(bool, tag = "1")]
+    pub enabled: bool,
+    #[prost(bool, tag = "2")]
+    pub has_secret: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotateAppClientSecretRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+    /// Client-generated UUID (16 bytes) for idempotent retry.
+    /// If a previous request with the same key already committed, the cached
+    /// response is returned instead of generating a new secret.
+    #[prost(bytes = "vec", tag = "4")]
+    pub idempotency_key: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotateAppClientSecretResponse {
+    /// Base64-encoded plaintext secret. Only returned here — never again.
+    #[prost(string, tag = "1")]
+    pub secret: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListAppClientAssertionsRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListAppClientAssertionsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub assertions: ::prost::alloc::vec::Vec<AppClientAssertionInfo>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateAppClientAssertionRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+    #[prost(string, tag = "4")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "5")]
+    pub expires_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Client-generated UUID (16 bytes) for idempotent retry.
+    /// If a previous request with the same key already committed, the cached
+    /// response (including the private key PEM) is returned instead of generating
+    /// a new keypair.
+    #[prost(bytes = "vec", tag = "6")]
+    pub idempotency_key: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateAppClientAssertionResponse {
+    #[prost(message, optional, tag = "1")]
+    pub assertion: ::core::option::Option<AppClientAssertionInfo>,
+    /// PEM-encoded private key. Only returned here — never again.
+    #[prost(string, tag = "2")]
+    pub private_key_pem: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeleteAppClientAssertionRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+    #[prost(message, optional, tag = "4")]
+    pub assertion: ::core::option::Option<ClientAssertionId>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeleteAppClientAssertionResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetAppClientAssertionEnabledRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+    #[prost(message, optional, tag = "4")]
+    pub assertion: ::core::option::Option<ClientAssertionId>,
+    #[prost(bool, tag = "5")]
+    pub enabled: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetAppClientAssertionEnabledResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListAppVaultsRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListAppVaultsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub vaults: ::prost::alloc::vec::Vec<AppVaultConnectionInfo>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AddAppVaultRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+    #[prost(message, optional, tag = "4")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    #[prost(string, repeated, tag = "5")]
+    pub allowed_scopes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AddAppVaultResponse {
+    #[prost(message, optional, tag = "1")]
+    pub vault: ::core::option::Option<AppVaultConnectionInfo>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateAppVaultRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+    #[prost(message, optional, tag = "4")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    #[prost(string, repeated, tag = "5")]
+    pub allowed_scopes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateAppVaultResponse {
+    #[prost(message, optional, tag = "1")]
+    pub vault: ::core::option::Option<AppVaultConnectionInfo>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveAppVaultRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub initiator: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+    #[prost(message, optional, tag = "4")]
+    pub vault: ::core::option::Option<VaultSlug>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveAppVaultResponse {}
 /// Structured audit event record.
 ///
 /// Follows the canonical log line ("wide event") pattern — a single structured
@@ -3276,6 +3616,42 @@ impl ClusterMemberRole {
             "CLUSTER_MEMBER_ROLE_UNSPECIFIED" => Some(Self::Unspecified),
             "CLUSTER_MEMBER_ROLE_VOTER" => Some(Self::Voter),
             "CLUSTER_MEMBER_ROLE_LEARNER" => Some(Self::Learner),
+            _ => None,
+        }
+    }
+}
+/// Credential type discriminator for enable/disable operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AppCredentialType {
+    Unspecified = 0,
+    ClientSecret = 1,
+    MtlsCa = 2,
+    MtlsSelfSigned = 3,
+    ClientAssertion = 4,
+}
+impl AppCredentialType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "APP_CREDENTIAL_TYPE_UNSPECIFIED",
+            Self::ClientSecret => "APP_CREDENTIAL_TYPE_CLIENT_SECRET",
+            Self::MtlsCa => "APP_CREDENTIAL_TYPE_MTLS_CA",
+            Self::MtlsSelfSigned => "APP_CREDENTIAL_TYPE_MTLS_SELF_SIGNED",
+            Self::ClientAssertion => "APP_CREDENTIAL_TYPE_CLIENT_ASSERTION",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "APP_CREDENTIAL_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "APP_CREDENTIAL_TYPE_CLIENT_SECRET" => Some(Self::ClientSecret),
+            "APP_CREDENTIAL_TYPE_MTLS_CA" => Some(Self::MtlsCa),
+            "APP_CREDENTIAL_TYPE_MTLS_SELF_SIGNED" => Some(Self::MtlsSelfSigned),
+            "APP_CREDENTIAL_TYPE_CLIENT_ASSERTION" => Some(Self::ClientAssertion),
             _ => None,
         }
     }
@@ -9976,6 +10352,1599 @@ pub mod user_service_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "ledger.v1.UserService";
     impl<T> tonic::server::NamedService for UserServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+/// Generated client implementations.
+pub mod app_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// Organization-scoped client application management.
+    /// All mutations require Organization Administrator authorization.
+    #[derive(Debug, Clone)]
+    pub struct AppServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl AppServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> AppServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> AppServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            AppServiceClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// Create a new app within an organization.
+        pub async fn create_app(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateAppRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateAppResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/CreateApp",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AppService", "CreateApp"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Get an app by slug.
+        pub async fn get_app(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetAppRequest>,
+        ) -> std::result::Result<tonic::Response<super::GetAppResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/GetApp",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AppService", "GetApp"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// List all apps in an organization.
+        pub async fn list_apps(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListAppsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListAppsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/ListApps",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AppService", "ListApps"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Update app metadata (name, description).
+        pub async fn update_app(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateAppRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateAppResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/UpdateApp",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AppService", "UpdateApp"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Delete an app and all associated credentials and vault connections.
+        pub async fn delete_app(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DeleteAppRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteAppResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/DeleteApp",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AppService", "DeleteApp"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Enable or disable an app.
+        pub async fn set_app_enabled(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetAppEnabledRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetAppEnabledResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/SetAppEnabled",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AppService", "SetAppEnabled"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Enable or disable a credential type on an app.
+        pub async fn set_app_credential_enabled(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetAppCredentialEnabledRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetAppCredentialEnabledResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/SetAppCredentialEnabled",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.AppService", "SetAppCredentialEnabled"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Get the client secret credential (hash only, not the plaintext secret).
+        pub async fn get_app_client_secret(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetAppClientSecretRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetAppClientSecretResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/GetAppClientSecret",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AppService", "GetAppClientSecret"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Rotate the client secret. Returns the new plaintext secret (one-time).
+        pub async fn rotate_app_client_secret(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RotateAppClientSecretRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RotateAppClientSecretResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/RotateAppClientSecret",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.AppService", "RotateAppClientSecret"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// List client assertion entries for an app.
+        pub async fn list_app_client_assertions(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListAppClientAssertionsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListAppClientAssertionsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/ListAppClientAssertions",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.AppService", "ListAppClientAssertions"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Create a client assertion entry. Returns the private key PEM (one-time).
+        pub async fn create_app_client_assertion(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateAppClientAssertionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateAppClientAssertionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/CreateAppClientAssertion",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.AppService", "CreateAppClientAssertion"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Delete a client assertion entry.
+        pub async fn delete_app_client_assertion(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DeleteAppClientAssertionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteAppClientAssertionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/DeleteAppClientAssertion",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.AppService", "DeleteAppClientAssertion"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Enable or disable a client assertion entry.
+        pub async fn set_app_client_assertion_enabled(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetAppClientAssertionEnabledRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetAppClientAssertionEnabledResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/SetAppClientAssertionEnabled",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "ledger.v1.AppService",
+                        "SetAppClientAssertionEnabled",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// List vault connections for an app.
+        pub async fn list_app_vaults(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListAppVaultsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListAppVaultsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/ListAppVaults",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AppService", "ListAppVaults"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Add a vault connection to an app.
+        pub async fn add_app_vault(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AddAppVaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AddAppVaultResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/AddAppVault",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AppService", "AddAppVault"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Update a vault connection's allowed scopes.
+        pub async fn update_app_vault(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateAppVaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateAppVaultResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/UpdateAppVault",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AppService", "UpdateAppVault"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Remove a vault connection from an app.
+        pub async fn remove_app_vault(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RemoveAppVaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RemoveAppVaultResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/RemoveAppVault",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AppService", "RemoveAppVault"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod app_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with AppServiceServer.
+    #[async_trait]
+    pub trait AppService: std::marker::Send + std::marker::Sync + 'static {
+        /// Create a new app within an organization.
+        async fn create_app(
+            &self,
+            request: tonic::Request<super::CreateAppRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateAppResponse>,
+            tonic::Status,
+        >;
+        /// Get an app by slug.
+        async fn get_app(
+            &self,
+            request: tonic::Request<super::GetAppRequest>,
+        ) -> std::result::Result<tonic::Response<super::GetAppResponse>, tonic::Status>;
+        /// List all apps in an organization.
+        async fn list_apps(
+            &self,
+            request: tonic::Request<super::ListAppsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListAppsResponse>,
+            tonic::Status,
+        >;
+        /// Update app metadata (name, description).
+        async fn update_app(
+            &self,
+            request: tonic::Request<super::UpdateAppRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateAppResponse>,
+            tonic::Status,
+        >;
+        /// Delete an app and all associated credentials and vault connections.
+        async fn delete_app(
+            &self,
+            request: tonic::Request<super::DeleteAppRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteAppResponse>,
+            tonic::Status,
+        >;
+        /// Enable or disable an app.
+        async fn set_app_enabled(
+            &self,
+            request: tonic::Request<super::SetAppEnabledRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetAppEnabledResponse>,
+            tonic::Status,
+        >;
+        /// Enable or disable a credential type on an app.
+        async fn set_app_credential_enabled(
+            &self,
+            request: tonic::Request<super::SetAppCredentialEnabledRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetAppCredentialEnabledResponse>,
+            tonic::Status,
+        >;
+        /// Get the client secret credential (hash only, not the plaintext secret).
+        async fn get_app_client_secret(
+            &self,
+            request: tonic::Request<super::GetAppClientSecretRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetAppClientSecretResponse>,
+            tonic::Status,
+        >;
+        /// Rotate the client secret. Returns the new plaintext secret (one-time).
+        async fn rotate_app_client_secret(
+            &self,
+            request: tonic::Request<super::RotateAppClientSecretRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RotateAppClientSecretResponse>,
+            tonic::Status,
+        >;
+        /// List client assertion entries for an app.
+        async fn list_app_client_assertions(
+            &self,
+            request: tonic::Request<super::ListAppClientAssertionsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListAppClientAssertionsResponse>,
+            tonic::Status,
+        >;
+        /// Create a client assertion entry. Returns the private key PEM (one-time).
+        async fn create_app_client_assertion(
+            &self,
+            request: tonic::Request<super::CreateAppClientAssertionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateAppClientAssertionResponse>,
+            tonic::Status,
+        >;
+        /// Delete a client assertion entry.
+        async fn delete_app_client_assertion(
+            &self,
+            request: tonic::Request<super::DeleteAppClientAssertionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteAppClientAssertionResponse>,
+            tonic::Status,
+        >;
+        /// Enable or disable a client assertion entry.
+        async fn set_app_client_assertion_enabled(
+            &self,
+            request: tonic::Request<super::SetAppClientAssertionEnabledRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetAppClientAssertionEnabledResponse>,
+            tonic::Status,
+        >;
+        /// List vault connections for an app.
+        async fn list_app_vaults(
+            &self,
+            request: tonic::Request<super::ListAppVaultsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListAppVaultsResponse>,
+            tonic::Status,
+        >;
+        /// Add a vault connection to an app.
+        async fn add_app_vault(
+            &self,
+            request: tonic::Request<super::AddAppVaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AddAppVaultResponse>,
+            tonic::Status,
+        >;
+        /// Update a vault connection's allowed scopes.
+        async fn update_app_vault(
+            &self,
+            request: tonic::Request<super::UpdateAppVaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateAppVaultResponse>,
+            tonic::Status,
+        >;
+        /// Remove a vault connection from an app.
+        async fn remove_app_vault(
+            &self,
+            request: tonic::Request<super::RemoveAppVaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RemoveAppVaultResponse>,
+            tonic::Status,
+        >;
+    }
+    /// Organization-scoped client application management.
+    /// All mutations require Organization Administrator authorization.
+    #[derive(Debug)]
+    pub struct AppServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> AppServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for AppServiceServer<T>
+    where
+        T: AppService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/ledger.v1.AppService/CreateApp" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateAppSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::CreateAppRequest>
+                    for CreateAppSvc<T> {
+                        type Response = super::CreateAppResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateAppRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::create_app(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateAppSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/GetApp" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetAppSvc<T: AppService>(pub Arc<T>);
+                    impl<T: AppService> tonic::server::UnaryService<super::GetAppRequest>
+                    for GetAppSvc<T> {
+                        type Response = super::GetAppResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetAppRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::get_app(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetAppSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/ListApps" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListAppsSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::ListAppsRequest>
+                    for ListAppsSvc<T> {
+                        type Response = super::ListAppsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListAppsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::list_apps(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListAppsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/UpdateApp" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpdateAppSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::UpdateAppRequest>
+                    for UpdateAppSvc<T> {
+                        type Response = super::UpdateAppResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UpdateAppRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::update_app(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpdateAppSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/DeleteApp" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeleteAppSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::DeleteAppRequest>
+                    for DeleteAppSvc<T> {
+                        type Response = super::DeleteAppResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DeleteAppRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::delete_app(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeleteAppSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/SetAppEnabled" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetAppEnabledSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::SetAppEnabledRequest>
+                    for SetAppEnabledSvc<T> {
+                        type Response = super::SetAppEnabledResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SetAppEnabledRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::set_app_enabled(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetAppEnabledSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/SetAppCredentialEnabled" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetAppCredentialEnabledSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::SetAppCredentialEnabledRequest>
+                    for SetAppCredentialEnabledSvc<T> {
+                        type Response = super::SetAppCredentialEnabledResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::SetAppCredentialEnabledRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::set_app_credential_enabled(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetAppCredentialEnabledSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/GetAppClientSecret" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetAppClientSecretSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::GetAppClientSecretRequest>
+                    for GetAppClientSecretSvc<T> {
+                        type Response = super::GetAppClientSecretResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetAppClientSecretRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::get_app_client_secret(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetAppClientSecretSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/RotateAppClientSecret" => {
+                    #[allow(non_camel_case_types)]
+                    struct RotateAppClientSecretSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::RotateAppClientSecretRequest>
+                    for RotateAppClientSecretSvc<T> {
+                        type Response = super::RotateAppClientSecretResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RotateAppClientSecretRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::rotate_app_client_secret(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RotateAppClientSecretSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/ListAppClientAssertions" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListAppClientAssertionsSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::ListAppClientAssertionsRequest>
+                    for ListAppClientAssertionsSvc<T> {
+                        type Response = super::ListAppClientAssertionsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::ListAppClientAssertionsRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::list_app_client_assertions(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListAppClientAssertionsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/CreateAppClientAssertion" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateAppClientAssertionSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::CreateAppClientAssertionRequest>
+                    for CreateAppClientAssertionSvc<T> {
+                        type Response = super::CreateAppClientAssertionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::CreateAppClientAssertionRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::create_app_client_assertion(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateAppClientAssertionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/DeleteAppClientAssertion" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeleteAppClientAssertionSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::DeleteAppClientAssertionRequest>
+                    for DeleteAppClientAssertionSvc<T> {
+                        type Response = super::DeleteAppClientAssertionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::DeleteAppClientAssertionRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::delete_app_client_assertion(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeleteAppClientAssertionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/SetAppClientAssertionEnabled" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetAppClientAssertionEnabledSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<
+                        super::SetAppClientAssertionEnabledRequest,
+                    > for SetAppClientAssertionEnabledSvc<T> {
+                        type Response = super::SetAppClientAssertionEnabledResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::SetAppClientAssertionEnabledRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::set_app_client_assertion_enabled(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetAppClientAssertionEnabledSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/ListAppVaults" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListAppVaultsSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::ListAppVaultsRequest>
+                    for ListAppVaultsSvc<T> {
+                        type Response = super::ListAppVaultsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListAppVaultsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::list_app_vaults(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListAppVaultsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/AddAppVault" => {
+                    #[allow(non_camel_case_types)]
+                    struct AddAppVaultSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::AddAppVaultRequest>
+                    for AddAppVaultSvc<T> {
+                        type Response = super::AddAppVaultResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AddAppVaultRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::add_app_vault(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AddAppVaultSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/UpdateAppVault" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpdateAppVaultSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::UpdateAppVaultRequest>
+                    for UpdateAppVaultSvc<T> {
+                        type Response = super::UpdateAppVaultResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UpdateAppVaultRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::update_app_vault(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpdateAppVaultSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/RemoveAppVault" => {
+                    #[allow(non_camel_case_types)]
+                    struct RemoveAppVaultSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::RemoveAppVaultRequest>
+                    for RemoveAppVaultSvc<T> {
+                        type Response = super::RemoveAppVaultResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RemoveAppVaultRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::remove_app_vault(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RemoveAppVaultSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for AppServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "ledger.v1.AppService";
+    impl<T> tonic::server::NamedService for AppServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }

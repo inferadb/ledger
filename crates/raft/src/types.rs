@@ -9,12 +9,12 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
+use inferadb_ledger_types::{
+    AppId, AppSlug, ClientAssertionId, Hash, OrganizationId, OrganizationSlug, Region,
+    SetCondition, TeamId, TeamSlug, Transaction, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
+};
 // Re-export domain types that originated here but now live in types crate.
 pub use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId};
-use inferadb_ledger_types::{
-    Hash, OrganizationId, OrganizationSlug, Region, SetCondition, TeamId, TeamSlug, Transaction,
-    UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
-};
 use openraft::{BasicNode, impls::OneshotResponder};
 use serde::{Deserialize, Serialize};
 
@@ -318,6 +318,145 @@ pub enum LedgerRequest {
         team: TeamId,
         /// New name (if changing).
         name: Option<String>,
+    },
+
+    /// Creates a new application within an organization.
+    CreateApp {
+        /// Organization to create the app in.
+        organization: OrganizationId,
+        /// External slug for API lookups (generated before Raft proposal).
+        slug: AppSlug,
+        /// App name (unique within organization).
+        name: String,
+        /// Optional description.
+        description: Option<String>,
+    },
+
+    /// Updates app metadata (name and/or description).
+    UpdateApp {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App to update.
+        app: AppId,
+        /// New name (if changing).
+        name: Option<String>,
+        /// New description (if changing; `Some(None)` clears it).
+        description: Option<Option<String>>,
+    },
+
+    /// Deletes an application and all its sub-resources.
+    DeleteApp {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App to delete.
+        app: AppId,
+    },
+
+    /// Enables or disables an application.
+    SetAppEnabled {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App to toggle.
+        app: AppId,
+        /// Whether to enable (`true`) or disable (`false`).
+        enabled: bool,
+    },
+
+    /// Sets the enabled state of a credential type on an app.
+    SetAppCredentialEnabled {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App whose credential to modify.
+        app: AppId,
+        /// Which credential type to toggle.
+        credential_type: inferadb_ledger_state::system::AppCredentialType,
+        /// New enabled state.
+        enabled: bool,
+    },
+
+    /// Rotates the client secret for an app.
+    ///
+    /// Generates a new secret, stores the bcrypt hash, and returns
+    /// the plaintext secret once in the response.
+    RotateAppClientSecret {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App whose secret to rotate.
+        app: AppId,
+        /// Bcrypt hash of the new secret (computed before Raft proposal).
+        new_secret_hash: String,
+    },
+
+    /// Creates a client assertion entry (Ed25519 keypair).
+    CreateAppClientAssertion {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App to add the assertion to.
+        app: AppId,
+        /// User-provided name.
+        name: String,
+        /// When this entry expires.
+        expires_at: DateTime<Utc>,
+        /// Raw 32-byte Ed25519 public key.
+        public_key_bytes: Vec<u8>,
+    },
+
+    /// Deletes a client assertion entry.
+    DeleteAppClientAssertion {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App containing the assertion.
+        app: AppId,
+        /// Assertion entry to delete.
+        assertion: ClientAssertionId,
+    },
+
+    /// Enables or disables an individual client assertion entry.
+    SetAppClientAssertionEnabled {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App containing the assertion.
+        app: AppId,
+        /// Assertion entry to toggle.
+        assertion: ClientAssertionId,
+        /// New enabled state.
+        enabled: bool,
+    },
+
+    /// Adds a vault connection to an app.
+    AddAppVault {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App to add the vault connection to.
+        app: AppId,
+        /// Vault to connect.
+        vault: VaultId,
+        /// External vault slug (for response construction).
+        vault_slug: VaultSlug,
+        /// Allowed scopes for this connection.
+        allowed_scopes: Vec<String>,
+    },
+
+    /// Updates a vault connection's allowed scopes.
+    UpdateAppVault {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App containing the vault connection.
+        app: AppId,
+        /// Vault whose connection to update.
+        vault: VaultId,
+        /// New allowed scopes.
+        allowed_scopes: Vec<String>,
+    },
+
+    /// Removes a vault connection from an app.
+    RemoveAppVault {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App containing the vault connection.
+        app: AppId,
+        /// Vault to disconnect.
+        vault: VaultId,
     },
 }
 
@@ -785,6 +924,80 @@ pub enum LedgerResponse {
         /// Organization the team belongs to.
         organization_id: OrganizationId,
     },
+
+    /// App created.
+    AppCreated {
+        /// Assigned internal app ID.
+        app_id: AppId,
+        /// External Snowflake slug.
+        app_slug: AppSlug,
+    },
+
+    /// App metadata updated.
+    AppUpdated {
+        /// Organization the app belongs to.
+        organization_id: OrganizationId,
+    },
+
+    /// App deleted.
+    AppDeleted {
+        /// Organization the app belonged to.
+        organization_id: OrganizationId,
+    },
+
+    /// App enabled or disabled.
+    AppToggled {
+        /// Organization the app belongs to.
+        organization_id: OrganizationId,
+    },
+
+    /// App credential enabled/disabled.
+    AppCredentialToggled {
+        /// Organization the app belongs to.
+        organization_id: OrganizationId,
+    },
+
+    /// App client secret rotated.
+    AppClientSecretRotated {
+        /// Organization the app belongs to.
+        organization_id: OrganizationId,
+    },
+
+    /// Client assertion entry created.
+    AppClientAssertionCreated {
+        /// Assigned assertion entry ID.
+        assertion_id: ClientAssertionId,
+    },
+
+    /// Client assertion entry deleted.
+    AppClientAssertionDeleted {
+        /// Organization the app belongs to.
+        organization_id: OrganizationId,
+    },
+
+    /// Client assertion entry enabled/disabled.
+    AppClientAssertionToggled {
+        /// Organization the app belongs to.
+        organization_id: OrganizationId,
+    },
+
+    /// App vault connection added.
+    AppVaultAdded {
+        /// Organization the app belongs to.
+        organization_id: OrganizationId,
+    },
+
+    /// App vault connection updated.
+    AppVaultUpdated {
+        /// Organization the app belongs to.
+        organization_id: OrganizationId,
+    },
+
+    /// App vault connection removed.
+    AppVaultRemoved {
+        /// Organization the app belongs to.
+        organization_id: OrganizationId,
+    },
 }
 
 impl fmt::Display for LedgerResponse {
@@ -899,6 +1112,42 @@ impl fmt::Display for LedgerResponse {
             },
             LedgerResponse::BatchWrite { responses } => {
                 write!(f, "BatchWrite(count={})", responses.len())
+            },
+            LedgerResponse::AppCreated { app_id, app_slug } => {
+                write!(f, "AppCreated(id={}, slug={})", app_id, app_slug)
+            },
+            LedgerResponse::AppUpdated { organization_id } => {
+                write!(f, "AppUpdated(org={})", organization_id)
+            },
+            LedgerResponse::AppDeleted { organization_id } => {
+                write!(f, "AppDeleted(org={})", organization_id)
+            },
+            LedgerResponse::AppToggled { organization_id } => {
+                write!(f, "AppToggled(org={})", organization_id)
+            },
+            LedgerResponse::AppCredentialToggled { organization_id } => {
+                write!(f, "AppCredentialToggled(org={})", organization_id)
+            },
+            LedgerResponse::AppClientSecretRotated { organization_id } => {
+                write!(f, "AppClientSecretRotated(org={})", organization_id)
+            },
+            LedgerResponse::AppClientAssertionCreated { assertion_id } => {
+                write!(f, "AppClientAssertionCreated(id={})", assertion_id)
+            },
+            LedgerResponse::AppClientAssertionDeleted { organization_id } => {
+                write!(f, "AppClientAssertionDeleted(org={})", organization_id)
+            },
+            LedgerResponse::AppClientAssertionToggled { organization_id } => {
+                write!(f, "AppClientAssertionToggled(org={})", organization_id)
+            },
+            LedgerResponse::AppVaultAdded { organization_id } => {
+                write!(f, "AppVaultAdded(org={})", organization_id)
+            },
+            LedgerResponse::AppVaultUpdated { organization_id } => {
+                write!(f, "AppVaultUpdated(org={})", organization_id)
+            },
+            LedgerResponse::AppVaultRemoved { organization_id } => {
+                write!(f, "AppVaultRemoved(org={})", organization_id)
             },
         }
     }

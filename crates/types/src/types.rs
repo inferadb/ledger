@@ -275,6 +275,55 @@ define_slug!(
     TeamSlug
 );
 
+define_id!(
+    /// Internal sequential identifier for an application within an organization.
+    ///
+    /// Wraps an `i64` with compile-time type safety. Never exposed in APIs —
+    /// use [`AppSlug`] for external identification.
+    ///
+    /// # Display
+    ///
+    /// Formats with `app:` prefix: `app:5`.
+    AppId, i64, "app"
+);
+
+impl Default for AppId {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+define_slug!(
+    /// Snowflake-generated external identifier for an application.
+    ///
+    /// Wraps a `u64` Snowflake ID that is the sole external identifier for
+    /// applications in gRPC APIs and the SDK.
+    ///
+    /// # Display
+    ///
+    /// Displays as the raw number: `1234567890`.
+    AppSlug
+);
+
+define_id!(
+    /// Internal sequential identifier for a client assertion entry.
+    ///
+    /// Wraps an `i64` with compile-time type safety. Used within the
+    /// application's client assertion credential type to identify
+    /// individual certificate entries.
+    ///
+    /// # Display
+    ///
+    /// Formats with `assertion:` prefix: `assertion:2`.
+    ClientAssertionId, i64, "assertion"
+);
+
+impl Default for ClientAssertionId {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
 // ============================================================================
 // Region Type
 // ============================================================================

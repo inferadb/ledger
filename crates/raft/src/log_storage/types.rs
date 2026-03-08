@@ -7,8 +7,9 @@ use std::collections::{HashMap, HashSet};
 
 use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
 use inferadb_ledger_types::{
-    EmailVerifyTokenId, Hash, Operation, OrganizationId, OrganizationSlug, Region, TeamId,
-    TeamSlug, Transaction, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
+    AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, Hash, Operation, OrganizationId,
+    OrganizationSlug, Region, TeamId, TeamSlug, Transaction, UserEmailId, UserId, UserSlug,
+    VaultId, VaultSlug,
 };
 use openraft::{LogId, StoredMembership};
 use serde::{Deserialize, Serialize};
@@ -93,6 +94,15 @@ pub struct AppliedState {
     /// loading every organization profile from the state layer.
     #[serde(default)]
     pub user_org_index: HashMap<UserId, HashSet<OrganizationId>>,
+    /// App slug → (organization ID, app ID) mapping for fast resolution.
+    #[serde(default)]
+    pub app_slug_index: HashMap<AppSlug, (OrganizationId, AppId)>,
+    /// Internal app ID → slug reverse mapping for response construction.
+    #[serde(default)]
+    pub app_id_to_slug: HashMap<AppId, AppSlug>,
+    /// App name uniqueness index: (organization, name) → app ID.
+    #[serde(default)]
+    pub app_name_index: HashMap<(OrganizationId, String), AppId>,
     /// Deterministic timestamp (nanoseconds since epoch) from the last applied
     /// Raft entry's `proposed_at`. Used as the reference "now" for snapshot event
     /// collection — ensures two snapshots of the same state produce identical
@@ -189,6 +199,12 @@ pub struct SequenceCounters {
     /// Next team ID.
     #[serde(default)]
     pub team: TeamId,
+    /// Next app ID.
+    #[serde(default)]
+    pub app: AppId,
+    /// Next client assertion ID.
+    #[serde(default)]
+    pub client_assertion: ClientAssertionId,
 }
 
 impl Default for SequenceCounters {
@@ -200,6 +216,8 @@ impl Default for SequenceCounters {
             user_email: UserEmailId::new(0),
             email_verify: EmailVerifyTokenId::new(0),
             team: TeamId::new(0),
+            app: AppId::new(0),
+            client_assertion: ClientAssertionId::new(0),
         }
     }
 }
@@ -214,6 +232,8 @@ impl SequenceCounters {
             user_email: UserEmailId::new(1),
             email_verify: EmailVerifyTokenId::new(1),
             team: TeamId::new(1),
+            app: AppId::new(1),
+            client_assertion: ClientAssertionId::new(1),
         }
     }
 
@@ -256,6 +276,20 @@ impl SequenceCounters {
     pub fn next_team(&mut self) -> TeamId {
         let id = self.team;
         self.team = TeamId::new(id.value() + 1);
+        id
+    }
+
+    /// Returns and increments the next app ID.
+    pub fn next_app(&mut self) -> AppId {
+        let id = self.app;
+        self.app = AppId::new(id.value() + 1);
+        id
+    }
+
+    /// Returns and increments the next client assertion ID.
+    pub fn next_client_assertion(&mut self) -> ClientAssertionId {
+        let id = self.client_assertion;
+        self.client_assertion = ClientAssertionId::new(id.value() + 1);
         id
     }
 }
@@ -342,6 +376,10 @@ pub struct PendingExternalWrites {
     pub team_slug_index: Vec<(TeamSlug, (OrganizationId, TeamId))>,
     /// `TeamSlugIndex` table deletes (on team deletion).
     pub team_slug_index_deleted: Vec<TeamSlug>,
+    /// `AppSlugIndex` table inserts/updates.
+    pub app_slug_index: Vec<(AppSlug, (OrganizationId, AppId))>,
+    /// `AppSlugIndex` table deletes (on app deletion).
+    pub app_slug_index_deleted: Vec<AppSlug>,
 }
 
 impl PendingExternalWrites {
@@ -366,8 +404,12 @@ impl PendingExternalWrites {
             && self.slug_index_deleted.is_empty()
             && self.vault_slug_index.is_empty()
             && self.vault_slug_index_deleted.is_empty()
+            && self.user_slug_index.is_empty()
+            && self.user_slug_index_deleted.is_empty()
             && self.team_slug_index.is_empty()
             && self.team_slug_index_deleted.is_empty()
+            && self.app_slug_index.is_empty()
+            && self.app_slug_index_deleted.is_empty()
     }
 
     /// Encodes a composite key for vault-scoped tables (`VaultHeights`,
@@ -488,6 +530,17 @@ pub enum VaultHealthStatus {
         /// Current recovery attempt (1-based, max MAX_RECOVERY_ATTEMPTS).
         attempt: u8,
     },
+}
+
+impl VaultHealthStatus {
+    /// Returns a stable string label for use in metrics and logging.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Diverged { .. } => "diverged",
+            Self::Recovering { .. } => "recovering",
+        }
+    }
 }
 
 #[cfg(test)]

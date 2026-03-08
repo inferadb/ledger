@@ -50,6 +50,14 @@ message TeamSlug {
   uint64 slug = 1;
 }
 
+message AppSlug {
+  uint64 slug = 1;
+}
+
+message ClientAssertionId {
+  int64 id = 1;
+}
+
 // Geographic region for data residency. Each Raft consensus group maps 1:1 to
 // a region. Organizations declare a region governing where their data is stored.
 enum Region {
@@ -1771,6 +1779,301 @@ service UserService {
   // Each step is idempotent — safe to retry on failure.
   rpc EraseUser(EraseUserRequest) returns (EraseUserResponse);
 }
+
+// =============================================================================
+// App Service
+// =============================================================================
+
+// Organization-scoped client application management.
+// All mutations require Organization Administrator authorization.
+service AppService {
+  // Create a new app within an organization.
+  rpc CreateApp(CreateAppRequest) returns (CreateAppResponse);
+
+  // Get an app by slug.
+  rpc GetApp(GetAppRequest) returns (GetAppResponse);
+
+  // List all apps in an organization.
+  rpc ListApps(ListAppsRequest) returns (ListAppsResponse);
+
+  // Update app metadata (name, description).
+  rpc UpdateApp(UpdateAppRequest) returns (UpdateAppResponse);
+
+  // Delete an app and all associated credentials and vault connections.
+  rpc DeleteApp(DeleteAppRequest) returns (DeleteAppResponse);
+
+  // Enable or disable an app.
+  rpc SetAppEnabled(SetAppEnabledRequest) returns (SetAppEnabledResponse);
+
+  // Enable or disable a credential type on an app.
+  rpc SetAppCredentialEnabled(SetAppCredentialEnabledRequest) returns (SetAppCredentialEnabledResponse);
+
+  // Get the client secret credential (hash only, not the plaintext secret).
+  rpc GetAppClientSecret(GetAppClientSecretRequest) returns (GetAppClientSecretResponse);
+
+  // Rotate the client secret. Returns the new plaintext secret (one-time).
+  rpc RotateAppClientSecret(RotateAppClientSecretRequest) returns (RotateAppClientSecretResponse);
+
+  // List client assertion entries for an app.
+  rpc ListAppClientAssertions(ListAppClientAssertionsRequest) returns (ListAppClientAssertionsResponse);
+
+  // Create a client assertion entry. Returns the private key PEM (one-time).
+  rpc CreateAppClientAssertion(CreateAppClientAssertionRequest) returns (CreateAppClientAssertionResponse);
+
+  // Delete a client assertion entry.
+  rpc DeleteAppClientAssertion(DeleteAppClientAssertionRequest) returns (DeleteAppClientAssertionResponse);
+
+  // Enable or disable a client assertion entry.
+  rpc SetAppClientAssertionEnabled(SetAppClientAssertionEnabledRequest) returns (SetAppClientAssertionEnabledResponse);
+
+  // List vault connections for an app.
+  rpc ListAppVaults(ListAppVaultsRequest) returns (ListAppVaultsResponse);
+
+  // Add a vault connection to an app.
+  rpc AddAppVault(AddAppVaultRequest) returns (AddAppVaultResponse);
+
+  // Update a vault connection's allowed scopes.
+  rpc UpdateAppVault(UpdateAppVaultRequest) returns (UpdateAppVaultResponse);
+
+  // Remove a vault connection from an app.
+  rpc RemoveAppVault(RemoveAppVaultRequest) returns (RemoveAppVaultResponse);
+}
+
+// Credential type discriminator for enable/disable operations.
+enum AppCredentialType {
+  APP_CREDENTIAL_TYPE_UNSPECIFIED = 0;
+  APP_CREDENTIAL_TYPE_CLIENT_SECRET = 1;
+  APP_CREDENTIAL_TYPE_MTLS_CA = 2;
+  APP_CREDENTIAL_TYPE_MTLS_SELF_SIGNED = 3;
+  APP_CREDENTIAL_TYPE_CLIENT_ASSERTION = 4;
+}
+
+// App resource as returned by Get/List.
+// Credentials are included in Get but omitted from List for efficiency.
+message AppInfo {
+  AppSlug slug = 1;
+  string name = 2;
+  optional string description = 3;
+  bool enabled = 4;
+  optional AppCredentialsInfo credentials = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// Credential configuration state (enabled flags only, no secrets).
+message AppCredentialsInfo {
+  bool client_secret_enabled = 1;
+  bool mtls_ca_enabled = 2;
+  bool mtls_self_signed_enabled = 3;
+  bool client_assertion_enabled = 4;
+}
+
+// Client assertion entry metadata (public info only).
+message AppClientAssertionInfo {
+  ClientAssertionId id = 1;
+  string name = 2;
+  bool enabled = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+// Vault connection info.
+message AppVaultConnectionInfo {
+  VaultSlug vault = 1;
+  repeated string allowed_scopes = 2;
+  google.protobuf.Timestamp created_at = 3;
+  google.protobuf.Timestamp updated_at = 4;
+}
+
+message CreateAppRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  string name = 3;
+  optional string description = 4;
+}
+
+message CreateAppResponse {
+  AppInfo app = 1;
+}
+
+message GetAppRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+}
+
+message GetAppResponse {
+  AppInfo app = 1;
+}
+
+message ListAppsRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+}
+
+message ListAppsResponse {
+  repeated AppInfo apps = 1;
+}
+
+message UpdateAppRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+  optional string name = 4;
+  optional string description = 5;
+}
+
+message UpdateAppResponse {
+  AppInfo app = 1;
+}
+
+message DeleteAppRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+}
+
+message DeleteAppResponse {}
+
+message SetAppEnabledRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+  bool enabled = 4;
+}
+
+message SetAppEnabledResponse {
+  AppInfo app = 1;
+}
+
+message SetAppCredentialEnabledRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+  AppCredentialType credential_type = 4;
+  bool enabled = 5;
+}
+
+message SetAppCredentialEnabledResponse {
+  AppInfo app = 1;
+}
+
+message GetAppClientSecretRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+}
+
+message GetAppClientSecretResponse {
+  bool enabled = 1;
+  bool has_secret = 2;
+}
+
+message RotateAppClientSecretRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+  // Client-generated UUID (16 bytes) for idempotent retry.
+  // If a previous request with the same key already committed, the cached
+  // response is returned instead of generating a new secret.
+  bytes idempotency_key = 4;
+}
+
+message RotateAppClientSecretResponse {
+  // Base64-encoded plaintext secret. Only returned here — never again.
+  string secret = 1;
+}
+
+message ListAppClientAssertionsRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+}
+
+message ListAppClientAssertionsResponse {
+  repeated AppClientAssertionInfo assertions = 1;
+}
+
+message CreateAppClientAssertionRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+  string name = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  // Client-generated UUID (16 bytes) for idempotent retry.
+  // If a previous request with the same key already committed, the cached
+  // response (including the private key PEM) is returned instead of generating
+  // a new keypair.
+  bytes idempotency_key = 6;
+}
+
+message CreateAppClientAssertionResponse {
+  AppClientAssertionInfo assertion = 1;
+  // PEM-encoded private key. Only returned here — never again.
+  string private_key_pem = 2;
+}
+
+message DeleteAppClientAssertionRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+  ClientAssertionId assertion = 4;
+}
+
+message DeleteAppClientAssertionResponse {}
+
+message SetAppClientAssertionEnabledRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+  ClientAssertionId assertion = 4;
+  bool enabled = 5;
+}
+
+message SetAppClientAssertionEnabledResponse {}
+
+message ListAppVaultsRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+}
+
+message ListAppVaultsResponse {
+  repeated AppVaultConnectionInfo vaults = 1;
+}
+
+message AddAppVaultRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+  VaultSlug vault = 4;
+  repeated string allowed_scopes = 5;
+}
+
+message AddAppVaultResponse {
+  AppVaultConnectionInfo vault = 1;
+}
+
+message UpdateAppVaultRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+  VaultSlug vault = 4;
+  repeated string allowed_scopes = 5;
+}
+
+message UpdateAppVaultResponse {
+  AppVaultConnectionInfo vault = 1;
+}
+
+message RemoveAppVaultRequest {
+  OrganizationSlug organization = 1;
+  UserSlug initiator = 2;
+  AppSlug app = 3;
+  VaultSlug vault = 4;
+}
+
+message RemoveAppVaultResponse {}
 
 // =============================================================================
 // Events Service

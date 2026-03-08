@@ -3276,7 +3276,7 @@ mod tests {
                 .unwrap();
             assert!(org.slug.value() > 0);
 
-            let org_info = client.get_organization(org.slug, 0).await.unwrap();
+            let org_info = client.get_organization(org.slug, UserSlug::new(0)).await.unwrap();
             assert_eq!(org_info.slug, org.slug);
             assert_eq!(org_info.name, "test-organization");
         }

@@ -145,3 +145,10 @@ pub(crate) fn datetime_to_proto(dt: &DateTime<Utc>) -> prost_types::Timestamp {
         nanos: i32::try_from(dt.timestamp_subsec_nanos()).unwrap_or(0),
     }
 }
+
+/// Converts a proto `Timestamp` to a chrono `DateTime<Utc>`.
+///
+/// Returns `DateTime::UNIX_EPOCH` if the timestamp cannot be represented.
+pub(crate) fn proto_to_datetime(ts: &prost_types::Timestamp) -> DateTime<Utc> {
+    DateTime::from_timestamp(ts.seconds, ts.nanos.max(0) as u32).unwrap_or(DateTime::UNIX_EPOCH)
+}

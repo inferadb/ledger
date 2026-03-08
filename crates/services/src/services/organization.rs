@@ -8,8 +8,6 @@
 //! the directory metadata and profile data. Region migration creates a saga
 //! for the orchestrator to drive.
 
-use std::{sync::Arc, time::Duration};
-
 use inferadb_ledger_proto::proto::{
     self, CreateOrganizationRequest, CreateOrganizationResponse, CreateOrganizationTeamRequest,
     CreateOrganizationTeamResponse, DeleteOrganizationRequest, DeleteOrganizationResponse,
@@ -25,113 +23,35 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     error::ServiceError,
-    log_storage::AppliedStateAccessor,
-    logging::{RequestContext, Sampler},
+    logging::RequestContext,
     metrics, trace_context,
-    types::{LedgerRequest, LedgerResponse, LedgerTypeConfig, SystemRequest},
+    types::{LedgerRequest, LedgerResponse, SystemRequest},
 };
-use inferadb_ledger_state::{
-    StateLayer,
-    system::{OrganizationMemberRole as DomainMemberRole, SystemOrganizationService},
+use inferadb_ledger_state::system::{
+    OrganizationMember as DomainOrganizationMember, OrganizationMemberRole as DomainMemberRole,
+    OrganizationProfile, OrganizationRegistry, OrganizationStatus as DomainOrganizationStatus,
+    SystemKeys, SystemOrganizationService, TeamProfile,
 };
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
-    OrganizationId as DomainOrganizationId, OrganizationSlug as DomainOrganizationSlug,
-    config::ValidationConfig,
+    OrganizationId as DomainOrganizationId, OrganizationSlug as DomainOrganizationSlug, TeamId,
+    VaultId as SystemVaultId, decode,
     events::{EventAction, EventOutcome as EventOutcomeType},
     validation,
 };
-use openraft::Raft;
 use tonic::{Request, Response, Status};
 
-use super::slug_resolver::SlugResolver;
-
-/// Creates a `RequestContext` for an OrganizationService method and fills in common fields.
-macro_rules! org_ctx {
-    ($self:expr, $method:literal, $grpc_metadata:expr, $trace_ctx:expr) => {{
-        let mut ctx = RequestContext::new("OrganizationService", $method);
-        ctx.set_admin_action($method);
-        $self.fill_context(&mut ctx, $grpc_metadata, $trace_ctx);
-        ctx
-    }};
-}
+use super::{service_infra::ServiceContext, slug_resolver::SlugResolver};
 
 /// Organization lifecycle: creation, deletion, retrieval, listing, and region migration.
-#[derive(bon::Builder)]
-#[builder(on(_, required))]
-#[allow(dead_code)] // event_handle wired up for future handler-phase audit events
 pub struct OrganizationService {
-    /// Raft consensus handle for proposing write operations.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// State layer for direct reads (profile, registry lookups).
-    state: Arc<StateLayer<FileBackend>>,
-    /// Accessor for applied state (slug resolution, org metadata).
-    applied_state: AppliedStateAccessor,
-    /// Sampler for log tail sampling.
-    #[builder(default)]
-    sampler: Option<Sampler>,
-    /// Node ID for logging and events.
-    #[builder(default)]
-    node_id: Option<u64>,
-    /// Input validation configuration.
-    #[builder(default = Arc::new(ValidationConfig::default()))]
-    validation_config: Arc<ValidationConfig>,
-    /// Maximum Raft proposal timeout.
-    #[builder(default = Duration::from_secs(30))]
-    proposal_timeout: Duration,
-    /// Handler-phase event handle for audit events.
-    #[builder(default)]
-    event_handle:
-        Option<inferadb_ledger_raft::event_writer::EventHandle<inferadb_ledger_store::FileBackend>>,
-    /// Health state for drain-phase write rejection.
-    #[builder(default)]
-    health_state: Option<inferadb_ledger_raft::graceful_shutdown::HealthState>,
+    ctx: ServiceContext,
 }
 
 impl OrganizationService {
-    /// Records a handler-phase audit event if the event handle is configured.
-    fn record_handler_event(&self, entry: inferadb_ledger_types::events::EventEntry) {
-        if let Some(ref handle) = self.event_handle {
-            handle.record_handler_event(entry);
-        }
-    }
-
-    /// Returns the configured TTL for handler-phase events, defaulting to 90 days.
-    fn default_ttl_days(&self) -> u32 {
-        self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)
-    }
-
-    /// Fills in common fields on a pre-created `RequestContext`.
-    fn fill_context(
-        &self,
-        ctx: &mut RequestContext,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        trace_ctx: &trace_context::TraceContext,
-    ) {
-        super::service_infra::fill_context(
-            ctx,
-            grpc_metadata,
-            trace_ctx,
-            self.sampler.as_ref(),
-            self.node_id,
-        );
-    }
-
-    /// Proposes a request through Raft with deadline handling.
-    async fn propose_request(
-        &self,
-        request: LedgerRequest,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        ctx: &mut RequestContext,
-    ) -> Result<LedgerResponse, Status> {
-        super::service_infra::propose_request(
-            &self.raft,
-            request,
-            grpc_metadata,
-            self.proposal_timeout,
-            ctx,
-        )
-        .await
+    /// Creates a new `OrganizationService` from shared service infrastructure.
+    pub(crate) fn new(ctx: ServiceContext) -> Self {
+        Self { ctx }
     }
 
     /// Validates that a protected region has sufficient in-region nodes for quorum.
@@ -142,7 +62,7 @@ impl OrganizationService {
         if !region.requires_residency() {
             return Ok(());
         }
-        let sys_svc = SystemOrganizationService::new(self.state.clone());
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let nodes = sys_svc.list_nodes().map_err(|e| {
             Status::internal(format!("Failed to list nodes for region validation: {e}"))
         })?;
@@ -174,121 +94,83 @@ impl OrganizationService {
     }
 
     /// Reads the organization profile from the regional store.
-    fn read_org_profile(
-        &self,
-        org_id: DomainOrganizationId,
-    ) -> Option<inferadb_ledger_state::system::OrganizationProfile> {
-        let key = inferadb_ledger_state::system::SystemKeys::organization_profile_key(org_id);
-        match self.state.get_entity(inferadb_ledger_types::VaultId::new(0), key.as_bytes()) {
-            Ok(Some(entity)) => {
-                match inferadb_ledger_types::decode::<
-                    inferadb_ledger_state::system::OrganizationProfile,
-                >(&entity.value)
-                {
-                    Ok(profile) => Some(profile),
-                    Err(e) => {
-                        tracing::warn!(
-                            organization = org_id.value(),
-                            error = %e,
-                            "corrupt organization profile, skipping"
-                        );
-                        None
-                    },
-                }
-            },
-            _ => None,
-        }
+    fn read_org_profile(&self, org_id: DomainOrganizationId) -> Option<OrganizationProfile> {
+        let key = SystemKeys::organization_profile_key(org_id);
+        let entity = self.ctx.state.get_entity(SystemVaultId::new(0), key.as_bytes()).ok()??;
+        decode::<OrganizationProfile>(&entity.value)
+            .inspect_err(|e| {
+                tracing::warn!(
+                    organization = org_id.value(),
+                    error = %e,
+                    "corrupt organization profile, skipping"
+                );
+            })
+            .ok()
     }
 
     /// Reads the organization registry from the StateLayer.
-    fn read_org_registry(
-        &self,
-        org_id: DomainOrganizationId,
-    ) -> Option<inferadb_ledger_state::system::OrganizationRegistry> {
-        let key = inferadb_ledger_state::system::SystemKeys::organization_key(org_id);
-        match self.state.get_entity(inferadb_ledger_types::VaultId::new(0), key.as_bytes()) {
-            Ok(Some(entity)) => inferadb_ledger_types::decode::<
-                inferadb_ledger_state::system::OrganizationRegistry,
-            >(&entity.value)
-            .ok(),
-            _ => None,
-        }
+    fn read_org_registry(&self, org_id: DomainOrganizationId) -> Option<OrganizationRegistry> {
+        let key = SystemKeys::organization_key(org_id);
+        let entity = self.ctx.state.get_entity(SystemVaultId::new(0), key.as_bytes()).ok()??;
+        decode::<OrganizationRegistry>(&entity.value).ok()
     }
 
     /// Reads a team profile from the regional store.
     fn read_team_profile(
         &self,
         org_id: DomainOrganizationId,
-        team_id: inferadb_ledger_types::TeamId,
-    ) -> Option<inferadb_ledger_state::system::TeamProfile> {
-        let key = inferadb_ledger_state::system::SystemKeys::team_profile_key(org_id, team_id);
-        match self.state.get_entity(inferadb_ledger_types::VaultId::new(0), key.as_bytes()) {
-            Ok(Some(entity)) => {
-                match inferadb_ledger_types::decode::<inferadb_ledger_state::system::TeamProfile>(
-                    &entity.value,
-                ) {
-                    Ok(profile) => Some(profile),
-                    Err(e) => {
-                        tracing::warn!(
-                            organization = org_id.value(),
-                            team = team_id.value(),
-                            error = %e,
-                            "corrupt team profile, skipping"
-                        );
-                        None
-                    },
-                }
-            },
-            _ => None,
-        }
+        team_id: TeamId,
+    ) -> Option<TeamProfile> {
+        let key = SystemKeys::team_profile_key(org_id, team_id);
+        let entity = self.ctx.state.get_entity(SystemVaultId::new(0), key.as_bytes()).ok()??;
+        decode::<TeamProfile>(&entity.value)
+            .inspect_err(|e| {
+                tracing::warn!(
+                    organization = org_id.value(),
+                    team = team_id.value(),
+                    error = %e,
+                    "corrupt team profile, skipping"
+                );
+            })
+            .ok()
     }
 
     /// Lists all team profiles for an organization.
-    fn list_team_profiles(
-        &self,
-        org_id: DomainOrganizationId,
-    ) -> Vec<inferadb_ledger_state::system::TeamProfile> {
-        let prefix = format!(
-            "{}{}:",
-            inferadb_ledger_state::system::SystemKeys::TEAM_PROFILE_PREFIX,
-            org_id.value()
-        );
-        match self.state.list_entities(
-            inferadb_ledger_types::VaultId::new(0),
+    fn list_team_profiles(&self, org_id: DomainOrganizationId) -> Vec<TeamProfile> {
+        /// Maximum number of team profiles to load per organization.
+        const MAX_TEAM_PROFILES: usize = 1_000;
+
+        let prefix = format!("{}{}:", SystemKeys::TEAM_PROFILE_PREFIX, org_id.value());
+        let entities = match self.ctx.state.list_entities(
+            SystemVaultId::new(0),
             Some(&prefix),
             None,
-            usize::MAX,
+            MAX_TEAM_PROFILES,
         ) {
-            Ok(entities) => {
-                entities
-                    .iter()
-                    .filter_map(|e| {
-                        match inferadb_ledger_types::decode::<
-                            inferadb_ledger_state::system::TeamProfile,
-                        >(&e.value)
-                        {
-                            Ok(profile) => Some(profile),
-                            Err(err) => {
-                                tracing::warn!(
-                                    organization = org_id.value(),
-                                    key = %String::from_utf8_lossy(&e.key),
-                                    error = %err,
-                                    "corrupt team profile, skipping"
-                                );
-                                None
-                            },
-                        }
+            Ok(entities) => entities,
+            Err(_) => return Vec::new(),
+        };
+        entities
+            .iter()
+            .filter_map(|e| {
+                decode::<TeamProfile>(&e.value)
+                    .inspect_err(|err| {
+                        tracing::warn!(
+                            organization = org_id.value(),
+                            key = %String::from_utf8_lossy(&e.key),
+                            error = %err,
+                            "corrupt team profile, skipping"
+                        );
                     })
-                    .collect()
-            },
-            Err(_) => Vec::new(),
-        }
+                    .ok()
+            })
+            .collect()
     }
 
     /// Converts a domain `TeamProfile` to its proto representation.
     fn team_to_proto(
         sys_svc: &SystemOrganizationService<FileBackend>,
-        team: &inferadb_ledger_state::system::TeamProfile,
+        team: &TeamProfile,
         org_slug: DomainOrganizationSlug,
     ) -> proto::OrganizationTeam {
         let members = team
@@ -315,10 +197,39 @@ impl OrganizationService {
         }
     }
 
+    /// Resolves a user slug to a `UserId` and loads the non-deleted organization profile.
+    ///
+    /// Shared precondition check for `validate_org_admin`, `validate_org_member`,
+    /// and `validate_org_admin_or_team_manager`.
+    fn resolve_user_and_org_profile(
+        &self,
+        slug_resolver: &SlugResolver,
+        organization_id: DomainOrganizationId,
+        user_slug: &Option<proto::UserSlug>,
+        ctx: &mut RequestContext,
+    ) -> Result<(inferadb_ledger_types::UserId, OrganizationProfile), Status> {
+        let user_id = slug_resolver.extract_and_resolve_user(user_slug).inspect_err(|status| {
+            ctx.set_error("InvalidArgument", status.message());
+        })?;
+
+        if self
+            .read_org_registry(organization_id)
+            .is_some_and(|r| r.status == DomainOrganizationStatus::Deleted)
+        {
+            ctx.set_error("NotFound", "Organization not found");
+            return Err(Status::not_found("Organization not found"));
+        }
+
+        let profile = self.read_org_profile(organization_id).ok_or_else(|| {
+            ctx.set_error("NotFound", "Organization profile not found");
+            Status::not_found("Organization not found")
+        })?;
+
+        Ok((user_id, profile))
+    }
+
     /// Validates that the initiator is an administrator of the given organization.
     ///
-    /// Resolves the initiator's user slug to a `UserId`, reads the organization
-    /// profile, and checks that the resolved user is a member with Admin role.
     /// Returns the resolved `UserId` on success.
     fn validate_org_admin(
         &self,
@@ -327,25 +238,8 @@ impl OrganizationService {
         initiator_slug: &Option<proto::UserSlug>,
         ctx: &mut RequestContext,
     ) -> Result<inferadb_ledger_types::UserId, Status> {
-        let initiator_id =
-            slug_resolver.extract_and_resolve_user(initiator_slug).inspect_err(|status| {
-                ctx.set_error("InvalidArgument", status.message());
-            })?;
-
-        // Check registry status first — deleted orgs are invisible
-        if self
-            .read_org_registry(organization_id)
-            .is_some_and(|r| r.status == inferadb_ledger_state::system::OrganizationStatus::Deleted)
-        {
-            ctx.set_error("NotFound", "Organization not found");
-            return Err(Status::not_found("Organization not found"));
-        }
-
-        // Read org profile to check member list
-        let profile = self.read_org_profile(organization_id).ok_or_else(|| {
-            ctx.set_error("NotFound", "Organization profile not found");
-            Status::not_found("Organization not found")
-        })?;
+        let (initiator_id, profile) =
+            self.resolve_user_and_org_profile(slug_resolver, organization_id, initiator_slug, ctx)?;
 
         let is_admin = profile
             .members
@@ -361,35 +255,16 @@ impl OrganizationService {
 
     /// Validates that the caller is a member of the given organization (any role).
     ///
-    /// Returns the resolved `UserId` on success.
+    /// Returns the resolved `UserId` and profile on success.
     fn validate_org_member(
         &self,
         slug_resolver: &SlugResolver,
         organization_id: DomainOrganizationId,
         caller_slug: &Option<proto::UserSlug>,
         ctx: &mut RequestContext,
-    ) -> Result<
-        (inferadb_ledger_types::UserId, inferadb_ledger_state::system::OrganizationProfile),
-        Status,
-    > {
-        let caller_id =
-            slug_resolver.extract_and_resolve_user(caller_slug).inspect_err(|status| {
-                ctx.set_error("InvalidArgument", status.message());
-            })?;
-
-        // Check registry status first — deleted orgs are invisible
-        if self
-            .read_org_registry(organization_id)
-            .is_some_and(|r| r.status == inferadb_ledger_state::system::OrganizationStatus::Deleted)
-        {
-            ctx.set_error("NotFound", "Organization not found");
-            return Err(Status::not_found("Organization not found"));
-        }
-
-        let profile = self.read_org_profile(organization_id).ok_or_else(|| {
-            ctx.set_error("NotFound", "Organization profile not found");
-            Status::not_found("Organization not found")
-        })?;
+    ) -> Result<(inferadb_ledger_types::UserId, OrganizationProfile), Status> {
+        let (caller_id, profile) =
+            self.resolve_user_and_org_profile(slug_resolver, organization_id, caller_slug, ctx)?;
 
         let is_member = profile.members.iter().any(|m| m.user_id == caller_id);
         if !is_member {
@@ -407,28 +282,13 @@ impl OrganizationService {
         &self,
         slug_resolver: &SlugResolver,
         organization_id: DomainOrganizationId,
-        team_id: inferadb_ledger_types::TeamId,
+        team_id: TeamId,
         initiator_slug: &Option<proto::UserSlug>,
         ctx: &mut RequestContext,
     ) -> Result<inferadb_ledger_types::UserId, Status> {
-        let initiator_id =
-            slug_resolver.extract_and_resolve_user(initiator_slug).inspect_err(|status| {
-                ctx.set_error("InvalidArgument", status.message());
-            })?;
+        let (initiator_id, profile) =
+            self.resolve_user_and_org_profile(slug_resolver, organization_id, initiator_slug, ctx)?;
 
-        // Deleted organizations are invisible
-        if self
-            .read_org_registry(organization_id)
-            .is_some_and(|r| r.status == inferadb_ledger_state::system::OrganizationStatus::Deleted)
-        {
-            ctx.set_error("NotFound", "Organization not found");
-            return Err(Status::not_found("Organization not found"));
-        }
-
-        let profile = self.read_org_profile(organization_id).ok_or_else(|| {
-            ctx.set_error("NotFound", "Organization not found");
-            Status::not_found("Organization not found")
-        })?;
         let is_org_admin = profile
             .members
             .iter()
@@ -454,7 +314,7 @@ impl OrganizationService {
     /// Returns `None` if the user cannot be resolved (e.g. deleted user).
     fn member_to_proto(
         sys_svc: &SystemOrganizationService<FileBackend>,
-        member: &inferadb_ledger_state::system::OrganizationMember,
+        member: &DomainOrganizationMember,
     ) -> Option<proto::OrganizationMember> {
         sys_svc.get_user(member.user_id).ok().flatten().map(|user| proto::OrganizationMember {
             user: Some(proto::UserSlug { slug: user.slug.value() }),
@@ -471,7 +331,7 @@ impl OrganizationService {
         &self,
         org: inferadb_ledger_raft::log_storage::OrganizationMeta,
         resolved_slug: DomainOrganizationSlug,
-        cached_profile: Option<inferadb_ledger_state::system::OrganizationProfile>,
+        cached_profile: Option<OrganizationProfile>,
     ) -> GetOrganizationResponse {
         let profile = cached_profile.or_else(|| self.read_org_profile(org.organization));
         let registry = self.read_org_registry(org.organization);
@@ -483,19 +343,15 @@ impl OrganizationService {
             r.member_nodes.iter().map(|id| NodeId { id: id.clone() }).collect()
         });
         let config_version = registry.as_ref().map_or(0, |r| r.config_version);
-        let created_at = registry.as_ref().map(|r| prost_types::Timestamp {
-            seconds: r.created_at.timestamp(),
-            nanos: r.created_at.timestamp_subsec_nanos() as i32,
-        });
+        let created_at =
+            registry.as_ref().map(|r| crate::proto_compat::datetime_to_proto(&r.created_at));
 
         let members = profile.as_ref().map_or(vec![], |p| {
-            let sys_svc = SystemOrganizationService::new(self.state.clone());
+            let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
             p.members.iter().filter_map(|m| Self::member_to_proto(&sys_svc, m)).collect()
         });
-        let updated_at = profile.as_ref().map(|p| prost_types::Timestamp {
-            seconds: p.updated_at.timestamp(),
-            nanos: p.updated_at.timestamp_subsec_nanos() as i32,
-        });
+        let updated_at =
+            profile.as_ref().map(|p| crate::proto_compat::datetime_to_proto(&p.updated_at));
 
         GetOrganizationResponse {
             slug: Some(OrganizationSlug { slug: resolved_slug.value() }),
@@ -524,18 +380,23 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Reject requests with insufficient remaining deadline
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         // Reject if node is draining
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = org_ctx!(self, "create_organization", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "create_organization",
+            &grpc_metadata,
+            &trace_ctx,
+        );
         ctx.set_target_organization_name(&req.name);
 
         // Validate organization name
-        validation::validate_organization_name(&req.name, &self.validation_config)
+        validation::validate_organization_name(&req.name, &self.ctx.validation_config)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         // Validate and convert proto region to domain region
@@ -571,7 +432,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             Status::invalid_argument("admin is required for organization creation")
         })?;
         let admin_user_slug = inferadb_ledger_types::UserSlug::new(admin_slug_proto.slug);
-        let sys_svc_admin = SystemOrganizationService::new(self.state.clone());
+        let sys_svc_admin = SystemOrganizationService::new(self.ctx.state.clone());
         let admin_user_id = sys_svc_admin
             .get_user_id_by_slug(admin_user_slug)
             .map_err(|e| Status::internal(format!("Failed to resolve admin slug: {e}")))?
@@ -597,7 +458,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             admin: admin_user_id,
         });
 
-        let response = self.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
             LedgerResponse::OrganizationDirectoryCreated {
@@ -610,8 +471,8 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                 metrics::record_organization_operation(organization_id, "create");
                 metrics::record_organization_latency(organization_id, "create", ctx.elapsed_secs());
 
-                if let Some(node_id) = self.node_id {
-                    self.record_handler_event(
+                if let Some(node_id) = self.ctx.node_id {
+                    self.ctx.record_handler_event(
                         inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                             EventAction::OrganizationCreated,
                             organization_id,
@@ -622,7 +483,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                         .detail("region", region.as_str())
                         .trace_id(&trace_ctx.trace_id)
                         .outcome(EventOutcomeType::Success)
-                        .build(self.default_ttl_days()),
+                        .build(self.ctx.default_ttl_days()),
                     );
                 }
 
@@ -653,16 +514,21 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Reject requests with insufficient remaining deadline
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         // Reject if node is draining
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = org_ctx!(self, "delete_organization", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "delete_organization",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
         let organization_id =
             slug_resolver.extract_and_resolve(&req.slug).inspect_err(|status| {
@@ -677,7 +543,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Submit delete organization through Raft
         let ledger_request = LedgerRequest::DeleteOrganization { organization: organization_id };
 
-        let response = self.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
             LedgerResponse::OrganizationDeleted {
@@ -689,8 +555,8 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                 metrics::record_organization_operation(deleted_org_id, "delete");
                 metrics::record_organization_latency(deleted_org_id, "delete", ctx.elapsed_secs());
 
-                if let Some(node_id) = self.node_id {
-                    self.record_handler_event(
+                if let Some(node_id) = self.ctx.node_id {
+                    self.ctx.record_handler_event(
                         inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                             EventAction::OrganizationDeleted,
                             deleted_org_id,
@@ -700,15 +566,12 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                         .principal("system")
                         .trace_id(&trace_ctx.trace_id)
                         .outcome(EventOutcomeType::Success)
-                        .build(self.default_ttl_days()),
+                        .build(self.ctx.default_ttl_days()),
                     );
                 }
 
                 Ok(Response::new(DeleteOrganizationResponse {
-                    deleted_at: Some(prost_types::Timestamp {
-                        seconds: deleted_at.timestamp(),
-                        nanos: deleted_at.timestamp_subsec_nanos() as i32,
-                    }),
+                    deleted_at: Some(crate::proto_compat::datetime_to_proto(&deleted_at)),
                     retention_days,
                 }))
             },
@@ -736,10 +599,15 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = org_ctx!(self, "get_organization", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "get_organization",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
         // Extract organization from request
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
         let organization_id =
             slug_resolver.extract_and_resolve(&req.slug).inspect_err(|status| {
@@ -751,12 +619,10 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         let (_, profile) =
             self.validate_org_member(&slug_resolver, organization_id, &req.caller, &mut ctx)?;
 
-        let org_meta = self.applied_state.get_organization(organization_id);
+        let org_meta = self.ctx.applied_state.get_organization(organization_id);
 
         match org_meta {
-            Some(org)
-                if org.status == inferadb_ledger_state::system::OrganizationStatus::Deleted =>
-            {
+            Some(org) if org.status == DomainOrganizationStatus::Deleted => {
                 ctx.set_error("NotFound", "Organization not found");
                 Err(ServiceError::not_found("Organization", organization_slug_val.to_string())
                     .into())
@@ -786,9 +652,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = org_ctx!(self, "list_organizations", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "list_organizations",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
 
         // Resolve caller — required for authorization filtering
         let caller_id =
@@ -801,8 +672,8 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
 
         // Use user→org index for O(1) membership lookup instead of loading
         // every organization profile.
-        let caller_org_ids = self.applied_state.user_organization_ids(caller_id);
-        let all_orgs = self.applied_state.list_organizations();
+        let caller_org_ids = self.ctx.applied_state.user_organization_ids(caller_id);
+        let all_orgs = self.ctx.applied_state.list_organizations();
         let orgs_with_slugs: Vec<_> = all_orgs
             .into_iter()
             .filter(|org| caller_org_ids.contains(&org.organization))
@@ -835,17 +706,22 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Reject requests with insufficient remaining deadline
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         // Reject if node is draining
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = org_ctx!(self, "migrate_organization", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "migrate_organization",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
         // Resolve organization slug → internal ID
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
         let organization_id =
             slug_resolver.extract_and_resolve(&req.slug).inspect_err(|status| {
@@ -860,12 +736,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         let target_region = inferadb_ledger_proto::convert::region_from_i32(req.target_region)?;
 
         // Look up current organization state
-        let org_meta = self.applied_state.get_organization(organization_id).ok_or_else(|| {
-            ctx.set_error("NotFound", "Organization not found");
-            let err: Status =
-                ServiceError::not_found("Organization", organization_slug_val.to_string()).into();
-            err
-        })?;
+        let org_meta =
+            self.ctx.applied_state.get_organization(organization_id).ok_or_else(|| {
+                ctx.set_error("NotFound", "Organization not found");
+                let err: Status =
+                    ServiceError::not_found("Organization", organization_slug_val.to_string())
+                        .into();
+                err
+            })?;
 
         let source_region = org_meta.region;
 
@@ -878,7 +756,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         }
 
         // Validate: organization must be Active
-        if org_meta.status != inferadb_ledger_state::system::OrganizationStatus::Active {
+        if org_meta.status != DomainOrganizationStatus::Active {
             let mut context = std::collections::HashMap::new();
             context.insert("status".to_string(), format!("{:?}", org_meta.status));
             let details = super::error_details::build_error_details(
@@ -998,7 +876,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             ],
         };
 
-        let response = self.propose_request(batch_request, &grpc_metadata, &mut ctx).await?;
+        let response = self.ctx.propose_request(batch_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
             LedgerResponse::BatchWrite { responses } => {
@@ -1058,15 +936,20 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Reject requests with insufficient remaining deadline
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         // Reject if node is draining
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = org_ctx!(self, "update_organization", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "update_organization",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
         let organization_id =
             slug_resolver.extract_and_resolve(&req.slug).inspect_err(|status| {
@@ -1084,14 +967,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
 
         // Validate name if provided
         if let Some(ref name) = req.name {
-            validation::validate_organization_name(name, &self.validation_config)
+            validation::validate_organization_name(name, &self.ctx.validation_config)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
         }
 
         let ledger_request =
             LedgerRequest::UpdateOrganization { organization: organization_id, name: req.name };
 
-        let response = self.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
             LedgerResponse::OrganizationUpdated { organization_id: updated_org_id } => {
@@ -1099,8 +982,8 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                 metrics::record_organization_operation(updated_org_id, "update");
                 metrics::record_organization_latency(updated_org_id, "update", ctx.elapsed_secs());
 
-                if let Some(node_id) = self.node_id {
-                    self.record_handler_event(
+                if let Some(node_id) = self.ctx.node_id {
+                    self.ctx.record_handler_event(
                         inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                             EventAction::OrganizationUpdated,
                             updated_org_id,
@@ -1110,12 +993,13 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                         .principal("system")
                         .trace_id(&trace_ctx.trace_id)
                         .outcome(EventOutcomeType::Success)
-                        .build(self.default_ttl_days()),
+                        .build(self.ctx.default_ttl_days()),
                     );
                 }
 
                 // Re-read the org to return full response
                 let org_meta = self
+                    .ctx
                     .applied_state
                     .get_organization(updated_org_id)
                     .ok_or_else(|| Status::internal("Organization not found after update"))?;
@@ -1157,9 +1041,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = org_ctx!(self, "list_organization_members", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "list_organization_members",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
         let organization_id =
             slug_resolver.extract_and_resolve(&req.slug).inspect_err(|status| {
@@ -1174,7 +1063,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         let page_size = crate::proto_compat::normalize_page_size(req.page_size);
         let start_after = crate::proto_compat::decode_page_token(&req.page_token);
 
-        let sys_svc = SystemOrganizationService::new(self.state.clone());
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
 
         // Resolve member slugs, then paginate by slug cursor
         let members_with_slugs: Vec<_> = profile
@@ -1203,15 +1092,20 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         request: Request<RemoveOrganizationMemberRequest>,
     ) -> Result<Response<RemoveOrganizationMemberResponse>, Status> {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = org_ctx!(self, "remove_organization_member", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "remove_organization_member",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
         let organization_id =
             slug_resolver.extract_and_resolve(&req.slug).inspect_err(|status| {
@@ -1280,7 +1174,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             organization: organization_id,
             target: target_id,
         };
-        let response = self.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
             LedgerResponse::OrganizationMemberRemoved { .. } => {
@@ -1306,15 +1200,20 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         request: Request<UpdateOrganizationMemberRoleRequest>,
     ) -> Result<Response<UpdateOrganizationMemberRoleResponse>, Status> {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = org_ctx!(self, "update_organization_member_role", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "update_organization_member_role",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
         let organization_id =
             slug_resolver.extract_and_resolve(&req.slug).inspect_err(|status| {
@@ -1370,14 +1269,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             target: target_id,
             role: new_role,
         };
-        let response = self.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
             LedgerResponse::OrganizationMemberRoleUpdated { .. } => {
                 ctx.set_success();
 
                 // Re-read profile after Raft apply for fresh data
-                let sys_svc = SystemOrganizationService::new(self.state.clone());
+                let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
                 let member = self.read_org_profile(organization_id).and_then(|p| {
                     p.members
                         .iter()
@@ -1412,9 +1311,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let inner = request.into_inner();
-        let mut ctx = org_ctx!(self, "list_organization_teams", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "list_organization_teams",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_id =
             slug_resolver.extract_and_resolve(&inner.organization).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
@@ -1439,7 +1343,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         let page_size = crate::proto_compat::normalize_page_size(inner.page_size);
         let start_after = crate::proto_compat::decode_page_token(&inner.page_token);
 
-        let sys_svc = SystemOrganizationService::new(self.state.clone());
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
 
         let teams_with_slugs: Vec<_> = teams
             .iter()
@@ -1462,14 +1366,19 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         request: Request<CreateOrganizationTeamRequest>,
     ) -> Result<Response<CreateOrganizationTeamResponse>, Status> {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let inner = request.into_inner();
-        let mut ctx = org_ctx!(self, "create_organization_team", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "create_organization_team",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_id =
             slug_resolver.extract_and_resolve(&inner.organization).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
@@ -1495,7 +1404,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
 
         // Validate team name
         let name = inner.name.trim().to_string();
-        if let Err(e) = validation::validate_organization_name(&name, &self.validation_config) {
+        if let Err(e) = validation::validate_organization_name(&name, &self.ctx.validation_config) {
             ctx.set_error("InvalidArgument", &e.to_string());
             return Err(Status::invalid_argument(e.to_string()));
         }
@@ -1511,12 +1420,12 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             slug: team_slug,
             name,
         };
-        let response = self.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
             LedgerResponse::OrganizationTeamCreated { team_id, .. } => {
                 ctx.set_success();
-                let sys_svc = SystemOrganizationService::new(self.state.clone());
+                let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
                 let team = self
                     .read_team_profile(organization_id, team_id)
                     .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));
@@ -1538,14 +1447,19 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         request: Request<DeleteOrganizationTeamRequest>,
     ) -> Result<Response<DeleteOrganizationTeamResponse>, Status> {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let inner = request.into_inner();
-        let mut ctx = org_ctx!(self, "delete_organization_team", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "delete_organization_team",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let (organization_id, team_id) =
             slug_resolver.extract_and_resolve_team(&inner.slug).inspect_err(|status| {
                 ctx.set_error("NotFound", status.message());
@@ -1586,7 +1500,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             team: team_id,
             move_members_to: move_to,
         };
-        let response = self.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
             LedgerResponse::OrganizationTeamDeleted { .. } => {
@@ -1609,14 +1523,19 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         request: Request<UpdateOrganizationTeamRequest>,
     ) -> Result<Response<UpdateOrganizationTeamResponse>, Status> {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let inner = request.into_inner();
-        let mut ctx = org_ctx!(self, "update_organization_team", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "update_organization_team",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let (organization_id, team_id) =
             slug_resolver.extract_and_resolve_team(&inner.slug).inspect_err(|status| {
                 ctx.set_error("NotFound", status.message());
@@ -1635,7 +1554,8 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Validate new name if provided
         if let Some(ref name) = inner.name {
             let trimmed = name.trim();
-            if let Err(e) = validation::validate_organization_name(trimmed, &self.validation_config)
+            if let Err(e) =
+                validation::validate_organization_name(trimmed, &self.ctx.validation_config)
             {
                 ctx.set_error("InvalidArgument", &e.to_string());
                 return Err(Status::invalid_argument(e.to_string()));
@@ -1647,12 +1567,12 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             team: team_id,
             name: inner.name.map(|n| n.trim().to_string()),
         };
-        let response = self.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
             LedgerResponse::OrganizationTeamUpdated { .. } => {
                 ctx.set_success();
-                let sys_svc = SystemOrganizationService::new(self.state.clone());
+                let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
                 let team = self
                     .read_team_profile(organization_id, team_id)
                     .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));

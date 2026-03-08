@@ -16,6 +16,7 @@ use inferadb_ledger_types::{
     UserEmailId, UserId, UserRole, UserSlug, UserStatus, VaultId, VaultSlug, decode, encode,
 };
 use snafu::{ResultExt, Snafu};
+use tracing::warn;
 
 use super::{
     keys::SystemKeys,
@@ -29,6 +30,19 @@ use crate::state::{StateError, StateLayer};
 
 /// The reserved organization ID for _system.
 pub const SYSTEM_ORGANIZATION_ID: OrganizationId = OrganizationId::new(0);
+
+/// Maximum number of nodes returned by `list_nodes`.
+const MAX_LIST_NODES: usize = 1_000;
+/// Maximum number of organizations returned by `list_organizations`.
+const MAX_LIST_ORGANIZATIONS: usize = 10_000;
+/// Maximum number of user directory entries returned by `list_user_directory`.
+const MAX_LIST_USER_DIRECTORY: usize = 10_000;
+/// Maximum number of users returned by `list_flat_users` and `list_erased_user_ids`.
+const MAX_LIST_USERS: usize = 100_000;
+/// Maximum number of email hash entries scanned by `erase_user`.
+const MAX_EMAIL_HASH_SCAN: usize = 100_000;
+/// Maximum number of erasure audit records returned.
+const MAX_LIST_ERASURE_AUDITS: usize = 100_000;
 
 /// The reserved vault ID for _system entities.
 pub const SYSTEM_VAULT_ID: VaultId = VaultId::new(0);
@@ -191,13 +205,14 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     pub fn list_nodes(&self) -> Result<Vec<NodeInfo>> {
         let entities = self
             .state
-            .list_entities(SYSTEM_VAULT_ID, Some(SystemKeys::NODE_PREFIX), None, 1000)
+            .list_entities(SYSTEM_VAULT_ID, Some(SystemKeys::NODE_PREFIX), None, MAX_LIST_NODES)
             .context(StateSnafu)?;
 
         let mut nodes = Vec::new();
         for entity in entities {
-            if let Ok(node) = decode::<NodeInfo>(&entity.value) {
-                nodes.push(node);
+            match decode::<NodeInfo>(&entity.value) {
+                Ok(node) => nodes.push(node),
+                Err(e) => warn!(error = %e, "Skipping corrupt NodeInfo entry during list"),
             }
         }
 
@@ -322,13 +337,21 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     pub fn list_organizations(&self) -> Result<Vec<OrganizationRegistry>> {
         let entities = self
             .state
-            .list_entities(SYSTEM_VAULT_ID, Some(SystemKeys::ORG_PREFIX), None, 10000)
+            .list_entities(
+                SYSTEM_VAULT_ID,
+                Some(SystemKeys::ORG_PREFIX),
+                None,
+                MAX_LIST_ORGANIZATIONS,
+            )
             .context(StateSnafu)?;
 
         let mut organizations = Vec::new();
         for entity in entities {
-            if let Ok(registry) = decode::<OrganizationRegistry>(&entity.value) {
-                organizations.push(registry);
+            match decode::<OrganizationRegistry>(&entity.value) {
+                Ok(registry) => organizations.push(registry),
+                Err(e) => {
+                    warn!(error = %e, "Skipping corrupt OrganizationRegistry entry during list")
+                },
             }
         }
 
@@ -654,13 +677,19 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     pub fn list_user_directory(&self) -> Result<Vec<UserDirectoryEntry>> {
         let entities = self
             .state
-            .list_entities(SYSTEM_VAULT_ID, Some(SystemKeys::USER_DIRECTORY_PREFIX), None, 10000)
+            .list_entities(
+                SYSTEM_VAULT_ID,
+                Some(SystemKeys::USER_DIRECTORY_PREFIX),
+                None,
+                MAX_LIST_USER_DIRECTORY,
+            )
             .context(StateSnafu)?;
 
         let mut entries = Vec::new();
         for entity in entities {
-            if let Ok(entry) = decode::<UserDirectoryEntry>(&entity.value) {
-                entries.push(entry);
+            match decode::<UserDirectoryEntry>(&entity.value) {
+                Ok(entry) => entries.push(entry),
+                Err(e) => warn!(error = %e, "Skipping corrupt UserDirectoryEntry during list"),
             }
         }
 
@@ -914,7 +943,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
                 SYSTEM_VAULT_ID,
                 Some(SystemKeys::EMAIL_HASH_INDEX_PREFIX),
                 None,
-                100_000,
+                MAX_EMAIL_HASH_SCAN,
             )
             .context(StateSnafu)?;
 
@@ -1036,7 +1065,12 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     pub fn list_erased_user_ids(&self) -> Result<std::collections::HashSet<UserId>> {
         let entities = self
             .state
-            .list_entities(SYSTEM_VAULT_ID, Some(SystemKeys::ERASURE_AUDIT_PREFIX), None, 100_000)
+            .list_entities(
+                SYSTEM_VAULT_ID,
+                Some(SystemKeys::ERASURE_AUDIT_PREFIX),
+                None,
+                MAX_LIST_ERASURE_AUDITS,
+            )
             .context(StateSnafu)?;
 
         let mut erased = std::collections::HashSet::new();
@@ -1188,7 +1222,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     pub fn list_flat_users(&self) -> Result<Vec<User>> {
         let entities = self
             .state
-            .list_entities(SYSTEM_VAULT_ID, Some(SystemKeys::USER_PREFIX), None, 100_000)
+            .list_entities(SYSTEM_VAULT_ID, Some(SystemKeys::USER_PREFIX), None, MAX_LIST_USERS)
             .context(StateSnafu)?;
 
         let mut users = Vec::new();
@@ -1198,8 +1232,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             if SystemKeys::parse_user_key(&key_str).is_none() {
                 continue;
             }
-            if let Ok(user) = decode::<User>(&entity.value) {
-                users.push(user);
+            match decode::<User>(&entity.value) {
+                Ok(user) => users.push(user),
+                Err(e) => warn!(error = %e, "Skipping corrupt User entry during list_flat_users"),
             }
         }
 
@@ -1474,8 +1509,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             if SystemKeys::parse_user_key(&key_str).is_none() {
                 continue;
             }
-            if let Ok(user) = decode::<User>(&entity.value) {
-                users.push(user);
+            match decode::<User>(&entity.value) {
+                Ok(user) => users.push(user),
+                Err(e) => warn!(error = %e, "Skipping corrupt User entry during list_erased_users"),
             }
         }
         Ok(users)

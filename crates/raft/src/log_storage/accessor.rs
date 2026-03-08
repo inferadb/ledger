@@ -9,8 +9,8 @@ use std::{
 };
 
 use inferadb_ledger_types::{
-    OrganizationId, OrganizationSlug, OrganizationUsage, TeamId, TeamSlug, UserId, UserSlug,
-    VaultId, VaultSlug,
+    AppId, AppSlug, OrganizationId, OrganizationSlug, OrganizationUsage, TeamId, TeamSlug, UserId,
+    UserSlug, VaultId, VaultSlug,
 };
 use parking_lot::RwLock;
 
@@ -245,6 +245,18 @@ impl AppliedStateAccessor {
     /// Resolves an internal team ID to its external slug.
     pub fn resolve_team_id_to_slug(&self, id: TeamId) -> Option<TeamSlug> {
         self.state.read().team_id_to_slug.get(&id).copied()
+    }
+
+    // --- App slug resolution ---
+
+    /// Resolves an external app slug to its internal (organization, app) IDs.
+    pub fn resolve_app_slug(&self, slug: AppSlug) -> Option<(OrganizationId, AppId)> {
+        self.state.read().app_slug_index.get(&slug).copied()
+    }
+
+    /// Resolves an internal app ID to its external slug.
+    pub fn resolve_app_id_to_slug(&self, id: AppId) -> Option<AppSlug> {
+        self.state.read().app_id_to_slug.get(&id).copied()
     }
 
     /// Checks the replicated client sequence table for idempotency.

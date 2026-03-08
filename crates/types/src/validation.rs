@@ -133,43 +133,7 @@ pub fn validate_organization_name(
         });
     }
 
-    if name.starts_with(char::is_whitespace) {
-        return Err(ValidationError {
-            field: "organization_name".to_string(),
-            constraint: "must not have leading whitespace".to_string(),
-        });
-    }
-
-    if name.ends_with(char::is_whitespace) {
-        return Err(ValidationError {
-            field: "organization_name".to_string(),
-            constraint: "must not have trailing whitespace".to_string(),
-        });
-    }
-
-    if let Some(offset) = name.chars().position(|c| c.is_ascii_control()) {
-        return Err(ValidationError {
-            field: "organization_name".to_string(),
-            constraint: format!("contains ASCII control character at character offset {offset}"),
-        });
-    }
-
-    let mut prev_was_whitespace = false;
-    for (i, c) in name.chars().enumerate() {
-        if c.is_whitespace() {
-            if prev_was_whitespace {
-                return Err(ValidationError {
-                    field: "organization_name".to_string(),
-                    constraint: format!("contains consecutive whitespace at character offset {i}"),
-                });
-            }
-            prev_was_whitespace = true;
-        } else {
-            prev_was_whitespace = false;
-        }
-    }
-
-    Ok(())
+    validate_display_name_whitespace(name, "organization_name", |c| c.is_ascii_control())
 }
 
 /// Validates a relationship string (resource, relation, or subject).
@@ -370,32 +334,52 @@ pub fn validate_user_name(name: &str) -> Result<(), ValidationError> {
         });
     }
 
+    validate_display_name_whitespace(name, "user_name", char::is_control)
+}
+
+/// Validates a display name for whitespace and control character rules.
+///
+/// Rejects leading/trailing whitespace, consecutive whitespace, and control characters.
+/// The `is_forbidden_control` predicate controls which control characters are rejected:
+/// `char::is_ascii_control` for organization names, `char::is_control` for user names.
+fn validate_display_name_whitespace(
+    name: &str,
+    field: &str,
+    is_forbidden_control: fn(char) -> bool,
+) -> Result<(), ValidationError> {
     if name.starts_with(char::is_whitespace) {
         return Err(ValidationError {
-            field: "user_name".to_string(),
+            field: field.to_string(),
             constraint: "must not have leading whitespace".to_string(),
         });
     }
 
     if name.ends_with(char::is_whitespace) {
         return Err(ValidationError {
-            field: "user_name".to_string(),
+            field: field.to_string(),
             constraint: "must not have trailing whitespace".to_string(),
         });
     }
 
-    if name.contains("  ") {
-        return Err(ValidationError {
-            field: "user_name".to_string(),
-            constraint: "must not contain consecutive whitespace".to_string(),
-        });
-    }
-
-    if let Some(pos) = name.find(|c: char| c.is_control()) {
-        return Err(ValidationError {
-            field: "user_name".to_string(),
-            constraint: format!("must not contain control character at byte offset {}", pos),
-        });
+    let mut prev_was_whitespace = false;
+    for (i, c) in name.chars().enumerate() {
+        if is_forbidden_control(c) {
+            return Err(ValidationError {
+                field: field.to_string(),
+                constraint: format!("contains control character at character offset {i}"),
+            });
+        }
+        if c.is_whitespace() {
+            if prev_was_whitespace {
+                return Err(ValidationError {
+                    field: field.to_string(),
+                    constraint: format!("contains consecutive whitespace at character offset {i}"),
+                });
+            }
+            prev_was_whitespace = true;
+        } else {
+            prev_was_whitespace = false;
+        }
     }
 
     Ok(())
@@ -924,5 +908,19 @@ mod tests {
     fn test_validate_user_name_tab_rejected() {
         let err = validate_user_name("Alice\tSmith").unwrap_err();
         assert!(err.constraint.contains("control"));
+    }
+
+    #[test]
+    fn test_validate_user_name_unicode_consecutive_whitespace() {
+        // Non-breaking space (\u{00A0}) followed by regular space
+        let err = validate_user_name("Alice\u{00A0} Smith").unwrap_err();
+        assert!(err.constraint.contains("consecutive whitespace"));
+    }
+
+    #[test]
+    fn test_validate_user_name_em_space_consecutive() {
+        // Two em spaces (\u{2003})
+        let err = validate_user_name("Alice\u{2003}\u{2003}Smith").unwrap_err();
+        assert!(err.constraint.contains("consecutive whitespace"));
     }
 }

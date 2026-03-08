@@ -8,7 +8,8 @@ use std::{fmt::Debug, ops::RangeBounds, sync::Arc};
 use inferadb_ledger_state::EventsDatabase;
 use inferadb_ledger_store::{FileBackend, TableId, tables};
 use inferadb_ledger_types::{
-    EmailVerifyTokenId, UserEmailId, UserId, decode, encode, events::EventConfig,
+    AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, TeamId, TeamSlug, UserEmailId, UserId,
+    decode, encode, events::EventConfig,
 };
 use openraft::{
     Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
@@ -406,6 +407,7 @@ fn iter_table_raw(
         TableId::VaultHashes => collect_table!(tables::VaultHashes),
         TableId::VaultHealth => collect_table!(tables::VaultHealth),
         TableId::TeamSlugIndex => collect_table!(tables::TeamSlugIndex),
+        TableId::AppSlugIndex => collect_table!(tables::AppSlugIndex),
     }
 }
 
@@ -932,6 +934,12 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         pending
             .sequences
             .push(("email_verify".to_string(), state.sequences.email_verify.value() as u64));
+        pending.sequences.push(("team".to_string(), state.sequences.team.value() as u64));
+        pending.sequences.push(("app".to_string(), state.sequences.app.value() as u64));
+        pending.sequences.push((
+            "client_assertion".to_string(),
+            state.sequences.client_assertion.value() as u64,
+        ));
 
         // Persist core state blob + external table writes atomically
         self.save_state_core(&state, &pending)?;
@@ -1256,11 +1264,16 @@ impl RaftLogStore {
         for (key_bytes, value_bytes) in org_iter {
             if let Some(org_id_val) = inferadb_ledger_store::Key::decode(&key_bytes) {
                 let org_id = inferadb_ledger_types::OrganizationId::new(org_id_val);
-                if let Ok(meta) = decode::<super::types::OrganizationMeta>(&value_bytes) {
-                    state.id_to_slug.insert(org_id, meta.slug);
-                    state.slug_index.insert(meta.slug, org_id);
-                    state.organization_storage_bytes.insert(org_id, meta.storage_bytes);
-                    state.organizations.insert(org_id, meta);
+                match decode::<super::types::OrganizationMeta>(&value_bytes) {
+                    Ok(meta) => {
+                        state.id_to_slug.insert(org_id, meta.slug);
+                        state.slug_index.insert(meta.slug, org_id);
+                        state.organization_storage_bytes.insert(org_id, meta.storage_bytes);
+                        state.organizations.insert(org_id, meta);
+                    },
+                    Err(e) => {
+                        tracing::warn!(error = %e, ?org_id, "Skipping corrupt OrganizationMeta during state rebuild")
+                    },
                 }
             }
         }
@@ -1270,10 +1283,15 @@ impl RaftLogStore {
         for (key_bytes, value_bytes) in vault_iter {
             if let Some(vault_id_val) = <i64 as inferadb_ledger_store::Key>::decode(&key_bytes) {
                 let vault_id = inferadb_ledger_types::VaultId::new(vault_id_val);
-                if let Ok(meta) = decode::<super::types::VaultMeta>(&value_bytes) {
-                    state.vault_id_to_slug.insert(vault_id, meta.slug);
-                    state.vault_slug_index.insert(meta.slug, vault_id);
-                    state.vaults.insert((meta.organization, vault_id), meta);
+                match decode::<super::types::VaultMeta>(&value_bytes) {
+                    Ok(meta) => {
+                        state.vault_id_to_slug.insert(vault_id, meta.slug);
+                        state.vault_slug_index.insert(meta.slug, vault_id);
+                        state.vaults.insert((meta.organization, vault_id), meta);
+                    },
+                    Err(e) => {
+                        tracing::warn!(error = %e, ?vault_id, "Skipping corrupt VaultMeta during state rebuild")
+                    },
                 }
             }
         }
@@ -1300,6 +1318,15 @@ impl RaftLogStore {
                     "email_verify" => {
                         state.sequences.email_verify = EmailVerifyTokenId::new(val as i64);
                     },
+                    "team" => {
+                        state.sequences.team = TeamId::new(val as i64);
+                    },
+                    "app" => {
+                        state.sequences.app = AppId::new(val as i64);
+                    },
+                    "client_assertion" => {
+                        state.sequences.client_assertion = ClientAssertionId::new(val as i64);
+                    },
                     _ => {},
                 }
             }
@@ -1316,8 +1343,13 @@ impl RaftLogStore {
                 let vault_id = inferadb_ledger_types::VaultId::new(i64::from_be_bytes(
                     key_bytes[8..16].try_into().unwrap_or([0; 8]),
                 ));
-                if let Ok(height) = decode::<u64>(&value_bytes) {
-                    state.vault_heights.insert((org_id, vault_id), height);
+                match decode::<u64>(&value_bytes) {
+                    Ok(height) => {
+                        state.vault_heights.insert((org_id, vault_id), height);
+                    },
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Skipping corrupt vault height during state rebuild")
+                    },
                 }
             }
         }
@@ -1349,8 +1381,13 @@ impl RaftLogStore {
                 let vault_id = inferadb_ledger_types::VaultId::new(i64::from_be_bytes(
                     key_bytes[8..16].try_into().unwrap_or([0; 8]),
                 ));
-                if let Ok(status) = decode::<super::types::VaultHealthStatus>(&value_bytes) {
-                    state.vault_health.insert((org_id, vault_id), status);
+                match decode::<super::types::VaultHealthStatus>(&value_bytes) {
+                    Ok(status) => {
+                        state.vault_health.insert((org_id, vault_id), status);
+                    },
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Skipping corrupt VaultHealthStatus during state rebuild")
+                    },
                 }
             }
         }
@@ -1367,8 +1404,13 @@ impl RaftLogStore {
                     key_bytes[8..16].try_into().unwrap_or([0; 8]),
                 ));
                 let client_id = String::from_utf8_lossy(&key_bytes[16..]).to_string();
-                if let Ok(entry) = decode::<super::types::ClientSequenceEntry>(&value_bytes) {
-                    state.client_sequences.insert((org_id, vault_id, client_id), entry);
+                match decode::<super::types::ClientSequenceEntry>(&value_bytes) {
+                    Ok(entry) => {
+                        state.client_sequences.insert((org_id, vault_id, client_id), entry);
+                    },
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Skipping corrupt ClientSequenceEntry during state rebuild")
+                    },
                 }
             }
         }
@@ -1413,6 +1455,34 @@ impl RaftLogStore {
                 let user_id = inferadb_ledger_types::UserId::new(user_id_val);
                 state.user_slug_index.insert(slug, user_id);
                 state.user_id_to_slug.insert(user_id, slug);
+            }
+        }
+
+        // Load team slug index
+        let team_slug_iter =
+            read_txn.iter::<tables::TeamSlugIndex>().map_err(|e| to_storage_error(&e))?;
+        for (key_bytes, value_bytes) in team_slug_iter {
+            if let (Some(slug_val), Ok((org_id, team_id))) = (
+                <u64 as inferadb_ledger_store::Key>::decode(&key_bytes),
+                decode::<(inferadb_ledger_types::OrganizationId, TeamId)>(&value_bytes),
+            ) {
+                let slug = TeamSlug::new(slug_val);
+                state.team_slug_index.insert(slug, (org_id, team_id));
+                state.team_id_to_slug.insert(team_id, slug);
+            }
+        }
+
+        // Load app slug index
+        let app_slug_iter =
+            read_txn.iter::<tables::AppSlugIndex>().map_err(|e| to_storage_error(&e))?;
+        for (key_bytes, value_bytes) in app_slug_iter {
+            if let (Some(slug_val), Ok((org_id, app_id))) = (
+                <u64 as inferadb_ledger_store::Key>::decode(&key_bytes),
+                decode::<(inferadb_ledger_types::OrganizationId, AppId)>(&value_bytes),
+            ) {
+                let slug = AppSlug::new(slug_val);
+                state.app_slug_index.insert(slug, (org_id, app_id));
+                state.app_id_to_slug.insert(app_id, slug);
             }
         }
 

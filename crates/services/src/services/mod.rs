@@ -15,6 +15,7 @@
 //! requests to the correct node via gRPC.
 
 mod admin;
+mod app;
 mod discovery;
 pub(crate) mod error_details;
 mod events;
@@ -33,6 +34,7 @@ mod vault;
 mod write;
 
 pub use admin::AdminService;
+pub use app::AppService;
 pub use discovery::DiscoveryService;
 pub use events::EventsService;
 pub use forward_client::ForwardClient;

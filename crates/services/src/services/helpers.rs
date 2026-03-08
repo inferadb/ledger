@@ -190,10 +190,17 @@ fn validation_status(message: impl Into<String>) -> Status {
 
 /// Computes a hash of operations for idempotency payload comparison.
 ///
-/// Uses concatenation of operation fields to create a deterministic
-/// byte sequence that can be hashed with seahash.
+/// Uses length-prefixed encoding of operation fields to create a
+/// deterministic, collision-resistant byte sequence. Each variable-length
+/// field is preceded by its `u32 LE` length to prevent boundary ambiguity
+/// (e.g., `("ab","cd")` vs `("abc","d")` producing distinct byte sequences).
 pub(crate) fn hash_operations(operations: &[proto::Operation]) -> Vec<u8> {
     use proto::operation::Op;
+
+    fn push_lp(bytes: &mut Vec<u8>, data: &[u8]) {
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(data);
+    }
 
     let mut bytes = Vec::new();
     for op in operations {
@@ -201,22 +208,23 @@ pub(crate) fn hash_operations(operations: &[proto::Operation]) -> Vec<u8> {
             match inner {
                 Op::CreateRelationship(cr) => {
                     bytes.extend_from_slice(b"CR");
-                    bytes.extend_from_slice(cr.resource.as_bytes());
-                    bytes.extend_from_slice(cr.relation.as_bytes());
-                    bytes.extend_from_slice(cr.subject.as_bytes());
+                    push_lp(&mut bytes, cr.resource.as_bytes());
+                    push_lp(&mut bytes, cr.relation.as_bytes());
+                    push_lp(&mut bytes, cr.subject.as_bytes());
                 },
                 Op::DeleteRelationship(dr) => {
                     bytes.extend_from_slice(b"DR");
-                    bytes.extend_from_slice(dr.resource.as_bytes());
-                    bytes.extend_from_slice(dr.relation.as_bytes());
-                    bytes.extend_from_slice(dr.subject.as_bytes());
+                    push_lp(&mut bytes, dr.resource.as_bytes());
+                    push_lp(&mut bytes, dr.relation.as_bytes());
+                    push_lp(&mut bytes, dr.subject.as_bytes());
                 },
                 Op::SetEntity(se) => {
                     bytes.extend_from_slice(b"SE");
-                    bytes.extend_from_slice(se.key.as_bytes());
-                    bytes.extend_from_slice(&se.value);
+                    push_lp(&mut bytes, se.key.as_bytes());
+                    push_lp(&mut bytes, &se.value);
                     if let Some(cond) = &se.condition {
-                        bytes.extend_from_slice(&format!("{:?}", cond).into_bytes());
+                        let cond_bytes = format!("{cond:?}");
+                        push_lp(&mut bytes, cond_bytes.as_bytes());
                     }
                     if let Some(exp) = se.expires_at {
                         bytes.extend_from_slice(&exp.to_le_bytes());
@@ -224,11 +232,11 @@ pub(crate) fn hash_operations(operations: &[proto::Operation]) -> Vec<u8> {
                 },
                 Op::DeleteEntity(de) => {
                     bytes.extend_from_slice(b"DE");
-                    bytes.extend_from_slice(de.key.as_bytes());
+                    push_lp(&mut bytes, de.key.as_bytes());
                 },
                 Op::ExpireEntity(ee) => {
                     bytes.extend_from_slice(b"EE");
-                    bytes.extend_from_slice(ee.key.as_bytes());
+                    push_lp(&mut bytes, ee.key.as_bytes());
                     bytes.extend_from_slice(&ee.expired_at.to_le_bytes());
                 },
             }

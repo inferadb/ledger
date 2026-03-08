@@ -468,7 +468,8 @@ async fn test_admin_operations() {
     assert!(organization.value() > 0, "should get valid organization slug");
 
     // Get the organization
-    let org_info = client.get_organization(organization, 0).await.expect("get organization");
+    let org_info =
+        client.get_organization(organization, UserSlug::new(0)).await.expect("get organization");
     assert_eq!(org_info.name, ns_name);
 
     // Create a vault

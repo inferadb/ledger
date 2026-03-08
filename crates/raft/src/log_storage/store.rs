@@ -8,14 +8,14 @@ use std::{
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{
     BlockArchive, StateLayer,
-    system::{SYSTEM_VAULT_ID, SystemKeys, TeamProfile},
+    system::{App, SYSTEM_VAULT_ID, SystemKeys, TeamProfile},
 };
 use inferadb_ledger_store::{
     Database, DatabaseConfig, FileBackend, Key, StorageBackend, Value, WriteTransaction, tables,
 };
 use inferadb_ledger_types::{
-    EmailVerifyTokenId, OrganizationId, OrganizationSlug, Region, TeamId, TeamSlug, UserEmailId,
-    UserId, UserSlug, VaultId, VaultSlug, decode, encode,
+    AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, OrganizationId, OrganizationSlug,
+    Region, TeamId, TeamSlug, UserEmailId, UserId, UserSlug, VaultId, VaultSlug, decode, encode,
 };
 use openraft::{Entry, LogId, StorageError, Vote};
 use parking_lot::RwLock;
@@ -310,9 +310,52 @@ impl<B: StorageBackend> RaftLogStore<B> {
             }
         }
 
+        // Rebuild app name index
+        let app_pairs: Vec<_> = {
+            let state = self.applied_state.read();
+            state.app_slug_index.values().map(|(org_id, app_id)| (*org_id, *app_id)).collect()
+        };
+        let mut app_name_entries = Vec::with_capacity(app_pairs.len());
+        for (org_id, app_id) in app_pairs {
+            let key = SystemKeys::app_key(org_id, app_id);
+            match state_layer.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
+                Ok(Some(entity)) => match decode::<App>(&entity.value) {
+                    Ok(app) => {
+                        app_name_entries.push(((org_id, app.name), app_id));
+                    },
+                    Err(e) => {
+                        warn!(
+                            organization_id = %org_id,
+                            app_id = %app_id,
+                            error = %e,
+                            "Failed to decode app during index rebuild"
+                        );
+                    },
+                },
+                Ok(None) => {
+                    warn!(
+                        organization_id = %org_id,
+                        app_id = %app_id,
+                        "App entity missing during index rebuild"
+                    );
+                },
+                Err(e) => {
+                    warn!(
+                        organization_id = %org_id,
+                        app_id = %app_id,
+                        error = %e,
+                        "Failed to read app during index rebuild"
+                    );
+                },
+            }
+        }
+
         let mut state = self.applied_state.write();
         for (key, team_id) in name_entries {
             state.team_name_index.insert(key, team_id);
+        }
+        for (key, app_id) in app_name_entries {
+            state.app_name_index.insert(key, app_id);
         }
         state.user_org_index = user_org_entries;
     }
@@ -605,6 +648,21 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 .map_err(|e| to_storage_error(&e))?;
         }
 
+        // AppSlugIndex inserts/updates
+        for (slug, (org_id, app_id)) in &pending.app_slug_index {
+            let value = encode(&(*org_id, *app_id)).map_err(|e| to_serde_error(&e))?;
+            write_txn
+                .insert::<tables::AppSlugIndex>(&slug.value(), &value)
+                .map_err(|e| to_storage_error(&e))?;
+        }
+
+        // AppSlugIndex deletes
+        for slug in &pending.app_slug_index_deleted {
+            write_txn
+                .delete::<tables::AppSlugIndex>(&slug.value())
+                .map_err(|e| to_storage_error(&e))?;
+        }
+
         Ok(())
     }
 
@@ -654,10 +712,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// its corresponding table. Also reconstructs derived fields
     /// (`id_to_slug`, `vault_id_to_slug`, `organization_storage_bytes`).
     ///
-    /// Handles three cases:
-    /// - **New format** (version sentinel present): normal load from tables.
-    /// - **Old format** (no sentinel): automatic in-place migration — deserializes old
-    ///   `AppliedState`, populates all 9 external tables, rewrites with sentinel.
+    /// Handles two cases:
+    /// - **Valid format** (version sentinel present): normal load from tables.
     /// - **Fresh database** (no `KEY_APPLIED_STATE` entry): returns default state.
     pub(super) fn load_state_from_tables(
         &self,
@@ -683,29 +739,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 decode(&state_data[2..]).map_err(|e| to_serde_error(&e))?;
             self.reconstruct_from_tables(core)
         } else {
-            // Old format — attempt migration
-            let old_state: AppliedState = match decode(&state_data) {
-                Ok(state) => state,
-                Err(e) => {
-                    // Neither old format nor new format — corrupt data
-                    return Err(to_serde_error(&e));
-                },
-            };
-
-            warn!(
-                organizations = old_state.organizations.len(),
-                vaults = old_state.vaults.len(),
-                client_sequences = old_state.client_sequences.len(),
-                "Migrating old-format AppliedState blob to externalized tables"
-            );
-
-            let start = std::time::Instant::now();
-            self.migrate_old_format(&old_state)?;
-            let elapsed = start.elapsed();
-
-            warn!(elapsed_ms = elapsed.as_millis() as u64, "AppliedState migration complete");
-
-            Ok(old_state)
+            // Unrecognized format — corrupt data
+            Err(corrupted_error(
+                "Unrecognized AppliedState format (missing version sentinel)".to_string(),
+            ))
         }
     }
 
@@ -759,6 +796,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
         // TeamSlugIndex table scan
         Self::load_team_slug_index(&read_txn, &mut state)?;
 
+        // AppSlugIndex table scan
+        Self::load_app_slug_index(&read_txn, &mut state)?;
+
         Ok(state)
     }
 
@@ -790,6 +830,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     state.sequences.email_verify = EmailVerifyTokenId::new(value as i64);
                 },
                 "team" => state.sequences.team = TeamId::new(value as i64),
+                "app" => state.sequences.app = AppId::new(value as i64),
+                "client_assertion" => {
+                    state.sequences.client_assertion = ClientAssertionId::new(value as i64);
+                },
                 unknown => {
                     warn!(key = unknown, "Unknown sequence key in Sequences table, skipping");
                 },
@@ -1039,6 +1083,28 @@ impl<B: StorageBackend> RaftLogStore<B> {
         Ok(())
     }
 
+    /// Load app slug index from the AppSlugIndex table.
+    fn load_app_slug_index(
+        read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
+        state: &mut AppliedState,
+    ) -> Result<(), StorageError<LedgerNodeId>> {
+        let mut iter = read_txn.iter::<tables::AppSlugIndex>().map_err(|e| to_storage_error(&e))?;
+
+        while let Some((key_bytes, value_bytes)) =
+            iter.next_entry().map_err(|e| to_storage_error(&e))?
+        {
+            let slug_raw = <u64 as Key>::decode(&key_bytes)
+                .ok_or_else(|| corrupted_error("invalid u64 key in AppSlugIndex table"))?;
+            let slug = AppSlug::new(slug_raw);
+            let (org_id, app_id): (OrganizationId, AppId) =
+                decode(&value_bytes).map_err(|e| to_serde_error(&e))?;
+            state.app_slug_index.insert(slug, (org_id, app_id));
+            state.app_id_to_slug.insert(app_id, slug);
+        }
+
+        Ok(())
+    }
+
     /// Decode a 16-byte composite key into (OrganizationId, VaultId).
     fn decode_vault_composite_key(
         key_bytes: &[u8],
@@ -1061,92 +1127,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
         ));
         Ok((org_id, vault_id))
     }
-
-    /// Migrate from old-format full `AppliedState` blob to externalized tables.
-    ///
-    /// Populates all 9 external tables from the old state's HashMap fields,
-    /// writes `AppliedStateCore` with version sentinel, and commits atomically.
-    fn migrate_old_format(
-        &self,
-        old_state: &AppliedState,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
-        let mut pending = PendingExternalWrites::new();
-
-        // Populate organizations
-        for (org_id, meta) in &old_state.organizations {
-            let blob = encode(meta).map_err(|e| to_serde_error(&e))?;
-            pending.organizations.push((*org_id, blob));
-        }
-
-        // Populate vaults
-        for ((_org_id, _vault_id), meta) in &old_state.vaults {
-            let blob = encode(meta).map_err(|e| to_serde_error(&e))?;
-            pending.vaults.push((meta.vault, blob));
-        }
-
-        // Populate vault heights
-        for ((org_id, vault_id), height) in &old_state.vault_heights {
-            pending.vault_heights.push(((*org_id, *vault_id), *height));
-        }
-
-        // Populate vault hashes
-        for ((org_id, vault_id), hash) in &old_state.previous_vault_hashes {
-            pending.vault_hashes.push(((*org_id, *vault_id), *hash));
-        }
-
-        // Populate vault health
-        for ((org_id, vault_id), status) in &old_state.vault_health {
-            pending.vault_health.push(((*org_id, *vault_id), status.clone()));
-        }
-
-        // Populate sequences
-        pending
-            .sequences
-            .push(("organization".to_string(), old_state.sequences.organization.value() as u64));
-        pending.sequences.push(("vault".to_string(), old_state.sequences.vault.value() as u64));
-        pending.sequences.push(("user".to_string(), old_state.sequences.user.value() as u64));
-        pending
-            .sequences
-            .push(("user_email".to_string(), old_state.sequences.user_email.value() as u64));
-        pending
-            .sequences
-            .push(("email_verify".to_string(), old_state.sequences.email_verify.value() as u64));
-        pending.sequences.push(("team".to_string(), old_state.sequences.team.value() as u64));
-
-        // Populate client sequences
-        for ((org_id, vault_id, client_id), sequence) in &old_state.client_sequences {
-            let key = PendingExternalWrites::client_sequence_key(
-                *org_id,
-                *vault_id,
-                client_id.as_bytes(),
-            );
-            let value = encode(sequence).map_err(|e| to_serde_error(&e))?;
-            pending.client_sequences.push((key, value));
-        }
-
-        // Populate slug index
-        for (slug, org_id) in &old_state.slug_index {
-            pending.slug_index.push((*slug, *org_id));
-        }
-
-        // Populate vault slug index
-        for (slug, vault_id) in &old_state.vault_slug_index {
-            pending.vault_slug_index.push((*slug, *vault_id));
-        }
-
-        // Populate user slug index
-        for (slug, user_id) in &old_state.user_slug_index {
-            pending.user_slug_index.push((*slug, *user_id));
-        }
-
-        // Populate team slug index
-        for (slug, ids) in &old_state.team_slug_index {
-            pending.team_slug_index.push((*slug, *ids));
-        }
-
-        // Write core + external tables atomically
-        self.save_state_core(old_state, &pending)
-    }
 }
 
 #[cfg(test)]
@@ -1155,8 +1135,8 @@ mod tests {
     use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
     use inferadb_ledger_store::{FileBackend, tables};
     use inferadb_ledger_types::{
-        OrganizationId, OrganizationSlug, Region, TeamId, UserEmailId, VaultId, VaultSlug, decode,
-        encode,
+        AppId, ClientAssertionId, OrganizationId, OrganizationSlug, Region, TeamId, UserEmailId,
+        VaultId, VaultSlug, decode, encode,
     };
     use openraft::{CommittedLeaderId, LogId};
     use tempfile::tempdir;
@@ -1184,6 +1164,8 @@ mod tests {
                 user_email: UserEmailId::new(40),
                 email_verify: EmailVerifyTokenId::new(50),
                 team: TeamId::new(0),
+                app: AppId::new(0),
+                client_assertion: ClientAssertionId::new(0),
             },
             ..Default::default()
         };
@@ -1297,6 +1279,11 @@ mod tests {
             .sequences
             .push(("email_verify".to_string(), state.sequences.email_verify.value() as u64));
         pending.sequences.push(("team".to_string(), state.sequences.team.value() as u64));
+        pending.sequences.push(("app".to_string(), state.sequences.app.value() as u64));
+        pending.sequences.push((
+            "client_assertion".to_string(),
+            state.sequences.client_assertion.value() as u64,
+        ));
 
         for ((org_id, vault_id, client_id), sequence) in &state.client_sequences {
             let key = PendingExternalWrites::client_sequence_key(
@@ -1318,6 +1305,10 @@ mod tests {
 
         for (slug, ids) in &state.team_slug_index {
             pending.team_slug_index.push((*slug, *ids));
+        }
+
+        for (slug, ids) in &state.app_slug_index {
+            pending.app_slug_index.push((*slug, *ids));
         }
 
         pending
@@ -1377,6 +1368,14 @@ mod tests {
             left.organization_storage_bytes, right.organization_storage_bytes,
             "organization_storage_bytes (derived) mismatch"
         );
+        assert_eq!(left.team_slug_index, right.team_slug_index, "team_slug_index mismatch");
+        assert_eq!(
+            left.team_id_to_slug, right.team_id_to_slug,
+            "team_id_to_slug (derived) mismatch"
+        );
+        assert_eq!(left.app_slug_index, right.app_slug_index, "app_slug_index mismatch");
+        assert_eq!(left.app_id_to_slug, right.app_id_to_slug, "app_id_to_slug (derived) mismatch");
+        assert_eq!(left.app_name_index, right.app_name_index, "app_name_index mismatch");
     }
 
     // ========================================================================
@@ -1456,107 +1455,6 @@ mod tests {
             // Drop without commit — COW semantics discard changes
         }
 
-        let loaded = store.load_state_from_tables().unwrap();
-        assert_states_equal(&original, &loaded);
-    }
-
-    // ========================================================================
-    // Old-format migration
-    // ========================================================================
-
-    #[test]
-    fn test_old_format_migration() {
-        let dir = tempdir().unwrap();
-        let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft.db")).unwrap();
-
-        // Build a state with substantial data
-        let mut original = build_populated_state();
-
-        // Add more client sequences to exercise bulk migration
-        for i in 0..50u64 {
-            original.client_sequences.insert(
-                (OrganizationId::new(1), VaultId::new(11), format!("migrated-client-{i}")),
-                ClientSequenceEntry { sequence: i * 100, ..ClientSequenceEntry::default() },
-            );
-        }
-
-        // Write old-format blob (no version sentinel)
-        let old_blob = encode(&original).unwrap();
-        {
-            let mut write_txn = store.db.write().unwrap();
-            write_txn
-                .insert::<tables::RaftState>(&KEY_APPLIED_STATE.to_string(), &old_blob)
-                .unwrap();
-            write_txn.commit().unwrap();
-        }
-
-        // load_state_from_tables should detect old format and migrate
-        let loaded = store.load_state_from_tables().unwrap();
-        assert_states_equal(&original, &loaded);
-
-        // Second load should use new format (no re-migration)
-        let loaded2 = store.load_state_from_tables().unwrap();
-        assert_states_equal(&original, &loaded2);
-
-        // Verify sentinel was written
-        let read_txn = store.db.read().unwrap();
-        let raw =
-            read_txn.get::<tables::RaftState>(&KEY_APPLIED_STATE.to_string()).unwrap().unwrap();
-        assert_eq!(&raw[..2], &[0x00, 0x01], "version sentinel must be present after migration");
-    }
-
-    // ========================================================================
-    // Crash during migration (drop without commit)
-    // ========================================================================
-
-    #[test]
-    fn test_crash_during_migration_preserves_old_format() {
-        let dir = tempdir().unwrap();
-        let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft.db")).unwrap();
-
-        let original = build_populated_state();
-
-        // Write old-format blob
-        let old_blob = encode(&original).unwrap();
-        {
-            let mut write_txn = store.db.write().unwrap();
-            write_txn
-                .insert::<tables::RaftState>(&KEY_APPLIED_STATE.to_string(), &old_blob)
-                .unwrap();
-            write_txn.commit().unwrap();
-        }
-
-        // Simulate crash: directly do what migrate_old_format does but drop the txn
-        {
-            let pending = build_pending_from_state(&original);
-            let core = AppliedStateCore::from(&original);
-            let core_bytes = encode(&core).unwrap();
-            let mut state_data = Vec::with_capacity(
-                RaftLogStore::<FileBackend>::STATE_CORE_VERSION.len() + core_bytes.len(),
-            );
-            state_data.extend_from_slice(&RaftLogStore::<FileBackend>::STATE_CORE_VERSION);
-            state_data.extend_from_slice(&core_bytes);
-
-            let mut write_txn = store.db.write().unwrap();
-            write_txn
-                .insert::<tables::RaftState>(&KEY_APPLIED_STATE.to_string(), &state_data)
-                .unwrap();
-            RaftLogStore::<FileBackend>::flush_external_writes(&pending, &mut write_txn).unwrap();
-            // Drop without commit — simulates crash
-        }
-
-        // Old-format blob should still be there unchanged
-        let read_txn = store.db.read().unwrap();
-        let raw =
-            read_txn.get::<tables::RaftState>(&KEY_APPLIED_STATE.to_string()).unwrap().unwrap();
-        assert_ne!(
-            &raw[..2],
-            &[0x00, 0x01],
-            "sentinel should NOT be present — crash aborted migration"
-        );
-        drop(read_txn);
-
-        // Next load should re-trigger migration successfully
         let loaded = store.load_state_from_tables().unwrap();
         assert_states_equal(&original, &loaded);
     }
@@ -1916,6 +1814,8 @@ mod tests {
                 user_email: UserEmailId::new(10000),
                 email_verify: EmailVerifyTokenId::new(10000),
                 team: TeamId::new(0),
+                app: AppId::new(0),
+                client_assertion: ClientAssertionId::new(0),
             },
             ..Default::default()
         };
@@ -2017,6 +1917,8 @@ mod tests {
                 user_email: UserEmailId::new(80),
                 email_verify: EmailVerifyTokenId::new(90),
                 team: TeamId::new(0),
+                app: AppId::new(0),
+                client_assertion: ClientAssertionId::new(0),
             },
             ..Default::default()
         };

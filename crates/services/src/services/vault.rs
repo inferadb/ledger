@@ -7,120 +7,33 @@
 //! Vault creation generates a Snowflake slug and initializes the vault's
 //! blockchain with a genesis block via a single Raft entry.
 
-use std::{sync::Arc, time::Duration};
-
 use inferadb_ledger_proto::proto::{
     BlockHeader, CreateVaultRequest, CreateVaultResponse, DeleteVaultRequest, DeleteVaultResponse,
     GetVaultRequest, GetVaultResponse, Hash, ListVaultsRequest, ListVaultsResponse, NodeId,
     OrganizationSlug, VaultSlug as ProtoVaultSlug,
 };
 use inferadb_ledger_raft::{
-    log_storage::AppliedStateAccessor,
-    logging::{RequestContext, Sampler},
     metrics, trace_context,
-    types::{
-        BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse, LedgerTypeConfig,
-    },
+    types::{BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse},
 };
-use inferadb_ledger_state::StateLayer;
-use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
     OrganizationSlug as DomainOrganizationSlug, VaultEntry, VaultSlug as DomainVaultSlug,
     ZERO_HASH,
-    config::ValidationConfig,
     events::{EventAction, EventOutcome as EventOutcomeType},
 };
-use openraft::Raft;
 use tonic::{Request, Response, Status};
 
-use super::slug_resolver::SlugResolver;
-
-/// Creates a `RequestContext` for a VaultService method and fills in common fields.
-macro_rules! vault_ctx {
-    ($self:expr, $method:literal, $grpc_metadata:expr, $trace_ctx:expr) => {{
-        let mut ctx = RequestContext::new("VaultService", $method);
-        ctx.set_admin_action($method);
-        $self.fill_context(&mut ctx, $grpc_metadata, $trace_ctx);
-        ctx
-    }};
-}
+use super::{service_infra::ServiceContext, slug_resolver::SlugResolver};
 
 /// Vault lifecycle: creation, deletion, retrieval, and listing.
-#[derive(bon::Builder)]
-#[builder(on(_, required))]
 pub struct VaultService {
-    /// Raft consensus handle for proposing write operations.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// State layer for entity reads (state root computation).
-    state: Arc<StateLayer<FileBackend>>,
-    /// Accessor for applied state (slug resolution, vault metadata).
-    applied_state: AppliedStateAccessor,
-    /// Sampler for log tail sampling.
-    #[builder(default)]
-    sampler: Option<Sampler>,
-    /// Node ID for logging and events.
-    #[builder(default)]
-    node_id: Option<u64>,
-    /// Input validation configuration.
-    #[builder(default = Arc::new(ValidationConfig::default()))]
-    #[allow(dead_code)] // reserved for future vault-level input validation
-    validation_config: Arc<ValidationConfig>,
-    /// Maximum Raft proposal timeout.
-    #[builder(default = Duration::from_secs(30))]
-    proposal_timeout: Duration,
-    /// Handler-phase event handle for audit events.
-    #[builder(default)]
-    event_handle:
-        Option<inferadb_ledger_raft::event_writer::EventHandle<inferadb_ledger_store::FileBackend>>,
-    /// Health state for drain-phase write rejection.
-    #[builder(default)]
-    health_state: Option<inferadb_ledger_raft::graceful_shutdown::HealthState>,
+    ctx: ServiceContext,
 }
 
 impl VaultService {
-    /// Records a handler-phase audit event if the event handle is configured.
-    fn record_handler_event(&self, entry: inferadb_ledger_types::events::EventEntry) {
-        if let Some(ref handle) = self.event_handle {
-            handle.record_handler_event(entry);
-        }
-    }
-
-    /// Returns the configured TTL for handler-phase events, defaulting to 90 days.
-    fn default_ttl_days(&self) -> u32 {
-        self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)
-    }
-
-    /// Fills in common fields on a pre-created `RequestContext`.
-    fn fill_context(
-        &self,
-        ctx: &mut RequestContext,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        trace_ctx: &trace_context::TraceContext,
-    ) {
-        super::service_infra::fill_context(
-            ctx,
-            grpc_metadata,
-            trace_ctx,
-            self.sampler.as_ref(),
-            self.node_id,
-        );
-    }
-
-    /// Proposes a request through Raft with deadline handling.
-    async fn propose_request(
-        &self,
-        request: LedgerRequest,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        ctx: &mut RequestContext,
-    ) -> Result<LedgerResponse, Status> {
-        super::service_infra::propose_request(
-            &self.raft,
-            request,
-            grpc_metadata,
-            self.proposal_timeout,
-            ctx,
-        )
-        .await
+    /// Creates a new `VaultService` from shared service infrastructure.
+    pub(crate) fn new(ctx: ServiceContext) -> Self {
+        Self { ctx }
     }
 }
 
@@ -137,16 +50,21 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         // Reject requests with insufficient remaining deadline
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         // Reject if node is draining
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = vault_ctx!(self, "create_vault", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "VaultService",
+            "create_vault",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
         let organization_id =
             slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
@@ -176,7 +94,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             retention_policy,
         };
 
-        let response = self.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
             LedgerResponse::VaultCreated { vault: vault_id, slug } => {
@@ -189,8 +107,8 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                     ctx.elapsed_secs(),
                 );
 
-                if let Some(node_id) = self.node_id {
-                    self.record_handler_event(
+                if let Some(node_id) = self.ctx.node_id {
+                    self.ctx.record_handler_event(
                         inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                             EventAction::VaultCreated,
                             organization_id,
@@ -201,24 +119,24 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                         .principal("system")
                         .trace_id(&trace_ctx.trace_id)
                         .outcome(EventOutcomeType::Success)
-                        .build(self.default_ttl_days()),
+                        .build(self.ctx.default_ttl_days()),
                     );
                 }
 
                 // Get Raft metrics for leader_id and term
-                let raft_metrics = self.raft.metrics().borrow().clone();
+                let raft_metrics = self.ctx.raft.metrics().borrow().clone();
                 let leader_id = raft_metrics.current_leader.unwrap_or(raft_metrics.id);
                 ctx.set_raft_term(raft_metrics.current_term);
 
                 // Compute empty state root for genesis block
-                let state_root = self.state.compute_state_root(vault_id).unwrap_or_else(|e| {
-                    tracing::warn!(
+                let state_root = self.ctx.state.compute_state_root(vault_id).map_err(|e| {
+                    tracing::error!(
                         vault_id = vault_id.value(),
                         error = %e,
-                        "Failed to compute state root for genesis block, using ZERO_HASH"
+                        "Failed to compute state root for genesis block"
                     );
-                    ZERO_HASH
-                });
+                    Status::internal("Failed to compute state root for genesis block")
+                })?;
 
                 // Build genesis block header (height 0)
                 let genesis_entry = VaultEntry {
@@ -277,16 +195,21 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         // Reject requests with insufficient remaining deadline
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         // Reject if node is draining
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = vault_ctx!(self, "delete_vault", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "VaultService",
+            "delete_vault",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
         let organization_id =
             slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
@@ -305,7 +228,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         let ledger_request =
             LedgerRequest::DeleteVault { organization: organization_id, vault: vault_id };
 
-        let response = self.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
             LedgerResponse::VaultDeleted { success } => {
@@ -318,8 +241,8 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                         ctx.elapsed_secs(),
                     );
 
-                    if let Some(node_id) = self.node_id {
-                        self.record_handler_event(
+                    if let Some(node_id) = self.ctx.node_id {
+                        self.ctx.record_handler_event(
                             inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
                                 EventAction::VaultDeleted,
                                 organization_id,
@@ -330,7 +253,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                             .principal("system")
                             .trace_id(&trace_ctx.trace_id)
                             .outcome(EventOutcomeType::Success)
-                            .build(self.default_ttl_days()),
+                            .build(self.ctx.default_ttl_days()),
                         );
                     }
 
@@ -367,9 +290,10 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = vault_ctx!(self, "get_vault", &grpc_metadata, &trace_ctx);
+        let mut ctx =
+            self.ctx.make_request_context("VaultService", "get_vault", &grpc_metadata, &trace_ctx);
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
         let organization_id =
             slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
@@ -385,8 +309,8 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         ctx.set_target(organization_slug_val, vault_val);
 
         // Get vault metadata and height
-        let vault_meta = self.applied_state.get_vault(organization_id, vault_id);
-        let height = self.applied_state.vault_height(organization_id, vault_id);
+        let vault_meta = self.ctx.applied_state.get_vault(organization_id, vault_id);
+        let height = self.ctx.applied_state.vault_height(organization_id, vault_id);
 
         match vault_meta {
             Some(vault) => {
@@ -413,6 +337,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
 
     /// Lists all vaults across all organizations with their block heights.
     ///
+    /// Supports cursor-based pagination via `page_token` / `page_size`.
     /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn list_vaults(
         &self,
@@ -420,38 +345,52 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
     ) -> Result<Response<ListVaultsResponse>, Status> {
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
-        let _req = request.into_inner();
+        let req = request.into_inner();
 
-        let mut ctx = vault_ctx!(self, "list_vaults", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "VaultService",
+            "list_vaults",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        // List all vaults across all organizations
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
-        let vaults = self
+        let page_size = crate::proto_compat::normalize_page_size(req.page_size);
+        let start_after = crate::proto_compat::decode_page_token(&req.page_token);
+
+        // Build (vault_slug, response) pairs for pagination
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
+        let vaults_with_slugs: Vec<(u64, inferadb_ledger_proto::proto::GetVaultResponse)> = self
+            .ctx
             .applied_state
             .all_vault_heights()
             .keys()
             .filter_map(|(org_id, vault_id)| {
-                self.applied_state.get_vault(*org_id, *vault_id).map(|v| {
-                    let height = self.applied_state.vault_height(v.organization, v.vault);
+                self.ctx.applied_state.get_vault(*org_id, *vault_id).map(|v| {
+                    let height = self.ctx.applied_state.vault_height(v.organization, v.vault);
                     let organization = slug_resolver.resolve_slug(v.organization)?;
-                    Ok(inferadb_ledger_proto::proto::GetVaultResponse {
-                        organization: Some(OrganizationSlug { slug: organization.value() }),
-                        vault: Some(ProtoVaultSlug { slug: v.slug.value() }),
-                        height,
-                        state_root: None,
-                        nodes: vec![],
-                        leader: None,
-                        status: inferadb_ledger_proto::proto::VaultStatus::Active.into(),
-                        retention_policy: None,
-                    })
+                    Ok((
+                        v.slug.value(),
+                        inferadb_ledger_proto::proto::GetVaultResponse {
+                            organization: Some(OrganizationSlug { slug: organization.value() }),
+                            vault: Some(ProtoVaultSlug { slug: v.slug.value() }),
+                            height,
+                            state_root: None,
+                            nodes: vec![],
+                            leader: None,
+                            status: inferadb_ledger_proto::proto::VaultStatus::Active.into(),
+                            retention_policy: None,
+                        },
+                    ))
                 })
             })
             .collect::<Result<Vec<_>, Status>>()?;
 
-        // Set count in context for observability
+        let (vaults, next_page_token) =
+            crate::proto_compat::paginate_by_slug(vaults_with_slugs, start_after, page_size);
+
         ctx.set_keys_count(vaults.len());
         ctx.set_success();
 
-        Ok(Response::new(ListVaultsResponse { vaults, next_page_token: None }))
+        Ok(Response::new(ListVaultsResponse { vaults, next_page_token }))
     }
 }

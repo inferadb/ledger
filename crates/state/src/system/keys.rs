@@ -1,8 +1,8 @@
 //! Key patterns for the `_system` organization.
 
 use inferadb_ledger_types::{
-    EmailVerifyTokenId, NodeId, OrganizationId, OrganizationSlug, Region, TeamId, TeamSlug,
-    UserEmailId, UserId, UserSlug, VaultSlug,
+    AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, NodeId, OrganizationId,
+    OrganizationSlug, Region, TeamId, TeamSlug, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
 
 /// Key pattern generators for `_system` organization entities.
@@ -189,6 +189,102 @@ impl SystemKeys {
 
     /// Prefix for team profile keys.
     pub const TEAM_PROFILE_PREFIX: &'static str = "_sys:team_profile:";
+
+    // ========================================================================
+    // App Keys
+    // ========================================================================
+
+    /// Primary key for an application record in the system vault.
+    ///
+    /// Pattern: `_sys:app:{organization_id}:{app_id}` → postcard-serialized `App`
+    pub fn app_key(organization: OrganizationId, app: AppId) -> String {
+        format!("_sys:app:{}:{}", organization.value(), app.value())
+    }
+
+    /// Prefix for listing all apps in an organization.
+    ///
+    /// Pattern: `_sys:app:{organization_id}:`
+    pub fn app_prefix(organization: OrganizationId) -> String {
+        format!("_sys:app:{}:", organization.value())
+    }
+
+    /// Index key for app slug lookup.
+    ///
+    /// Pattern: `_idx:app:slug:{slug}` → `{org_id}:{app_id}`
+    pub fn app_slug_key(slug: AppSlug) -> String {
+        format!("_idx:app:slug:{}", slug.value())
+    }
+
+    /// Index key for app name uniqueness within an organization.
+    ///
+    /// Pattern: `_idx:app:name:{org_id}:{name}` → app_id
+    pub fn app_name_index_key(organization: OrganizationId, name: &str) -> String {
+        format!("_idx:app:name:{}:{}", organization.value(), name)
+    }
+
+    /// Prefix for listing all app name index entries for an organization.
+    ///
+    /// Pattern: `_idx:app:name:{org_id}:`
+    pub fn app_name_index_prefix(organization: OrganizationId) -> String {
+        format!("_idx:app:name:{}:", organization.value())
+    }
+
+    /// Primary key for a client assertion entry.
+    ///
+    /// Pattern: `_sys:app_assertion:{org_id}:{app_id}:{assertion_id}`
+    pub fn app_assertion_key(
+        organization: OrganizationId,
+        app: AppId,
+        assertion: ClientAssertionId,
+    ) -> String {
+        format!("_sys:app_assertion:{}:{}:{}", organization.value(), app.value(), assertion.value())
+    }
+
+    /// Prefix for listing all client assertion entries for an app.
+    ///
+    /// Pattern: `_sys:app_assertion:{org_id}:{app_id}:`
+    pub fn app_assertion_prefix(organization: OrganizationId, app: AppId) -> String {
+        format!("_sys:app_assertion:{}:{}:", organization.value(), app.value())
+    }
+
+    /// Primary key for a vault connection for an app.
+    ///
+    /// Pattern: `_sys:app_vault:{org_id}:{app_id}:{vault_id}`
+    pub fn app_vault_key(organization: OrganizationId, app: AppId, vault: VaultId) -> String {
+        format!("_sys:app_vault:{}:{}:{}", organization.value(), app.value(), vault.value())
+    }
+
+    /// Prefix for listing all vault connections for an app.
+    ///
+    /// Pattern: `_sys:app_vault:{org_id}:{app_id}:`
+    pub fn app_vault_prefix(organization: OrganizationId, app: AppId) -> String {
+        format!("_sys:app_vault:{}:{}:", organization.value(), app.value())
+    }
+
+    /// Prefix for app keys.
+    pub const APP_PREFIX: &'static str = "_sys:app:";
+
+    /// Prefix for app slug index entries.
+    pub const APP_SLUG_INDEX_PREFIX: &'static str = "_idx:app:slug:";
+
+    /// Prefix for app name index entries.
+    pub const APP_NAME_INDEX_PREFIX: &'static str = "_idx:app:name:";
+
+    /// Prefix for app assertion entries.
+    pub const APP_ASSERTION_PREFIX: &'static str = "_sys:app_assertion:";
+
+    /// Prefix for app vault connection entries.
+    pub const APP_VAULT_PREFIX: &'static str = "_sys:app_vault:";
+
+    /// Key for the app ID sequence counter.
+    ///
+    /// Pattern: `_meta:seq:app` → next AppId
+    pub const APP_SEQ_KEY: &'static str = "_meta:seq:app";
+
+    /// Key for the client assertion ID sequence counter.
+    ///
+    /// Pattern: `_meta:seq:client_assertion` → next ClientAssertionId
+    pub const CLIENT_ASSERTION_SEQ_KEY: &'static str = "_meta:seq:client_assertion";
 
     // ========================================================================
     // Node Keys
@@ -581,5 +677,102 @@ mod tests {
         assert_ne!(hash_key, email_key);
         assert!(hash_key.starts_with("_idx:email_hash:"));
         assert!(email_key.starts_with("_idx:email:"));
+    }
+
+    // =========================================================================
+    // App key tests
+    // =========================================================================
+
+    #[test]
+    fn test_app_key() {
+        let key = SystemKeys::app_key(OrganizationId::new(5), AppId::new(42));
+        assert_eq!(key, "_sys:app:5:42");
+        assert!(key.starts_with(SystemKeys::APP_PREFIX));
+    }
+
+    #[test]
+    fn test_app_prefix() {
+        let prefix = SystemKeys::app_prefix(OrganizationId::new(5));
+        assert_eq!(prefix, "_sys:app:5:");
+        assert!(prefix.starts_with(SystemKeys::APP_PREFIX));
+        // Key should start with the prefix
+        let key = SystemKeys::app_key(OrganizationId::new(5), AppId::new(42));
+        assert!(key.starts_with(&prefix));
+    }
+
+    #[test]
+    fn test_app_slug_key() {
+        let key = SystemKeys::app_slug_key(AppSlug::new(9999));
+        assert_eq!(key, "_idx:app:slug:9999");
+        assert!(key.starts_with(SystemKeys::APP_SLUG_INDEX_PREFIX));
+    }
+
+    #[test]
+    fn test_app_name_index_key() {
+        let key = SystemKeys::app_name_index_key(OrganizationId::new(3), "my-app");
+        assert_eq!(key, "_idx:app:name:3:my-app");
+        assert!(key.starts_with(SystemKeys::APP_NAME_INDEX_PREFIX));
+    }
+
+    #[test]
+    fn test_app_name_index_prefix() {
+        let prefix = SystemKeys::app_name_index_prefix(OrganizationId::new(3));
+        assert_eq!(prefix, "_idx:app:name:3:");
+        let key = SystemKeys::app_name_index_key(OrganizationId::new(3), "my-app");
+        assert!(key.starts_with(&prefix));
+    }
+
+    #[test]
+    fn test_app_assertion_key() {
+        let key = SystemKeys::app_assertion_key(
+            OrganizationId::new(1),
+            AppId::new(2),
+            ClientAssertionId::new(3),
+        );
+        assert_eq!(key, "_sys:app_assertion:1:2:3");
+        assert!(key.starts_with(SystemKeys::APP_ASSERTION_PREFIX));
+    }
+
+    #[test]
+    fn test_app_assertion_prefix() {
+        let prefix = SystemKeys::app_assertion_prefix(OrganizationId::new(1), AppId::new(2));
+        assert_eq!(prefix, "_sys:app_assertion:1:2:");
+        let key = SystemKeys::app_assertion_key(
+            OrganizationId::new(1),
+            AppId::new(2),
+            ClientAssertionId::new(7),
+        );
+        assert!(key.starts_with(&prefix));
+    }
+
+    #[test]
+    fn test_app_vault_key() {
+        let key = SystemKeys::app_vault_key(OrganizationId::new(1), AppId::new(2), VaultId::new(3));
+        assert_eq!(key, "_sys:app_vault:1:2:3");
+        assert!(key.starts_with(SystemKeys::APP_VAULT_PREFIX));
+    }
+
+    #[test]
+    fn test_app_vault_prefix() {
+        let prefix = SystemKeys::app_vault_prefix(OrganizationId::new(1), AppId::new(2));
+        assert_eq!(prefix, "_sys:app_vault:1:2:");
+        let key = SystemKeys::app_vault_key(OrganizationId::new(1), AppId::new(2), VaultId::new(9));
+        assert!(key.starts_with(&prefix));
+    }
+
+    #[test]
+    fn test_app_key_isolation_across_organizations() {
+        // Same app ID in different orgs must produce different keys
+        let key_a = SystemKeys::app_key(OrganizationId::new(1), AppId::new(10));
+        let key_b = SystemKeys::app_key(OrganizationId::new(2), AppId::new(10));
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn test_app_prefixes_do_not_collide() {
+        // Ensure app, assertion, and vault prefixes are distinct namespaces
+        assert_ne!(SystemKeys::APP_PREFIX, SystemKeys::APP_ASSERTION_PREFIX);
+        assert_ne!(SystemKeys::APP_PREFIX, SystemKeys::APP_VAULT_PREFIX);
+        assert_ne!(SystemKeys::APP_ASSERTION_PREFIX, SystemKeys::APP_VAULT_PREFIX);
     }
 }

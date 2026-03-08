@@ -43,7 +43,7 @@ use std::{
 use parking_lot::Mutex;
 use snafu::Snafu;
 
-use crate::types::{OrganizationSlug, TeamSlug, UserSlug, VaultSlug};
+use crate::types::{AppSlug, OrganizationSlug, TeamSlug, UserSlug, VaultSlug};
 
 /// Custom epoch: 2024-01-01 00:00:00 UTC (milliseconds since Unix epoch).
 const EPOCH_MS: u64 = 1_704_067_200_000;
@@ -209,6 +209,19 @@ pub fn generate_user_slug() -> Result<UserSlug, SnowflakeError> {
 /// Unix epoch.
 pub fn generate_team_slug() -> Result<TeamSlug, SnowflakeError> {
     generate().map(TeamSlug::new)
+}
+
+/// Generates a new [`AppSlug`] from a Snowflake ID.
+///
+/// Convenience wrapper around [`generate()`] that returns the ID wrapped in
+/// the `AppSlug` newtype.
+///
+/// # Errors
+///
+/// Returns [`SnowflakeError::SystemClock`] if the system clock is before the
+/// Unix epoch.
+pub fn generate_app_slug() -> Result<AppSlug, SnowflakeError> {
+    generate().map(AppSlug::new)
 }
 
 /// Extracts the timestamp portion from a Snowflake ID.

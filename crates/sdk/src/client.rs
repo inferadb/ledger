@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{
-    OrganizationSlug, Region, TeamSlug, UserRole, UserSlug, UserStatus, VaultSlug,
+    AppSlug, ClientAssertionId as DomainClientAssertionId, OrganizationSlug, Region, TeamSlug,
+    UserRole, UserSlug, UserStatus, VaultSlug,
 };
 use tonic::service::interceptor::InterceptedService;
 
@@ -385,6 +386,15 @@ fn proto_timestamp_to_system_time(ts: &prost_types::Timestamp) -> Option<std::ti
     std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(secs, nanos))
 }
 
+fn system_time_to_proto_timestamp(t: &std::time::SystemTime) -> prost_types::Timestamp {
+    match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => {
+            prost_types::Timestamp { seconds: d.as_secs() as i64, nanos: d.subsec_nanos() as i32 }
+        },
+        Err(_) => prost_types::Timestamp { seconds: 0, nanos: 0 },
+    }
+}
+
 /// Role of a member within an organization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrganizationMemberRole {
@@ -538,32 +548,55 @@ pub struct OrganizationDeleteInfo {
 }
 
 impl OrganizationInfo {
-    /// Creates from protobuf response.
-    fn from_proto(response: proto::GetOrganizationResponse) -> Self {
+    /// Constructs from the fields shared by all organization response protos.
+    fn from_fields(
+        slug: Option<proto::OrganizationSlug>,
+        name: String,
+        region: i32,
+        member_nodes: Vec<proto::NodeId>,
+        config_version: u64,
+        status: i32,
+        tier: i32,
+        members: &[proto::OrganizationMember],
+    ) -> Self {
         Self {
-            slug: OrganizationSlug::new(response.slug.map_or(0, |n| n.slug)),
-            name: response.name,
-            region: region_from_proto_i32(response.region).unwrap_or(Region::GLOBAL),
-            member_nodes: response.member_nodes.into_iter().map(|n| n.id).collect(),
-            config_version: response.config_version,
-            status: OrganizationStatus::from_proto(response.status),
-            tier: OrganizationTier::from_proto(response.tier),
-            members: response.members.iter().map(OrganizationMemberInfo::from_proto).collect(),
+            slug: OrganizationSlug::new(slug.map_or(0, |n| n.slug)),
+            name,
+            region: region_from_proto_i32(region).unwrap_or(Region::GLOBAL),
+            member_nodes: member_nodes.into_iter().map(|n| n.id).collect(),
+            config_version,
+            status: OrganizationStatus::from_proto(status),
+            tier: OrganizationTier::from_proto(tier),
+            members: members.iter().map(OrganizationMemberInfo::from_proto).collect(),
         }
     }
 
+    /// Creates from protobuf get response.
+    fn from_proto(r: proto::GetOrganizationResponse) -> Self {
+        Self::from_fields(
+            r.slug,
+            r.name,
+            r.region,
+            r.member_nodes,
+            r.config_version,
+            r.status,
+            r.tier,
+            &r.members,
+        )
+    }
+
     /// Creates from protobuf update response.
-    fn from_update_proto(response: proto::UpdateOrganizationResponse) -> Self {
-        Self {
-            slug: OrganizationSlug::new(response.slug.map_or(0, |n| n.slug)),
-            name: response.name,
-            region: region_from_proto_i32(response.region).unwrap_or(Region::GLOBAL),
-            member_nodes: response.member_nodes.into_iter().map(|n| n.id).collect(),
-            config_version: response.config_version,
-            status: OrganizationStatus::from_proto(response.status),
-            tier: OrganizationTier::from_proto(response.tier),
-            members: response.members.iter().map(OrganizationMemberInfo::from_proto).collect(),
-        }
+    fn from_update_proto(r: proto::UpdateOrganizationResponse) -> Self {
+        Self::from_fields(
+            r.slug,
+            r.name,
+            r.region,
+            r.member_nodes,
+            r.config_version,
+            r.status,
+            r.tier,
+            &r.members,
+        )
     }
 }
 
@@ -668,6 +701,156 @@ impl HealthCheckResult {
     /// Returns true if the status is unavailable.
     pub fn is_unavailable(&self) -> bool {
         self.status == HealthStatus::Unavailable
+    }
+}
+
+// =============================================================================
+// App Types
+// =============================================================================
+
+/// SDK representation of a client application.
+#[derive(Debug, Clone)]
+pub struct AppInfo {
+    /// External Snowflake slug.
+    pub slug: AppSlug,
+    /// Human-readable name.
+    pub name: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Whether the app is enabled.
+    pub enabled: bool,
+    /// Credentials configuration (absent in list responses).
+    pub credentials: Option<AppCredentialsInfo>,
+    /// Creation timestamp.
+    pub created_at: Option<std::time::SystemTime>,
+    /// Last update timestamp.
+    pub updated_at: Option<std::time::SystemTime>,
+}
+
+/// Credential configuration for an app.
+#[derive(Debug, Clone)]
+pub struct AppCredentialsInfo {
+    /// Client secret credential.
+    pub client_secret_enabled: bool,
+    /// mTLS CA credential.
+    pub mtls_ca_enabled: bool,
+    /// mTLS self-signed credential.
+    pub mtls_self_signed_enabled: bool,
+    /// Client assertion (private key JWT) credential.
+    pub client_assertion_enabled: bool,
+}
+
+/// A client assertion entry (public metadata only — private key is never returned after creation).
+#[derive(Debug, Clone)]
+pub struct AppClientAssertionInfo {
+    /// Server-assigned assertion ID.
+    pub id: DomainClientAssertionId,
+    /// User-provided name.
+    pub name: String,
+    /// Whether this assertion is individually enabled.
+    pub enabled: bool,
+    /// Expiration timestamp.
+    pub expires_at: Option<std::time::SystemTime>,
+    /// Creation timestamp.
+    pub created_at: Option<std::time::SystemTime>,
+}
+
+/// A vault connection for an app.
+#[derive(Debug, Clone)]
+pub struct AppVaultConnectionInfo {
+    /// Vault slug (external identifier).
+    pub vault_slug: VaultSlug,
+    /// Allowed scopes for this vault connection.
+    pub allowed_scopes: Vec<String>,
+    /// Creation timestamp.
+    pub created_at: Option<std::time::SystemTime>,
+}
+
+/// Result of creating a client assertion — includes the private key PEM (returned only once).
+#[derive(Debug, Clone)]
+pub struct CreateAppClientAssertionResult {
+    /// The created assertion metadata.
+    pub assertion: AppClientAssertionInfo,
+    /// Private key PEM (Ed25519). Only returned on creation.
+    pub private_key_pem: String,
+}
+
+/// Result of getting a client secret's status.
+#[derive(Debug, Clone)]
+pub struct AppClientSecretStatus {
+    /// Whether the client secret credential is enabled.
+    pub enabled: bool,
+    /// Whether a secret has been generated.
+    pub has_secret: bool,
+}
+
+/// Credential type for enable/disable operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppCredentialType {
+    /// Client secret (shared secret).
+    ClientSecret,
+    /// mTLS with CA-signed certificate.
+    MtlsCa,
+    /// mTLS with self-signed certificate.
+    MtlsSelfSigned,
+    /// Client assertion (private key JWT).
+    ClientAssertion,
+}
+
+impl AppCredentialType {
+    fn to_proto(self) -> i32 {
+        match self {
+            AppCredentialType::ClientSecret => proto::AppCredentialType::ClientSecret as i32,
+            AppCredentialType::MtlsCa => proto::AppCredentialType::MtlsCa as i32,
+            AppCredentialType::MtlsSelfSigned => proto::AppCredentialType::MtlsSelfSigned as i32,
+            AppCredentialType::ClientAssertion => proto::AppCredentialType::ClientAssertion as i32,
+        }
+    }
+}
+
+fn app_info_from_proto(p: &proto::AppInfo) -> AppInfo {
+    AppInfo {
+        slug: AppSlug::new(p.slug.as_ref().map_or(0, |s| s.slug)),
+        name: p.name.clone(),
+        description: p.description.clone(),
+        enabled: p.enabled,
+        credentials: p.credentials.as_ref().map(|c| AppCredentialsInfo {
+            client_secret_enabled: c.client_secret_enabled,
+            mtls_ca_enabled: c.mtls_ca_enabled,
+            mtls_self_signed_enabled: c.mtls_self_signed_enabled,
+            client_assertion_enabled: c.client_assertion_enabled,
+        }),
+        created_at: p.created_at.as_ref().and_then(proto_timestamp_to_system_time),
+        updated_at: p.updated_at.as_ref().and_then(proto_timestamp_to_system_time),
+    }
+}
+
+fn assertion_info_from_proto(p: &proto::AppClientAssertionInfo) -> AppClientAssertionInfo {
+    AppClientAssertionInfo {
+        id: DomainClientAssertionId::new(p.id.as_ref().map_or(0, |id| id.id)),
+        name: p.name.clone(),
+        enabled: p.enabled,
+        expires_at: p.expires_at.as_ref().and_then(proto_timestamp_to_system_time),
+        created_at: p.created_at.as_ref().and_then(proto_timestamp_to_system_time),
+    }
+}
+
+fn vault_connection_from_proto(p: &proto::AppVaultConnectionInfo) -> AppVaultConnectionInfo {
+    AppVaultConnectionInfo {
+        vault_slug: VaultSlug::new(p.vault.as_ref().map_or(0, |s| s.slug)),
+        allowed_scopes: p.allowed_scopes.clone(),
+        created_at: p.created_at.as_ref().and_then(proto_timestamp_to_system_time),
+    }
+}
+
+/// Constructs an `SdkError::Rpc` for a missing field in a server response.
+fn missing_response_field(field: &str, response_type: &str) -> error::SdkError {
+    error::SdkError::Rpc {
+        code: tonic::Code::Internal,
+        message: format!("Missing {field} in {response_type}"),
+        request_id: None,
+        trace_id: None,
+        error_details: None,
     }
 }
 
@@ -2139,6 +2322,20 @@ macro_rules! create_grpc_client {
     };
 }
 
+/// Acquires a channel from the connection pool and constructs a typed gRPC client.
+///
+/// Replaces the 5-line boilerplate of `pool.get_channel()` + `Self::create_xxx_client(...)`.
+macro_rules! connected_client {
+    ($pool:expr, $create_fn:ident) => {{
+        let channel = $pool.get_channel().await?;
+        Self::$create_fn(
+            channel,
+            $pool.compression_enabled(),
+            TraceContextInterceptor::with_timeout($pool.config().trace(), $pool.config().timeout()),
+        )
+    }};
+}
+
 impl LedgerClient {
     /// Creates a new `LedgerClient` with the given configuration.
     ///
@@ -2716,15 +2913,7 @@ impl LedgerClient {
         self.with_metrics(
             "read",
             with_retry_cancellable(&retry_policy, &token, Some(pool), "read", || async {
-                let channel = pool.get_channel().await?;
-                let mut client = Self::create_read_client(
-                    channel,
-                    pool.compression_enabled(),
-                    TraceContextInterceptor::with_timeout(
-                        pool.config().trace(),
-                        pool.config().timeout(),
-                    ),
-                );
+                let mut client = connected_client!(pool, create_read_client);
 
                 let request = proto::ReadRequest {
                     organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -2760,15 +2949,7 @@ impl LedgerClient {
         self.with_metrics(
             "batch_read",
             with_retry_cancellable(&retry_policy, &token, Some(pool), "batch_read", || async {
-                let channel = pool.get_channel().await?;
-                let mut client = Self::create_read_client(
-                    channel,
-                    pool.compression_enabled(),
-                    TraceContextInterceptor::with_timeout(
-                        pool.config().trace(),
-                        pool.config().timeout(),
-                    ),
-                );
+                let mut client = connected_client!(pool, create_read_client);
 
                 let request = proto::BatchReadRequest {
                     organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -2908,15 +3089,7 @@ impl LedgerClient {
                 let cid = client_id.clone();
                 let key_bytes = idempotency_key_bytes.clone();
                 async move {
-                    let channel = pool.get_channel().await?;
-                    let mut write_client = Self::create_write_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut write_client = connected_client!(pool, create_write_client);
 
                     let request = proto::WriteRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -2981,13 +3154,7 @@ impl LedgerClient {
                     },
                 }
             },
-            None => Err(crate::error::SdkError::Rpc {
-                code: tonic::Code::Internal,
-                message: "Empty write response".to_owned(),
-                request_id: None,
-                trace_id: None,
-                error_details: None,
-            }),
+            None => Err(missing_response_field("result", "WriteResponse")),
         }
     }
 
@@ -3145,15 +3312,7 @@ impl LedgerClient {
                 let cid = client_id.clone();
                 let key_bytes = idempotency_key_bytes.clone();
                 async move {
-                    let channel = pool.get_channel().await?;
-                    let mut write_client = Self::create_write_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut write_client = connected_client!(pool, create_write_client);
 
                     let request = proto::BatchWriteRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -3218,13 +3377,7 @@ impl LedgerClient {
                     },
                 }
             },
-            None => Err(crate::error::SdkError::Rpc {
-                code: tonic::Code::Internal,
-                message: "Empty batch write response".to_owned(),
-                request_id: None,
-                trace_id: None,
-                error_details: None,
-            }),
+            None => Err(missing_response_field("result", "BatchWriteResponse")),
         }
     }
 
@@ -3532,15 +3685,7 @@ impl LedgerClient {
                 Some(&pool),
                 "create_organization",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_organization_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_organization_client);
 
                     let request = proto::CreateOrganizationRequest {
                         name: name.clone(),
@@ -3610,7 +3755,7 @@ impl LedgerClient {
     pub async fn get_organization(
         &self,
         slug: OrganizationSlug,
-        caller_slug: u64,
+        user: UserSlug,
     ) -> Result<OrganizationInfo> {
         self.check_shutdown(None)?;
 
@@ -3625,19 +3770,11 @@ impl LedgerClient {
                 Some(&pool),
                 "get_organization",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_organization_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_organization_client);
 
                     let request = proto::GetOrganizationRequest {
                         slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        caller: Some(proto::UserSlug { slug: caller_slug }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                     };
 
                     let response =
@@ -3658,7 +3795,7 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `slug` - Organization slug (external identifier).
-    /// * `initiator_slug` - User slug of the admin performing the update.
+    /// * `user` - User slug of the admin performing the update.
     /// * `name` - New name for the organization, or `None` to keep the current name.
     ///
     /// # Returns
@@ -3688,7 +3825,7 @@ impl LedgerClient {
     pub async fn update_organization(
         &self,
         slug: OrganizationSlug,
-        initiator_slug: u64,
+        user: UserSlug,
         name: Option<String>,
     ) -> Result<OrganizationInfo> {
         self.check_shutdown(None)?;
@@ -3704,19 +3841,11 @@ impl LedgerClient {
                 Some(&pool),
                 "update_organization",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_organization_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_organization_client);
 
                     let request = proto::UpdateOrganizationRequest {
                         slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        initiator: Some(proto::UserSlug { slug: initiator_slug }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
                         name: name.clone(),
                     };
 
@@ -3741,7 +3870,7 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `slug` - Organization slug (external identifier).
-    /// * `initiator_slug` - User slug of the admin initiating the delete.
+    /// * `user` - User slug of the admin initiating the delete.
     ///
     /// # Returns
     ///
@@ -3770,7 +3899,7 @@ impl LedgerClient {
     pub async fn delete_organization(
         &self,
         slug: OrganizationSlug,
-        initiator_slug: u64,
+        user: UserSlug,
     ) -> Result<OrganizationDeleteInfo> {
         self.check_shutdown(None)?;
 
@@ -3785,19 +3914,11 @@ impl LedgerClient {
                 Some(&pool),
                 "delete_organization",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_organization_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_organization_client);
 
                     let request = proto::DeleteOrganizationRequest {
                         slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        initiator: Some(proto::UserSlug { slug: initiator_slug }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
                     };
 
                     let response = client
@@ -3805,14 +3926,8 @@ impl LedgerClient {
                         .await?
                         .into_inner();
 
-                    let deleted_at = response.deleted_at.and_then(|ts| {
-                        let secs = u64::try_from(ts.seconds).ok()?;
-                        let nanos = u32::try_from(ts.nanos).ok()?;
-                        Some(
-                            std::time::SystemTime::UNIX_EPOCH
-                                + std::time::Duration::new(secs, nanos),
-                        )
-                    });
+                    let deleted_at =
+                        response.deleted_at.as_ref().and_then(proto_timestamp_to_system_time);
 
                     Ok(OrganizationDeleteInfo {
                         deleted_at,
@@ -3877,15 +3992,7 @@ impl LedgerClient {
                 Some(&pool),
                 "list_organizations",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_organization_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_organization_client);
 
                     let request = proto::ListOrganizationsRequest {
                         page_token: page_token.clone(),
@@ -3949,15 +4056,7 @@ impl LedgerClient {
                 Some(&pool),
                 "list_organization_members",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_organization_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_organization_client);
 
                     let request = proto::ListOrganizationMembersRequest {
                         slug: Some(proto::OrganizationSlug { slug: slug.value() }),
@@ -3989,8 +4088,8 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `slug` - Organization slug (external identifier).
-    /// * `initiator_slug` - User slug of the person performing the removal.
-    /// * `target_slug` - User slug of the member to remove.
+    /// * `user` - User slug of the person performing the removal.
+    /// * `target` - User slug of the member to remove.
     ///
     /// # Errors
     ///
@@ -4001,8 +4100,8 @@ impl LedgerClient {
     pub async fn remove_organization_member(
         &self,
         slug: OrganizationSlug,
-        initiator_slug: u64,
-        target_slug: u64,
+        user: UserSlug,
+        target: UserSlug,
     ) -> Result<()> {
         self.check_shutdown(None)?;
 
@@ -4017,20 +4116,12 @@ impl LedgerClient {
                 Some(&pool),
                 "remove_organization_member",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_organization_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_organization_client);
 
                     let request = proto::RemoveOrganizationMemberRequest {
                         slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        initiator: Some(proto::UserSlug { slug: initiator_slug }),
-                        target: Some(proto::UserSlug { slug: target_slug }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        target: Some(proto::UserSlug { slug: target.value() }),
                     };
 
                     client.remove_organization_member(tonic::Request::new(request)).await?;
@@ -4049,8 +4140,8 @@ impl LedgerClient {
     /// # Arguments
     ///
     /// * `slug` - Organization slug (external identifier).
-    /// * `initiator_slug` - User slug of the admin performing the change.
-    /// * `target_slug` - User slug of the member to update.
+    /// * `user` - User slug of the admin performing the change.
+    /// * `target` - User slug of the member to update.
     /// * `role` - New role for the member.
     ///
     /// # Returns
@@ -4066,8 +4157,8 @@ impl LedgerClient {
     pub async fn update_organization_member_role(
         &self,
         slug: OrganizationSlug,
-        initiator_slug: u64,
-        target_slug: u64,
+        user: UserSlug,
+        target: UserSlug,
         role: OrganizationMemberRole,
     ) -> Result<OrganizationMemberInfo> {
         self.check_shutdown(None)?;
@@ -4083,20 +4174,12 @@ impl LedgerClient {
                 Some(&pool),
                 "update_organization_member_role",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_organization_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_organization_client);
 
                     let request = proto::UpdateOrganizationMemberRoleRequest {
                         slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        initiator: Some(proto::UserSlug { slug: initiator_slug }),
-                        target: Some(proto::UserSlug { slug: target_slug }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        target: Some(proto::UserSlug { slug: target.value() }),
                         role: role.to_proto(),
                     };
 
@@ -4109,12 +4192,8 @@ impl LedgerClient {
                         .member
                         .as_ref()
                         .map(OrganizationMemberInfo::from_proto)
-                        .ok_or_else(|| error::SdkError::Rpc {
-                        code: tonic::Code::Internal,
-                        message: "Server returned empty member in role update response".to_owned(),
-                        request_id: None,
-                        trace_id: None,
-                        error_details: None,
+                        .ok_or_else(|| {
+                        missing_response_field("member", "UpdateOrganizationMemberRoleResponse")
                     })?;
 
                     Ok(member)
@@ -4161,15 +4240,7 @@ impl LedgerClient {
                 Some(&pool),
                 "list_organization_teams",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_organization_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_organization_client);
 
                     let request = proto::ListOrganizationTeamsRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -4216,15 +4287,7 @@ impl LedgerClient {
                 Some(&pool),
                 "create_organization_team",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_organization_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_organization_client);
 
                     let request = proto::CreateOrganizationTeamRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -4237,15 +4300,11 @@ impl LedgerClient {
                         .await?
                         .into_inner();
 
-                    response.team.as_ref().map(TeamInfo::from_proto).ok_or_else(|| {
-                        error::SdkError::Rpc {
-                            code: tonic::Code::Internal,
-                            message: "Server returned empty team in create response".to_owned(),
-                            request_id: None,
-                            trace_id: None,
-                            error_details: None,
-                        }
-                    })
+                    response
+                        .team
+                        .as_ref()
+                        .map(TeamInfo::from_proto)
+                        .ok_or_else(|| missing_response_field("team", "CreateTeamResponse"))
                 },
             ),
         )
@@ -4275,15 +4334,7 @@ impl LedgerClient {
                 Some(&pool),
                 "delete_organization_team",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_organization_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_organization_client);
 
                     let request = proto::DeleteOrganizationTeamRequest {
                         slug: Some(proto::TeamSlug { slug: team.value() }),
@@ -4324,15 +4375,7 @@ impl LedgerClient {
                 Some(&pool),
                 "update_organization_team",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_organization_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_organization_client);
 
                     let request = proto::UpdateOrganizationTeamRequest {
                         slug: Some(proto::TeamSlug { slug: team.value() }),
@@ -4345,15 +4388,11 @@ impl LedgerClient {
                         .await?
                         .into_inner();
 
-                    response.team.as_ref().map(TeamInfo::from_proto).ok_or_else(|| {
-                        error::SdkError::Rpc {
-                            code: tonic::Code::Internal,
-                            message: "Server returned empty team in update response".to_owned(),
-                            request_id: None,
-                            trace_id: None,
-                            error_details: None,
-                        }
-                    })
+                    response
+                        .team
+                        .as_ref()
+                        .map(TeamInfo::from_proto)
+                        .ok_or_else(|| missing_response_field("team", "UpdateTeamResponse"))
                 },
             ),
         )
@@ -4387,7 +4426,7 @@ impl LedgerClient {
         slug: OrganizationSlug,
         target_region: Region,
         acknowledge_residency_downgrade: bool,
-        initiator_slug: u64,
+        user: UserSlug,
     ) -> Result<MigrationInfo> {
         self.check_shutdown(None)?;
 
@@ -4404,21 +4443,13 @@ impl LedgerClient {
                 Some(&pool),
                 "migrate_organization",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_organization_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_organization_client);
 
                     let request = proto::MigrateOrganizationRequest {
                         slug: Some(proto::OrganizationSlug { slug: slug.value() }),
                         target_region: target_i32,
                         acknowledge_residency_downgrade,
-                        initiator: Some(proto::UserSlug { slug: initiator_slug }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
                     };
 
                     let response = client
@@ -4463,7 +4494,7 @@ impl LedgerClient {
     /// - Connection fails after retry attempts
     pub async fn migrate_user_region(
         &self,
-        user_slug: u64,
+        user: UserSlug,
         target_region: Region,
     ) -> Result<UserMigrationInfo> {
         self.check_shutdown(None)?;
@@ -4481,18 +4512,10 @@ impl LedgerClient {
                 Some(&pool),
                 "migrate_user_region",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_user_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_user_client);
 
                     let request = proto::MigrateUserRegionRequest {
-                        slug: Some(proto::UserSlug { slug: user_slug }),
+                        slug: Some(proto::UserSlug { slug: user.value() }),
                         target_region: target_i32,
                     };
 
@@ -4558,15 +4581,7 @@ impl LedgerClient {
                 Some(&pool),
                 "erase_user",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_user_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_user_client);
 
                     let request = proto::EraseUserRequest {
                         user: Some(proto::UserSlug { slug: user.value() }),
@@ -4620,15 +4635,7 @@ impl LedgerClient {
                 Some(&pool),
                 "create_user",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_user_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_user_client);
 
                     let request = proto::CreateUserRequest {
                         name: name.clone(),
@@ -4643,15 +4650,10 @@ impl LedgerClient {
                     let response =
                         client.create_user(tonic::Request::new(request)).await?.into_inner();
 
-                    response.user.map(|u| user_info_from_proto(&u)).ok_or_else(|| {
-                        error::SdkError::Rpc {
-                            code: tonic::Code::Internal,
-                            message: "Missing user in CreateUserResponse".to_owned(),
-                            request_id: None,
-                            trace_id: None,
-                            error_details: None,
-                        }
-                    })
+                    response
+                        .user
+                        .map(|u| user_info_from_proto(&u))
+                        .ok_or_else(|| missing_response_field("user", "CreateUserResponse"))
                 },
             ),
         )
@@ -4659,7 +4661,7 @@ impl LedgerClient {
     }
 
     /// Gets a user by slug.
-    pub async fn get_user(&self, user_slug: u64) -> Result<UserInfo> {
+    pub async fn get_user(&self, user: UserSlug) -> Result<UserInfo> {
         self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
@@ -4673,31 +4675,19 @@ impl LedgerClient {
                 Some(&pool),
                 "get_user",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_user_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_user_client);
 
-                    let request =
-                        proto::GetUserRequest { slug: Some(proto::UserSlug { slug: user_slug }) };
+                    let request = proto::GetUserRequest {
+                        slug: Some(proto::UserSlug { slug: user.value() }),
+                    };
 
                     let response =
                         client.get_user(tonic::Request::new(request)).await?.into_inner();
 
-                    response.user.map(|u| user_info_from_proto(&u)).ok_or_else(|| {
-                        error::SdkError::Rpc {
-                            code: tonic::Code::Internal,
-                            message: "Missing user in GetUserResponse".to_owned(),
-                            request_id: None,
-                            trace_id: None,
-                            error_details: None,
-                        }
-                    })
+                    response
+                        .user
+                        .map(|u| user_info_from_proto(&u))
+                        .ok_or_else(|| missing_response_field("user", "GetUserResponse"))
                 },
             ),
         )
@@ -4709,7 +4699,7 @@ impl LedgerClient {
     /// At least one field must be provided.
     pub async fn update_user(
         &self,
-        user_slug: u64,
+        user: UserSlug,
         name: Option<String>,
         role: Option<UserRole>,
         primary_email_id: Option<i64>,
@@ -4732,18 +4722,10 @@ impl LedgerClient {
                 Some(&pool),
                 "update_user",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_user_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_user_client);
 
                     let request = proto::UpdateUserRequest {
-                        slug: Some(proto::UserSlug { slug: user_slug }),
+                        slug: Some(proto::UserSlug { slug: user.value() }),
                         name: name.clone(),
                         role: proto_role,
                         primary_email: primary_email_id.map(|id| proto::UserEmailId { id }),
@@ -4752,15 +4734,10 @@ impl LedgerClient {
                     let response =
                         client.update_user(tonic::Request::new(request)).await?.into_inner();
 
-                    response.user.map(|u| user_info_from_proto(&u)).ok_or_else(|| {
-                        error::SdkError::Rpc {
-                            code: tonic::Code::Internal,
-                            message: "Missing user in UpdateUserResponse".to_owned(),
-                            request_id: None,
-                            trace_id: None,
-                            error_details: None,
-                        }
-                    })
+                    response
+                        .user
+                        .map(|u| user_info_from_proto(&u))
+                        .ok_or_else(|| missing_response_field("user", "UpdateUserResponse"))
                 },
             ),
         )
@@ -4770,7 +4747,7 @@ impl LedgerClient {
     /// Soft-deletes a user, starting the retention countdown.
     pub async fn delete_user(
         &self,
-        user_slug: u64,
+        user: UserSlug,
         deleted_by: impl Into<String>,
     ) -> Result<UserInfo> {
         self.check_shutdown(None)?;
@@ -4787,18 +4764,10 @@ impl LedgerClient {
                 Some(&pool),
                 "delete_user",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_user_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_user_client);
 
                     let request = proto::DeleteUserRequest {
-                        slug: Some(proto::UserSlug { slug: user_slug }),
+                        slug: Some(proto::UserSlug { slug: user.value() }),
                         deleted_by: deleted_by.clone(),
                     };
 
@@ -4842,15 +4811,7 @@ impl LedgerClient {
                 Some(&pool),
                 "list_users",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_user_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_user_client);
 
                     let request = proto::ListUsersRequest {
                         page_size,
@@ -4886,15 +4847,7 @@ impl LedgerClient {
                 Some(&pool),
                 "search_users",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_user_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_user_client);
 
                     let request = proto::SearchUsersRequest {
                         filter: Some(proto::UserSearchFilter {
@@ -4920,7 +4873,7 @@ impl LedgerClient {
     /// Creates an email record for a user.
     pub async fn create_user_email(
         &self,
-        user_slug: u64,
+        user: UserSlug,
         email: impl Into<String>,
     ) -> Result<UserEmailInfo> {
         self.check_shutdown(None)?;
@@ -4937,33 +4890,20 @@ impl LedgerClient {
                 Some(&pool),
                 "create_user_email",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_user_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_user_client);
 
                     let request = proto::CreateUserEmailRequest {
-                        user: Some(proto::UserSlug { slug: user_slug }),
+                        user: Some(proto::UserSlug { slug: user.value() }),
                         email: email.clone(),
                     };
 
                     let response =
                         client.create_user_email(tonic::Request::new(request)).await?.into_inner();
 
-                    response.email.map(|e| user_email_info_from_proto(&e)).ok_or_else(|| {
-                        error::SdkError::Rpc {
-                            code: tonic::Code::Internal,
-                            message: "Missing email in CreateUserEmailResponse".to_owned(),
-                            request_id: None,
-                            trace_id: None,
-                            error_details: None,
-                        }
-                    })
+                    response
+                        .email
+                        .map(|e| user_email_info_from_proto(&e))
+                        .ok_or_else(|| missing_response_field("email", "CreateUserEmailResponse"))
                 },
             ),
         )
@@ -4971,7 +4911,7 @@ impl LedgerClient {
     }
 
     /// Deletes an email record from a user.
-    pub async fn delete_user_email(&self, user_slug: u64, email_id: i64) -> Result<()> {
+    pub async fn delete_user_email(&self, user: UserSlug, email_id: i64) -> Result<()> {
         self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
@@ -4985,18 +4925,10 @@ impl LedgerClient {
                 Some(&pool),
                 "delete_user_email",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_user_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_user_client);
 
                     let request = proto::DeleteUserEmailRequest {
-                        user: Some(proto::UserSlug { slug: user_slug }),
+                        user: Some(proto::UserSlug { slug: user.value() }),
                         email_id: Some(proto::UserEmailId { id: email_id }),
                     };
 
@@ -5011,7 +4943,7 @@ impl LedgerClient {
     /// Searches user emails by user or email address.
     pub async fn search_user_email(
         &self,
-        user_slug: Option<u64>,
+        user: Option<UserSlug>,
         email: Option<String>,
     ) -> Result<Vec<UserEmailInfo>> {
         self.check_shutdown(None)?;
@@ -5027,19 +4959,11 @@ impl LedgerClient {
                 Some(&pool),
                 "search_user_email",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_user_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_user_client);
 
                     let request = proto::SearchUserEmailRequest {
                         filter: Some(proto::UserEmailSearchFilter {
-                            user: user_slug.map(|s| proto::UserSlug { slug: s }),
+                            user: user.map(|s| proto::UserSlug { slug: s.value() }),
                             email: email.clone(),
                             verified_only: None,
                         }),
@@ -5073,30 +4997,17 @@ impl LedgerClient {
                 Some(&pool),
                 "verify_user_email",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_user_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_user_client);
 
                     let request = proto::VerifyUserEmailRequest { token: token.clone() };
 
                     let response =
                         client.verify_user_email(tonic::Request::new(request)).await?.into_inner();
 
-                    response.email.map(|e| user_email_info_from_proto(&e)).ok_or_else(|| {
-                        error::SdkError::Rpc {
-                            code: tonic::Code::Internal,
-                            message: "Missing email in VerifyUserEmailResponse".to_owned(),
-                            request_id: None,
-                            trace_id: None,
-                            error_details: None,
-                        }
-                    })
+                    response
+                        .email
+                        .map(|e| user_email_info_from_proto(&e))
+                        .ok_or_else(|| missing_response_field("email", "VerifyUserEmailResponse"))
                 },
             ),
         )
@@ -5132,15 +5043,7 @@ impl LedgerClient {
                 Some(&pool),
                 "rotate_blinding_key",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_admin_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_admin_client);
 
                     let request = proto::RotateBlindingKeyRequest { new_key_version };
 
@@ -5182,15 +5085,7 @@ impl LedgerClient {
                 Some(&pool),
                 "get_blinding_key_rehash_status",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_admin_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_admin_client);
 
                     let request = proto::GetBlindingKeyRehashStatusRequest {};
 
@@ -5257,15 +5152,7 @@ impl LedgerClient {
                 Some(&pool),
                 "create_vault",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_vault_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_vault_client);
 
                     let request = proto::CreateVaultRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -5341,15 +5228,7 @@ impl LedgerClient {
                 Some(&pool),
                 "get_vault",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_vault_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_vault_client);
 
                     let request = proto::GetVaultRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -5417,15 +5296,7 @@ impl LedgerClient {
                 Some(&pool),
                 "list_vaults",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_vault_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_vault_client);
 
                     let request =
                         proto::ListVaultsRequest { page_token: page_token.clone(), page_size };
@@ -5436,6 +5307,766 @@ impl LedgerClient {
                     let vaults = response.vaults.into_iter().map(VaultInfo::from_proto).collect();
 
                     Ok((vaults, response.next_page_token))
+                },
+            ),
+        )
+        .await
+    }
+
+    // =========================================================================
+    // App CRUD
+    // =========================================================================
+
+    /// Creates a new app in an organization.
+    pub async fn create_app(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        name: impl Into<String>,
+        description: Option<String>,
+    ) -> Result<AppInfo> {
+        self.check_shutdown(None)?;
+
+        let name = name.into();
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "create_app",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "create_app",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::CreateAppRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        name: name.clone(),
+                        description: description.clone(),
+                    };
+
+                    let response =
+                        client.create_app(tonic::Request::new(request)).await?.into_inner();
+
+                    response
+                        .app
+                        .map(|a| app_info_from_proto(&a))
+                        .ok_or_else(|| missing_response_field("app", "CreateAppResponse"))
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Gets an app by slug.
+    pub async fn get_app(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+    ) -> Result<AppInfo> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "get_app",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "get_app",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::GetAppRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                    };
+
+                    let response = client.get_app(tonic::Request::new(request)).await?.into_inner();
+
+                    response
+                        .app
+                        .map(|a| app_info_from_proto(&a))
+                        .ok_or_else(|| missing_response_field("app", "GetAppResponse"))
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Lists all apps in an organization.
+    pub async fn list_apps(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+    ) -> Result<Vec<AppInfo>> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "list_apps",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "list_apps",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::ListAppsRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                    };
+
+                    let response =
+                        client.list_apps(tonic::Request::new(request)).await?.into_inner();
+
+                    Ok(response.apps.iter().map(app_info_from_proto).collect())
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Updates an app's name and/or description.
+    pub async fn update_app(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+        name: Option<String>,
+        description: Option<String>,
+    ) -> Result<AppInfo> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "update_app",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "update_app",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::UpdateAppRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                        name: name.clone(),
+                        description: description.clone(),
+                    };
+
+                    let response =
+                        client.update_app(tonic::Request::new(request)).await?.into_inner();
+
+                    response
+                        .app
+                        .map(|a| app_info_from_proto(&a))
+                        .ok_or_else(|| missing_response_field("app", "UpdateAppResponse"))
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Deletes an app.
+    pub async fn delete_app(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+    ) -> Result<()> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "delete_app",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "delete_app",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::DeleteAppRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                    };
+
+                    client.delete_app(tonic::Request::new(request)).await?;
+                    Ok(())
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Enables an app.
+    pub async fn enable_app(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+    ) -> Result<AppInfo> {
+        self.set_app_enabled(organization, user, app, true).await
+    }
+
+    /// Disables an app.
+    pub async fn disable_app(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+    ) -> Result<AppInfo> {
+        self.set_app_enabled(organization, user, app, false).await
+    }
+
+    /// Sets whether an app is enabled or disabled.
+    pub async fn set_app_enabled(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+        enabled: bool,
+    ) -> Result<AppInfo> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "set_app_enabled",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "set_app_enabled",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::SetAppEnabledRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                        enabled,
+                    };
+
+                    let response =
+                        client.set_app_enabled(tonic::Request::new(request)).await?.into_inner();
+
+                    response
+                        .app
+                        .map(|a| app_info_from_proto(&a))
+                        .ok_or_else(|| missing_response_field("app", "SetAppEnabledResponse"))
+                },
+            ),
+        )
+        .await
+    }
+
+    // =========================================================================
+    // App Credentials
+    // =========================================================================
+
+    /// Enables or disables a credential type for an app.
+    pub async fn set_app_credential_enabled(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+        credential_type: AppCredentialType,
+        enabled: bool,
+    ) -> Result<AppInfo> {
+        self.check_shutdown(None)?;
+
+        let credential_type_i32 = credential_type.to_proto();
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "set_app_credential_enabled",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "set_app_credential_enabled",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::SetAppCredentialEnabledRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                        credential_type: credential_type_i32,
+                        enabled,
+                    };
+
+                    let response = client
+                        .set_app_credential_enabled(tonic::Request::new(request))
+                        .await?
+                        .into_inner();
+
+                    response.app.map(|a| app_info_from_proto(&a)).ok_or_else(|| {
+                        missing_response_field("app", "SetAppCredentialEnabledResponse")
+                    })
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Gets the client secret status for an app (enabled flag and whether a secret exists).
+    pub async fn get_app_client_secret(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+    ) -> Result<AppClientSecretStatus> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "get_app_client_secret",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "get_app_client_secret",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::GetAppClientSecretRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                    };
+
+                    let response = client
+                        .get_app_client_secret(tonic::Request::new(request))
+                        .await?
+                        .into_inner();
+
+                    Ok(AppClientSecretStatus {
+                        enabled: response.enabled,
+                        has_secret: response.has_secret,
+                    })
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Rotates the client secret for an app. Returns the new plaintext secret (base64-encoded).
+    ///
+    /// An idempotency key is generated per call so retries (including automatic
+    /// retries) return the same secret instead of creating a new one.
+    pub async fn rotate_app_client_secret(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+    ) -> Result<String> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+        let idempotency_key: [u8; 16] = rand::random();
+
+        self.with_metrics(
+            "rotate_app_client_secret",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "rotate_app_client_secret",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::RotateAppClientSecretRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                        idempotency_key: idempotency_key.to_vec(),
+                    };
+
+                    let response = client
+                        .rotate_app_client_secret(tonic::Request::new(request))
+                        .await?
+                        .into_inner();
+
+                    Ok(response.secret)
+                },
+            ),
+        )
+        .await
+    }
+
+    // =========================================================================
+    // App Client Assertions
+    // =========================================================================
+
+    /// Lists client assertions for an app.
+    pub async fn list_app_client_assertions(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+    ) -> Result<Vec<AppClientAssertionInfo>> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "list_app_client_assertions",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "list_app_client_assertions",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::ListAppClientAssertionsRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                    };
+
+                    let response = client
+                        .list_app_client_assertions(tonic::Request::new(request))
+                        .await?
+                        .into_inner();
+
+                    Ok(response.assertions.iter().map(assertion_info_from_proto).collect())
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Creates a client assertion for an app. Returns the assertion metadata and private key PEM.
+    ///
+    /// The private key PEM is only returned on creation — it cannot be retrieved again.
+    /// An idempotency key is generated per call so retries return the same keypair.
+    pub async fn create_app_client_assertion(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+        name: impl Into<String>,
+        expires_at: std::time::SystemTime,
+    ) -> Result<CreateAppClientAssertionResult> {
+        self.check_shutdown(None)?;
+
+        let name = name.into();
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+        let idempotency_key: [u8; 16] = rand::random();
+        let expires_at_proto = system_time_to_proto_timestamp(&expires_at);
+
+        self.with_metrics(
+            "create_app_client_assertion",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "create_app_client_assertion",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::CreateAppClientAssertionRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                        name: name.clone(),
+                        expires_at: Some(expires_at_proto),
+                        idempotency_key: idempotency_key.to_vec(),
+                    };
+
+                    let response = client
+                        .create_app_client_assertion(tonic::Request::new(request))
+                        .await?
+                        .into_inner();
+
+                    let assertion = response
+                        .assertion
+                        .map(|a| assertion_info_from_proto(&a))
+                        .ok_or_else(|| {
+                            missing_response_field("assertion", "CreateAppClientAssertionResponse")
+                        })?;
+
+                    Ok(CreateAppClientAssertionResult {
+                        assertion,
+                        private_key_pem: response.private_key_pem,
+                    })
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Deletes a client assertion for an app.
+    pub async fn delete_app_client_assertion(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+        assertion: DomainClientAssertionId,
+    ) -> Result<()> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "delete_app_client_assertion",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "delete_app_client_assertion",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::DeleteAppClientAssertionRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                        assertion: Some(proto::ClientAssertionId { id: assertion.value() }),
+                    };
+
+                    client.delete_app_client_assertion(tonic::Request::new(request)).await?;
+                    Ok(())
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Enables or disables a specific client assertion.
+    pub async fn set_app_client_assertion_enabled(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+        assertion: DomainClientAssertionId,
+        enabled: bool,
+    ) -> Result<()> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "set_app_client_assertion_enabled",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "set_app_client_assertion_enabled",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::SetAppClientAssertionEnabledRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                        assertion: Some(proto::ClientAssertionId { id: assertion.value() }),
+                        enabled,
+                    };
+
+                    client.set_app_client_assertion_enabled(tonic::Request::new(request)).await?;
+                    Ok(())
+                },
+            ),
+        )
+        .await
+    }
+
+    // =========================================================================
+    // App Vault Connections
+    // =========================================================================
+
+    /// Lists vault connections for an app.
+    pub async fn list_app_vaults(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+    ) -> Result<Vec<AppVaultConnectionInfo>> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "list_app_vaults",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "list_app_vaults",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::ListAppVaultsRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                    };
+
+                    let response =
+                        client.list_app_vaults(tonic::Request::new(request)).await?.into_inner();
+
+                    Ok(response.vaults.iter().map(vault_connection_from_proto).collect())
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Adds a vault connection to an app.
+    pub async fn add_app_vault(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+        vault: VaultSlug,
+        allowed_scopes: Vec<String>,
+    ) -> Result<AppVaultConnectionInfo> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "add_app_vault",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "add_app_vault",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::AddAppVaultRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                        vault: Some(proto::VaultSlug { slug: vault.value() }),
+                        allowed_scopes: allowed_scopes.clone(),
+                    };
+
+                    let response =
+                        client.add_app_vault(tonic::Request::new(request)).await?.into_inner();
+
+                    response
+                        .vault
+                        .map(|v| vault_connection_from_proto(&v))
+                        .ok_or_else(|| missing_response_field("vault", "AddAppVaultResponse"))
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Updates the allowed scopes for a vault connection.
+    pub async fn update_app_vault(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+        vault: VaultSlug,
+        allowed_scopes: Vec<String>,
+    ) -> Result<AppVaultConnectionInfo> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "update_app_vault",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "update_app_vault",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::UpdateAppVaultRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                        vault: Some(proto::VaultSlug { slug: vault.value() }),
+                        allowed_scopes: allowed_scopes.clone(),
+                    };
+
+                    let response =
+                        client.update_app_vault(tonic::Request::new(request)).await?.into_inner();
+
+                    response
+                        .vault
+                        .map(|v| vault_connection_from_proto(&v))
+                        .ok_or_else(|| missing_response_field("vault", "UpdateAppVaultResponse"))
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Removes a vault connection from an app.
+    pub async fn remove_app_vault(
+        &self,
+        organization: OrganizationSlug,
+        user: UserSlug,
+        app: AppSlug,
+        vault: VaultSlug,
+    ) -> Result<()> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "remove_app_vault",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "remove_app_vault",
+                || async {
+                    let mut client = connected_client!(pool, create_app_client);
+
+                    let request = proto::RemoveAppVaultRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                        vault: Some(proto::VaultSlug { slug: vault.value() }),
+                    };
+
+                    client.remove_app_vault(tonic::Request::new(request)).await?;
+                    Ok(())
                 },
             ),
         )
@@ -5543,15 +6174,7 @@ impl LedgerClient {
                 Some(&pool),
                 "list_events",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_events_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_events_client);
 
                     let request = proto::ListEventsRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -5629,15 +6252,7 @@ impl LedgerClient {
                 Some(&pool),
                 "get_event",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_events_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_events_client);
 
                     let request = proto::GetEventRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -5699,15 +6314,7 @@ impl LedgerClient {
                 Some(&pool),
                 "count_events",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_events_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_events_client);
 
                     let request = proto::CountEventsRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -5780,15 +6387,7 @@ impl LedgerClient {
                 Some(&pool),
                 "ingest_events",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_events_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_events_client);
 
                     let request = proto::IngestEventsRequest {
                         source_service: source.as_str().to_owned(),
@@ -5905,15 +6504,7 @@ impl LedgerClient {
                 Some(&pool),
                 "health_check_detailed",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_health_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_health_client);
 
                     let request = proto::HealthCheckRequest { organization: None, vault: None };
 
@@ -5977,15 +6568,7 @@ impl LedgerClient {
                 Some(&pool),
                 "health_check_vault",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_health_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_health_client);
 
                     let request = proto::HealthCheckRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -6064,15 +6647,7 @@ impl LedgerClient {
                 Some(&pool),
                 "verified_read",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_read_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_read_client);
 
                     let request = proto::VerifiedReadRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -6158,15 +6733,7 @@ impl LedgerClient {
                 Some(&pool),
                 "list_entities",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_read_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_read_client);
 
                     let request = proto::ListEntitiesRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -6252,15 +6819,7 @@ impl LedgerClient {
                 Some(&pool),
                 "list_relationships",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_read_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_read_client);
 
                     let request = proto::ListRelationshipsRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -6348,15 +6907,7 @@ impl LedgerClient {
                 Some(&pool),
                 "list_resources",
                 || async {
-                    let channel = pool.get_channel().await?;
-                    let mut client = Self::create_read_client(
-                        channel,
-                        pool.compression_enabled(),
-                        TraceContextInterceptor::with_timeout(
-                            pool.config().trace(),
-                            pool.config().timeout(),
-                        ),
-                    );
+                    let mut client = connected_client!(pool, create_read_client);
 
                     let request = proto::ListResourcesRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -6398,6 +6949,7 @@ impl LedgerClient {
     );
     create_grpc_client!(create_vault_client, vault_service_client, VaultServiceClient);
     create_grpc_client!(create_user_client, user_service_client, UserServiceClient);
+    create_grpc_client!(create_app_client, app_service_client, AppServiceClient);
     create_grpc_client!(create_events_client, events_service_client, EventsServiceClient);
     create_grpc_client!(create_health_client, health_service_client, HealthServiceClient);
 }
@@ -7448,7 +8000,7 @@ mod tests {
             .expect("valid config");
 
         let client = LedgerClient::new(config).await.expect("client creation");
-        let result = client.get_organization(ORG, 0).await;
+        let result = client.get_organization(ORG, UserSlug::new(0)).await;
 
         assert!(result.is_err(), "expected connection error");
     }
@@ -9046,7 +9598,7 @@ mod tests {
             Err(crate::error::SdkError::Shutdown)
         ));
         assert!(matches!(
-            client.get_organization(ORG, 0).await,
+            client.get_organization(ORG, UserSlug::new(0)).await,
             Err(crate::error::SdkError::Shutdown)
         ));
         assert!(matches!(

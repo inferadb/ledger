@@ -239,6 +239,28 @@ pub enum EventAction {
     TeamDeleted,
     /// Organization purged (all data permanently removed).
     OrganizationPurged,
+    /// Application created.
+    AppCreated,
+    /// Application updated.
+    AppUpdated,
+    /// Application deleted.
+    AppDeleted,
+    /// Application enabled or disabled.
+    AppStatusChanged,
+    /// Application client secret rotated.
+    AppSecretRotated,
+    /// Application client assertion key created.
+    AppAssertionCreated,
+    /// Application client assertion key deleted.
+    AppAssertionDeleted,
+    /// Application credential enabled or disabled.
+    AppCredentialStatusChanged,
+    /// Application vault connection added.
+    AppVaultConnected,
+    /// Application vault connection removed.
+    AppVaultDisconnected,
+    /// Application vault connection scopes updated.
+    AppVaultUpdated,
     /// User account created.
     UserCreated,
     /// User account deleted.
@@ -320,6 +342,17 @@ impl EventAction {
             | EventAction::TeamUpdated
             | EventAction::TeamDeleted
             | EventAction::OrganizationPurged
+            | EventAction::AppCreated
+            | EventAction::AppUpdated
+            | EventAction::AppDeleted
+            | EventAction::AppStatusChanged
+            | EventAction::AppSecretRotated
+            | EventAction::AppAssertionCreated
+            | EventAction::AppAssertionDeleted
+            | EventAction::AppCredentialStatusChanged
+            | EventAction::AppVaultConnected
+            | EventAction::AppVaultDisconnected
+            | EventAction::AppVaultUpdated
             | EventAction::UserCreated
             | EventAction::UserDeleted
             | EventAction::UserUpdated
@@ -372,6 +405,17 @@ impl EventAction {
             EventAction::TeamUpdated => "ledger.team.updated",
             EventAction::TeamDeleted => "ledger.team.deleted",
             EventAction::OrganizationPurged => "ledger.organization.purged",
+            EventAction::AppCreated => "ledger.app.created",
+            EventAction::AppUpdated => "ledger.app.updated",
+            EventAction::AppDeleted => "ledger.app.deleted",
+            EventAction::AppStatusChanged => "ledger.app.status_changed",
+            EventAction::AppSecretRotated => "ledger.app.secret_rotated",
+            EventAction::AppAssertionCreated => "ledger.app.assertion_created",
+            EventAction::AppAssertionDeleted => "ledger.app.assertion_deleted",
+            EventAction::AppCredentialStatusChanged => "ledger.app.credential_status_changed",
+            EventAction::AppVaultConnected => "ledger.app.vault_connected",
+            EventAction::AppVaultDisconnected => "ledger.app.vault_disconnected",
+            EventAction::AppVaultUpdated => "ledger.app.vault_updated",
             EventAction::UserCreated => "ledger.user.created",
             EventAction::UserDeleted => "ledger.user.deleted",
             EventAction::UserUpdated => "ledger.user.updated",
@@ -422,6 +466,17 @@ impl EventAction {
             EventAction::TeamUpdated => "team_updated",
             EventAction::TeamDeleted => "team_deleted",
             EventAction::OrganizationPurged => "organization_purged",
+            EventAction::AppCreated => "app_created",
+            EventAction::AppUpdated => "app_updated",
+            EventAction::AppDeleted => "app_deleted",
+            EventAction::AppStatusChanged => "app_status_changed",
+            EventAction::AppSecretRotated => "app_secret_rotated",
+            EventAction::AppAssertionCreated => "app_assertion_created",
+            EventAction::AppAssertionDeleted => "app_assertion_deleted",
+            EventAction::AppCredentialStatusChanged => "app_credential_status_changed",
+            EventAction::AppVaultConnected => "app_vault_connected",
+            EventAction::AppVaultDisconnected => "app_vault_disconnected",
+            EventAction::AppVaultUpdated => "app_vault_updated",
             EventAction::UserCreated => "user_created",
             EventAction::UserDeleted => "user_deleted",
             EventAction::UserUpdated => "user_updated",
@@ -467,6 +522,17 @@ impl EventAction {
         EventAction::TeamUpdated,
         EventAction::TeamDeleted,
         EventAction::OrganizationPurged,
+        EventAction::AppCreated,
+        EventAction::AppUpdated,
+        EventAction::AppDeleted,
+        EventAction::AppStatusChanged,
+        EventAction::AppSecretRotated,
+        EventAction::AppAssertionCreated,
+        EventAction::AppAssertionDeleted,
+        EventAction::AppCredentialStatusChanged,
+        EventAction::AppVaultConnected,
+        EventAction::AppVaultDisconnected,
+        EventAction::AppVaultUpdated,
         EventAction::UserCreated,
         EventAction::UserDeleted,
         EventAction::UserUpdated,
@@ -897,8 +963,8 @@ mod tests {
 
     #[test]
     fn event_action_all_count() {
-        // 29 system + 11 organization = 40 total
-        assert_eq!(EventAction::ALL.len(), 40);
+        // 40 system + 11 organization = 51 total
+        assert_eq!(EventAction::ALL.len(), 51);
     }
 
     // ── EventOutcome ────────────────────────────────────────

@@ -4,8 +4,9 @@ use std::net::SocketAddr;
 
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
-    EmailVerifyTokenId, NodeId, OrganizationId, OrganizationSlug, Region, TeamId, TeamSlug,
-    UserEmailId, UserId, UserRole, UserSlug, UserStatus,
+    AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, NodeId, OrganizationId,
+    OrganizationSlug, Region, TeamId, TeamSlug, UserEmailId, UserId, UserRole, UserSlug,
+    UserStatus, VaultId, VaultSlug,
 };
 use serde::{Deserialize, Serialize};
 
@@ -429,6 +430,161 @@ pub enum OrganizationTier {
     Pro,
     /// Enterprise tier with custom limits and SLA.
     Enterprise,
+}
+
+// ============================================================================
+// App Types (Organization-scoped client applications)
+// ============================================================================
+
+/// Application record stored in the system vault.
+///
+/// Applications are organization-scoped client entities used for
+/// machine-to-machine authentication. Each app has its own set of
+/// credentials and vault connections.
+///
+/// Key pattern: `_sys:app:{organization_id}:{app_id}` → postcard-serialized entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct App {
+    /// Internal app identifier.
+    pub id: AppId,
+    /// External Snowflake identifier.
+    pub slug: AppSlug,
+    /// Organization this app belongs to.
+    pub organization: OrganizationId,
+    /// Human-readable app name (unique within organization).
+    pub name: String,
+    /// Optional description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Whether this app is enabled (defaults to false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Credential configuration for this app.
+    #[serde(default)]
+    pub credentials: AppCredentials,
+    /// App creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Last modification timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Credential configuration for an application.
+///
+/// Each credential type has an independent `enabled` toggle. All default
+/// to disabled. The credential type must be enabled for authentication
+/// attempts using that method to succeed.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AppCredentials {
+    /// Client secret credential (server-generated, bcrypt-hashed).
+    #[serde(default)]
+    pub client_secret: ClientSecretCredential,
+    /// CA-signed mTLS credential.
+    #[serde(default)]
+    pub mtls_ca: MtlsCredential,
+    /// Self-signed mTLS credential.
+    #[serde(default)]
+    pub mtls_self_signed: MtlsCredential,
+    /// Client assertion (private key JWT) credential.
+    #[serde(default)]
+    pub client_assertion: ClientAssertionCredentialConfig,
+}
+
+/// Client secret credential state.
+///
+/// The secret itself is never stored in plaintext — only a bcrypt hash
+/// is persisted. The plaintext is returned once at creation/rotation time.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ClientSecretCredential {
+    /// Whether client secret authentication is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Bcrypt hash of the current secret (`None` if never generated).
+    #[serde(default)]
+    pub secret_hash: Option<String>,
+    /// When the secret was last rotated.
+    #[serde(default)]
+    pub rotated_at: Option<DateTime<Utc>>,
+}
+
+/// mTLS credential toggle (CA-signed or self-signed).
+///
+/// mTLS certificate management is handled externally — this only
+/// tracks whether the authentication method is enabled.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MtlsCredential {
+    /// Whether this mTLS authentication method is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Client assertion credential type-level configuration.
+///
+/// Acts as a kill switch for all client assertion entries.
+/// Individual entries have their own `enabled` toggle.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ClientAssertionCredentialConfig {
+    /// Whether client assertion authentication is enabled (type-level kill switch).
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Individual client assertion entry (Ed25519 public key).
+///
+/// The private key PEM is returned once at creation time and never stored.
+/// Only the public key (DER-encoded) is persisted for JWT signature
+/// verification.
+///
+/// Key pattern: `_sys:app_assertion:{org_id}:{app_id}:{assertion_id}`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientAssertionEntry {
+    /// Internal assertion entry identifier.
+    pub id: ClientAssertionId,
+    /// User-provided name for this assertion entry.
+    pub name: String,
+    /// Whether this individual assertion entry is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// When this entry expires.
+    pub expires_at: DateTime<Utc>,
+    /// Raw 32-byte Ed25519 public key (for JWT verification).
+    pub public_key_bytes: Vec<u8>,
+    /// When this entry was created.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Vault connection for an application.
+///
+/// Defines which vaults an app can access and with what scopes.
+/// Scopes are stored for authorization policy but JWT generation
+/// is out of scope.
+///
+/// Key pattern: `_sys:app_vault:{org_id}:{app_id}:{vault_id}`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppVaultConnection {
+    /// Internal vault identifier.
+    pub vault_id: VaultId,
+    /// External vault slug (for API responses).
+    pub vault_slug: VaultSlug,
+    /// User-configurable allowed scopes (arbitrary strings).
+    pub allowed_scopes: Vec<String>,
+    /// When this connection was created.
+    pub created_at: DateTime<Utc>,
+    /// When this connection was last updated.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Credential type discriminator for the unified enable/disable RPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppCredentialType {
+    /// Client secret credential.
+    ClientSecret,
+    /// CA-signed mTLS credential.
+    MtlsCa,
+    /// Self-signed mTLS credential.
+    MtlsSelfSigned,
+    /// Client assertion (private key JWT) credential type-level toggle.
+    ClientAssertion,
 }
 
 // ============================================================================

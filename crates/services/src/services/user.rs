@@ -8,8 +8,6 @@
 //! transactions) driven by the saga orchestrator. Other write operations
 //! are single-step Raft proposals.
 
-use std::{sync::Arc, time::Duration};
-
 use chrono::Utc;
 use inferadb_ledger_proto::proto::{
     self, CreateUserEmailRequest, CreateUserEmailResponse, CreateUserRequest, CreateUserResponse,
@@ -21,157 +19,33 @@ use inferadb_ledger_proto::proto::{
     VerifyUserEmailResponse,
 };
 use inferadb_ledger_raft::{
-    error::{ServiceError, classify_raft_error},
+    error::ServiceError,
     event_writer::HandlerPhaseEmitter,
-    log_storage::AppliedStateAccessor,
-    logging::{RequestContext, Sampler},
     trace_context,
-    types::{LedgerRequest, LedgerResponse, LedgerTypeConfig, RaftPayload, SystemRequest},
+    types::{LedgerRequest, LedgerResponse, SystemRequest},
 };
-use inferadb_ledger_state::{
-    StateLayer,
-    system::{
-        CreateUserInput, CreateUserSaga, MigrateUserInput, MigrateUserSaga,
-        PendingOrganizationProfile, Saga, SystemOrganizationService,
-    },
+use inferadb_ledger_state::system::{
+    CreateUserInput, CreateUserSaga, MigrateUserInput, MigrateUserSaga, PendingOrganizationProfile,
+    Saga, SystemOrganizationService,
 };
-use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
     UserEmailId as DomainUserEmailId, VaultId as DomainVaultId,
-    config::ValidationConfig,
     events::{EventAction, EventOutcome as EventOutcomeType},
     validation,
 };
-use openraft::Raft;
 use tonic::{Request, Response, Status};
 
-use super::slug_resolver::SlugResolver;
-
-/// Creates a `RequestContext` for a UserService method and fills in common fields.
-macro_rules! user_ctx {
-    ($self:expr, $method:literal, $grpc_metadata:expr, $trace_ctx:expr) => {{
-        let mut ctx = RequestContext::new("UserService", $method);
-        ctx.set_admin_action($method);
-        $self.fill_context(&mut ctx, $grpc_metadata, $trace_ctx);
-        ctx
-    }};
-}
+use super::{service_infra::ServiceContext, slug_resolver::SlugResolver};
 
 /// User lifecycle, email management, region migration, and GDPR erasure.
-#[derive(bon::Builder)]
-#[builder(on(_, required))]
-#[allow(dead_code)] // validation_config wired up in future handlers
 pub struct UserService {
-    /// Raft consensus handle for proposing write operations.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// State layer for direct reads (get, list, search).
-    state: Arc<StateLayer<FileBackend>>,
-    /// Accessor for applied state (slug resolution).
-    applied_state: AppliedStateAccessor,
-    /// Sampler for log tail sampling.
-    #[builder(default)]
-    sampler: Option<Sampler>,
-    /// Node ID for logging and events.
-    #[builder(default)]
-    node_id: Option<u64>,
-    /// Input validation configuration.
-    #[builder(default = Arc::new(ValidationConfig::default()))]
-    validation_config: Arc<ValidationConfig>,
-    /// Maximum Raft proposal timeout.
-    #[builder(default = Duration::from_secs(30))]
-    proposal_timeout: Duration,
-    /// Handler-phase event handle for audit events.
-    #[builder(default)]
-    event_handle:
-        Option<inferadb_ledger_raft::event_writer::EventHandle<inferadb_ledger_store::FileBackend>>,
-    /// Health state for drain-phase write rejection.
-    #[builder(default)]
-    health_state: Option<inferadb_ledger_raft::graceful_shutdown::HealthState>,
+    ctx: ServiceContext,
 }
 
 impl UserService {
-    /// Records a handler-phase audit event if the event handle is configured.
-    fn record_handler_event(&self, entry: inferadb_ledger_types::events::EventEntry) {
-        if let Some(ref handle) = self.event_handle {
-            handle.record_handler_event(entry);
-        }
-    }
-
-    /// Fills in common fields on a pre-created `RequestContext`.
-    fn fill_context(
-        &self,
-        ctx: &mut RequestContext,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        trace_ctx: &trace_context::TraceContext,
-    ) {
-        super::service_infra::fill_context(
-            ctx,
-            grpc_metadata,
-            trace_ctx,
-            self.sampler.as_ref(),
-            self.node_id,
-        );
-    }
-
-    /// Proposes a system request through Raft with deadline handling.
-    async fn propose_system_request(
-        &self,
-        system_request: SystemRequest,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        ctx: &mut RequestContext,
-    ) -> Result<LedgerResponse, Status> {
-        let grpc_deadline =
-            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(grpc_metadata);
-        let timeout =
-            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
-
-        let ledger_request = LedgerRequest::System(system_request);
-        let payload = RaftPayload::new(ledger_request);
-
-        ctx.start_raft_timer();
-        let result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
-        ctx.end_raft_timer();
-
-        match result {
-            Ok(Ok(resp)) => Ok(resp.data),
-            Ok(Err(e)) => {
-                ctx.set_error("RaftError", &e.to_string());
-                Err(classify_raft_error(&e.to_string()))
-            },
-            Err(_) => {
-                inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
-                ctx.set_error("Timeout", "Raft proposal timed out");
-                Err(Status::deadline_exceeded(format!(
-                    "Raft proposal timed out after {}ms",
-                    timeout.as_millis()
-                )))
-            },
-        }
-    }
-
-    /// Proposes a generic Raft write with deadline handling.
-    ///
-    /// Delegates to [`service_infra::propose_request`](super::service_infra::propose_request)
-    /// which handles deadline extraction, timeout wrapping, and error mapping.
-    async fn propose_write(
-        &self,
-        request: LedgerRequest,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        ctx: &mut RequestContext,
-    ) -> Result<LedgerResponse, Status> {
-        super::service_infra::propose_request(
-            &self.raft,
-            request,
-            grpc_metadata,
-            self.proposal_timeout,
-            ctx,
-        )
-        .await
-    }
-
-    /// Default TTL for handler-phase events.
-    fn default_ttl_days(&self) -> u32 {
-        self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)
+    /// Creates a new `UserService` from shared service infrastructure.
+    pub(crate) fn new(ctx: ServiceContext) -> Self {
+        Self { ctx }
     }
 }
 
@@ -223,13 +97,14 @@ impl proto::user_service_server::UserService for UserService {
         request: Request<CreateUserRequest>,
     ) -> Result<Response<CreateUserResponse>, Status> {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = user_ctx!(self, "create_user", &grpc_metadata, &trace_ctx);
+        let mut ctx =
+            self.ctx.make_request_context("UserService", "create_user", &grpc_metadata, &trace_ctx);
 
         // Validate inputs
         validation::validate_user_name(&req.name).map_err(|e| {
@@ -247,12 +122,15 @@ impl proto::user_service_server::UserService for UserService {
             return Err(Status::invalid_argument("email_hmac is required"));
         }
         if !req.organization_name.is_empty() {
-            validation::validate_organization_name(&req.organization_name, &self.validation_config)
-                .map_err(|e| {
-                    let msg = e.to_string();
-                    ctx.set_error("InvalidArgument", &msg);
-                    Status::invalid_argument(msg)
-                })?;
+            validation::validate_organization_name(
+                &req.organization_name,
+                &self.ctx.validation_config,
+            )
+            .map_err(|e| {
+                let msg = e.to_string();
+                ctx.set_error("InvalidArgument", &msg);
+                Status::invalid_argument(msg)
+            })?;
         }
 
         let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
@@ -328,13 +206,13 @@ impl proto::user_service_server::UserService for UserService {
             request_hash: 0,
         };
 
-        self.propose_write(saga_request, &grpc_metadata, &mut ctx).await?;
+        self.ctx.propose_request(saga_request, &grpc_metadata, &mut ctx).await?;
 
         // Saga is now persisted. The orchestrator will drive it to completion.
         // We return a response with the saga ID; the user/slug will be
         // available once the saga completes (poll via GetUser).
-        if let Some(node_id) = self.node_id {
-            self.record_handler_event(
+        if let Some(node_id) = self.ctx.node_id {
+            self.ctx.record_handler_event(
                 HandlerPhaseEmitter::for_system(EventAction::UserCreated, node_id)
                     .principal("system")
                     .detail("saga_id", &saga_id)
@@ -342,7 +220,7 @@ impl proto::user_service_server::UserService for UserService {
                     .detail("admin", &admin.to_string())
                     .trace_id(&trace_ctx.trace_id)
                     .outcome(EventOutcomeType::Success)
-                    .build(self.default_ttl_days()),
+                    .build(self.ctx.default_ttl_days()),
             );
         }
 
@@ -362,15 +240,16 @@ impl proto::user_service_server::UserService for UserService {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = user_ctx!(self, "get_user", &grpc_metadata, &trace_ctx);
+        let mut ctx =
+            self.ctx.make_request_context("UserService", "get_user", &grpc_metadata, &trace_ctx);
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_id = slug_resolver.extract_and_resolve_user(&req.slug).inspect_err(|status| {
             ctx.set_error("InvalidArgument", status.message());
         })?;
         let user_slug = SlugResolver::extract_user_slug(&req.slug)?;
 
-        let sys_svc = SystemOrganizationService::new(self.state.clone());
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let user = sys_svc.get_user(user_id).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
             Status::internal(format!("Failed to read user: {e}"))
@@ -398,15 +277,16 @@ impl proto::user_service_server::UserService for UserService {
         request: Request<UpdateUserRequest>,
     ) -> Result<Response<UpdateUserResponse>, Status> {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = user_ctx!(self, "update_user", &grpc_metadata, &trace_ctx);
+        let mut ctx =
+            self.ctx.make_request_context("UserService", "update_user", &grpc_metadata, &trace_ctx);
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_id = slug_resolver.extract_and_resolve_user(&req.slug).inspect_err(|status| {
             ctx.set_error("InvalidArgument", status.message());
         })?;
@@ -438,6 +318,7 @@ impl proto::user_service_server::UserService for UserService {
         }
 
         let response = self
+            .ctx
             .propose_system_request(
                 SystemRequest::UpdateUser { user_id, name: req.name, role, primary_email },
                 &grpc_metadata,
@@ -447,18 +328,18 @@ impl proto::user_service_server::UserService for UserService {
 
         match response {
             LedgerResponse::UserUpdated { user_id: updated_id } => {
-                if let Some(node_id) = self.node_id {
-                    self.record_handler_event(
+                if let Some(node_id) = self.ctx.node_id {
+                    self.ctx.record_handler_event(
                         HandlerPhaseEmitter::for_system(EventAction::UserUpdated, node_id)
                             .principal("system")
                             .detail("user_id", &updated_id.to_string())
                             .trace_id(&trace_ctx.trace_id)
                             .outcome(EventOutcomeType::Success)
-                            .build(self.default_ttl_days()),
+                            .build(self.ctx.default_ttl_days()),
                     );
                 }
 
-                let sys_svc = SystemOrganizationService::new(self.state.clone());
+                let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
                 let user = sys_svc
                     .get_user(updated_id)
                     .map_err(|e| Status::internal(format!("Failed to read updated user: {e}")))?;
@@ -487,15 +368,16 @@ impl proto::user_service_server::UserService for UserService {
         request: Request<DeleteUserRequest>,
     ) -> Result<Response<DeleteUserResponse>, Status> {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = user_ctx!(self, "delete_user", &grpc_metadata, &trace_ctx);
+        let mut ctx =
+            self.ctx.make_request_context("UserService", "delete_user", &grpc_metadata, &trace_ctx);
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_id = slug_resolver.extract_and_resolve_user(&req.slug).inspect_err(|status| {
             ctx.set_error("InvalidArgument", status.message());
         })?;
@@ -507,20 +389,21 @@ impl proto::user_service_server::UserService for UserService {
         }
 
         let response = self
+            .ctx
             .propose_system_request(SystemRequest::DeleteUser { user_id }, &grpc_metadata, &mut ctx)
             .await?;
 
         match response {
             LedgerResponse::UserSoftDeleted { user_id: deleted_id, retention_days } => {
-                if let Some(node_id) = self.node_id {
-                    self.record_handler_event(
+                if let Some(node_id) = self.ctx.node_id {
+                    self.ctx.record_handler_event(
                         HandlerPhaseEmitter::for_system(EventAction::UserSoftDeleted, node_id)
                             .principal(&req.deleted_by)
                             .detail("user_id", &deleted_id.to_string())
                             .detail("retention_days", &retention_days.to_string())
                             .trace_id(&trace_ctx.trace_id)
                             .outcome(EventOutcomeType::Success)
-                            .build(self.default_ttl_days()),
+                            .build(self.ctx.default_ttl_days()),
                     );
                 }
 
@@ -553,7 +436,8 @@ impl proto::user_service_server::UserService for UserService {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = user_ctx!(self, "list_users", &grpc_metadata, &trace_ctx);
+        let mut ctx =
+            self.ctx.make_request_context("UserService", "list_users", &grpc_metadata, &trace_ctx);
 
         let page_size = if req.page_size == 0 { 100 } else { req.page_size.min(1000) as usize };
 
@@ -561,13 +445,13 @@ impl proto::user_service_server::UserService for UserService {
         let start_after_key =
             req.page_token.as_ref().and_then(|token| String::from_utf8(token.clone()).ok());
 
-        let sys_svc = SystemOrganizationService::new(self.state.clone());
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let users = sys_svc.list_users(start_after_key.as_deref(), page_size + 1).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
             Status::internal(format!("Failed to list users: {e}"))
         })?;
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let has_more = users.len() > page_size;
         let page_users: Vec<_> = users.into_iter().take(page_size).collect();
 
@@ -597,7 +481,12 @@ impl proto::user_service_server::UserService for UserService {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = user_ctx!(self, "search_users", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "UserService",
+            "search_users",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
         let filter = req.filter.ok_or_else(|| {
             ctx.set_error("InvalidArgument", "filter is required");
@@ -610,13 +499,13 @@ impl proto::user_service_server::UserService for UserService {
             Status::invalid_argument("At least email filter must be provided")
         })?;
 
-        let sys_svc = SystemOrganizationService::new(self.state.clone());
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let user = sys_svc.search_users_by_email(&email).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
             Status::internal(format!("Search failed: {e}"))
         })?;
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let users: Vec<proto::User> = user
             .into_iter()
             .map(|u| {
@@ -634,15 +523,20 @@ impl proto::user_service_server::UserService for UserService {
         request: Request<CreateUserEmailRequest>,
     ) -> Result<Response<CreateUserEmailResponse>, Status> {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = user_ctx!(self, "create_user_email", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "UserService",
+            "create_user_email",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_id = slug_resolver.extract_and_resolve_user(&req.user).inspect_err(|status| {
             ctx.set_error("InvalidArgument", status.message());
         })?;
@@ -654,6 +548,7 @@ impl proto::user_service_server::UserService for UserService {
         })?;
 
         let response = self
+            .ctx
             .propose_system_request(
                 SystemRequest::CreateUserEmail { user_id, email: req.email },
                 &grpc_metadata,
@@ -663,19 +558,19 @@ impl proto::user_service_server::UserService for UserService {
 
         match response {
             LedgerResponse::UserEmailCreated { email_id } => {
-                if let Some(node_id) = self.node_id {
-                    self.record_handler_event(
+                if let Some(node_id) = self.ctx.node_id {
+                    self.ctx.record_handler_event(
                         HandlerPhaseEmitter::for_system(EventAction::UserEmailCreated, node_id)
                             .principal("system")
                             .detail("user_id", &user_id.to_string())
                             .detail("email_id", &email_id.to_string())
                             .trace_id(&trace_ctx.trace_id)
                             .outcome(EventOutcomeType::Success)
-                            .build(self.default_ttl_days()),
+                            .build(self.ctx.default_ttl_days()),
                     );
                 }
 
-                let sys_svc = SystemOrganizationService::new(self.state.clone());
+                let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
                 let email = sys_svc
                     .get_user_email(email_id)
                     .map_err(|e| Status::internal(format!("Failed to read created email: {e}")))?;
@@ -704,15 +599,20 @@ impl proto::user_service_server::UserService for UserService {
         request: Request<DeleteUserEmailRequest>,
     ) -> Result<Response<DeleteUserEmailResponse>, Status> {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = user_ctx!(self, "delete_user_email", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "UserService",
+            "delete_user_email",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_id = slug_resolver.extract_and_resolve_user(&req.user).inspect_err(|status| {
             ctx.set_error("InvalidArgument", status.message());
         })?;
@@ -724,6 +624,7 @@ impl proto::user_service_server::UserService for UserService {
         let domain_email_id = DomainUserEmailId::new(email_id.id);
 
         let response = self
+            .ctx
             .propose_system_request(
                 SystemRequest::DeleteUserEmail { user_id, email_id: domain_email_id },
                 &grpc_metadata,
@@ -733,15 +634,15 @@ impl proto::user_service_server::UserService for UserService {
 
         match response {
             LedgerResponse::UserEmailDeleted { .. } => {
-                if let Some(node_id) = self.node_id {
-                    self.record_handler_event(
+                if let Some(node_id) = self.ctx.node_id {
+                    self.ctx.record_handler_event(
                         HandlerPhaseEmitter::for_system(EventAction::UserEmailDeleted, node_id)
                             .principal("system")
                             .detail("user_id", &user_id.to_string())
                             .detail("email_id", &domain_email_id.to_string())
                             .trace_id(&trace_ctx.trace_id)
                             .outcome(EventOutcomeType::Success)
-                            .build(self.default_ttl_days()),
+                            .build(self.ctx.default_ttl_days()),
                     );
                 }
 
@@ -772,15 +673,20 @@ impl proto::user_service_server::UserService for UserService {
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = user_ctx!(self, "search_user_email", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "UserService",
+            "search_user_email",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
         let filter = req.filter.ok_or_else(|| {
             ctx.set_error("InvalidArgument", "filter is required");
             Status::invalid_argument("filter is required")
         })?;
 
-        let sys_svc = SystemOrganizationService::new(self.state.clone());
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
 
         // If user filter is set, list that user's emails
         if let Some(ref user_slug) = filter.user {
@@ -836,13 +742,18 @@ impl proto::user_service_server::UserService for UserService {
         request: Request<VerifyUserEmailRequest>,
     ) -> Result<Response<VerifyUserEmailResponse>, Status> {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = user_ctx!(self, "verify_user_email", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "UserService",
+            "verify_user_email",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
         if req.token.is_empty() {
             ctx.set_error("InvalidArgument", "token must be non-empty");
@@ -850,7 +761,7 @@ impl proto::user_service_server::UserService for UserService {
         }
 
         // Hash the plaintext token and look up the verification record
-        let sys_svc = SystemOrganizationService::new(self.state.clone());
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let token_record = sys_svc.get_verification_token_by_hash(&req.token).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
             Status::internal(format!("Failed to look up verification token: {e}"))
@@ -861,6 +772,7 @@ impl proto::user_service_server::UserService for UserService {
         })?;
 
         let response = self
+            .ctx
             .propose_system_request(
                 SystemRequest::VerifyUserEmail { email_id: token_record.email_id },
                 &grpc_metadata,
@@ -870,14 +782,14 @@ impl proto::user_service_server::UserService for UserService {
 
         match response {
             LedgerResponse::UserEmailVerified { email_id } => {
-                if let Some(node_id) = self.node_id {
-                    self.record_handler_event(
+                if let Some(node_id) = self.ctx.node_id {
+                    self.ctx.record_handler_event(
                         HandlerPhaseEmitter::for_system(EventAction::UserEmailVerified, node_id)
                             .principal("system")
                             .detail("email_id", &email_id.to_string())
                             .trace_id(&trace_ctx.trace_id)
                             .outcome(EventOutcomeType::Success)
-                            .build(self.default_ttl_days()),
+                            .build(self.ctx.default_ttl_days()),
                     );
                 }
 
@@ -909,15 +821,20 @@ impl proto::user_service_server::UserService for UserService {
         request: Request<MigrateUserRegionRequest>,
     ) -> Result<Response<MigrateUserRegionResponse>, Status> {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = user_ctx!(self, "migrate_user_region", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "UserService",
+            "migrate_user_region",
+            &grpc_metadata,
+            &trace_ctx,
+        );
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_slug_val = req.slug.as_ref().map_or(0, |s| s.slug);
         let user_id = slug_resolver.extract_and_resolve_user(&req.slug).inspect_err(|status| {
             ctx.set_error("InvalidArgument", status.message());
@@ -925,7 +842,7 @@ impl proto::user_service_server::UserService for UserService {
 
         let target_region = inferadb_ledger_proto::convert::region_from_i32(req.target_region)?;
 
-        let sys_svc = SystemOrganizationService::new(self.state.clone());
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let dir_entry = sys_svc.get_user_directory(user_id).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
             Status::internal(format!("Failed to read user directory: {e}"))
@@ -1037,7 +954,7 @@ impl proto::user_service_server::UserService for UserService {
             request_hash: 0,
         };
 
-        self.propose_write(saga_request, &grpc_metadata, &mut ctx).await?;
+        self.ctx.propose_request(saga_request, &grpc_metadata, &mut ctx).await?;
 
         ctx.set_success();
         let proto_source: ProtoRegion = source_region.into();
@@ -1055,13 +972,14 @@ impl proto::user_service_server::UserService for UserService {
         request: Request<EraseUserRequest>,
     ) -> Result<Response<EraseUserResponse>, Status> {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = user_ctx!(self, "erase_user", &grpc_metadata, &trace_ctx);
+        let mut ctx =
+            self.ctx.make_request_context("UserService", "erase_user", &grpc_metadata, &trace_ctx);
 
         if req.erased_by.is_empty() {
             ctx.set_error("InvalidArgument", "erased_by must be non-empty");
@@ -1070,12 +988,13 @@ impl proto::user_service_server::UserService for UserService {
 
         let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
 
-        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_id = slug_resolver.extract_and_resolve_user(&req.user).inspect_err(|status| {
             ctx.set_error("InvalidArgument", status.message());
         })?;
 
         let response = self
+            .ctx
             .propose_system_request(
                 SystemRequest::EraseUser { user_id, erased_by: req.erased_by.clone(), region },
                 &grpc_metadata,
@@ -1085,15 +1004,15 @@ impl proto::user_service_server::UserService for UserService {
 
         match response {
             LedgerResponse::UserErased { user_id: erased_id } => {
-                if let Some(node_id) = self.node_id {
-                    self.record_handler_event(
+                if let Some(node_id) = self.ctx.node_id {
+                    self.ctx.record_handler_event(
                         HandlerPhaseEmitter::for_system(EventAction::UserErased, node_id)
                             .principal(&req.erased_by)
                             .detail("user_id", &erased_id.to_string())
                             .detail("region", region.as_str())
                             .trace_id(&trace_ctx.trace_id)
                             .outcome(EventOutcomeType::Success)
-                            .build(self.default_ttl_days()),
+                            .build(self.ctx.default_ttl_days()),
                     );
                 }
 

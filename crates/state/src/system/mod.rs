@@ -30,9 +30,11 @@ pub use service::{
     SYSTEM_ORGANIZATION_ID, SYSTEM_VAULT_ID, SystemError, SystemOrganizationService,
 };
 pub use types::{
-    EmailVerificationToken, ErasureAuditRecord, MigrationSummary, NodeInfo, NodeRole,
-    OrganizationDirectoryEntry, OrganizationDirectoryStatus, OrganizationMember,
-    OrganizationMemberRole, OrganizationProfile, OrganizationRegistry, OrganizationStatus,
-    OrganizationTier, PendingOrganizationProfile, SubjectKey, TeamMember, TeamMemberRole,
-    TeamProfile, User, UserDirectoryEntry, UserDirectoryStatus, UserEmail, UserMigrationEntry,
+    App, AppCredentialType, AppCredentials, AppVaultConnection, ClientAssertionCredentialConfig,
+    ClientAssertionEntry, ClientSecretCredential, EmailVerificationToken, ErasureAuditRecord,
+    MigrationSummary, MtlsCredential, NodeInfo, NodeRole, OrganizationDirectoryEntry,
+    OrganizationDirectoryStatus, OrganizationMember, OrganizationMemberRole, OrganizationProfile,
+    OrganizationRegistry, OrganizationStatus, OrganizationTier, PendingOrganizationProfile,
+    SubjectKey, TeamMember, TeamMemberRole, TeamProfile, User, UserDirectoryEntry,
+    UserDirectoryStatus, UserEmail, UserMigrationEntry,
 };

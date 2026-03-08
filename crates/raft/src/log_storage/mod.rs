@@ -292,8 +292,15 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
         let request = LedgerRequest::CreateVault {
-            organization: OrganizationId::new(1),
+            organization: org_id,
             slug: VaultSlug::new(1),
             name: Some("test-vault".to_string()),
             retention_policy: None,
@@ -304,10 +311,7 @@ mod tests {
         match response {
             LedgerResponse::VaultCreated { vault: vault_id, .. } => {
                 assert_eq!(vault_id, VaultId::new(1));
-                assert_eq!(
-                    state.vault_heights.get(&(OrganizationId::new(1), VaultId::new(1))),
-                    Some(&0)
-                );
+                assert_eq!(state.vault_heights.get(&(org_id, VaultId::new(1))), Some(&0));
             },
             _ => panic!("unexpected response"),
         }
@@ -321,14 +325,21 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
         // Mark vault as diverged
         state.vault_health.insert(
-            (OrganizationId::new(1), VaultId::new(1)),
+            (org_id, VaultId::new(1)),
             VaultHealthStatus::Diverged { expected: [1u8; 32], computed: [2u8; 32], at_height: 10 },
         );
 
         let request = LedgerRequest::Write {
-            organization: OrganizationId::new(1),
+            organization: org_id,
             vault: VaultId::new(1),
             transactions: vec![],
             idempotency_key: [0u8; 16],
@@ -2060,9 +2071,17 @@ mod tests {
         let mut state_a = store_a.applied_state.write();
         let mut state_b = store_b.applied_state.write();
 
+        // Register active org on both nodes
+        let org_slug = inferadb_ledger_types::OrganizationSlug::new(100);
+        let org_id_a =
+            create_active_organization(&store_a, &mut state_a, org_slug, Region::US_EAST_VA);
+        let org_id_b =
+            create_active_organization(&store_b, &mut state_b, org_slug, Region::US_EAST_VA);
+        assert_eq!(org_id_a, org_id_b, "Both stores should assign the same org ID");
+
         // Create vault on both nodes
         let create_vault = LedgerRequest::CreateVault {
-            organization: OrganizationId::new(1),
+            organization: org_id_a,
             slug: VaultSlug::new(1),
             name: Some("test".to_string()),
             retention_policy: None,
@@ -2073,7 +2092,7 @@ mod tests {
         // Apply multiple writes
         for _ in 0..5 {
             let write = LedgerRequest::Write {
-                organization: OrganizationId::new(1),
+                organization: org_id_a,
                 vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
@@ -2085,12 +2104,12 @@ mod tests {
 
         // Heights must match
         assert_eq!(
-            state_a.vault_heights.get(&(OrganizationId::new(1), VaultId::new(1))),
-            state_b.vault_heights.get(&(OrganizationId::new(1), VaultId::new(1))),
+            state_a.vault_heights.get(&(org_id_a, VaultId::new(1))),
+            state_b.vault_heights.get(&(org_id_b, VaultId::new(1))),
             "Vault heights must be identical after same operations"
         );
         assert_eq!(
-            state_a.vault_heights.get(&(OrganizationId::new(1), VaultId::new(1))),
+            state_a.vault_heights.get(&(org_id_a, VaultId::new(1))),
             Some(&5),
             "Height should be 5 after 5 writes"
         );
@@ -2385,6 +2404,9 @@ mod tests {
             team_id_to_slug: HashMap::new(),
             team_name_index: HashMap::new(),
             user_org_index: HashMap::new(),
+            app_slug_index: HashMap::new(),
+            app_id_to_slug: HashMap::new(),
+            app_name_index: HashMap::new(),
             last_applied_timestamp_ns: 0,
         };
 

@@ -25,7 +25,8 @@
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_raft::log_storage::AppliedStateAccessor;
 use inferadb_ledger_types::{
-    OrganizationId, OrganizationSlug, TeamId, TeamSlug, UserId, UserSlug, VaultId, VaultSlug,
+    AppId, AppSlug, OrganizationId, OrganizationSlug, TeamId, TeamSlug, UserId, UserSlug, VaultId,
+    VaultSlug,
 };
 use tonic::Status;
 
@@ -308,6 +309,48 @@ impl SlugResolver {
                 self.resolve_team(domain_slug).map(Some)
             },
         }
+    }
+
+    // =========================================================================
+    // App slug resolution
+    // =========================================================================
+
+    /// Extracts and validates an app slug from a proto message.
+    ///
+    /// Returns `INVALID_ARGUMENT` if the slug field is missing or zero.
+    pub fn extract_app_slug(proto_slug: &Option<proto::AppSlug>) -> Result<AppSlug, Status> {
+        let slug = proto_slug.as_ref().ok_or_else(|| Status::invalid_argument("Missing app"))?;
+        if slug.slug == 0 {
+            return Err(Status::invalid_argument("app must be non-zero"));
+        }
+        Ok(AppSlug::new(slug.slug))
+    }
+
+    /// Resolves an app slug to its internal (organization ID, app ID) pair.
+    ///
+    /// Returns `NOT_FOUND` if the slug is not registered.
+    pub fn resolve_app(&self, slug: AppSlug) -> Result<(OrganizationId, AppId), Status> {
+        self.state
+            .resolve_app_slug(slug)
+            .ok_or_else(|| Status::not_found(format!("App with slug {} not found", slug.value())))
+    }
+
+    /// Reverse lookup: internal app ID to external slug.
+    ///
+    /// Returns `NOT_FOUND` if the ID has no associated slug.
+    pub fn resolve_app_slug(&self, id: AppId) -> Result<AppSlug, Status> {
+        self.state
+            .resolve_app_id_to_slug(id)
+            .ok_or_else(|| Status::not_found(format!("App {} not found", id)))
+    }
+
+    /// Extracts an app slug from a proto message and resolves it to internal IDs.
+    pub fn extract_and_resolve_app(
+        &self,
+        proto_slug: &Option<proto::AppSlug>,
+    ) -> Result<(OrganizationId, AppId), Status> {
+        let slug = Self::extract_app_slug(proto_slug)?;
+        self.resolve_app(slug)
     }
 }
 

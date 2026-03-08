@@ -48,11 +48,15 @@ pub use hash::{
 pub use types::{
     // Constants
     ALL_REGIONS,
+    // App identifiers
+    AppId,
+    AppSlug,
     // Structs
     BlockHeader,
     BlockRetentionMode,
     BlockRetentionPolicy,
     ChainCommitment,
+    ClientAssertionId,
     // Type aliases
     ClientId,
     EmailVerifyTokenId,

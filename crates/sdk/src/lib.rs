@@ -81,14 +81,16 @@ mod tracing;
 pub use builders::{BatchReadBuilder, RelationshipQueryBuilder, WriteBuilder};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use client::{
-    BlindingKeyRehashStatus, BlindingKeyRotationStatus, BlockAnnouncement, BlockHeader, ChainProof,
-    Direction, Entity, EventEmissionPath, EventFilter, EventOutcome, EventPage, EventScope,
-    EventSource, HealthCheckResult, HealthStatus, IngestRejection, IngestResult, LedgerClient,
-    ListEntitiesOpts, ListRelationshipsOpts, ListResourcesOpts, MerkleProof, MerkleSibling,
-    MigrationInfo, Operation, OrganizationDeleteInfo, OrganizationInfo, OrganizationMemberInfo,
-    OrganizationMemberRole, OrganizationStatus, OrganizationTier, PagedResult, ReadConsistency,
-    Relationship, SdkEventEntry, SdkIngestEventEntry, SetCondition, UserEmailInfo, UserInfo,
-    UserMigrationInfo, VaultInfo, VaultStatus, VerifiedValue, VerifyOpts, WriteSuccess,
+    AppClientAssertionInfo, AppClientSecretStatus, AppCredentialType, AppCredentialsInfo, AppInfo,
+    AppVaultConnectionInfo, BlindingKeyRehashStatus, BlindingKeyRotationStatus, BlockAnnouncement,
+    BlockHeader, ChainProof, CreateAppClientAssertionResult, Direction, Entity, EventEmissionPath,
+    EventFilter, EventOutcome, EventPage, EventScope, EventSource, HealthCheckResult, HealthStatus,
+    IngestRejection, IngestResult, LedgerClient, ListEntitiesOpts, ListRelationshipsOpts,
+    ListResourcesOpts, MerkleProof, MerkleSibling, MigrationInfo, Operation,
+    OrganizationDeleteInfo, OrganizationInfo, OrganizationMemberInfo, OrganizationMemberRole,
+    OrganizationStatus, OrganizationTier, PagedResult, ReadConsistency, Relationship,
+    SdkEventEntry, SdkIngestEventEntry, SetCondition, UserEmailInfo, UserInfo, UserMigrationInfo,
+    VaultInfo, VaultStatus, VerifiedValue, VerifyOpts, WriteSuccess,
 };
 pub use config::{
     CertificateData, ClientConfig, ClientConfigBuilder, DiscoveryConfig, RetryPolicy, TlsConfig,
@@ -99,8 +101,8 @@ pub use discovery::{DiscoveryResult, DiscoveryService, PeerInfo};
 pub use error::{Result, SdkError};
 // Re-export commonly used types from inferadb-ledger-types
 pub use inferadb_ledger_types::{
-    OrganizationId, OrganizationSlug, Region, TeamId, TeamSlug, UserRole, UserSlug, UserStatus,
-    VaultId, VaultSlug,
+    AppId, AppSlug, ClientAssertionId, OrganizationId, OrganizationSlug, Region, TeamId, TeamSlug,
+    UserRole, UserSlug, UserStatus, VaultId, VaultSlug,
 };
 pub use metrics::{ConnectionEvent, MetricsSdkMetrics, NoopSdkMetrics, SdkMetrics};
 pub use retry::{with_retry, with_retry_cancellable};
