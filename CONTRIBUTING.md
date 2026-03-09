@@ -104,7 +104,7 @@ Property tests use [proptest](https://proptest-rs.github.io/proptest/) to verify
 
 ```bash
 # Run with default iterations (256 cases per test)
-cargo test --workspace --lib -- proptest
+cargo +1.92 test --workspace --lib -- proptest
 
 # Run with high iteration count (10k cases per test)
 just test-proptest

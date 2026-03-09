@@ -4,20 +4,21 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use inferadb_ledger_state::{
-    StateError,
+    StateError, StateLayer,
     system::{
         App, AppCredentialType, AppCredentials, AppVaultConnection, ClientAssertionEntry,
-        OrganizationMember, OrganizationMemberRole, OrganizationProfile, OrganizationRegistry,
-        OrganizationStatus, PendingOrganizationProfile, SYSTEM_VAULT_ID, SystemKeys, TeamMember,
-        TeamProfile,
+        CreateSigningKeyInput, CreateSigningKeySaga, OrganizationMember, OrganizationMemberRole,
+        OrganizationProfile, OrganizationRegistry, OrganizationStatus, PendingOrganizationProfile,
+        RefreshToken, SYSTEM_VAULT_ID, Saga, SigningKey, SigningKeyScope, SigningKeyStatus,
+        SystemKeys, SystemOrganizationService, TeamMember, TeamProfile, User,
     },
 };
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
-    AppId, AppSlug, Hash, LedgerErrorCode, Operation, OrganizationId, TeamId, TeamSlug, VaultEntry,
-    VaultId, compute_tx_merkle_root, decode, encode,
+    AppId, AppSlug, Hash, LedgerErrorCode, Operation, OrganizationId, TeamId, TeamSlug,
+    TokenSubject, TokenType, VaultEntry, VaultId, compute_tx_merkle_root, decode, encode,
     events::{EventAction, EventEntry, EventOutcome},
 };
 
@@ -46,6 +47,52 @@ fn try_encode<T: serde::Serialize>(value: &T, context: &str) -> Option<Vec<u8>> 
         Err(e) => {
             tracing::error!(context, error = %e, "Failed to encode state — persistence skipped, potential state divergence");
             None
+        },
+    }
+}
+
+/// Writes a `CreateSigningKeySaga` record to `_system` storage.
+///
+/// Called from the `CreateOrganizationWithProfile` apply handler to ensure
+/// newly created orgs get a signing key. The saga orchestrator picks up
+/// the record on its next poll cycle.
+///
+/// This is a synchronous write through the state layer (not Raft) because
+/// the apply handler is already inside a Raft commit.
+fn write_signing_key_saga<B: StorageBackend>(
+    state_layer: &Arc<StateLayer<B>>,
+    scope: SigningKeyScope,
+) {
+    let saga_id = uuid::Uuid::new_v4().to_string();
+    let saga = CreateSigningKeySaga::new(saga_id.clone(), CreateSigningKeyInput { scope });
+    let wrapped = Saga::CreateSigningKey(saga);
+
+    let key = format!("saga:{saga_id}");
+    match serde_json::to_vec(&wrapped) {
+        Ok(value) => {
+            let op =
+                Operation::SetEntity { key: key.clone(), value, condition: None, expires_at: None };
+            if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &[op], 0) {
+                tracing::error!(
+                    saga_id = %saga_id,
+                    scope = ?scope,
+                    error = %e,
+                    "Failed to write CreateSigningKeySaga record"
+                );
+            } else {
+                tracing::info!(
+                    saga_id = %saga_id,
+                    scope = ?scope,
+                    "Wrote CreateSigningKeySaga from apply handler"
+                );
+            }
+        },
+        Err(e) => {
+            tracing::error!(
+                saga_id = %saga_id,
+                error = %e,
+                "Failed to serialize CreateSigningKeySaga"
+            );
         },
     }
 }
@@ -384,6 +431,28 @@ fn migrate_team_members<B: StorageBackend>(
             message: format!("Failed to migrate members to target team: {e}"),
         })
         .map(|_| ())
+}
+
+/// Converts a `u64` seconds value into a `chrono::Duration`, saturating at `i64::MAX`.
+fn saturating_duration_secs(secs: u64) -> Duration {
+    Duration::seconds(i64::try_from(secs).unwrap_or(i64::MAX))
+}
+
+/// Looks up a signing key by kid, returning the key or an early-return error tuple.
+fn require_signing_key<B: StorageBackend>(
+    sys: &SystemOrganizationService<B>,
+    kid: &str,
+) -> Result<SigningKey, (LedgerResponse, Option<VaultEntry>)> {
+    match sys.get_signing_key_by_kid(kid) {
+        Ok(Some(k)) => Ok(k),
+        Ok(None) => {
+            Err(error_result(LedgerErrorCode::NotFound, format!("Signing key not found: {kid}")))
+        },
+        Err(e) => Err(error_result(
+            LedgerErrorCode::Internal,
+            format!("Failed to look up signing key: {e}"),
+        )),
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -810,6 +879,28 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         );
                                     }
                                 }
+                            }
+
+                            // Cascade: revoke refresh tokens on soft-delete.
+                            // Signing keys are retained until PurgeOrganization for
+                            // in-flight token validation during the retention window.
+                            let sys = SystemOrganizationService::new(state_layer.clone());
+                            match sys.revoke_all_org_refresh_tokens(*organization, block_timestamp)
+                            {
+                                Ok(result) => {
+                                    tracing::info!(
+                                        organization_id = organization.value(),
+                                        revoked_count = result.revoked_count,
+                                        "Cascade-revoked refresh tokens on org soft-delete"
+                                    );
+                                },
+                                Err(e) => {
+                                    tracing::error!(
+                                        organization_id = organization.value(),
+                                        error = %e,
+                                        "Failed to cascade-revoke tokens on org soft-delete"
+                                    );
+                                },
                             }
                         }
 
@@ -1648,10 +1739,44 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 ) {
                     Ok(state_layer) => match load_app(state_layer, *organization, *app) {
                         Ok(mut app_record) => {
+                            let was_enabled = app_record.enabled;
                             app_record.enabled = *enabled;
                             app_record.updated_at = block_timestamp;
                             match save_app(state_layer, *organization, &app_record) {
                                 Ok(()) => {
+                                    // Cascade: revoke all refresh tokens when disabling an app
+                                    if was_enabled && !*enabled {
+                                        if let Some(app_slug) = state.app_id_to_slug.get(app) {
+                                            let sys =
+                                                SystemOrganizationService::new(state_layer.clone());
+                                            let subject = TokenSubject::App(*app_slug);
+                                            match sys.revoke_all_subject_tokens(
+                                                &subject,
+                                                block_timestamp,
+                                            ) {
+                                                Ok(result) => {
+                                                    tracing::info!(
+                                                        app_id = app.value(),
+                                                        app_slug = app_slug.value(),
+                                                        revoked_count = result.revoked_count,
+                                                        "Cascade-revoked refresh tokens on app disable"
+                                                    );
+                                                },
+                                                Err(e) => {
+                                                    tracing::error!(
+                                                        app_id = app.value(),
+                                                        error = %e,
+                                                        "Failed to cascade-revoke tokens on app disable"
+                                                    );
+                                                },
+                                            }
+                                        } else {
+                                            tracing::warn!(
+                                                app_id = app.value(),
+                                                "App slug not found for cascade token revocation on disable"
+                                            );
+                                        }
+                                    }
                                     LedgerResponse::AppToggled { organization_id: *organization }
                                 },
                                 Err(e) => e,
@@ -2109,6 +2234,38 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         None,
                                     );
                                 }
+                                // Cascade: revoke all refresh tokens for this app+vault
+                                if let Some(app_slug) = state.app_id_to_slug.get(app) {
+                                    let sys = SystemOrganizationService::new(state_layer.clone());
+                                    match sys.revoke_app_vault_tokens(
+                                        *app_slug,
+                                        *vault,
+                                        block_timestamp,
+                                    ) {
+                                        Ok(result) => {
+                                            tracing::info!(
+                                                app_id = app.value(),
+                                                vault_id = vault.value(),
+                                                revoked_count = result.revoked_count,
+                                                "Cascade-revoked refresh tokens on vault disconnect"
+                                            );
+                                        },
+                                        Err(e) => {
+                                            tracing::error!(
+                                                app_id = app.value(),
+                                                vault_id = vault.value(),
+                                                error = %e,
+                                                "Failed to cascade-revoke tokens on vault disconnect"
+                                            );
+                                        },
+                                    }
+                                } else {
+                                    tracing::warn!(
+                                        app_id = app.value(),
+                                        vault_id = vault.value(),
+                                        "App slug not found for cascade token revocation on vault disconnect"
+                                    );
+                                }
                                 LedgerResponse::AppVaultRemoved { organization_id: *organization }
                             },
                             Ok(None) => LedgerResponse::Error {
@@ -2285,6 +2442,42 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     error = %e,
                                     "Failed to clean up state layer entities during purge"
                                 );
+                            }
+
+                            // Cascade: delete org signing keys and revoke all refresh tokens
+                            let sys = SystemOrganizationService::new(state_layer.clone());
+                            match sys.delete_org_signing_keys(*organization) {
+                                Ok(count) => {
+                                    tracing::info!(
+                                        organization_id = organization.value(),
+                                        deleted_keys = count,
+                                        "Deleted org signing keys during purge"
+                                    );
+                                },
+                                Err(e) => {
+                                    tracing::error!(
+                                        organization_id = organization.value(),
+                                        error = %e,
+                                        "Failed to delete org signing keys during purge"
+                                    );
+                                },
+                            }
+                            match sys.revoke_all_org_refresh_tokens(*organization, block_timestamp)
+                            {
+                                Ok(result) => {
+                                    tracing::info!(
+                                        organization_id = organization.value(),
+                                        revoked_count = result.revoked_count,
+                                        "Revoked org refresh tokens during purge"
+                                    );
+                                },
+                                Err(e) => {
+                                    tracing::error!(
+                                        organization_id = organization.value(),
+                                        error = %e,
+                                        "Failed to revoke org refresh tokens during purge"
+                                    );
+                                },
                             }
                         }
 
@@ -3229,6 +3422,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         .entry(*admin)
                                         .or_default()
                                         .insert(organization_id);
+
+                                    // Write CreateSigningKeySaga for this org's signing key.
+                                    // The saga orchestrator picks it up on the next poll cycle.
+                                    write_signing_key_saga(
+                                        state_layer,
+                                        SigningKeyScope::Organization(organization_id),
+                                    );
                                 }
                             }
                         }
@@ -3409,6 +3609,620 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 }
 
                 (response, None)
+            },
+
+            // ── Signing Key Operations ──
+            LedgerRequest::CreateSigningKey {
+                scope,
+                kid,
+                public_key_bytes,
+                encrypted_private_key,
+                rmk_version,
+            } => {
+                let Some(state_layer) = &self.state_layer else {
+                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                };
+                let sys = SystemOrganizationService::new(state_layer.clone());
+
+                // Idempotent: if a key with this kid already exists and is Active, return success.
+                match sys.get_signing_key_by_kid(kid) {
+                    Ok(Some(existing)) if existing.status == SigningKeyStatus::Active => {
+                        return (
+                            LedgerResponse::SigningKeyCreated { id: existing.id, kid: kid.clone() },
+                            None,
+                        );
+                    },
+                    Ok(_) => {},
+                    Err(e) => {
+                        return error_result(
+                            LedgerErrorCode::Internal,
+                            format!("Failed to check existing signing key: {e}"),
+                        );
+                    },
+                }
+
+                // Verify no other active key exists for this scope (use RotateSigningKey instead).
+                match sys.get_active_signing_key(scope) {
+                    Ok(Some(active)) => {
+                        return error_result(
+                            LedgerErrorCode::FailedPrecondition,
+                            format!(
+                                "Active signing key already exists for scope: kid={}. Use RotateSigningKey.",
+                                active.kid
+                            ),
+                        );
+                    },
+                    Ok(None) => {},
+                    Err(e) => {
+                        return error_result(
+                            LedgerErrorCode::Internal,
+                            format!("Failed to check active signing key: {e}"),
+                        );
+                    },
+                }
+
+                let id = state.sequences.next_signing_key();
+                let key = SigningKey {
+                    id,
+                    kid: kid.clone(),
+                    public_key_bytes: public_key_bytes.clone(),
+                    encrypted_private_key: encrypted_private_key.clone(),
+                    rmk_version: *rmk_version,
+                    scope: *scope,
+                    status: SigningKeyStatus::Active,
+                    valid_from: block_timestamp,
+                    valid_until: None,
+                    created_at: block_timestamp,
+                    rotated_at: None,
+                    revoked_at: None,
+                };
+
+                if let Err(e) = sys.store_signing_key(&key) {
+                    return error_result(
+                        LedgerErrorCode::Internal,
+                        format!("Failed to store signing key: {e}"),
+                    );
+                }
+
+                (LedgerResponse::SigningKeyCreated { id, kid: kid.clone() }, None)
+            },
+
+            LedgerRequest::RotateSigningKey {
+                old_kid,
+                new_kid,
+                new_public_key_bytes,
+                new_encrypted_private_key,
+                rmk_version,
+                grace_period_secs,
+            } => {
+                let Some(state_layer) = &self.state_layer else {
+                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                };
+                let sys = SystemOrganizationService::new(state_layer.clone());
+
+                // Look up old key; verify it's Active.
+                let old_key = match require_signing_key(&sys, old_kid) {
+                    Ok(k) => k,
+                    Err(resp) => return resp,
+                };
+
+                if old_key.status != SigningKeyStatus::Active {
+                    return error_result(
+                        LedgerErrorCode::FailedPrecondition,
+                        format!(
+                            "Signing key {old_kid} is not Active (status: {:?})",
+                            old_key.status
+                        ),
+                    );
+                }
+
+                // Transition old key: Rotated (with grace period) or Revoked (immediate).
+                if *grace_period_secs == 0 {
+                    // Immediate revocation.
+                    if let Err(e) = sys.update_signing_key_status(
+                        old_kid,
+                        SigningKeyStatus::Revoked,
+                        None,
+                        block_timestamp,
+                    ) {
+                        return error_result(
+                            LedgerErrorCode::Internal,
+                            format!("Failed to revoke old signing key: {e}"),
+                        );
+                    }
+                } else {
+                    // Grace period: old key stays valid for verification.
+                    let valid_until =
+                        block_timestamp + saturating_duration_secs(*grace_period_secs);
+                    if let Err(e) = sys.update_signing_key_status(
+                        old_kid,
+                        SigningKeyStatus::Rotated,
+                        Some(valid_until),
+                        block_timestamp,
+                    ) {
+                        return error_result(
+                            LedgerErrorCode::Internal,
+                            format!("Failed to rotate old signing key: {e}"),
+                        );
+                    }
+                }
+
+                // Create new key as Active.
+                let new_id = state.sequences.next_signing_key();
+                let new_key = SigningKey {
+                    id: new_id,
+                    kid: new_kid.clone(),
+                    public_key_bytes: new_public_key_bytes.clone(),
+                    encrypted_private_key: new_encrypted_private_key.clone(),
+                    rmk_version: *rmk_version,
+                    scope: old_key.scope,
+                    status: SigningKeyStatus::Active,
+                    valid_from: block_timestamp,
+                    valid_until: None,
+                    created_at: block_timestamp,
+                    rotated_at: None,
+                    revoked_at: None,
+                };
+
+                if let Err(e) = sys.store_signing_key(&new_key) {
+                    return error_result(
+                        LedgerErrorCode::Internal,
+                        format!("Failed to store new signing key: {e}"),
+                    );
+                }
+
+                (
+                    LedgerResponse::SigningKeyRotated {
+                        old_kid: old_kid.clone(),
+                        new_kid: new_kid.clone(),
+                    },
+                    None,
+                )
+            },
+
+            LedgerRequest::RevokeSigningKey { kid } => {
+                let Some(state_layer) = &self.state_layer else {
+                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                };
+                let sys = SystemOrganizationService::new(state_layer.clone());
+
+                let key = match require_signing_key(&sys, kid) {
+                    Ok(k) => k,
+                    Err(resp) => return resp,
+                };
+
+                if key.status == SigningKeyStatus::Revoked {
+                    // Already revoked — idempotent success.
+                    return (LedgerResponse::SigningKeyRevoked { kid: kid.clone() }, None);
+                }
+
+                if let Err(e) = sys.update_signing_key_status(
+                    kid,
+                    SigningKeyStatus::Revoked,
+                    None,
+                    block_timestamp,
+                ) {
+                    return error_result(
+                        LedgerErrorCode::Internal,
+                        format!("Failed to revoke signing key: {e}"),
+                    );
+                }
+
+                (LedgerResponse::SigningKeyRevoked { kid: kid.clone() }, None)
+            },
+
+            LedgerRequest::TransitionSigningKeyRevoked { kid } => {
+                let Some(state_layer) = &self.state_layer else {
+                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                };
+                let sys = SystemOrganizationService::new(state_layer.clone());
+
+                let key = match sys.get_signing_key_by_kid(kid) {
+                    Ok(Some(k)) => k,
+                    Ok(None) => {
+                        // Key not found — idempotent no-op.
+                        return (LedgerResponse::SigningKeyTransitioned { kid: kid.clone() }, None);
+                    },
+                    Err(e) => {
+                        return error_result(
+                            LedgerErrorCode::Internal,
+                            format!("Failed to look up signing key '{kid}': {e}"),
+                        );
+                    },
+                };
+
+                // Only transition Rotated keys past their grace period.
+                if key.status != SigningKeyStatus::Rotated {
+                    return (LedgerResponse::SigningKeyTransitioned { kid: kid.clone() }, None);
+                }
+
+                // Verify grace period actually expired.
+                if let Some(valid_until) = key.valid_until
+                    && valid_until >= block_timestamp
+                {
+                    // Grace period not yet expired — no-op.
+                    return (LedgerResponse::SigningKeyTransitioned { kid: kid.clone() }, None);
+                }
+
+                if let Err(e) = sys.update_signing_key_status(
+                    kid,
+                    SigningKeyStatus::Revoked,
+                    key.valid_until,
+                    block_timestamp,
+                ) {
+                    return error_result(
+                        LedgerErrorCode::Internal,
+                        format!("Failed to transition signing key: {e}"),
+                    );
+                }
+
+                (LedgerResponse::SigningKeyTransitioned { kid: kid.clone() }, None)
+            },
+
+            // ── Refresh Token Operations ──
+            LedgerRequest::CreateRefreshToken {
+                token_hash,
+                family,
+                token_type,
+                subject,
+                organization,
+                vault,
+                kid,
+                ttl_secs,
+            } => {
+                let Some(state_layer) = &self.state_layer else {
+                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                };
+                let sys = SystemOrganizationService::new(state_layer.clone());
+
+                let id = state.sequences.next_refresh_token();
+                let expires_at = block_timestamp + saturating_duration_secs(*ttl_secs);
+
+                let token = RefreshToken {
+                    id,
+                    token_hash: *token_hash,
+                    family: *family,
+                    token_type: *token_type,
+                    subject: *subject,
+                    organization: *organization,
+                    vault: *vault,
+                    kid: kid.clone(),
+                    expires_at,
+                    used: false,
+                    created_at: block_timestamp,
+                    used_at: None,
+                    revoked_at: None,
+                };
+
+                if let Err(e) = sys.store_refresh_token(&token) {
+                    return error_result(
+                        LedgerErrorCode::Internal,
+                        format!("Failed to store refresh token: {e}"),
+                    );
+                }
+
+                (LedgerResponse::RefreshTokenCreated { id }, None)
+            },
+
+            LedgerRequest::UseRefreshToken {
+                old_token_hash,
+                new_token_hash,
+                new_kid,
+                ttl_secs,
+                expected_version,
+            } => {
+                let Some(state_layer) = &self.state_layer else {
+                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                };
+                let sys = SystemOrganizationService::new(state_layer.clone());
+
+                // Look up old token by hash.
+                let old_token = match sys.get_refresh_token_by_hash(old_token_hash) {
+                    Ok(Some(t)) => t,
+                    Ok(None) => {
+                        return error_result(
+                            LedgerErrorCode::Unauthenticated,
+                            "Refresh token not found",
+                        );
+                    },
+                    Err(e) => {
+                        return error_result(
+                            LedgerErrorCode::Internal,
+                            format!("Failed to look up refresh token: {e}"),
+                        );
+                    },
+                };
+
+                // Check if family is poisoned (prior reuse detected).
+                match sys.is_family_poisoned(&old_token.family) {
+                    Ok(true) => {
+                        return error_result(
+                            LedgerErrorCode::Unauthenticated,
+                            "Refresh token reuse detected: family revoked",
+                        );
+                    },
+                    Ok(false) => {},
+                    Err(e) => {
+                        return error_result(
+                            LedgerErrorCode::Internal,
+                            format!("Failed to check family poison status: {e}"),
+                        );
+                    },
+                }
+
+                // If old token already used → poison the family (theft detection).
+                if old_token.used {
+                    if let Err(e) = sys.poison_token_family(&old_token.family) {
+                        tracing::error!(error = %e, "Failed to poison token family on reuse detection");
+                    }
+                    return error_result(
+                        LedgerErrorCode::Unauthenticated,
+                        "Refresh token reuse detected: family revoked",
+                    );
+                }
+
+                // Check expiry.
+                if old_token.expires_at <= block_timestamp {
+                    return error_result(LedgerErrorCode::Unauthenticated, "Refresh token expired");
+                }
+
+                // Check revocation.
+                if old_token.revoked_at.is_some() {
+                    return error_result(LedgerErrorCode::Unauthenticated, "Refresh token revoked");
+                }
+
+                // For user session refresh: validate TokenVersion.
+                let mut token_version = None;
+                if let Some(expected) = expected_version
+                    && let TokenSubject::User(user_slug) = &old_token.subject
+                {
+                    let user_id = match state.user_slug_index.get(user_slug) {
+                        Some(&id) => id,
+                        None => {
+                            return error_result(
+                                LedgerErrorCode::NotFound,
+                                "User slug not found in index",
+                            );
+                        },
+                    };
+
+                    // Read user entity to get current TokenVersion.
+                    let user_key = SystemKeys::user_key(user_id);
+                    let entity = match state_layer.get_entity(SYSTEM_VAULT_ID, user_key.as_bytes())
+                    {
+                        Ok(Some(entity)) => entity,
+                        Ok(None) => {
+                            return error_result(
+                                LedgerErrorCode::NotFound,
+                                "User not found for version check",
+                            );
+                        },
+                        Err(e) => {
+                            return error_result(
+                                LedgerErrorCode::Internal,
+                                format!("Failed to read user: {e}"),
+                            );
+                        },
+                    };
+                    let user = match decode::<User>(&entity.value) {
+                        Ok(user) => user,
+                        Err(e) => {
+                            return error_result(
+                                LedgerErrorCode::Internal,
+                                format!("Failed to decode user: {e}"),
+                            );
+                        },
+                    };
+                    if user.version != *expected {
+                        return error_result(
+                            LedgerErrorCode::Unauthenticated,
+                            "Token version mismatch: session invalidated",
+                        );
+                    }
+                    token_version = Some(user.version);
+                }
+
+                // For vault token refresh: verify app enabled + read allowed_scopes.
+                let mut allowed_scopes = None;
+                if old_token.token_type == TokenType::VaultAccess
+                    && let TokenSubject::App(app_slug) = &old_token.subject
+                {
+                    // Resolve app slug to (org_id, app_id).
+                    let (org_id, app_id) = match state.app_slug_index.get(app_slug) {
+                        Some(ids) => *ids,
+                        None => {
+                            return error_result(LedgerErrorCode::NotFound, "App not found");
+                        },
+                    };
+
+                    // Verify app is enabled.
+                    let app = match load_app(state_layer, org_id, app_id) {
+                        Ok(app) => app,
+                        Err(resp) => return (resp, None),
+                    };
+                    if !app.enabled {
+                        return error_result(
+                            LedgerErrorCode::FailedPrecondition,
+                            "App is disabled",
+                        );
+                    }
+
+                    // Read current AppVaultConnection for allowed_scopes.
+                    if let Some(vault_id) = old_token.vault {
+                        let connection_key = SystemKeys::app_vault_key(org_id, app_id, vault_id);
+                        let entity = match state_layer
+                            .get_entity(SYSTEM_VAULT_ID, connection_key.as_bytes())
+                        {
+                            Ok(Some(entity)) => entity,
+                            Ok(None) => {
+                                return error_result(
+                                    LedgerErrorCode::FailedPrecondition,
+                                    "Vault connection removed since token was issued",
+                                );
+                            },
+                            Err(e) => {
+                                return error_result(
+                                    LedgerErrorCode::Internal,
+                                    format!("Failed to read vault connection: {e}"),
+                                );
+                            },
+                        };
+                        let connection = match decode::<AppVaultConnection>(&entity.value) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                return error_result(
+                                    LedgerErrorCode::Internal,
+                                    format!("Failed to decode vault connection: {e}"),
+                                );
+                            },
+                        };
+                        allowed_scopes = Some(connection.allowed_scopes);
+                    }
+                }
+
+                // Mark old token as used.
+                if let Err(e) = sys.mark_refresh_token_used(old_token.id, block_timestamp) {
+                    return error_result(
+                        LedgerErrorCode::Internal,
+                        format!("Failed to mark refresh token used: {e}"),
+                    );
+                }
+
+                // Create new refresh token with same family.
+                let new_id = state.sequences.next_refresh_token();
+                let new_expires_at = block_timestamp + saturating_duration_secs(*ttl_secs);
+
+                let new_token = RefreshToken {
+                    id: new_id,
+                    token_hash: *new_token_hash,
+                    family: old_token.family,
+                    token_type: old_token.token_type,
+                    subject: old_token.subject,
+                    organization: old_token.organization,
+                    vault: old_token.vault,
+                    kid: new_kid.clone(),
+                    expires_at: new_expires_at,
+                    used: false,
+                    created_at: block_timestamp,
+                    used_at: None,
+                    revoked_at: None,
+                };
+
+                if let Err(e) = sys.store_refresh_token(&new_token) {
+                    return error_result(
+                        LedgerErrorCode::Internal,
+                        format!("Failed to store new refresh token: {e}"),
+                    );
+                }
+
+                (
+                    LedgerResponse::RefreshTokenRotated { new_id, token_version, allowed_scopes },
+                    None,
+                )
+            },
+
+            LedgerRequest::RevokeTokenFamily { family } => {
+                let Some(state_layer) = &self.state_layer else {
+                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                };
+                let sys = SystemOrganizationService::new(state_layer.clone());
+
+                match sys.revoke_token_family(family, block_timestamp) {
+                    Ok(result) => {
+                        (LedgerResponse::TokenFamilyRevoked { count: result.revoked_count }, None)
+                    },
+                    Err(e) => error_result(
+                        LedgerErrorCode::Internal,
+                        format!("Failed to revoke token family: {e}"),
+                    ),
+                }
+            },
+
+            LedgerRequest::RevokeAllSubjectTokens { subject } => {
+                let Some(state_layer) = &self.state_layer else {
+                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                };
+                let sys = SystemOrganizationService::new(state_layer.clone());
+
+                match sys.revoke_all_subject_tokens(subject, block_timestamp) {
+                    Ok(result) => {
+                        (LedgerResponse::SubjectTokensRevoked { count: result.revoked_count }, None)
+                    },
+                    Err(e) => error_result(
+                        LedgerErrorCode::Internal,
+                        format!("Failed to revoke subject tokens: {e}"),
+                    ),
+                }
+            },
+
+            LedgerRequest::RevokeAppVaultTokens { app, vault } => {
+                let Some(state_layer) = &self.state_layer else {
+                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                };
+                let sys = SystemOrganizationService::new(state_layer.clone());
+
+                match sys.revoke_app_vault_tokens(*app, *vault, block_timestamp) {
+                    Ok(result) => (
+                        LedgerResponse::AppVaultTokensRevoked { count: result.revoked_count },
+                        None,
+                    ),
+                    Err(e) => error_result(
+                        LedgerErrorCode::Internal,
+                        format!("Failed to revoke app vault tokens: {e}"),
+                    ),
+                }
+            },
+
+            LedgerRequest::RevokeAllUserSessions { user } => {
+                let Some(state_layer) = &self.state_layer else {
+                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                };
+                let sys = SystemOrganizationService::new(state_layer.clone());
+
+                // Resolve UserId → UserSlug from in-memory state.
+                let user_slug = match state.user_id_to_slug.get(user) {
+                    Some(slug) => *slug,
+                    None => {
+                        return error_result(
+                            LedgerErrorCode::NotFound,
+                            format!("User slug not found for user {user}"),
+                        );
+                    },
+                };
+
+                match sys.revoke_all_user_sessions(*user, user_slug, block_timestamp) {
+                    Ok(result) => (
+                        LedgerResponse::AllUserSessionsRevoked {
+                            count: result.revoked_count,
+                            version: result.new_version,
+                        },
+                        None,
+                    ),
+                    Err(e) => error_result(
+                        LedgerErrorCode::Internal,
+                        format!("Failed to revoke all user sessions: {e}"),
+                    ),
+                }
+            },
+
+            LedgerRequest::DeleteExpiredRefreshTokens => {
+                let Some(state_layer) = &self.state_layer else {
+                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                };
+                let sys = SystemOrganizationService::new(state_layer.clone());
+
+                match sys.delete_expired_refresh_tokens(block_timestamp) {
+                    Ok(result) => (
+                        LedgerResponse::ExpiredRefreshTokensDeleted {
+                            count: result.expired_count + result.poisoned_families_cleaned,
+                        },
+                        None,
+                    ),
+                    Err(e) => error_result(
+                        LedgerErrorCode::Internal,
+                        format!("Failed to delete expired refresh tokens: {e}"),
+                    ),
+                }
             },
 
             LedgerRequest::BatchWrite { requests } => {

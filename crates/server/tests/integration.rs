@@ -22,6 +22,7 @@ mod network_simulation;
 mod orphan_cleanup;
 mod replication;
 mod saga_orchestrator;
+mod token_lifecycle;
 mod ttl_gc;
 mod watch_blocks_realtime;
 mod write_read;

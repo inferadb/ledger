@@ -12,20 +12,24 @@ Ledger is InferaDB's storage layer—a blockchain database for cryptographically
 
 ## Terminology
 
-| Term             | Definition                                                                                                                               |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| **Organization** | Storage unit per organization. Contains entities, vaults, relationships. Isolated with separate Raft consensus per region.               |
-| **Vault**        | Relationship store within an organization. Maintains its own cryptographic chain (separate `state_root`, `previous_hash`, block height). |
-| **Entity**       | Key-value data in an organization (users, teams, clients, sessions). Supports TTL, versioning, conditional writes.                       |
-| **Relationship** | Authorization tuple: `(resource, relation, subject)`. Used by Engine for permission checks.                                              |
-| **`_system`**    | Special organization for global data: user accounts and organization routing. Replicated to all nodes.                                   |
+| Term              | Definition                                                                                                                               |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| **Organization**  | Storage unit per organization. Contains entities, vaults, relationships. Isolated with separate Raft consensus per region.               |
+| **Vault**         | Relationship store within an organization. Maintains its own cryptographic chain (separate `state_root`, `previous_hash`, block height). |
+| **Entity**        | Key-value data in an organization (users, teams, clients, sessions). Supports TTL, versioning, conditional writes.                       |
+| **Relationship**  | Authorization tuple: `(resource, relation, subject)`. Used by Engine for permission checks.                                              |
+| **`_system`**     | Special organization for global data: user accounts, organization routing, signing keys, and refresh tokens. Replicated to all nodes.    |
+| **Signing Key**   | Ed25519 key pair for JWT signing. Private key stored envelope-encrypted (RMK→DEK→key). Scoped globally or per-organization.              |
+| **Refresh Token** | Long-lived opaque token for obtaining new JWT access tokens. Family-tracked for theft detection.                                         |
 
 ## Hierarchy
 
 ```
 _system organization (global)
 ├── Users (global accounts)
-└── Organization routing table
+├── Organization routing table
+├── Signing keys (global + per-org)
+└── Refresh tokens (session + vault)
 
 org (per-organization)
 ├── Organization metadata
@@ -126,10 +130,12 @@ Ledger uses **leader-assigned sequential IDs**. The leader assigns IDs during bl
 
 ```
 _meta:seq:organization    → next OrganizationId (starts at 1; 0 = _system)
-_meta:seq:vault        → next VaultId (internal)
-_meta:seq:user         → next UserId
-_meta:seq:user_email   → next UserEmailId
-_meta:seq:email_verify → next TokenId
+_meta:seq:vault           → next VaultId (internal)
+_meta:seq:user            → next UserId
+_meta:seq:user_email      → next UserEmailId
+_meta:seq:email_verify    → next TokenId
+_meta:seq:signing_key     → next SigningKeyId
+_meta:seq:refresh_token   → next RefreshTokenId
 ```
 
 **Dual-ID architecture:** Organizations and vaults use two identifiers — a sequential internal ID (`OrganizationId`/`VaultId`, `i64`) for storage key density and B+ tree performance, and an external Snowflake slug (`OrganizationSlug`/`VaultSlug`, `u64`) as the sole identifier exposed in gRPC APIs and the SDK. Internal IDs are never visible to API consumers. The `SlugResolver` at the gRPC service boundary translates slugs to internal IDs for storage operations.
@@ -145,15 +151,20 @@ _meta:seq:email_verify → next TokenId
 
 ### In `_system` (organization_slug = 0)
 
-| Entity Type          | Key Pattern                  | Example                        |
-| -------------------- | ---------------------------- | ------------------------------ |
-| User                 | `user:{id}`                  | `user:1`                       |
-| User email           | `user_email:{id}`            | `user_email:1`                 |
-| Email index          | `_idx:email:{email}`         | `_idx:email:alice@example.com` |
-| User emails index    | `_idx:user_emails:{user_id}` | `_idx:user_emails:1`           |
-| Organization routing | `ns:{organization_slug}`     | `ns:1`                         |
-| Node info            | `node:{id}`                  | `node:A`                       |
-| Sequence counter     | `_meta:seq:{entity_type}`    | `_meta:seq:user`               |
+| Entity Type          | Key Pattern                  | Example                         |
+| -------------------- | ---------------------------- | ------------------------------- |
+| User                 | `user:{id}`                  | `user:1`                        |
+| User email           | `user_email:{id}`            | `user_email:1`                  |
+| Email index          | `_idx:email:{email}`         | `_idx:email:alice@example.com`  |
+| User emails index    | `_idx:user_emails:{user_id}` | `_idx:user_emails:1`            |
+| Organization routing | `ns:{organization_slug}`     | `ns:1`                          |
+| Node info            | `node:{id}`                  | `node:A`                        |
+| Signing key          | `_sys:signing_key:{id}`      | `_sys:signing_key:1`            |
+| Signing key index    | `_idx:signing_key:kid:{kid}` | `_idx:signing_key:kid:{uuid}`   |
+| Signing key scope    | `_idx:signing_key:scope:...` | `_idx:signing_key:scope:global` |
+| Refresh token        | `_sys:refresh_token:{id}`    | `_sys:refresh_token:1`          |
+| Refresh token hash   | `_idx:refresh_token:hash:..` | `_idx:refresh_token:hash:{hex}` |
+| Sequence counter     | `_meta:seq:{entity_type}`    | `_meta:seq:user`                |
 
 ### In an Organization
 

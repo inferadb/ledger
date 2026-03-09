@@ -12,7 +12,11 @@ Crate structure, key abstractions, and code organization for contributors.
                     └───────┬────────┘
                             │
                     ┌───────▼────────┐
-                    │      raft      │  Consensus & gRPC services
+                    │   services     │  gRPC services, server assembly
+                    └───────┬────────┘
+                            │
+                    ┌───────▼────────┐
+                    │      raft      │  Consensus, batching, background jobs
                     └───────┬────────┘
                             │
                     ┌───────▼────────┐
@@ -27,9 +31,9 @@ Crate structure, key abstractions, and code organization for contributors.
                     │     types      │  Shared primitives
                     └────────────────┘
 
-        ┌────────────────┐     ┌────────────────┐
-        │      sdk       │     │   test-utils   │
-        └────────────────┘     └────────────────┘
+  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
+  │     proto      │  │      sdk       │  │   test-utils   │
+  └────────────────┘  └────────────────┘  └────────────────┘
 ```
 
 ## Crate Overview
@@ -58,7 +62,7 @@ Custom B+ tree storage engine with MVCC.
 - `BTree` - B+ tree implementation
 - `Transaction` - MVCC transaction with snapshot isolation
 
-**Tables:** 20 compile-time tables (`TableId` enum) for entities, relationships, blocks, Raft log, vault metadata, slug indexes, client sequences, and more.
+**Tables:** 21 compile-time tables (`TableId` enum) for entities, relationships, blocks, Raft log, vault metadata, slug indexes, client sequences, compaction metadata, and more.
 
 ### `inferadb-ledger-state`
 
@@ -75,24 +79,51 @@ Domain logic built on top of store.
 
 ### `inferadb-ledger-raft`
 
-Raft consensus via [Openraft](https://github.com/datafuselabs/openraft), gRPC services, batching.
+Raft consensus via [Openraft](https://github.com/datafuselabs/openraft), batching, background jobs.
 
 **Key abstractions:**
 
 - `RaftNode` - Openraft node wrapper
 - `LogStorage` - Raft log backed by store
-- `StateMachine` - State machine implementation
+- `StateMachine` - State machine implementation (apply handlers for all `LedgerRequest` variants)
 - `BatchProcessor` - Transaction batching
-- `WriteService` - Write handling with cross-region forwarding
+- `SagaOrchestrator` - Multi-step workflow orchestration (org creation, signing key bootstrap)
+- `TokenMaintenanceJob` - Background cleanup for expired tokens and key lifecycle transitions
+- `RateLimiter` - 3-tier rate limiting (per-app, per-org, global)
+
+### `inferadb-ledger-services`
+
+gRPC service implementations and server assembly.
+
+**Key abstractions:**
+
+- `LedgerServer` - Assembles all gRPC services with shared infrastructure
+- `JwtEngine` - Ed25519 token signing/validation with ArcSwap key cache
+- `ServiceContext` - Shared Raft/state/logging infrastructure for service handlers
 
 **gRPC services:**
 
 - `ReadService` - Query entities and relationships
-- `WriteService` - Modify state
-- `AdminService` - Cluster management
-- `HealthService` - Health checks
+- `WriteService` - Modify state with cross-region forwarding
+- `AdminService` - Cluster management, configuration, backups
+- `OrganizationService` - Organization CRUD, members, teams
+- `VaultService` - Vault CRUD and health
+- `UserService` - User accounts, emails, verification
+- `AppService` - Application management, credentials, connections
+- `TokenService` - JWT token lifecycle (sessions, vault tokens, signing keys)
+- `EventsService` - Audit event queries and ingestion
+- `HealthService` - Health checks with dependency probes
 - `RaftService` - Node-to-node Raft RPCs
 - `SystemDiscoveryService` - Peer discovery
+
+### `inferadb-ledger-proto`
+
+Generated protobuf code and domain type conversions.
+
+**Key modules:**
+
+- `generated/` - Auto-generated from `proto/ledger/v1/ledger.proto`
+- `convert.rs` - `From`/`TryFrom` conversions between proto and domain types
 
 ### `inferadb-ledger-server`
 
@@ -197,8 +228,9 @@ Server start → Config::from_env() → NodeId generation
 
 1. Define in `proto/ledger/v1/ledger.proto`
 2. Run `just proto`
-3. Implement handler in `crates/raft/src/service/<service>.rs`
-4. Add tests in `crates/raft/tests/`
+3. Add proto conversions in `crates/proto/src/convert.rs`
+4. Implement handler in `crates/services/src/services/<service>.rs`
+5. Add tests in `crates/server/tests/`
 
 ### New Storage Table
 

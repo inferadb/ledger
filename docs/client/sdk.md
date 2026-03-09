@@ -533,6 +533,169 @@ println!("Leader: {}", result.is_leader);
 let vault_health = client.health_check_vault(organization_slug, vault_slug).await?;
 ```
 
+## Token Operations
+
+### User Sessions
+
+```rust
+use inferadb_ledger_sdk::token::{TokenPair, ValidatedToken};
+
+// Create a user session (access + refresh token pair)
+let pair: TokenPair = client.create_user_session(user_slug).await?;
+println!("Access token: {}", pair.access_token);
+println!("Expires at: {:?}", pair.access_expires_at);
+
+// Validate an access token and get parsed claims
+let claims: ValidatedToken = client.validate_token(&pair.access_token).await?;
+match claims {
+    ValidatedToken::UserSession { user, role } => {
+        println!("User: {}, Role: {}", user, role);
+    }
+    ValidatedToken::VaultAccess { app, vault, scopes, .. } => {
+        println!("App: {}, Vault: {}, Scopes: {:?}", app, vault, scopes);
+    }
+}
+
+// Refresh a token pair (rotate-on-use: old refresh token is consumed)
+let new_pair = client.refresh_token(&pair.refresh_token).await?;
+
+// Revoke a single refresh token and its family
+client.revoke_token(&pair.refresh_token).await?;
+
+// Revoke all sessions for a user (increments token version)
+let revoked_count = client.revoke_all_user_sessions(user_slug).await?;
+```
+
+### Vault Tokens
+
+```rust
+// Create a vault access token for an app
+let vault_pair = client.create_vault_token(org_slug, app_slug, vault_slug).await?;
+```
+
+### Signing Key Management
+
+```rust
+use inferadb_ledger_sdk::token::PublicKeyInfo;
+
+// Create a new signing key for a scope
+let kid = client.create_signing_key(scope).await?;
+
+// Rotate a signing key (creates replacement, marks old as rotated)
+let new_kid = client.rotate_signing_key(&kid).await?;
+
+// Revoke a signing key immediately
+client.revoke_signing_key(&kid).await?;
+
+// Get active public keys for token verification (JWKS-style)
+let keys: Vec<PublicKeyInfo> = client.get_public_keys().await?;
+for key in &keys {
+    println!("kid: {}, status: {}", key.kid, key.status);
+}
+```
+
+> **Note:** Refresh tokens use rotate-on-use semantics. Each refresh token can be used at most once — reuse triggers family poisoning (theft detection), revoking all tokens in that family.
+
+## Organization Operations
+
+```rust
+// Create organization
+let org = client.create_organization("my_app", Region::US_EAST_VA).await?;
+
+// Get, update, delete
+let info = client.get_organization(org_slug).await?;
+client.update_organization(org_slug, Some("new_name"), None).await?;
+client.delete_organization(org_slug).await?;
+
+// List with pagination
+let orgs = client.list_organizations(None).await?;
+
+// Member management
+let members = client.list_organization_members(org_slug, None).await?;
+client.remove_organization_member(org_slug, user_slug).await?;
+client.update_organization_member_role(org_slug, user_slug, role).await?;
+
+// Team management
+let teams = client.list_organization_teams(org_slug).await?;
+client.create_organization_team(org_slug, "engineering").await?;
+client.delete_organization_team(org_slug, team_slug).await?;
+
+// Region migration
+client.migrate_organization(org_slug, target_region).await?;
+```
+
+## User Operations
+
+```rust
+// Create, get, update, delete users
+let user = client.create_user("alice@example.com", "Alice", None).await?;
+let info = client.get_user(user_slug).await?;
+client.update_user(user_slug, Some("Alice Smith"), None).await?;
+client.delete_user(user_slug).await?;
+
+// List and search
+let users = client.list_users(None).await?;
+let matches = client.search_users("alice@example.com").await?;
+
+// Email management
+client.create_user_email(user_slug, "alice@work.com").await?;
+client.delete_user_email(user_slug, email_id).await?;
+let email = client.verify_user_email(verification_token).await?;
+let results = client.search_user_email("alice@").await?;
+
+// Region migration and erasure
+client.migrate_user_region(user_slug, target_region).await?;
+client.erase_user(user_slug).await?;
+```
+
+## App Operations
+
+```rust
+// Create and manage apps
+let app = client.create_app(org_slug, "my-api").await?;
+let info = client.get_app(org_slug, app_slug).await?;
+let apps = client.list_apps(org_slug).await?;
+client.update_app(org_slug, app_slug, Some("new-name")).await?;
+client.delete_app(org_slug, app_slug).await?;
+
+// Enable/disable
+client.enable_app(org_slug, app_slug).await?;
+client.disable_app(org_slug, app_slug).await?;
+
+// Credentials
+client.set_app_credential_enabled(org_slug, app_slug, true).await?;
+let secret = client.get_app_client_secret(org_slug, app_slug).await?;
+client.rotate_app_client_secret(org_slug, app_slug).await?;
+
+// Client assertions (mTLS/JWT client auth)
+let assertions = client.list_app_client_assertions(org_slug, app_slug).await?;
+client.create_app_client_assertion(org_slug, app_slug, assertion).await?;
+client.delete_app_client_assertion(org_slug, app_slug, assertion_id).await?;
+
+// Vault connections
+let vaults = client.list_app_vaults(org_slug, app_slug).await?;
+client.add_app_vault(org_slug, app_slug, vault_slug).await?;
+client.update_app_vault(org_slug, app_slug, vault_slug, scopes).await?;
+client.remove_app_vault(org_slug, app_slug, vault_slug).await?;
+```
+
+## Events Operations
+
+```rust
+// List events with filtering
+let events = client.list_events(org_slug, filter).await?;
+let next_page = client.list_events_next(page_token).await?;
+
+// Get a single event
+let event = client.get_event(org_slug, event_id).await?;
+
+// Count events matching a filter
+let count = client.count_events(org_slug, filter).await?;
+
+// Ingest custom events
+client.ingest_events(org_slug, events).await?;
+```
+
 ## Error Handling
 
 ### Error Types

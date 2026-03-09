@@ -28,12 +28,12 @@ The leader maintains sequence state per client:
 
 ### `ClientSequenceEntry` Fields
 
-| Field                  | Type      | Description                                     |
-| ---------------------- | --------- | ----------------------------------------------- |
-| `sequence`             | `u64`     | Last committed sequence number                  |
-| `last_seen`            | `i64`     | Deterministic apply-phase timestamp              |
-| `last_idempotency_key` | `[u8;16]` | UUID v4 from the last write                    |
-| `last_request_hash`    | `u64`     | Seahash of the last write's operation payload   |
+| Field                  | Type      | Description                                   |
+| ---------------------- | --------- | --------------------------------------------- |
+| `sequence`             | `u64`     | Last committed sequence number                |
+| `last_seen`            | `i64`     | Deterministic apply-phase timestamp           |
+| `last_idempotency_key` | `[u8;16]` | UUID v4 from the last write                   |
+| `last_request_hash`    | `u64`     | Seahash of the last write's operation payload |
 
 ### Validation Rules
 
@@ -118,10 +118,10 @@ Resume from `last_committed_sequence + 1`.
 
 Client state is tracked at two levels:
 
-| Write Scope         | GetClientState Call                          | Use Case                         |
-| ------------------- | -------------------------------------------- | -------------------------------- |
-| Organization entities  | `GetClientState(ns_id, client_id)`           | Control writing users, sessions  |
-| Vault relationships | `GetClientState(ns_id, vault_id, client_id)` | App writing authorization tuples |
+| Write Scope           | GetClientState Call                          | Use Case                         |
+| --------------------- | -------------------------------------------- | -------------------------------- |
+| Organization entities | `GetClientState(ns_id, client_id)`           | Control writing users, sessions  |
+| Vault relationships   | `GetClientState(ns_id, vault_id, client_id)` | App writing authorization tuples |
 
 A single client can have separate sequence streams for each scope.
 
@@ -178,3 +178,20 @@ fn assign_actor(auth_context: &AuthContext) -> String {
 | `system:{name}` | `system:gc`          | Internal operation |
 
 **Security**: Clients cannot specify actor—it's always derived from the authenticated request context. This prevents impersonation attacks.
+
+## Token Operation Idempotency
+
+Token operations (`TokenService`) use different idempotency semantics than data writes:
+
+| Operation               | Idempotency          | Notes                                                          |
+| ----------------------- | -------------------- | -------------------------------------------------------------- |
+| `CreateUserSession`     | Not idempotent       | Each call creates a new session                                |
+| `ValidateToken`         | Naturally idempotent | Read-only, no state change                                     |
+| `RefreshToken`          | **At-most-once**     | Refresh token consumed on use; reuse triggers family poisoning |
+| `RevokeToken`           | Idempotent           | Revoking an already-revoked token is a no-op                   |
+| `RevokeAllUserSessions` | Idempotent           | Bumps token version (monotonic)                                |
+| `CreateSigningKey`      | Not idempotent       | Each call generates a new key                                  |
+| `RotateSigningKey`      | Idempotent           | Rotating an already-rotated key is a no-op                     |
+| `RevokeSigningKey`      | Idempotent           | Revoking an already-revoked key is a no-op                     |
+
+Token operations go through Raft consensus but do not use the `(client_id, sequence)` idempotency mechanism. Instead, they rely on state-based idempotency (e.g., key status transitions are one-way).

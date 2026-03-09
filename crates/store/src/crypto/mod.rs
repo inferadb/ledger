@@ -27,8 +27,9 @@ mod types;
 pub use backend::EncryptedBackend;
 pub use cache::{DekCache, RmkCache};
 pub use key_manager::{
-    EnvKeyManager, FileKeyManager, RegionKeyManager, SecretsClient, SecretsManagerKeyManager,
-    VersionSidecarEntry, required_regions, rmk_versions_for_health, validate_rmk_provisioning,
+    EnvKeyManager, FileKeyManager, InMemoryKeyManager, RegionKeyManager, SecretsClient,
+    SecretsManagerKeyManager, VersionSidecarEntry, required_regions, rmk_versions_for_health,
+    validate_rmk_provisioning,
 };
 pub use operations::{decrypt_page_body, encrypt_page_body, generate_dek, unwrap_dek, wrap_dek};
 pub use sidecar::CryptoSidecar;

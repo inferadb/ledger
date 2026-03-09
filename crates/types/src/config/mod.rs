@@ -12,6 +12,7 @@
 #![allow(clippy::disallowed_methods)]
 
 mod encryption;
+mod jwt;
 mod key_management;
 mod node;
 mod observability;
@@ -21,6 +22,7 @@ mod runtime;
 mod storage;
 
 pub use encryption::*;
+pub use jwt::*;
 pub use key_management::*;
 pub use node::*;
 pub use observability::*;
@@ -1297,5 +1299,120 @@ mod tests {
                 "{region:?} should have {expected}-day retention"
             );
         }
+    }
+
+    // =========================================================================
+    // JwtConfig validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_jwt_config_defaults_are_valid() {
+        let config = JwtConfig::builder().build().expect("defaults should be valid");
+        assert_eq!(config.issuer, "inferadb");
+        assert_eq!(config.session_access_ttl_secs, 1800);
+        assert_eq!(config.session_refresh_ttl_secs, 1_209_600);
+        assert_eq!(config.vault_access_ttl_secs, 900);
+        assert_eq!(config.vault_refresh_ttl_secs, 3600);
+        assert_eq!(config.clock_skew_secs, 30);
+        assert_eq!(config.key_rotation_grace_secs, 14400);
+    }
+
+    #[test]
+    fn test_jwt_config_default_trait() {
+        let config = JwtConfig::default();
+        assert_eq!(config.issuer, "inferadb");
+        config.validate().expect("default should be valid");
+    }
+
+    #[test]
+    fn test_jwt_config_builder_custom_values() {
+        let config = JwtConfig::builder()
+            .issuer("my-cluster")
+            .session_access_ttl_secs(600)
+            .session_refresh_ttl_secs(86400)
+            .vault_access_ttl_secs(300)
+            .vault_refresh_ttl_secs(1800)
+            .clock_skew_secs(10)
+            .key_rotation_grace_secs(7200)
+            .build()
+            .expect("custom values should be valid");
+        assert_eq!(config.issuer, "my-cluster");
+        assert_eq!(config.session_access_ttl_secs, 600);
+        assert_eq!(config.vault_access_ttl_secs, 300);
+    }
+
+    #[test]
+    fn test_jwt_config_rejects_empty_issuer() {
+        let result = JwtConfig::builder().issuer("").build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_jwt_config_rejects_zero_ttls() {
+        let fields: Vec<(&str, _)> = vec![
+            ("session_access", JwtConfig::builder().session_access_ttl_secs(0).build()),
+            ("session_refresh", JwtConfig::builder().session_refresh_ttl_secs(0).build()),
+            ("vault_access", JwtConfig::builder().vault_access_ttl_secs(0).build()),
+            ("vault_refresh", JwtConfig::builder().vault_refresh_ttl_secs(0).build()),
+            ("key_rotation_grace", JwtConfig::builder().key_rotation_grace_secs(0).build()),
+        ];
+        for (name, result) in fields {
+            assert!(result.is_err(), "{name} should reject zero");
+        }
+    }
+
+    #[test]
+    fn test_jwt_config_refresh_must_exceed_access() {
+        // Session: refresh <= access
+        let result = JwtConfig::builder()
+            .session_access_ttl_secs(1800)
+            .session_refresh_ttl_secs(1800)
+            .build();
+        assert!(result.is_err());
+
+        // Vault: refresh <= access
+        let result =
+            JwtConfig::builder().vault_access_ttl_secs(900).vault_refresh_ttl_secs(900).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_jwt_config_clock_skew_must_be_less_than_min_access_ttl() {
+        // clock_skew >= min(session_access, vault_access)
+        let result = JwtConfig::builder()
+            .vault_access_ttl_secs(30)
+            .vault_refresh_ttl_secs(3600)
+            .clock_skew_secs(30)
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_jwt_config_serde_roundtrip() {
+        let config = JwtConfig::builder()
+            .issuer("test")
+            .session_access_ttl_secs(600)
+            .session_refresh_ttl_secs(7200)
+            .build()
+            .unwrap();
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: JwtConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn test_jwt_config_serde_defaults() {
+        let config: JwtConfig = serde_json::from_str("{}").unwrap();
+        config.validate().expect("serde defaults should be valid");
+        assert_eq!(config.issuer, "inferadb");
+        assert_eq!(config.session_access_ttl_secs, 1800);
+    }
+
+    #[test]
+    fn test_jwt_config_validate_method() {
+        let mut config = JwtConfig::default();
+        assert!(config.validate().is_ok());
+        config.session_access_ttl_secs = 0;
+        assert!(config.validate().is_err());
     }
 }

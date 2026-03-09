@@ -26,14 +26,19 @@ use inferadb_ledger_state::{
     StateLayer,
     system::{
         CreateOrganizationInput, CreateOrganizationSaga, CreateOrganizationSagaState,
-        CreateUserSaga, CreateUserSagaState, DeleteUserSaga, DeleteUserSagaState, MigrateOrgSaga,
+        CreateSigningKeyInput, CreateSigningKeySaga, CreateSigningKeySagaState, CreateUserSaga,
+        CreateUserSagaState, DeleteUserSaga, DeleteUserSagaState, MigrateOrgSaga,
         MigrateOrgSagaState, MigrateUserSaga, MigrateUserSagaState, SAGA_POLL_INTERVAL, Saga,
-        SagaLockKey,
+        SagaLockKey, SigningKeyScope,
     },
 };
-use inferadb_ledger_store::StorageBackend;
+use inferadb_ledger_store::{
+    StorageBackend,
+    crypto::{RegionKeyManager, generate_dek, wrap_dek},
+};
 use inferadb_ledger_types::{
-    Operation, OrganizationId, SetCondition, Transaction, UserId, VaultId,
+    Operation, OrganizationId, Region, SetCondition, SigningKeyEnvelope, Transaction, UserId,
+    VaultId,
     config::MigrationConfig,
     events::{EventAction, EventOutcome},
     snowflake,
@@ -42,6 +47,7 @@ use openraft::Raft;
 use snafu::{GenerateImplicitData, ResultExt};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
+use zeroize::Zeroize;
 
 use crate::{
     error::{DeserializationSnafu, SagaError, SerializationSnafu, StateReadSnafu},
@@ -90,6 +96,11 @@ pub struct SagaOrchestrator<B: StorageBackend + 'static> {
     /// Migration timeout configuration.
     #[builder(default)]
     migration_config: MigrationConfig,
+    /// Region key manager for signing key envelope encryption.
+    /// Required for `CreateSigningKeySaga` execution (keypair generation
+    /// needs RMK to encrypt the private key material).
+    #[builder(default)]
+    key_manager: Option<Arc<dyn RegionKeyManager>>,
 }
 
 impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
@@ -976,6 +987,26 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     organization_slug = organization_slug.value(),
                     "CreateOrganization: saga completed"
                 );
+
+                // Fire CreateSigningKeySaga for the new organization's signing key
+                if self.key_manager.is_some() {
+                    let scope = SigningKeyScope::Organization(organization_id);
+                    if let Err(e) = self.write_signing_key_saga(scope).await {
+                        warn!(
+                            saga_id = %saga.id,
+                            organization_id = organization_id.value(),
+                            error = %e,
+                            "CreateOrganization: failed to write CreateSigningKeySaga"
+                        );
+                    } else {
+                        info!(
+                            saga_id = %saga.id,
+                            organization_id = organization_id.value(),
+                            "CreateOrganization: fired CreateSigningKeySaga for org"
+                        );
+                    }
+                }
+
                 Ok(())
             },
 
@@ -1112,6 +1143,283 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         }
     }
 
+    /// Creates a `SystemOrganizationService` from the shared state layer.
+    fn system_service(&self) -> inferadb_ledger_state::system::SystemOrganizationService<B> {
+        inferadb_ledger_state::system::SystemOrganizationService::new(Arc::clone(&self.state))
+    }
+
+    /// Maps a signing key scope to the Region whose RMK protects it.
+    ///
+    /// Global keys use `Region::GLOBAL` (always provisioned, validated at startup).
+    /// Org keys use the org's assigned region.
+    fn scope_to_region(&self, scope: &SigningKeyScope) -> Result<Region, SagaError> {
+        match scope {
+            SigningKeyScope::Global => Ok(Region::GLOBAL),
+            SigningKeyScope::Organization(org_id) => {
+                let sys_service = self.system_service();
+                sys_service
+                    .get_region_for_organization(*org_id)
+                    .map_err(|e| SagaError::KeyGeneration {
+                        message: format!("Failed to resolve region for org {org_id}: {e}"),
+                    })?
+                    .ok_or_else(|| SagaError::EntityNotFound {
+                        entity_type: "Organization".to_string(),
+                        identifier: org_id.to_string(),
+                    })
+            },
+        }
+    }
+
+    /// Generates an Ed25519 keypair and encrypts the private key with envelope encryption.
+    ///
+    /// Uses the RMK for the appropriate region (Global → `Region::GLOBAL`,
+    /// Organization → org's region). The `kid` is used as AAD to bind the
+    /// ciphertext to its key identity.
+    fn generate_and_encrypt_keypair(
+        &self,
+        scope: &SigningKeyScope,
+        kid: &str,
+    ) -> Result<(Vec<u8>, Vec<u8>, u32), SagaError> {
+        let key_manager = self.key_manager.as_ref().ok_or_else(|| SagaError::KeyGeneration {
+            message: "No key manager configured".to_string(),
+        })?;
+
+        // Resolve which region's RMK to use
+        let region = self.scope_to_region(scope)?;
+
+        // Get current RMK for the region
+        let rmk = key_manager.current_rmk(region).map_err(|e| SagaError::KeyEncryption {
+            message: format!("Failed to get RMK for region {region}: {e}"),
+        })?;
+
+        // Generate Ed25519 keypair from 32 random bytes.
+        // Using from_bytes() with CSPRNG output avoids rand_core version
+        // conflicts between rand 0.10 (workspace) and rand_core 0.6 (ed25519-dalek).
+        let mut secret_bytes = [0u8; 32];
+        rand::RngExt::fill(&mut rand::rng(), &mut secret_bytes);
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_bytes);
+        let public_key_bytes = signing_key.verifying_key().to_bytes().to_vec();
+        let mut private_key_bytes = signing_key.to_bytes();
+
+        // Zeroize seed material — no longer needed after keypair derivation
+        secret_bytes.zeroize();
+
+        // Envelope encryption: generate DEK, wrap with RMK, encrypt private key with DEK
+        let dek = generate_dek();
+        let wrapped_dek = wrap_dek(&dek, &rmk).map_err(|e| SagaError::KeyEncryption {
+            message: format!("DEK wrapping failed: {e}"),
+        })?;
+
+        // Encrypt private key with DEK using AES-256-GCM, kid as AAD
+        let (ciphertext, nonce, auth_tag) = inferadb_ledger_store::crypto::encrypt_page_body(
+            &private_key_bytes,
+            kid.as_bytes(),
+            &dek,
+        )
+        .map_err(|e| {
+            private_key_bytes.zeroize();
+            SagaError::KeyEncryption { message: format!("Private key encryption failed: {e}") }
+        })?;
+
+        // Zeroize plaintext private key — now encrypted in ciphertext
+        private_key_bytes.zeroize();
+
+        // Build envelope
+        let ct_array: [u8; 32] = ciphertext.try_into().map_err(|_| SagaError::KeyEncryption {
+            message: "Unexpected ciphertext length (expected 32 bytes)".to_string(),
+        })?;
+        let envelope = SigningKeyEnvelope {
+            wrapped_dek: *wrapped_dek.as_bytes(),
+            nonce,
+            ciphertext: ct_array,
+            auth_tag,
+        };
+
+        Ok((public_key_bytes, envelope.to_bytes().to_vec(), rmk.version))
+    }
+
+    /// Executes a single step of a CreateSigningKey saga.
+    ///
+    /// Two-step state machine:
+    /// 1. `Pending` → check idempotency, generate keypair, encrypt → `KeyGenerated`
+    /// 2. `KeyGenerated` → propose `CreateSigningKey` through Raft → `Completed`
+    async fn execute_create_signing_key_step(
+        &self,
+        saga: &mut CreateSigningKeySaga,
+    ) -> Result<(), SagaError> {
+        match saga.state.clone() {
+            CreateSigningKeySagaState::Pending => {
+                // Idempotency: check if an active key already exists for this scope
+                let sys_service = self.system_service();
+                let existing =
+                    sys_service.get_active_signing_key(&saga.input.scope).map_err(|e| {
+                        SagaError::KeyGeneration {
+                            message: format!("Failed to check active key: {e}"),
+                        }
+                    })?;
+                if let Some(key) = existing {
+                    // Active key already exists — skip to Completed
+                    saga.transition(CreateSigningKeySagaState::Completed { kid: key.kid });
+                    info!(
+                        saga_id = %saga.id,
+                        scope = ?saga.input.scope,
+                        "CreateSigningKey: active key already exists, skipping"
+                    );
+                    return Ok(());
+                }
+
+                // Generate keypair and encrypt private key
+                let kid = uuid::Uuid::new_v4().to_string();
+                let (public_key_bytes, encrypted_private_key, rmk_version) =
+                    self.generate_and_encrypt_keypair(&saga.input.scope, &kid)?;
+
+                saga.transition(CreateSigningKeySagaState::KeyGenerated {
+                    kid: kid.clone(),
+                    public_key_bytes,
+                    encrypted_private_key,
+                    rmk_version,
+                });
+                info!(
+                    saga_id = %saga.id,
+                    kid = %kid,
+                    scope = ?saga.input.scope,
+                    "CreateSigningKey: keypair generated and encrypted"
+                );
+                Ok(())
+            },
+
+            CreateSigningKeySagaState::KeyGenerated {
+                kid,
+                public_key_bytes,
+                encrypted_private_key,
+                rmk_version,
+            } => {
+                // Propose CreateSigningKey through Raft
+                let request = LedgerRequest::CreateSigningKey {
+                    scope: saga.input.scope,
+                    kid: kid.clone(),
+                    public_key_bytes,
+                    encrypted_private_key,
+                    rmk_version,
+                };
+
+                let result =
+                    self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                        SagaError::SagaRaftWrite {
+                            message: format!("{e:?}"),
+                            backtrace: snafu::Backtrace::generate(),
+                        }
+                    })?;
+
+                let response = result.data;
+                match response {
+                    crate::types::LedgerResponse::SigningKeyCreated {
+                        kid: created_kid, ..
+                    } => {
+                        saga.transition(CreateSigningKeySagaState::Completed { kid: created_kid });
+                        info!(
+                            saga_id = %saga.id,
+                            kid = %kid,
+                            scope = ?saga.input.scope,
+                            "CreateSigningKey: saga completed"
+                        );
+                        Ok(())
+                    },
+                    crate::types::LedgerResponse::Error { code, message } => {
+                        Err(SagaError::UnexpectedSagaResponse { code, description: message })
+                    },
+                    other => Err(SagaError::UnexpectedSagaResponse {
+                        code: inferadb_ledger_types::LedgerErrorCode::Internal,
+                        description: format!("expected SigningKeyCreated, got {other}"),
+                    }),
+                }
+            },
+
+            CreateSigningKeySagaState::Completed { .. }
+            | CreateSigningKeySagaState::Failed { .. }
+            | CreateSigningKeySagaState::TimedOut => {
+                // Terminal states
+                Ok(())
+            },
+        }
+    }
+
+    /// Writes a `CreateSigningKeySaga` record to `_system` storage.
+    ///
+    /// Called from both org creation paths to ensure all orgs get signing keys.
+    /// Also called during global key bootstrap. The saga orchestrator picks up
+    /// pending saga records on its next poll cycle.
+    async fn write_signing_key_saga(&self, scope: SigningKeyScope) -> Result<(), SagaError> {
+        let saga_id = uuid::Uuid::new_v4().to_string();
+        let saga = CreateSigningKeySaga::new(saga_id.clone(), CreateSigningKeyInput { scope });
+
+        self.save_saga(&Saga::CreateSigningKey(saga)).await?;
+        info!(
+            saga_id = %saga_id,
+            scope = ?scope,
+            "Wrote CreateSigningKeySaga record"
+        );
+        Ok(())
+    }
+
+    /// Checks if a global signing key exists and writes a bootstrap saga if not.
+    ///
+    /// Called on every leader poll cycle. Idempotent — if a saga or active key
+    /// already exists, this is a no-op.
+    async fn check_global_signing_key_bootstrap(&self) {
+        // Skip if no key manager configured (signing keys not enabled)
+        if self.key_manager.is_none() {
+            return;
+        }
+
+        let sys_service = self.system_service();
+
+        // Check if active global key exists
+        match sys_service.get_active_signing_key(&SigningKeyScope::Global) {
+            Ok(Some(_)) => return, // Key already exists
+            Ok(None) => {},        // Need to bootstrap
+            Err(e) => {
+                warn!(error = %e, "Failed to check global signing key status");
+                return;
+            },
+        }
+
+        // Check if any non-failed CreateSigningKey saga for Global scope exists
+        // (covers both pending and completed sagas to avoid duplicates)
+        let all_sagas =
+            match self.state.list_entities(SYSTEM_VAULT_ID, Some(SAGA_KEY_PREFIX), None, 1000) {
+                Ok(entities) => entities,
+                Err(e) => {
+                    warn!(error = %e, "Failed to list sagas for bootstrap check");
+                    return;
+                },
+            };
+
+        let has_global_key_saga = all_sagas.iter().any(|entity| {
+            let Ok(saga) = serde_json::from_slice::<Saga>(&entity.value) else {
+                return false;
+            };
+            if let Saga::CreateSigningKey(csk) = &saga {
+                csk.input.scope == SigningKeyScope::Global
+                    && !matches!(
+                        csk.state,
+                        CreateSigningKeySagaState::Failed { .. }
+                            | CreateSigningKeySagaState::TimedOut
+                    )
+            } else {
+                false
+            }
+        });
+        if has_global_key_saga {
+            return;
+        }
+
+        info!("No global signing key found, writing bootstrap saga");
+        if let Err(e) = self.write_signing_key_saga(SigningKeyScope::Global).await {
+            warn!(error = %e, "Failed to write global signing key bootstrap saga");
+        }
+    }
+
     /// Executes a single saga.
     async fn execute_saga(&self, mut saga: Saga) {
         let saga_id = saga.id().to_string();
@@ -1125,6 +1433,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             Saga::MigrateUser(s) => self.execute_migrate_user_step(s).await,
             Saga::CreateUser(s) => self.execute_create_user_step(s).await,
             Saga::CreateOrganization(s) => self.execute_create_organization_step(s).await,
+            Saga::CreateSigningKey(s) => self.execute_create_signing_key_step(s).await,
         };
 
         if let Err(e) = result {
@@ -1159,6 +1468,9 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         let cycle_start = Instant::now();
 
         debug!("Starting saga poll cycle");
+
+        // Bootstrap global signing key if absent
+        self.check_global_signing_key_bootstrap().await;
 
         let sagas = self.load_pending_sagas();
         let saga_count = sagas.len() as u64;
@@ -1234,14 +1546,14 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 )]
 mod tests {
     use inferadb_ledger_state::system::{
-        CreateOrganizationInput, CreateUserInput, DeleteUserInput, MigrateOrgInput,
-        MigrateUserInput, OrganizationTier,
+        CreateOrganizationInput, CreateSigningKeyInput, CreateSigningKeySaga, CreateUserInput,
+        DeleteUserInput, MigrateOrgInput, MigrateUserInput, OrganizationTier, SigningKeyScope,
     };
     use inferadb_ledger_types::{OrganizationSlug, Region};
 
     use super::*;
 
-    /// Builds all five saga variants in their initial (Pending) state.
+    /// Builds all six saga variants in their initial (Pending) state.
     fn all_pending_sagas() -> Vec<(&'static str, Saga)> {
         vec![
             (
@@ -1306,6 +1618,13 @@ mod tests {
                         admin: UserId::new(1),
                         pending_profile_key: "_sys:pending:create-org-303".to_string(),
                     },
+                )),
+            ),
+            (
+                "CreateSigningKey",
+                Saga::CreateSigningKey(CreateSigningKeySaga::new(
+                    "create-key-404".to_string(),
+                    CreateSigningKeyInput { scope: SigningKeyScope::Global },
                 )),
             ),
         ]

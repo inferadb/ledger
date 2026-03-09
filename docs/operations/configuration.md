@@ -346,12 +346,12 @@ inferadb-ledger \
 
 Snapshot and cache settings. Configured via `UpdateConfig` RPC at runtime.
 
-| Field                    | Type     | Default     | Description                              |
-| ------------------------ | -------- | ----------- | ---------------------------------------- |
-| `cache_size_bytes`       | usize    | `268435456` | B+ tree page cache size (256 MB default) |
-| `hot_cache_snapshots`    | usize    | `3`         | Snapshots to keep in hot cache           |
-| `snapshot_interval`      | duration | `5m`        | Interval between automatic snapshots     |
-| `compression_level`      | i32      | `3`         | zstd compression level (1–22)            |
+| Field                 | Type     | Default     | Description                              |
+| --------------------- | -------- | ----------- | ---------------------------------------- |
+| `cache_size_bytes`    | usize    | `268435456` | B+ tree page cache size (256 MB default) |
+| `hot_cache_snapshots` | usize    | `3`         | Snapshots to keep in hot cache           |
+| `snapshot_interval`   | duration | `5m`        | Interval between automatic snapshots     |
+| `compression_level`   | i32      | `3`         | zstd compression level (1–22)            |
 
 **Compression level trade-offs**: Level 3 (default) balances speed and ratio well for typical workloads (~3–4x compression). Higher levels (6–10) yield marginally better compression at increasing CPU cost. Levels above 10 are rarely worthwhile for Ledger's data patterns.
 
@@ -359,10 +359,10 @@ Snapshot and cache settings. Configured via `UpdateConfig` RPC at runtime.
 
 Controls how expired client sequence entries are purged from the replicated state. These entries enable cross-failover idempotency deduplication within the TTL window.
 
-| Field                | Type | Default | Description                                     |
-| -------------------- | ---- | ------- | ----------------------------------------------- |
-| `eviction_interval`  | u64  | `1000`  | Evict when `last_applied.index % interval == 0` |
-| `ttl_seconds`        | i64  | `86400` | Entry TTL in seconds (24 hours default)         |
+| Field               | Type | Default | Description                                     |
+| ------------------- | ---- | ------- | ----------------------------------------------- |
+| `eviction_interval` | u64  | `1000`  | Evict when `last_applied.index % interval == 0` |
+| `ttl_seconds`       | i64  | `86400` | Entry TTL in seconds (24 hours default)         |
 
 **Eviction is deterministic**: triggered by the Raft log index, ensuring all replicas evict identical entries at the same point. Lower `eviction_interval` means more frequent checks (slightly more CPU per apply cycle). Higher values mean entries may live slightly beyond TTL.
 
@@ -379,6 +379,24 @@ Use `GetConfig` to inspect current runtime configuration:
 ```bash
 grpcurl -plaintext localhost:50051 ledger.v1.AdminService/GetConfig
 ```
+
+## JWT Configuration
+
+Token issuance and signing key management settings. See [INTEGRATION.md](../INTEGRATION.md) for the full JWT integration guide.
+
+| Variable                                          | Default             | Description                            |
+| ------------------------------------------------- | ------------------- | -------------------------------------- |
+| `INFERADB__LEDGER__JWT__ISSUER`                   | `"inferadb"`        | JWT `iss` claim value                  |
+| `INFERADB__LEDGER__JWT__SESSION_ACCESS_TTL_SECS`  | `1800` (30 min)     | User session access token TTL          |
+| `INFERADB__LEDGER__JWT__SESSION_REFRESH_TTL_SECS` | `1209600` (14 days) | User session refresh token TTL         |
+| `INFERADB__LEDGER__JWT__VAULT_ACCESS_TTL_SECS`    | `900` (15 min)      | Vault access token TTL                 |
+| `INFERADB__LEDGER__JWT__VAULT_REFRESH_TTL_SECS`   | `3600` (1 hour)     | Vault refresh token TTL                |
+| `INFERADB__LEDGER__JWT__CLOCK_SKEW_SECS`          | `30`                | Clock skew leeway for token validation |
+| `INFERADB__LEDGER__JWT__KEY_ROTATION_GRACE_SECS`  | `14400` (4 hours)   | Rotated key validation window          |
+
+**Validation constraints**: All TTLs > 0, refresh TTL > access TTL for each pair, clock skew < minimum access TTL, grace period > 0.
+
+**Runtime reconfiguration**: JWT TTL values are updatable at runtime via `UpdateConfig` RPC without restart. Changes take effect for newly issued tokens; existing tokens retain their original expiry.
 
 ## Events Configuration
 

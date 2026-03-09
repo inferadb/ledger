@@ -265,3 +265,45 @@ If issues persist:
 2. Check for known issues in release notes
 
 3. File an issue with diagnostics attached
+
+## Token Issues
+
+### "No active signing key for scope"
+
+**Cause**: The `CreateSigningKeySaga` hasn't completed during bootstrap, or the active key was revoked without rotation.
+
+**Resolution**:
+
+1. Check saga status: the saga orchestrator should auto-bootstrap signing keys
+2. Manually create a signing key: `TokenService/CreateSigningKey` with the appropriate scope
+3. Check `ledger_background_job_runs_total{job="saga_orchestrator"}` for failures
+
+### "Token expired" on all requests
+
+**Cause**: Clock skew between the server and clients, or signing key rotation left a gap.
+
+**Resolution**:
+
+1. Verify server time is synced (NTP)
+2. Check `GetPublicKeys` returns at least one active key
+3. If keys are all revoked/expired, create a new signing key
+
+### "Refresh token reuse detected: family revoked"
+
+**Cause**: A refresh token was used more than once — this is the theft detection mechanism. All tokens in that family are now poisoned.
+
+**Resolution**:
+
+1. This is working as intended — the user must create a new session
+2. If this happens frequently, investigate whether clients are retrying refresh calls without checking for success
+3. Monitor `ledger_refresh_token_reuse_total` for abnormal spikes (potential credential theft)
+
+### Token maintenance not running
+
+**Symptoms**: Expired tokens accumulating, rotated keys not transitioning to revoked.
+
+**Resolution**:
+
+1. Verify node is leader: `inferadb_ledger_raft_is_leader == 1` (token maintenance runs on leader only)
+2. Check `ledger_background_job_runs_total{job="token_maintenance"}` for recent runs
+3. Check `ledger_background_job_runs_total{job="token_maintenance", result="failure"}` for errors

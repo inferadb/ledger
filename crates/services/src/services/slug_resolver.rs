@@ -352,6 +352,24 @@ impl SlugResolver {
         let slug = Self::extract_app_slug(proto_slug)?;
         self.resolve_app(slug)
     }
+
+    /// Extracts an optional app slug and resolves it if present.
+    ///
+    /// Returns `Ok(None)` when the proto field is absent. Returns an error
+    /// only if the slug is present but zero or not found in the index.
+    pub fn extract_and_resolve_app_optional(
+        &self,
+        proto_slug: &Option<proto::AppSlug>,
+    ) -> Result<Option<(OrganizationId, AppId)>, Status> {
+        match proto_slug {
+            None => Ok(None),
+            Some(slug) if slug.slug == 0 => Err(Status::invalid_argument("app must be non-zero")),
+            Some(slug) => {
+                let domain_slug = AppSlug::new(slug.slug);
+                self.resolve_app(domain_slug).map(Some)
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -881,5 +899,143 @@ mod tests {
         // Cross-type lookups don't interfere
         assert!(resolver.resolve_user(UserSlug::new(100)).is_err());
         assert!(resolver.resolve_user(UserSlug::new(200)).is_err());
+    }
+
+    // =========================================================================
+    // App slug resolution
+    // =========================================================================
+
+    fn make_resolver_with_apps(app_entries: &[(u64, i64, i64)]) -> SlugResolver {
+        let mut state = AppliedState::default();
+        for &(slug_val, org_id_val, app_id_val) in app_entries {
+            let slug = AppSlug::new(slug_val);
+            let org_id = OrganizationId::new(org_id_val);
+            let app_id = AppId::new(app_id_val);
+            state.app_slug_index.insert(slug, (org_id, app_id));
+            state.app_id_to_slug.insert(app_id, slug);
+        }
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        SlugResolver::new(accessor)
+    }
+
+    #[test]
+    fn extract_app_slug_valid() {
+        let proto = Some(proto::AppSlug { slug: 42 });
+        let result = SlugResolver::extract_app_slug(&proto).unwrap();
+        assert_eq!(result.value(), 42);
+    }
+
+    #[test]
+    fn extract_app_slug_missing_returns_invalid_argument() {
+        let result = SlugResolver::extract_app_slug(&None);
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("Missing"));
+    }
+
+    #[test]
+    fn extract_app_slug_zero_returns_invalid_argument() {
+        let proto = Some(proto::AppSlug { slug: 0 });
+        let result = SlugResolver::extract_app_slug(&proto);
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("non-zero"));
+    }
+
+    #[test]
+    fn resolve_app_valid_slug() {
+        let resolver = make_resolver_with_apps(&[(100, 1, 10)]);
+        let (org_id, app_id) = resolver.resolve_app(AppSlug::new(100)).unwrap();
+        assert_eq!(org_id, OrganizationId::new(1));
+        assert_eq!(app_id, AppId::new(10));
+    }
+
+    #[test]
+    fn resolve_app_unknown_slug_returns_not_found() {
+        let resolver = make_resolver_with_apps(&[(100, 1, 10)]);
+        let result = resolver.resolve_app(AppSlug::new(999));
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert!(status.message().contains("999"));
+    }
+
+    #[test]
+    fn resolve_app_slug_reverse_lookup() {
+        let resolver = make_resolver_with_apps(&[(100, 1, 10)]);
+        let slug = resolver.resolve_app_slug(AppId::new(10)).unwrap();
+        assert_eq!(slug.value(), 100);
+    }
+
+    #[test]
+    fn resolve_app_slug_reverse_unknown_returns_not_found() {
+        let resolver = make_resolver_with_apps(&[(100, 1, 10)]);
+        let result = resolver.resolve_app_slug(AppId::new(999));
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[test]
+    fn extract_and_resolve_app_valid() {
+        let resolver = make_resolver_with_apps(&[(42, 1, 10)]);
+        let proto = Some(proto::AppSlug { slug: 42 });
+        let (org_id, app_id) = resolver.extract_and_resolve_app(&proto).unwrap();
+        assert_eq!(org_id, OrganizationId::new(1));
+        assert_eq!(app_id, AppId::new(10));
+    }
+
+    #[test]
+    fn extract_and_resolve_app_missing_slug() {
+        let resolver = make_resolver_with_apps(&[]);
+        let result = resolver.extract_and_resolve_app(&None);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn extract_and_resolve_app_zero_slug() {
+        let resolver = make_resolver_with_apps(&[]);
+        let proto = Some(proto::AppSlug { slug: 0 });
+        let result = resolver.extract_and_resolve_app(&proto);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn extract_and_resolve_app_unknown_slug() {
+        let resolver = make_resolver_with_apps(&[(42, 1, 10)]);
+        let proto = Some(proto::AppSlug { slug: 999 });
+        let result = resolver.extract_and_resolve_app(&proto);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[test]
+    fn extract_and_resolve_app_optional_none() {
+        let resolver = make_resolver_with_apps(&[]);
+        let result = resolver.extract_and_resolve_app_optional(&None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_and_resolve_app_optional_valid() {
+        let resolver = make_resolver_with_apps(&[(42, 1, 10)]);
+        let proto = Some(proto::AppSlug { slug: 42 });
+        let result = resolver.extract_and_resolve_app_optional(&proto).unwrap();
+        assert_eq!(result, Some((OrganizationId::new(1), AppId::new(10))));
+    }
+
+    #[test]
+    fn extract_and_resolve_app_optional_zero() {
+        let resolver = make_resolver_with_apps(&[]);
+        let proto = Some(proto::AppSlug { slug: 0 });
+        let result = resolver.extract_and_resolve_app_optional(&proto);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn extract_and_resolve_app_optional_unknown() {
+        let resolver = make_resolver_with_apps(&[(100, 1, 10)]);
+        let proto = Some(proto::AppSlug { slug: 999 });
+        let result = resolver.extract_and_resolve_app_optional(&proto);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
     }
 }

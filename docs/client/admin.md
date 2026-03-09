@@ -8,206 +8,35 @@ Operations for organization, vault, and cluster management.
 
 ```protobuf
 service AdminService {
-  // Organization operations
-  rpc CreateOrganization(CreateOrganizationRequest) returns (CreateOrganizationResponse);
-  rpc DeleteOrganization(DeleteOrganizationRequest) returns (DeleteOrganizationResponse);
-  rpc GetOrganization(GetOrganizationRequest) returns (GetOrganizationResponse);
-  rpc ListOrganizations(ListOrganizationsRequest) returns (ListOrganizationsResponse);
-
-  // Vault operations
-  rpc CreateVault(CreateVaultRequest) returns (CreateVaultResponse);
-  rpc DeleteVault(DeleteVaultRequest) returns (DeleteVaultResponse);
-  rpc GetVault(GetVaultRequest) returns (GetVaultResponse);
-  rpc ListVaults(ListVaultsRequest) returns (ListVaultsResponse);
-
-  // Cluster operations
+  // Cluster membership
   rpc JoinCluster(JoinClusterRequest) returns (JoinClusterResponse);
   rpc LeaveCluster(LeaveClusterRequest) returns (LeaveClusterResponse);
   rpc GetClusterInfo(GetClusterInfoRequest) returns (GetClusterInfoResponse);
   rpc GetNodeInfo(GetNodeInfoRequest) returns (GetNodeInfoResponse);
+  rpc TransferLeadership(TransferLeadershipRequest) returns (TransferLeadershipResponse);
 
-  // Maintenance operations
+  // Maintenance
   rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
   rpc CheckIntegrity(CheckIntegrityRequest) returns (CheckIntegrityResponse);
   rpc RecoverVault(RecoverVaultRequest) returns (RecoverVaultResponse);
+  rpc SimulateDivergence(SimulateDivergenceRequest) returns (SimulateDivergenceResponse);
   rpc ForceGc(ForceGcRequest) returns (ForceGcResponse);
+
+  // Runtime configuration
+  rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse);
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+
+  // Backup & restore
+  rpc CreateBackup(CreateBackupRequest) returns (CreateBackupResponse);
+  rpc ListBackups(ListBackupsRequest) returns (ListBackupsResponse);
+  rpc RestoreBackup(RestoreBackupRequest) returns (RestoreBackupResponse);
+
+  // Key rotation
+  rpc RotateBlindingKey(RotateBlindingKeyRequest) returns (RotateBlindingKeyResponse);
+  rpc GetBlindingKeyRehashStatus(GetBlindingKeyRehashStatusRequest) returns (GetBlindingKeyRehashStatusResponse);
+  rpc RotateRegionKey(RotateRegionKeyRequest) returns (RotateRegionKeyResponse);
+  rpc GetRewrapStatus(GetRewrapStatusRequest) returns (GetRewrapStatusResponse);
 }
-```
-
-## Organization Operations
-
-### CreateOrganization
-
-Creates a new organization in a region.
-
-```bash
-grpcurl -plaintext \
-  -d '{"name": "acme_corp", "region": 10}' \
-  localhost:50051 ledger.v1.AdminService/CreateOrganization
-```
-
-**Request:**
-
-| Field    | Type   | Description                                     |
-| -------- | ------ | ----------------------------------------------- |
-| `name`   | string | Human-readable organization name                |
-| `region` | Region | (Required) Geographic region for data residency |
-
-**Response:**
-
-| Field               | Type             | Description                      |
-| ------------------- | ---------------- | -------------------------------- |
-| `organization_slug` | OrganizationSlug | Assigned organization identifier |
-| `region`            | Region           | Assigned region                  |
-
-### DeleteOrganization
-
-Marks an organization for deletion. All vaults must be deleted first.
-
-```bash
-grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}}' \
-  localhost:50051 ledger.v1.AdminService/DeleteOrganization
-```
-
-### GetOrganization
-
-Retrieves organization metadata. Lookup by ID or name.
-
-```bash
-# By ID
-grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}}' \
-  localhost:50051 ledger.v1.AdminService/GetOrganization
-
-# By name
-grpcurl -plaintext \
-  -d '{"name": "acme_corp"}' \
-  localhost:50051 ledger.v1.AdminService/GetOrganization
-```
-
-**Response fields:**
-
-| Field               | Type               | Description             |
-| ------------------- | ------------------ | ----------------------- |
-| `organization_slug` | OrganizationSlug   | Organization identifier |
-| `name`              | string             | Organization name       |
-| `region`            | Region             | Data residency region   |
-| `member_nodes`      | NodeId[]           | Nodes in the region     |
-| `status`            | OrganizationStatus | Lifecycle state         |
-| `config_version`    | uint64             | For cache invalidation  |
-| `created_at`        | Timestamp          | Creation time           |
-
-**OrganizationStatus values:**
-
-| Value       | Description                      |
-| ----------- | -------------------------------- |
-| `ACTIVE`    | Accepting requests               |
-| `MIGRATING` | Being migrated to another region |
-| `SUSPENDED` | Billing or policy suspension     |
-| `DELETING`  | Deletion in progress             |
-| `DELETED`   | Tombstone                        |
-
-### ListOrganizations
-
-Lists all organizations with pagination.
-
-```bash
-grpcurl -plaintext \
-  -d '{"page_size": 100}' \
-  localhost:50051 ledger.v1.AdminService/ListOrganizations
-```
-
-**Request:**
-
-| Field        | Type   | Description                                |
-| ------------ | ------ | ------------------------------------------ |
-| `page_token` | bytes  | (Optional) Continuation token              |
-| `page_size`  | uint32 | Results per page (default: 100, max: 1000) |
-
-## Vault Operations
-
-### CreateVault
-
-Creates a new vault within an organization.
-
-```bash
-grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}}' \
-  localhost:50051 ledger.v1.AdminService/CreateVault
-```
-
-**Request:**
-
-| Field                | Type                 | Description                             |
-| -------------------- | -------------------- | --------------------------------------- |
-| `organization_slug`  | OrganizationSlug     | Parent organization                     |
-| `replication_factor` | uint32               | (Optional) Number of replicas           |
-| `initial_nodes`      | NodeId[]             | (Optional) Specific nodes to host vault |
-| `retention_policy`   | BlockRetentionPolicy | (Optional) Block retention mode         |
-
-**BlockRetentionMode values:**
-
-| Value       | Description                                           |
-| ----------- | ----------------------------------------------------- |
-| `FULL`      | Keep all blocks with full transactions (SOC 2, HIPAA) |
-| `COMPACTED` | Remove old transaction bodies after snapshot          |
-
-**Response:**
-
-| Field     | Type        | Description                                  |
-| --------- | ----------- | -------------------------------------------- |
-| `vault`   | VaultSlug   | Assigned vault slug (Snowflake identifier)   |
-| `genesis` | BlockHeader | Genesis block header with initial state root |
-
-### DeleteVault
-
-Marks a vault for deletion. Vault must be empty.
-
-```bash
-grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
-  localhost:50051 ledger.v1.AdminService/DeleteVault
-```
-
-### GetVault
-
-Retrieves vault metadata and current state.
-
-```bash
-grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
-  localhost:50051 ledger.v1.AdminService/GetVault
-```
-
-**Response:**
-
-| Field               | Type                 | Description              |
-| ------------------- | -------------------- | ------------------------ |
-| `organization_slug` | OrganizationSlug     | Parent organization      |
-| `vault`             | VaultSlug            | Vault slug               |
-| `height`            | uint64               | Current block height     |
-| `state_root`        | Hash                 | Current state root       |
-| `nodes`             | NodeId[]             | Hosting nodes            |
-| `leader`            | NodeId               | Current leader           |
-| `status`            | VaultStatus          | Lifecycle state          |
-| `retention_policy`  | BlockRetentionPolicy | Block retention settings |
-
-**VaultStatus values:**
-
-| Value       | Description                         |
-| ----------- | ----------------------------------- |
-| `ACTIVE`    | Accepting reads and writes          |
-| `READ_ONLY` | Reads only (migration, maintenance) |
-| `DELETED`   | Tombstone                           |
-
-### ListVaults
-
-Lists all vaults on this node.
-
-```bash
-grpcurl -plaintext \
-  localhost:50051 ledger.v1.AdminService/ListVaults
 ```
 
 ## Cluster Operations
@@ -267,6 +96,24 @@ grpcurl -plaintext \
 ```
 
 Used during coordinated bootstrap for nodes to discover each other's Snowflake IDs.
+
+### TransferLeadership
+
+Transfers Raft leadership to a specific node before shutdown or maintenance.
+
+```bash
+# Transfer to a specific node
+grpcurl -plaintext \
+  -d '{"target_node_id": "456"}' \
+  localhost:50051 ledger.v1.AdminService/TransferLeadership
+
+# Let the leader pick the most caught-up follower
+grpcurl -plaintext \
+  -d '{}' \
+  localhost:50051 ledger.v1.AdminService/TransferLeadership
+```
+
+If `target_node_id` is 0, the leader picks the most caught-up follower. Returns once the target has won the election or the timeout expires.
 
 ## Maintenance Operations
 
@@ -385,3 +232,94 @@ Only the leader can run GC. Returns error on followers.
 | `message`        | string | Status or error message            |
 | `expired_count`  | uint64 | Number of expired entities removed |
 | `vaults_scanned` | uint64 | Number of vaults scanned           |
+
+## Runtime Configuration
+
+### UpdateConfig
+
+Updates runtime-reconfigurable parameters without server restart.
+
+```bash
+grpcurl -plaintext \
+  -d '{"config_json": "{\"rate_limit\":{\"requests_per_second\":500}}", "dry_run": true}' \
+  localhost:50051 ledger.v1.AdminService/UpdateConfig
+```
+
+Supports rate limit thresholds, hot key detection, compaction intervals, and validation limits. Non-reconfigurable parameters (listen address, data directory, Raft topology) are rejected with `INVALID_ARGUMENT`. Set `dry_run: true` to validate without applying.
+
+### GetConfig
+
+Returns the current runtime configuration.
+
+```bash
+grpcurl -plaintext \
+  localhost:50051 ledger.v1.AdminService/GetConfig
+```
+
+## Backup & Restore
+
+### CreateBackup
+
+Triggers a consistent snapshot, compresses it, and writes to the configured backup destination.
+
+```bash
+grpcurl -plaintext \
+  localhost:50051 ledger.v1.AdminService/CreateBackup
+```
+
+### ListBackups
+
+Lists available backups with metadata.
+
+```bash
+grpcurl -plaintext \
+  localhost:50051 ledger.v1.AdminService/ListBackups
+```
+
+### RestoreBackup
+
+Restores from a backup. Stops the region, restores state, and resumes. Requires explicit confirmation via the `confirm` field.
+
+```bash
+grpcurl -plaintext \
+  -d '{"backup_id": "20260309T120000Z", "confirm": true}' \
+  localhost:50051 ledger.v1.AdminService/RestoreBackup
+```
+
+## Key Rotation
+
+### RotateBlindingKey
+
+Initiates rotation of the email blinding key. Triggers asynchronous re-hashing of all email HMAC entries. Returns immediately; poll `GetBlindingKeyRehashStatus` for progress.
+
+```bash
+grpcurl -plaintext \
+  localhost:50051 ledger.v1.AdminService/RotateBlindingKey
+```
+
+### GetBlindingKeyRehashStatus
+
+Checks the progress of an in-flight blinding key rotation.
+
+```bash
+grpcurl -plaintext \
+  localhost:50051 ledger.v1.AdminService/GetBlindingKeyRehashStatus
+```
+
+### RotateRegionKey
+
+Initiates rotation of the Region Master Key (RMK). Triggers asynchronous DEK re-wrapping of all page sidecar metadata. Returns immediately; poll `GetRewrapStatus` for progress.
+
+```bash
+grpcurl -plaintext \
+  localhost:50051 ledger.v1.AdminService/RotateRegionKey
+```
+
+### GetRewrapStatus
+
+Checks progress of DEK re-wrapping after RMK rotation.
+
+```bash
+grpcurl -plaintext \
+  localhost:50051 ledger.v1.AdminService/GetRewrapStatus
+```

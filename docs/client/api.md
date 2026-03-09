@@ -4,6 +4,25 @@
 
 This document covers read and write operations, error handling, and pagination.
 
+## gRPC Services Overview
+
+| Service               | Purpose                                          |
+| --------------------- | ------------------------------------------------ |
+| `ReadService`         | Entity/relationship reads, verified reads, lists |
+| `WriteService`        | Transactional writes, conditional operations     |
+| `AdminService`        | Cluster, maintenance, config, backup, keys       |
+| `OrganizationService` | Organization CRUD, members, teams, migration     |
+| `VaultService`        | Vault creation, listing, metadata                |
+| `UserService`         | User CRUD, emails, search, erasure               |
+| `AppService`          | App lifecycle, credentials, vault connections    |
+| `TokenService`        | JWT sessions, refresh, signing key management    |
+| `EventsService`       | Audit event listing, filtering, ingestion        |
+| `HealthService`       | Readiness, liveness, startup probes              |
+| `DiscoveryService`    | Endpoint discovery, region topology              |
+| `RaftService`         | Inter-node consensus (internal)                  |
+
+See [AdminService](admin.md) for admin operations, [SDK](sdk.md) for Rust client usage, and [Errors](errors.md) for error handling.
+
 ## Write Operations
 
 ### Single Write
@@ -186,12 +205,12 @@ for result in results.results {
 
 **Request:**
 
-| Field          | Type            | Description                     |
-| -------------- | --------------- | ------------------------------- |
-| `organization_slug` | OrganizationSlug     | Target organization                |
-| `vault`        | VaultSlug       | (Optional) Target vault         |
-| `keys`         | string[]        | Keys to read (max 1000)         |
-| `consistency`  | ReadConsistency | Consistency level for all reads |
+| Field               | Type             | Description                     |
+| ------------------- | ---------------- | ------------------------------- |
+| `organization_slug` | OrganizationSlug | Target organization             |
+| `vault`             | VaultSlug        | (Optional) Target vault         |
+| `keys`              | string[]         | Keys to read (max 1000)         |
+| `consistency`       | ReadConsistency  | Consistency level for all reads |
 
 **Response:**
 
@@ -355,15 +374,15 @@ let stream = client.watch_blocks(WatchBlocksRequest {
 
 ### gRPC Status Codes
 
-| Status                | Meaning                            | Examples                           |
-| --------------------- | ---------------------------------- | ---------------------------------- |
-| `UNAUTHENTICATED`     | Missing or invalid credentials     | Bad API key, expired session       |
-| `PERMISSION_DENIED`   | Valid auth but insufficient access | Write to read-only vault           |
-| `INVALID_ARGUMENT`    | Malformed request                  | Invalid key format, bad page_token |
-| `NOT_FOUND`           | Resource doesn't exist             | Unknown organization_slug, vault_slug   |
-| `UNAVAILABLE`         | Temporary failure                  | Leader election, node down         |
-| `RESOURCE_EXHAUSTED`  | Rate limit or quota                | Too many requests                  |
-| `FAILED_PRECONDITION` | Precondition failed                | Height unavailable (pruned)        |
+| Status                | Meaning                            | Examples                              |
+| --------------------- | ---------------------------------- | ------------------------------------- |
+| `UNAUTHENTICATED`     | Missing or invalid credentials     | Bad API key, expired session          |
+| `PERMISSION_DENIED`   | Valid auth but insufficient access | Write to read-only vault              |
+| `INVALID_ARGUMENT`    | Malformed request                  | Invalid key format, bad page_token    |
+| `NOT_FOUND`           | Resource doesn't exist             | Unknown organization_slug, vault_slug |
+| `UNAVAILABLE`         | Temporary failure                  | Leader election, node down            |
+| `RESOURCE_EXHAUSTED`  | Rate limit or quota                | Too many requests                     |
+| `FAILED_PRECONDITION` | Precondition failed                | Height unavailable (pruned)           |
 
 ### Domain-Specific Errors
 

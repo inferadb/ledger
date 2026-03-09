@@ -24,7 +24,8 @@ incompatible clients before they encounter undefined behavior.
 
 - The SDK injects `x-ledger-api-version: 1` on every request via
   `TraceContextInterceptor`.
-- The server validates the header on client-facing RPCs (Read, Write, Admin).
+- The server validates the header on client-facing RPCs (Read, Write, Admin,
+  Organization, Vault, User, App, Token, Events).
 - Health, Discovery, and Raft RPCs are exempt — they serve infrastructure
   probes and inter-node consensus traffic that must work regardless of
   API version.

@@ -8,6 +8,7 @@
 //! - AdminService: Cluster operations, maintenance, backup/restore
 //! - UserService: User lifecycle and email management
 //! - AppService: Organization-scoped client application management
+//! - TokenService: JWT lifecycle (sessions, vault tokens, signing keys)
 //! - HealthService: Health checks
 //! - SystemDiscoveryService: Peer discovery
 
@@ -19,8 +20,8 @@ use inferadb_ledger_proto::proto::{
     organization_service_server::OrganizationServiceServer, raft_service_server::RaftServiceServer,
     read_service_server::ReadServiceServer,
     system_discovery_service_server::SystemDiscoveryServiceServer,
-    user_service_server::UserServiceServer, vault_service_server::VaultServiceServer,
-    write_service_server::WriteServiceServer,
+    token_service_server::TokenServiceServer, user_service_server::UserServiceServer,
+    vault_service_server::VaultServiceServer, write_service_server::WriteServiceServer,
 };
 use inferadb_ledger_raft::{
     graceful_shutdown::ConnectionTrackingLayer, idempotency::IdempotencyCache,
@@ -32,10 +33,11 @@ use tower::ServiceBuilder;
 
 use crate::{
     api_version::{ApiVersionLayer, api_version_interceptor},
+    jwt::JwtEngine,
     services::{
         AdminService, AppService, DiscoveryService, EventsService, HealthService,
         OrganizationService, RaftService, ReadService, RegionResolver, RegionResolverService,
-        UserService, VaultService, WriteService, service_infra::ServiceContext,
+        TokenServiceImpl, UserService, VaultService, WriteService, service_infra::ServiceContext,
     },
 };
 
@@ -120,6 +122,20 @@ pub struct LedgerServer {
     /// Included in discovery responses so peers know this node's region.
     #[builder(default = inferadb_ledger_types::Region::GLOBAL)]
     region: inferadb_ledger_types::Region,
+    /// JWT engine for token signing and validation (optional).
+    ///
+    /// When provided alongside `jwt_config` and `key_manager`, the `TokenService`
+    /// is registered and exposes session/vault token lifecycle RPCs.
+    #[builder(default)]
+    jwt_engine: Option<Arc<JwtEngine>>,
+    /// JWT configuration (token TTLs, issuer, clock skew).
+    #[builder(default)]
+    jwt_config: Option<inferadb_ledger_types::config::JwtConfig>,
+    /// Region key manager for signing key envelope encryption.
+    ///
+    /// Used by `TokenService` to decrypt signing keys on cache miss.
+    #[builder(default)]
+    key_manager: Option<Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>>,
 }
 
 impl LedgerServer {
@@ -249,6 +265,22 @@ impl LedgerServer {
         let organization_service = OrganizationService::new(svc_ctx.clone());
         let vault_service = VaultService::new(svc_ctx.clone());
         let user_service = UserService::new(svc_ctx.clone());
+
+        // TokenService is optional — registered when jwt_engine, jwt_config,
+        // and key_manager are all provided.
+        let token_service = if let (Some(jwt_engine), Some(jwt_config), Some(key_manager)) =
+            (self.jwt_engine, self.jwt_config, self.key_manager)
+        {
+            let mut svc =
+                TokenServiceImpl::new(svc_ctx.clone(), jwt_engine, jwt_config, key_manager);
+            if let Some(ref limiter) = self.organization_rate_limiter {
+                svc = svc.with_rate_limiter(limiter.clone());
+            }
+            Some(svc)
+        } else {
+            None
+        };
+
         let app_service = AppService::new(svc_ctx);
 
         // Extract connection tracker before health_state is moved into HealthService
@@ -324,6 +356,14 @@ impl LedgerServer {
             .add_service(SystemDiscoveryServiceServer::new(discovery_service))
             .add_service(RaftServiceServer::new(raft_service))
             .add_service(reflection_service);
+
+        // Register TokenService if JWT support is configured
+        if let Some(token_svc) = token_service {
+            router = router.add_service(TokenServiceServer::with_interceptor(
+                token_svc,
+                api_version_interceptor,
+            ));
+        }
 
         // EventsService is optional — only registered when events_db is provided.
         if let Some(events_db) = self.events_db {

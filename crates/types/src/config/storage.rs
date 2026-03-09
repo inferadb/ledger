@@ -724,7 +724,7 @@ const fn default_reaper_batch_size() -> usize {
 /// The reaper periodically scans for users in `Deleting` status whose
 /// retention period has elapsed, and submits `EraseUser` Raft proposals
 /// to finalize deletion. Only runs on the leader node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct UserRetentionConfig {
     /// Interval between reaper scan cycles in seconds.
     ///
@@ -805,7 +805,7 @@ const fn default_purge_batch_size() -> usize {
 /// The purge job periodically scans for organizations in `Deleted` status
 /// whose retention cooldown has elapsed, and submits `PurgeOrganization`
 /// Raft proposals to finalize removal. Only runs on the leader node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct OrganizationPurgeConfig {
     /// Interval between purge scan cycles in seconds.
     ///

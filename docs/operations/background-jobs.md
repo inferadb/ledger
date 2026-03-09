@@ -12,22 +12,29 @@ InferaDB Ledger runs several background jobs that maintain data integrity, manag
 
 ### Label Values
 
-**`job`**: `gc`, `compaction`, `integrity_scrub`, `auto_recovery`, `backup`, `dek_rewrap`, `orphan_cleanup`, `saga_orchestrator`
+**`job`**: `gc`, `compaction`, `integrity_scrub`, `auto_recovery`, `backup`, `dek_rewrap`, `orphan_cleanup`, `saga_orchestrator`, `token_maintenance`, `ttl_gc`, `learner_refresh`, `organization_purge`, `user_retention`, `events_gc`, `resource_metrics`
 
 **`result`**: `success`, `failure`
 
 ### Items Processed per Job
 
-| Job                 | Item Meaning                          |
-| ------------------- | ------------------------------------- |
-| `gc`                | Blocks compacted (retention mode)     |
-| `compaction`        | B-tree pages merged                   |
-| `integrity_scrub`   | Pages checked (checksum + structural) |
-| `auto_recovery`     | Vaults successfully recovered         |
-| `backup`            | Backups created                       |
-| `dek_rewrap`        | Pages re-wrapped with new RMK         |
-| `orphan_cleanup`    | Orphaned membership records removed   |
-| `saga_orchestrator` | Sagas processed per cycle             |
+| Job                  | Item Meaning                               |
+| -------------------- | ------------------------------------------ |
+| `gc`                 | Blocks compacted (retention mode)          |
+| `compaction`         | B-tree pages merged                        |
+| `integrity_scrub`    | Pages checked (checksum + structural)      |
+| `auto_recovery`      | Vaults successfully recovered              |
+| `backup`             | Backups created                            |
+| `dek_rewrap`         | Pages re-wrapped with new RMK              |
+| `orphan_cleanup`     | Orphaned membership records removed        |
+| `saga_orchestrator`  | Sagas processed per cycle                  |
+| `token_maintenance`  | Expired tokens deleted + keys transitioned |
+| `ttl_gc`             | Expired entities removed                   |
+| `learner_refresh`    | Learner nodes refreshed                    |
+| `organization_purge` | Organizations purged after retention       |
+| `user_retention`     | Users reaped after retention expiry        |
+| `events_gc`          | Expired audit events removed               |
+| `resource_metrics`   | Metric collection cycles completed         |
 
 ## Jobs
 
@@ -99,9 +106,67 @@ Removes orphaned membership records left behind when users are deleted from the 
 - **Leader only**: Yes
 - **Actor**: `system:orphan_cleanup` (audit trail)
 
+### Token Maintenance
+
+Cleans up expired refresh tokens and transitions rotated signing keys past their grace period. Two phases per cycle:
+
+1. **Phase 1**: Proposes `DeleteExpiredRefreshTokens` through Raft (also garbage-collects poisoned token families)
+2. **Phase 2**: Scans for rotated signing keys past `valid_until`, proposes `TransitionSigningKeyRevoked` for each
+
+Both phases go through Raft — background jobs cannot bypass consensus for state changes.
+
+- **Default interval**: 5 minutes (300 seconds)
+- **Leader only**: Yes
+- **Config**: `token_maintenance_interval_secs` in server Config
+
+### TTL Garbage Collector
+
+Removes expired entities (those with `expires_at` in the past) from vault storage.
+
+- **Default interval**: 5 minutes
+- **Leader only**: Yes
+
+### Learner Refresh
+
+Refreshes Raft learner nodes to keep them caught up with the cluster.
+
+- **Default interval**: Configurable
+- **Leader only**: Yes
+
+### Organization Purge
+
+Purges soft-deleted organizations after their retention period expires. Removes all associated data (vaults, entities, relationships, members).
+
+- **Default interval**: 1 hour
+- **Leader only**: Yes
+- **Config**: `OrganizationPurgeConfig` (retention period)
+
+### User Retention Reaper
+
+Reaps soft-deleted users after the retention period expires. Removes user records from the system organization.
+
+- **Default interval**: 1 hour
+- **Leader only**: Yes
+- **Config**: `UserRetentionConfig` (retention period)
+
+### Events Garbage Collector
+
+Removes expired audit events based on their TTL. Runs per-region to clean up events that have exceeded their configured time-to-live.
+
+- **Default interval**: 1 hour
+- **Leader only**: Yes
+- **Config**: `EventConfig` (default_ttl_days)
+
+### Resource Metrics Collector
+
+Periodically collects disk space, page cache, and B-tree depth metrics for Prometheus exposure. Not a traditional "job" but a periodic metric collection cycle.
+
+- **Default interval**: 30 seconds
+- **Leader only**: No (runs on all nodes)
+
 ### Saga Orchestrator
 
-Drives multi-step distributed workflows (sagas) to completion. Each cycle scans for in-progress sagas, advances them through their next step, and handles compensation on failure. Sagas cover operations like user deletion (which spans system and organization vaults).
+Drives multi-step distributed workflows (sagas) to completion. Each cycle scans for in-progress sagas, advances them through their next step, and handles compensation on failure. Covers operations like user creation, organization creation, and signing key bootstrap (`CreateSigningKeySaga`).
 
 - **Default interval**: Configurable
 - **Leader only**: Yes

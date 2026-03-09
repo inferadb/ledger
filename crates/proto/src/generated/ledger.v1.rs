@@ -2309,6 +2309,185 @@ pub struct RemoveAppVaultRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RemoveAppVaultResponse {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TokenPair {
+    #[prost(string, tag = "1")]
+    pub access_token: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub refresh_token: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    pub access_expires_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "4")]
+    pub refresh_expires_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateUserSessionRequest {
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<UserSlug>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateUserSessionResponse {
+    #[prost(message, optional, tag = "1")]
+    pub tokens: ::core::option::Option<TokenPair>,
+}
+/// Validate an access token and return parsed claims on success.
+/// On validation failure, returns a gRPC error (UNAUTHENTICATED/PERMISSION_DENIED)
+/// with the failure reason in the status message — not a valid=false response.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ValidateTokenRequest {
+    #[prost(string, tag = "1")]
+    pub token: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub expected_audience: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ValidateTokenResponse {
+    #[prost(string, tag = "1")]
+    pub subject: ::prost::alloc::string::String,
+    /// "user_session" | "vault_access"
+    #[prost(string, tag = "2")]
+    pub token_type: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    pub expires_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Type-specific claims. oneof enforces valid combinations at the proto level.
+    #[prost(oneof = "validate_token_response::Claims", tags = "4, 5")]
+    pub claims: ::core::option::Option<validate_token_response::Claims>,
+}
+/// Nested message and enum types in `ValidateTokenResponse`.
+pub mod validate_token_response {
+    /// Type-specific claims. oneof enforces valid combinations at the proto level.
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Claims {
+        #[prost(message, tag = "4")]
+        UserSession(super::UserSessionClaims),
+        #[prost(message, tag = "5")]
+        VaultAccess(super::VaultAccessClaims),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UserSessionClaims {
+    #[prost(uint64, tag = "1")]
+    pub user_slug: u64,
+    /// "user" | "admin"
+    #[prost(string, tag = "2")]
+    pub role: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct VaultAccessClaims {
+    #[prost(uint64, tag = "1")]
+    pub org_slug: u64,
+    #[prost(uint64, tag = "2")]
+    pub app_slug: u64,
+    #[prost(uint64, tag = "3")]
+    pub vault_slug: u64,
+    #[prost(string, repeated, tag = "4")]
+    pub scopes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateVaultTokenRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub app: ::core::option::Option<AppSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    #[prost(string, repeated, tag = "4")]
+    pub scopes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateVaultTokenResponse {
+    #[prost(message, optional, tag = "1")]
+    pub tokens: ::core::option::Option<TokenPair>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RefreshTokenRequest {
+    #[prost(string, tag = "1")]
+    pub refresh_token: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RefreshTokenResponse {
+    #[prost(message, optional, tag = "1")]
+    pub tokens: ::core::option::Option<TokenPair>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeTokenRequest {
+    #[prost(string, tag = "1")]
+    pub refresh_token: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeTokenResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeAllUserSessionsRequest {
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<UserSlug>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeAllUserSessionsResponse {
+    #[prost(uint64, tag = "1")]
+    pub revoked_count: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateSigningKeyRequest {
+    #[prost(enumeration = "SigningKeyScope", tag = "1")]
+    pub scope: i32,
+    /// Required when scope=SIGNING_KEY_SCOPE_ORGANIZATION
+    #[prost(message, optional, tag = "2")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateSigningKeyResponse {
+    #[prost(message, optional, tag = "1")]
+    pub key: ::core::option::Option<PublicKeyInfo>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotateSigningKeyRequest {
+    #[prost(string, tag = "1")]
+    pub kid: ::prost::alloc::string::String,
+    /// 0 = use default from JwtConfig
+    #[prost(uint64, tag = "2")]
+    pub grace_period_secs: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotateSigningKeyResponse {
+    #[prost(message, optional, tag = "1")]
+    pub new_key: ::core::option::Option<PublicKeyInfo>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeSigningKeyRequest {
+    #[prost(string, tag = "1")]
+    pub kid: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeSigningKeyResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetPublicKeysRequest {
+    /// Absent = global keys
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetPublicKeysResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub keys: ::prost::alloc::vec::Vec<PublicKeyInfo>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PublicKeyInfo {
+    #[prost(string, tag = "1")]
+    pub kid: ::prost::alloc::string::String,
+    /// 32-byte Ed25519 public key
+    #[prost(bytes = "vec", tag = "2")]
+    pub public_key: ::prost::alloc::vec::Vec<u8>,
+    /// "active" | "rotated" | "revoked"
+    #[prost(string, tag = "3")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub valid_from: ::core::option::Option<::prost_types::Timestamp>,
+    /// Null if active
+    #[prost(message, optional, tag = "5")]
+    pub valid_until: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "6")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+}
 /// Structured audit event record.
 ///
 /// Follows the canonical log line ("wide event") pattern — a single structured
@@ -2834,7 +3013,8 @@ pub struct RotateBlindingKeyResponse {
     /// Entries re-hashed so far (0 on initial response).
     #[prost(uint64, tag = "2")]
     pub entries_rehashed: u64,
-    /// Whether the rotation is already complete (true if zero entries).
+    /// Whether the rehash is complete. Always false in the initial response;
+    /// poll GetBlindingKeyRehashStatus for the authoritative value.
     #[prost(bool, tag = "3")]
     pub complete: bool,
 }
@@ -3652,6 +3832,36 @@ impl AppCredentialType {
             "APP_CREDENTIAL_TYPE_MTLS_CA" => Some(Self::MtlsCa),
             "APP_CREDENTIAL_TYPE_MTLS_SELF_SIGNED" => Some(Self::MtlsSelfSigned),
             "APP_CREDENTIAL_TYPE_CLIENT_ASSERTION" => Some(Self::ClientAssertion),
+            _ => None,
+        }
+    }
+}
+/// Scope discriminator for signing keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SigningKeyScope {
+    Unspecified = 0,
+    Global = 1,
+    Organization = 2,
+}
+impl SigningKeyScope {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SIGNING_KEY_SCOPE_UNSPECIFIED",
+            Self::Global => "SIGNING_KEY_SCOPE_GLOBAL",
+            Self::Organization => "SIGNING_KEY_SCOPE_ORGANIZATION",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SIGNING_KEY_SCOPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "SIGNING_KEY_SCOPE_GLOBAL" => Some(Self::Global),
+            "SIGNING_KEY_SCOPE_ORGANIZATION" => Some(Self::Organization),
             _ => None,
         }
     }
@@ -11945,6 +12155,1028 @@ pub mod app_service_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "ledger.v1.AppService";
     impl<T> tonic::server::NamedService for AppServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+/// Generated client implementations.
+pub mod token_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// JWT token lifecycle: session creation, vault token issuance, refresh,
+    /// revocation, and signing key management.
+    #[derive(Debug, Clone)]
+    pub struct TokenServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl TokenServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> TokenServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> TokenServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            TokenServiceClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// Create a user session token pair (access + refresh).
+        pub async fn create_user_session(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateUserSessionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateUserSessionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.TokenService/CreateUserSession",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.TokenService", "CreateUserSession"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Validate an access token and return parsed claims.
+        /// Returns UNAUTHENTICATED for expired/invalid tokens.
+        pub async fn validate_token(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ValidateTokenRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ValidateTokenResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.TokenService/ValidateToken",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.TokenService", "ValidateToken"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Create a vault access token pair for an app.
+        pub async fn create_vault_token(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateVaultTokenRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateVaultTokenResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.TokenService/CreateVaultToken",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.TokenService", "CreateVaultToken"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Refresh an access token using a refresh token.
+        /// Implements rotation: old refresh token is consumed, new pair issued.
+        pub async fn refresh_token(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RefreshTokenRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RefreshTokenResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.TokenService/RefreshToken",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.TokenService", "RefreshToken"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Revoke a refresh token and its entire token family.
+        pub async fn revoke_token(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RevokeTokenRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RevokeTokenResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.TokenService/RevokeToken",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.TokenService", "RevokeToken"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Revoke all sessions for a user (increments token version).
+        pub async fn revoke_all_user_sessions(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RevokeAllUserSessionsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RevokeAllUserSessionsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.TokenService/RevokeAllUserSessions",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.TokenService", "RevokeAllUserSessions"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Create a new signing key for the given scope.
+        pub async fn create_signing_key(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateSigningKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateSigningKeyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.TokenService/CreateSigningKey",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.TokenService", "CreateSigningKey"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Rotate a signing key: creates a replacement and marks the old key as rotated.
+        pub async fn rotate_signing_key(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RotateSigningKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RotateSigningKeyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.TokenService/RotateSigningKey",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.TokenService", "RotateSigningKey"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Revoke a signing key immediately (no grace period).
+        pub async fn revoke_signing_key(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RevokeSigningKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RevokeSigningKeyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.TokenService/RevokeSigningKey",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.TokenService", "RevokeSigningKey"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Get active public keys for token verification (JWKS-style).
+        pub async fn get_public_keys(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetPublicKeysRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPublicKeysResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.TokenService/GetPublicKeys",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.TokenService", "GetPublicKeys"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod token_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with TokenServiceServer.
+    #[async_trait]
+    pub trait TokenService: std::marker::Send + std::marker::Sync + 'static {
+        /// Create a user session token pair (access + refresh).
+        async fn create_user_session(
+            &self,
+            request: tonic::Request<super::CreateUserSessionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateUserSessionResponse>,
+            tonic::Status,
+        >;
+        /// Validate an access token and return parsed claims.
+        /// Returns UNAUTHENTICATED for expired/invalid tokens.
+        async fn validate_token(
+            &self,
+            request: tonic::Request<super::ValidateTokenRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ValidateTokenResponse>,
+            tonic::Status,
+        >;
+        /// Create a vault access token pair for an app.
+        async fn create_vault_token(
+            &self,
+            request: tonic::Request<super::CreateVaultTokenRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateVaultTokenResponse>,
+            tonic::Status,
+        >;
+        /// Refresh an access token using a refresh token.
+        /// Implements rotation: old refresh token is consumed, new pair issued.
+        async fn refresh_token(
+            &self,
+            request: tonic::Request<super::RefreshTokenRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RefreshTokenResponse>,
+            tonic::Status,
+        >;
+        /// Revoke a refresh token and its entire token family.
+        async fn revoke_token(
+            &self,
+            request: tonic::Request<super::RevokeTokenRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RevokeTokenResponse>,
+            tonic::Status,
+        >;
+        /// Revoke all sessions for a user (increments token version).
+        async fn revoke_all_user_sessions(
+            &self,
+            request: tonic::Request<super::RevokeAllUserSessionsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RevokeAllUserSessionsResponse>,
+            tonic::Status,
+        >;
+        /// Create a new signing key for the given scope.
+        async fn create_signing_key(
+            &self,
+            request: tonic::Request<super::CreateSigningKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateSigningKeyResponse>,
+            tonic::Status,
+        >;
+        /// Rotate a signing key: creates a replacement and marks the old key as rotated.
+        async fn rotate_signing_key(
+            &self,
+            request: tonic::Request<super::RotateSigningKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RotateSigningKeyResponse>,
+            tonic::Status,
+        >;
+        /// Revoke a signing key immediately (no grace period).
+        async fn revoke_signing_key(
+            &self,
+            request: tonic::Request<super::RevokeSigningKeyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RevokeSigningKeyResponse>,
+            tonic::Status,
+        >;
+        /// Get active public keys for token verification (JWKS-style).
+        async fn get_public_keys(
+            &self,
+            request: tonic::Request<super::GetPublicKeysRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPublicKeysResponse>,
+            tonic::Status,
+        >;
+    }
+    /// JWT token lifecycle: session creation, vault token issuance, refresh,
+    /// revocation, and signing key management.
+    #[derive(Debug)]
+    pub struct TokenServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> TokenServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for TokenServiceServer<T>
+    where
+        T: TokenService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/ledger.v1.TokenService/CreateUserSession" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateUserSessionSvc<T: TokenService>(pub Arc<T>);
+                    impl<
+                        T: TokenService,
+                    > tonic::server::UnaryService<super::CreateUserSessionRequest>
+                    for CreateUserSessionSvc<T> {
+                        type Response = super::CreateUserSessionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateUserSessionRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TokenService>::create_user_session(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateUserSessionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.TokenService/ValidateToken" => {
+                    #[allow(non_camel_case_types)]
+                    struct ValidateTokenSvc<T: TokenService>(pub Arc<T>);
+                    impl<
+                        T: TokenService,
+                    > tonic::server::UnaryService<super::ValidateTokenRequest>
+                    for ValidateTokenSvc<T> {
+                        type Response = super::ValidateTokenResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ValidateTokenRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TokenService>::validate_token(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ValidateTokenSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.TokenService/CreateVaultToken" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateVaultTokenSvc<T: TokenService>(pub Arc<T>);
+                    impl<
+                        T: TokenService,
+                    > tonic::server::UnaryService<super::CreateVaultTokenRequest>
+                    for CreateVaultTokenSvc<T> {
+                        type Response = super::CreateVaultTokenResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateVaultTokenRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TokenService>::create_vault_token(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateVaultTokenSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.TokenService/RefreshToken" => {
+                    #[allow(non_camel_case_types)]
+                    struct RefreshTokenSvc<T: TokenService>(pub Arc<T>);
+                    impl<
+                        T: TokenService,
+                    > tonic::server::UnaryService<super::RefreshTokenRequest>
+                    for RefreshTokenSvc<T> {
+                        type Response = super::RefreshTokenResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RefreshTokenRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TokenService>::refresh_token(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RefreshTokenSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.TokenService/RevokeToken" => {
+                    #[allow(non_camel_case_types)]
+                    struct RevokeTokenSvc<T: TokenService>(pub Arc<T>);
+                    impl<
+                        T: TokenService,
+                    > tonic::server::UnaryService<super::RevokeTokenRequest>
+                    for RevokeTokenSvc<T> {
+                        type Response = super::RevokeTokenResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RevokeTokenRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TokenService>::revoke_token(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RevokeTokenSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.TokenService/RevokeAllUserSessions" => {
+                    #[allow(non_camel_case_types)]
+                    struct RevokeAllUserSessionsSvc<T: TokenService>(pub Arc<T>);
+                    impl<
+                        T: TokenService,
+                    > tonic::server::UnaryService<super::RevokeAllUserSessionsRequest>
+                    for RevokeAllUserSessionsSvc<T> {
+                        type Response = super::RevokeAllUserSessionsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RevokeAllUserSessionsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TokenService>::revoke_all_user_sessions(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RevokeAllUserSessionsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.TokenService/CreateSigningKey" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateSigningKeySvc<T: TokenService>(pub Arc<T>);
+                    impl<
+                        T: TokenService,
+                    > tonic::server::UnaryService<super::CreateSigningKeyRequest>
+                    for CreateSigningKeySvc<T> {
+                        type Response = super::CreateSigningKeyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateSigningKeyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TokenService>::create_signing_key(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateSigningKeySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.TokenService/RotateSigningKey" => {
+                    #[allow(non_camel_case_types)]
+                    struct RotateSigningKeySvc<T: TokenService>(pub Arc<T>);
+                    impl<
+                        T: TokenService,
+                    > tonic::server::UnaryService<super::RotateSigningKeyRequest>
+                    for RotateSigningKeySvc<T> {
+                        type Response = super::RotateSigningKeyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RotateSigningKeyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TokenService>::rotate_signing_key(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RotateSigningKeySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.TokenService/RevokeSigningKey" => {
+                    #[allow(non_camel_case_types)]
+                    struct RevokeSigningKeySvc<T: TokenService>(pub Arc<T>);
+                    impl<
+                        T: TokenService,
+                    > tonic::server::UnaryService<super::RevokeSigningKeyRequest>
+                    for RevokeSigningKeySvc<T> {
+                        type Response = super::RevokeSigningKeyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RevokeSigningKeyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TokenService>::revoke_signing_key(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RevokeSigningKeySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.TokenService/GetPublicKeys" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetPublicKeysSvc<T: TokenService>(pub Arc<T>);
+                    impl<
+                        T: TokenService,
+                    > tonic::server::UnaryService<super::GetPublicKeysRequest>
+                    for GetPublicKeysSvc<T> {
+                        type Response = super::GetPublicKeysResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetPublicKeysRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TokenService>::get_public_keys(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetPublicKeysSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for TokenServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "ledger.v1.TokenService";
+    impl<T> tonic::server::NamedService for TokenServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }

@@ -40,9 +40,14 @@ async fn test_single_node_bootstrap() {
 
     // Bootstrap should succeed
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let result =
-        bootstrap_node(&config, &data_dir, inferadb_ledger_raft::HealthState::new(), shutdown_rx)
-            .await;
+    let result = bootstrap_node(
+        &config,
+        &data_dir,
+        inferadb_ledger_raft::HealthState::new(),
+        shutdown_rx,
+        None,
+    )
+    .await;
     assert!(result.is_ok(), "single-node bootstrap should succeed: {:?}", result.err());
 
     let bootstrapped = result.unwrap();
@@ -96,6 +101,7 @@ async fn test_node_restart_preserves_id() {
             &data_dir,
             inferadb_ledger_raft::HealthState::new(),
             shutdown_rx,
+            None,
         )
         .await
         .expect("first bootstrap should succeed");
@@ -138,6 +144,7 @@ async fn test_node_restart_preserves_id() {
             &data_dir,
             inferadb_ledger_raft::HealthState::new(),
             shutdown_rx2,
+            None,
         )
         .await
         .expect("restart should succeed");
@@ -250,6 +257,7 @@ async fn test_late_joiner_finds_existing_cluster() {
         &leader_data_dir,
         inferadb_ledger_raft::HealthState::new(),
         shutdown_rx,
+        None,
     )
     .await
     .expect("leader bootstrap");
@@ -318,9 +326,14 @@ async fn test_join_mode_does_not_bootstrap() {
 
     // Bootstrap should succeed (node starts but doesn't initialize cluster)
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let result =
-        bootstrap_node(&config, &data_dir, inferadb_ledger_raft::HealthState::new(), shutdown_rx)
-            .await;
+    let result = bootstrap_node(
+        &config,
+        &data_dir,
+        inferadb_ledger_raft::HealthState::new(),
+        shutdown_rx,
+        None,
+    )
+    .await;
     assert!(result.is_ok(), "join mode should start successfully: {:?}", result.err());
 
     let bootstrapped = result.unwrap();

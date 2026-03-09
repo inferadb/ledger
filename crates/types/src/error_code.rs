@@ -35,6 +35,10 @@ pub enum LedgerErrorCode {
     /// Maps to `INTERNAL`.
     #[default]
     Internal,
+
+    /// Authentication failure (invalid token, expired, revoked, bad signature).
+    /// Maps to `UNAUTHENTICATED`.
+    Unauthenticated,
 }
 
 impl LedgerErrorCode {
@@ -47,6 +51,7 @@ impl LedgerErrorCode {
             Self::PermissionDenied => "PERMISSION_DENIED",
             Self::InvalidArgument => "INVALID_ARGUMENT",
             Self::Internal => "INTERNAL",
+            Self::Unauthenticated => "UNAUTHENTICATED",
         }
     }
 }

@@ -6,6 +6,7 @@
 //! ## Saga Patterns
 //!
 //! - **CreateOrganization**: Multi-group saga creating org directory entry + profile
+//! - **CreateSigningKey**: Single-group saga generating + encrypting + proposing a signing key
 //! - **CreateUser**: Multi-group saga allocating IDs, reserving email, writing regional data
 //! - **DeleteUser**: Marks user as deleting, removes memberships, then deletes user
 //! - **MigrateOrg**: Region migration with data transfer and integrity verification
@@ -22,7 +23,7 @@ use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{OrganizationId, OrganizationSlug, Region, UserId, UserSlug};
 use serde::{Deserialize, Serialize};
 
-use super::types::OrganizationTier;
+use super::types::{OrganizationTier, SigningKeyScope};
 
 /// Unique identifier for a saga.
 pub type SagaId = String;
@@ -557,6 +558,8 @@ pub enum SagaLockKey {
     Email(String),
     /// Lock on an organization (prevents concurrent migration).
     Organization(OrganizationId),
+    /// Lock on a signing key scope (prevents concurrent key creation for same scope).
+    SigningKeyScope(SigningKeyScope),
 }
 
 impl std::fmt::Display for SagaLockKey {
@@ -565,6 +568,12 @@ impl std::fmt::Display for SagaLockKey {
             SagaLockKey::User(id) => write!(f, "user:{}", id.value()),
             SagaLockKey::Email(email) => write!(f, "email:{email}"),
             SagaLockKey::Organization(id) => write!(f, "org:{}", id.value()),
+            SagaLockKey::SigningKeyScope(scope) => match scope {
+                SigningKeyScope::Global => write!(f, "signing_key:global"),
+                SigningKeyScope::Organization(id) => {
+                    write!(f, "signing_key:org:{}", id.value())
+                },
+            },
         }
     }
 }
@@ -971,6 +980,159 @@ impl CreateOrganizationSaga {
 }
 
 // =============================================================================
+// Create Signing Key Saga
+// =============================================================================
+
+/// Input parameters for Create Signing Key saga.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSigningKeyInput {
+    /// Scope of the signing key to create.
+    pub scope: SigningKeyScope,
+}
+
+/// State machine for the Create Signing Key saga.
+///
+/// Coordinates signing key creation on the leader:
+/// 1. Generate Ed25519 keypair and encrypt private key with RMK
+/// 2. Propose `CreateSigningKey` through Raft
+///
+/// Idempotent: if an active key already exists for the scope, the saga
+/// completes immediately without creating a new key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CreateSigningKeySagaState {
+    /// Initial state: about to generate keypair and encrypt.
+    Pending,
+    /// Step 1 complete: keypair generated, encrypted, ready to propose through Raft.
+    /// Stores the encrypted material for retry idempotency.
+    KeyGenerated {
+        /// UUID-format key identifier.
+        kid: String,
+        /// 32-byte Ed25519 public key.
+        public_key_bytes: Vec<u8>,
+        /// `SigningKeyEnvelope` serialized bytes.
+        encrypted_private_key: Vec<u8>,
+        /// RMK version used to wrap the DEK.
+        rmk_version: u32,
+    },
+    /// Step 2 complete: signing key committed through Raft.
+    Completed {
+        /// The created key's identifier.
+        kid: String,
+    },
+    /// Saga failed after exhausting retries.
+    Failed {
+        /// The step that failed (0-indexed).
+        step: u8,
+        /// Error description.
+        error: String,
+    },
+    /// Saga exceeded timeout and was auto-cancelled.
+    TimedOut,
+}
+
+/// Record for the Create Signing Key saga, tracking state and retry progress.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSigningKeySaga {
+    /// Unique saga identifier.
+    pub id: SagaId,
+    /// Current state.
+    pub state: CreateSigningKeySagaState,
+    /// Input parameters.
+    pub input: CreateSigningKeyInput,
+    /// When the saga was created.
+    pub created_at: DateTime<Utc>,
+    /// When the saga was last updated.
+    pub updated_at: DateTime<Utc>,
+    /// Number of retry attempts.
+    pub retries: u8,
+    /// Next retry time (for exponential backoff).
+    pub next_retry_at: Option<DateTime<Utc>>,
+}
+
+impl CreateSigningKeySaga {
+    /// Creates a new saga in Pending state.
+    pub fn new(id: SagaId, input: CreateSigningKeyInput) -> Self {
+        let now = Utc::now();
+        Self {
+            id,
+            state: CreateSigningKeySagaState::Pending,
+            input,
+            created_at: now,
+            updated_at: now,
+            retries: 0,
+            next_retry_at: None,
+        }
+    }
+
+    /// Checks if the saga is complete (success or permanently failed).
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.state,
+            CreateSigningKeySagaState::Completed { .. }
+                | CreateSigningKeySagaState::Failed { .. }
+                | CreateSigningKeySagaState::TimedOut
+        )
+    }
+
+    /// Checks if the saga is ready for retry.
+    pub fn is_ready_for_retry(&self) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        match self.next_retry_at {
+            Some(retry_at) => Utc::now() >= retry_at,
+            None => true,
+        }
+    }
+
+    /// Checks if the saga has exceeded the given timeout.
+    pub fn is_timed_out(&self, timeout: Duration) -> bool {
+        let elapsed = Utc::now() - self.created_at;
+        elapsed > chrono::Duration::from_std(timeout).unwrap_or(chrono::Duration::MAX)
+    }
+
+    /// Calculates next backoff duration using exponential backoff.
+    pub fn next_backoff(&self) -> Duration {
+        let base = Duration::from_secs(1);
+        let backoff = base * 2u32.saturating_pow(self.retries as u32);
+        std::cmp::min(backoff, MAX_BACKOFF)
+    }
+
+    /// Transitions to a new state.
+    pub fn transition(&mut self, new_state: CreateSigningKeySagaState) {
+        self.state = new_state;
+        self.updated_at = Utc::now();
+        self.next_retry_at = None;
+    }
+
+    /// Marks as failed with error.
+    ///
+    /// After `MAX_RETRIES` failures, transitions to terminal Failed state.
+    pub fn fail(&mut self, step: u8, error: String) {
+        self.retries = self.retries.saturating_add(1);
+        if self.retries >= MAX_RETRIES {
+            self.state = CreateSigningKeySagaState::Failed { step, error };
+        } else {
+            let backoff = self.next_backoff();
+            self.next_retry_at =
+                Some(Utc::now() + chrono::Duration::from_std(backoff).unwrap_or_default());
+        }
+        self.updated_at = Utc::now();
+    }
+
+    /// Returns the step number for the current state.
+    pub fn current_step(&self) -> u8 {
+        match &self.state {
+            CreateSigningKeySagaState::Pending => 0,
+            CreateSigningKeySagaState::KeyGenerated { .. } => 1,
+            CreateSigningKeySagaState::Completed { .. }
+            | CreateSigningKeySagaState::Failed { .. }
+            | CreateSigningKeySagaState::TimedOut => 0,
+        }
+    }
+}
+
+// =============================================================================
 // Generic Saga Wrapper
 // =============================================================================
 
@@ -987,6 +1149,8 @@ pub enum SagaType {
     CreateUser,
     /// Create Organization saga type (multi-group: GLOBAL + regional).
     CreateOrganization,
+    /// Create Signing Key saga type (single-group: generates + encrypts + proposes).
+    CreateSigningKey,
 }
 
 /// Generic saga record that wraps specific saga types.
@@ -1002,6 +1166,8 @@ pub enum Saga {
     CreateUser(CreateUserSaga),
     /// Create Organization saga (multi-group: GLOBAL + regional).
     CreateOrganization(CreateOrganizationSaga),
+    /// Create Signing Key saga (single-group: generates + encrypts + proposes).
+    CreateSigningKey(CreateSigningKeySaga),
 }
 
 impl Saga {
@@ -1013,6 +1179,7 @@ impl Saga {
             Saga::MigrateUser(s) => &s.id,
             Saga::CreateUser(s) => &s.id,
             Saga::CreateOrganization(s) => &s.id,
+            Saga::CreateSigningKey(s) => &s.id,
         }
     }
 
@@ -1024,6 +1191,7 @@ impl Saga {
             Saga::MigrateUser(_) => SagaType::MigrateUser,
             Saga::CreateUser(_) => SagaType::CreateUser,
             Saga::CreateOrganization(_) => SagaType::CreateOrganization,
+            Saga::CreateSigningKey(_) => SagaType::CreateSigningKey,
         }
     }
 
@@ -1035,6 +1203,7 @@ impl Saga {
             Saga::MigrateUser(s) => s.is_terminal(),
             Saga::CreateUser(s) => s.is_terminal(),
             Saga::CreateOrganization(s) => s.is_terminal(),
+            Saga::CreateSigningKey(s) => s.is_terminal(),
         }
     }
 
@@ -1046,6 +1215,7 @@ impl Saga {
             Saga::MigrateUser(s) => s.is_ready_for_retry(),
             Saga::CreateUser(s) => s.is_ready_for_retry(),
             Saga::CreateOrganization(s) => s.is_ready_for_retry(),
+            Saga::CreateSigningKey(s) => s.is_ready_for_retry(),
         }
     }
 
@@ -1057,6 +1227,7 @@ impl Saga {
             Saga::MigrateUser(s) => s.created_at,
             Saga::CreateUser(s) => s.created_at,
             Saga::CreateOrganization(s) => s.created_at,
+            Saga::CreateSigningKey(s) => s.created_at,
         }
     }
 
@@ -1068,6 +1239,7 @@ impl Saga {
             Saga::MigrateUser(s) => s.updated_at,
             Saga::CreateUser(s) => s.updated_at,
             Saga::CreateOrganization(s) => s.updated_at,
+            Saga::CreateSigningKey(s) => s.updated_at,
         }
     }
 
@@ -1079,6 +1251,7 @@ impl Saga {
             Saga::MigrateUser(s) => s.retries,
             Saga::CreateUser(s) => s.retries,
             Saga::CreateOrganization(s) => s.retries,
+            Saga::CreateSigningKey(s) => s.retries,
         }
     }
 
@@ -1103,6 +1276,9 @@ impl Saga {
                 },
                 _ => Vec::new(),
             },
+            Saga::CreateSigningKey(s) => {
+                vec![SagaLockKey::SigningKeyScope(s.input.scope)]
+            },
         }
     }
 
@@ -1114,6 +1290,7 @@ impl Saga {
             Saga::MigrateUser(s) => s.current_step(),
             Saga::CreateUser(s) => s.current_step(),
             Saga::CreateOrganization(s) => s.current_step(),
+            Saga::CreateSigningKey(s) => s.current_step(),
         }
     }
 
@@ -1128,6 +1305,7 @@ impl Saga {
             Saga::MigrateUser(s) => s.fail(step, error),
             Saga::CreateUser(s) => s.fail(step, error),
             Saga::CreateOrganization(s) => s.fail(step, error),
+            Saga::CreateSigningKey(s) => s.fail(step, error),
         }
     }
 
@@ -2264,5 +2442,246 @@ mod tests {
         saga.state = CreateOrganizationSagaState::Failed { step: 0, error: "err".to_string() };
         let wrapped = Saga::CreateOrganization(saga);
         assert!(wrapped.lock_keys().is_empty());
+    }
+
+    // =========================================================================
+    // CreateSigningKeySaga tests
+    // =========================================================================
+
+    fn make_create_signing_key_input() -> CreateSigningKeyInput {
+        CreateSigningKeyInput { scope: SigningKeyScope::Global }
+    }
+
+    #[test]
+    fn test_create_signing_key_saga_new() {
+        let saga = CreateSigningKeySaga::new("sk-1".to_string(), make_create_signing_key_input());
+        assert_eq!(saga.id, "sk-1");
+        assert_eq!(saga.state, CreateSigningKeySagaState::Pending);
+        assert_eq!(saga.retries, 0);
+        assert!(saga.next_retry_at.is_none());
+        assert_eq!(saga.input.scope, SigningKeyScope::Global);
+    }
+
+    #[test]
+    fn test_create_signing_key_saga_full_lifecycle() {
+        let mut saga =
+            CreateSigningKeySaga::new("sk-2".to_string(), make_create_signing_key_input());
+
+        // Step 1: key generated
+        saga.transition(CreateSigningKeySagaState::KeyGenerated {
+            kid: "kid-uuid-1".to_string(),
+            public_key_bytes: vec![0x01; 32],
+            encrypted_private_key: vec![0x02; 100],
+            rmk_version: 1,
+        });
+        assert!(matches!(saga.state, CreateSigningKeySagaState::KeyGenerated { .. }));
+        assert_eq!(saga.current_step(), 1);
+
+        // Step 2: completed
+        saga.transition(CreateSigningKeySagaState::Completed { kid: "kid-uuid-1".to_string() });
+        assert!(
+            matches!(saga.state, CreateSigningKeySagaState::Completed { ref kid } if kid == "kid-uuid-1")
+        );
+        assert!(saga.is_terminal());
+    }
+
+    #[test]
+    fn test_create_signing_key_saga_terminal_states() {
+        let base = CreateSigningKeySaga::new("sk-3".to_string(), make_create_signing_key_input());
+
+        let mut s = base.clone();
+        s.state = CreateSigningKeySagaState::Completed { kid: "k1".to_string() };
+        assert!(s.is_terminal());
+
+        let mut s = base.clone();
+        s.state = CreateSigningKeySagaState::Failed { step: 0, error: "err".to_string() };
+        assert!(s.is_terminal());
+
+        let mut s = base.clone();
+        s.state = CreateSigningKeySagaState::TimedOut;
+        assert!(s.is_terminal());
+
+        // Non-terminal: Pending
+        let s = base.clone();
+        assert!(!s.is_terminal());
+
+        // Non-terminal: KeyGenerated
+        let mut s = base;
+        s.state = CreateSigningKeySagaState::KeyGenerated {
+            kid: "k2".to_string(),
+            public_key_bytes: vec![],
+            encrypted_private_key: vec![],
+            rmk_version: 1,
+        };
+        assert!(!s.is_terminal());
+    }
+
+    #[test]
+    fn test_create_signing_key_saga_fail_and_retry() {
+        let mut saga =
+            CreateSigningKeySaga::new("sk-4".to_string(), make_create_signing_key_input());
+
+        // First failure: stays in Pending, gets retry backoff
+        saga.fail(0, "transient error".to_string());
+        assert_eq!(saga.retries, 1);
+        assert!(!saga.is_terminal());
+        assert!(saga.next_retry_at.is_some());
+
+        // Exhaust retries
+        for _ in 1..MAX_RETRIES {
+            saga.fail(0, "permanent".to_string());
+        }
+        assert!(matches!(
+            saga.state,
+            CreateSigningKeySagaState::Failed { step: 0, ref error } if error == "permanent"
+        ));
+        assert!(saga.is_terminal());
+    }
+
+    #[test]
+    fn test_create_signing_key_saga_retry_readiness() {
+        let mut saga =
+            CreateSigningKeySaga::new("sk-5".to_string(), make_create_signing_key_input());
+        assert!(saga.is_ready_for_retry());
+
+        // After failure, has a future retry_at
+        saga.fail(0, "err".to_string());
+        assert!(!saga.is_ready_for_retry());
+    }
+
+    #[test]
+    fn test_create_signing_key_saga_is_timed_out() {
+        let mut saga =
+            CreateSigningKeySaga::new("sk-timeout".to_string(), make_create_signing_key_input());
+        saga.created_at = Utc::now() - chrono::Duration::minutes(5);
+
+        assert!(saga.is_timed_out(Duration::from_secs(60))); // 1 min timeout
+        assert!(!saga.is_timed_out(Duration::from_secs(600))); // 10 min timeout
+    }
+
+    #[test]
+    fn test_create_signing_key_saga_current_step() {
+        let mut saga =
+            CreateSigningKeySaga::new("sk-6".to_string(), make_create_signing_key_input());
+        assert_eq!(saga.current_step(), 0);
+
+        saga.state = CreateSigningKeySagaState::KeyGenerated {
+            kid: "k".to_string(),
+            public_key_bytes: vec![],
+            encrypted_private_key: vec![],
+            rmk_version: 1,
+        };
+        assert_eq!(saga.current_step(), 1);
+
+        saga.state = CreateSigningKeySagaState::Completed { kid: "k".to_string() };
+        assert_eq!(saga.current_step(), 0);
+
+        saga.state = CreateSigningKeySagaState::Failed { step: 1, error: "err".to_string() };
+        assert_eq!(saga.current_step(), 0);
+
+        saga.state = CreateSigningKeySagaState::TimedOut;
+        assert_eq!(saga.current_step(), 0);
+    }
+
+    #[test]
+    fn test_create_signing_key_saga_serialization() {
+        let inner =
+            CreateSigningKeySaga::new("sk-ser-1".to_string(), make_create_signing_key_input());
+        let saga = Saga::CreateSigningKey(inner);
+        let bytes = saga.to_bytes().unwrap();
+        let restored = Saga::from_bytes(&bytes).unwrap();
+        assert_eq!(saga.id(), restored.id());
+        assert_eq!(saga.saga_type(), SagaType::CreateSigningKey);
+        assert_eq!(restored.saga_type(), SagaType::CreateSigningKey);
+
+        let Saga::CreateSigningKey(ref original) = saga else {
+            panic!("expected CreateSigningKey")
+        };
+        let Saga::CreateSigningKey(ref deserialized) = restored else {
+            panic!("expected CreateSigningKey")
+        };
+        assert_eq!(original.id, deserialized.id);
+        assert_eq!(original.input.scope, deserialized.input.scope);
+    }
+
+    #[test]
+    fn test_create_signing_key_saga_wrapper_delegation() {
+        let inner =
+            CreateSigningKeySaga::new("sk-wrap-1".to_string(), make_create_signing_key_input());
+        let saga = Saga::CreateSigningKey(inner);
+
+        assert_eq!(saga.id(), "sk-wrap-1");
+        assert_eq!(saga.saga_type(), SagaType::CreateSigningKey);
+        assert!(!saga.is_terminal());
+        assert_eq!(saga.retries(), 0);
+        assert_eq!(saga.current_step(), 0);
+    }
+
+    #[test]
+    fn test_create_signing_key_saga_lock_keys() {
+        // Global scope
+        let inner = CreateSigningKeySaga::new(
+            "sk-lock-1".to_string(),
+            CreateSigningKeyInput { scope: SigningKeyScope::Global },
+        );
+        let saga = Saga::CreateSigningKey(inner);
+        let keys = saga.lock_keys();
+        assert_eq!(keys.len(), 1);
+        assert!(matches!(keys[0], SagaLockKey::SigningKeyScope(SigningKeyScope::Global)));
+
+        // Organization scope
+        let inner = CreateSigningKeySaga::new(
+            "sk-lock-2".to_string(),
+            CreateSigningKeyInput { scope: SigningKeyScope::Organization(OrganizationId::new(42)) },
+        );
+        let saga = Saga::CreateSigningKey(inner);
+        let keys = saga.lock_keys();
+        assert_eq!(keys.len(), 1);
+        assert!(matches!(
+            keys[0],
+            SagaLockKey::SigningKeyScope(SigningKeyScope::Organization(id)) if id == OrganizationId::new(42)
+        ));
+    }
+
+    #[test]
+    fn test_signing_key_scope_lock_key_display() {
+        assert_eq!(
+            SagaLockKey::SigningKeyScope(SigningKeyScope::Global).to_string(),
+            "signing_key:global"
+        );
+        assert_eq!(
+            SagaLockKey::SigningKeyScope(SigningKeyScope::Organization(OrganizationId::new(7)))
+                .to_string(),
+            "signing_key:org:7"
+        );
+    }
+
+    #[test]
+    fn test_signing_key_scope_lock_key_serde() {
+        let keys = vec![
+            SagaLockKey::SigningKeyScope(SigningKeyScope::Global),
+            SagaLockKey::SigningKeyScope(SigningKeyScope::Organization(OrganizationId::new(42))),
+        ];
+        for key in keys {
+            let json = serde_json::to_vec(&key).unwrap();
+            let restored: SagaLockKey = serde_json::from_slice(&json).unwrap();
+            assert_eq!(key, restored);
+        }
+    }
+
+    #[test]
+    fn test_create_signing_key_saga_org_scope() {
+        let saga = CreateSigningKeySaga::new(
+            "sk-org-1".to_string(),
+            CreateSigningKeyInput { scope: SigningKeyScope::Organization(OrganizationId::new(99)) },
+        );
+        assert_eq!(saga.input.scope, SigningKeyScope::Organization(OrganizationId::new(99)));
+
+        // Roundtrip through Saga wrapper
+        let wrapped = Saga::CreateSigningKey(saga);
+        let bytes = wrapped.to_bytes().unwrap();
+        let restored = Saga::from_bytes(&bytes).unwrap();
+        let Saga::CreateSigningKey(ref s) = restored else { panic!("expected CreateSigningKey") };
+        assert_eq!(s.input.scope, SigningKeyScope::Organization(OrganizationId::new(99)));
     }
 }

@@ -214,11 +214,11 @@ grpcurl -plaintext healthy-node:50051 \
 # Remove corrupted node, let it resync from snapshot
 ```
 
-**Note on snapshots**: Snapshots are zstd-compressed binary files containing `AppliedStateCore` plus 9 externalized B+ tree tables, entity data, and event data. A SHA-256 checksum footer over the compressed bytes is verified before any decompression. Snapshot installation writes all state into a single `WriteTransaction` — either the entire install succeeds atomically or no state changes are visible.
+**Note on snapshots**: Snapshots are zstd-compressed binary files containing `AppliedStateCore` plus 12 externalized B+ tree tables, entity data, and event data. A SHA-256 checksum footer over the compressed bytes is verified before any decompression. Snapshot installation writes all state into a single `WriteTransaction` — either the entire install succeeds atomically or no state changes are visible.
 
 ### Table-Level Inconsistency
 
-If the integrity scrubber detects corruption in specific externalized tables (e.g., `VaultHeights`, `ClientSequences`) while the core `AppliedStateCore` is intact, the affected region can be recovered by installing a snapshot from a healthy replica. The snapshot will overwrite all 9 externalized tables atomically via a single `WriteTransaction`.
+If the integrity scrubber detects corruption in specific externalized tables (e.g., `VaultHeights`, `ClientSequences`) while the core `AppliedStateCore` is intact, the affected region can be recovered by installing a snapshot from a healthy replica. The snapshot will overwrite all 12 externalized tables atomically via a single `WriteTransaction`.
 
 ## Regional Failover
 

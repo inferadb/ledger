@@ -4,16 +4,18 @@ Frequently asked questions about InferaDB Ledger.
 
 ## Architecture
 
-### Why doesn't Ledger have authentication?
+### Why doesn't Ledger authenticate its own gRPC connections?
 
-Ledger is designed to run within a secure network perimeter (WireGuard, VPC). Authentication and authorization are handled by Engine and Control, which sit in front of Ledger. This keeps Ledger focused on consensus and storage while avoiding redundant auth layers.
+Ledger runs within a secure network perimeter (WireGuard, VPC) and trusts all incoming connections at the network layer. Only Engine and Control can reach Ledger's gRPC port.
 
-See [Security](operations/security.md) for the full trust model.
+However, Ledger **is** the JWT signing authority for the platform — its TokenService issues, validates, and revokes JWTs consumed by Engine and Control for end-user authentication. The distinction: Ledger doesn't authenticate _who is calling it_, but it _issues the tokens_ that authenticate end users elsewhere.
+
+See [Security](operations/security.md) for the trust model and [INTEGRATION.md](../INTEGRATION.md) for the JWT integration guide.
 
 ### How does Ledger relate to Engine and Control?
 
 - **Engine**: Evaluates authorization policies, performs graph traversal. Reads/writes relationships to Ledger.
-- **Control**: Manages users, organizations, tokens. Manages organizations and vaults in Ledger.
+- **Control**: Manages users and organizations. Delegates token issuance and validation to Ledger's TokenService.
 - **Ledger**: Stores authorization data with cryptographic verification. Does not interpret the data semantically.
 
 Engine and Control are the only intended clients of Ledger.

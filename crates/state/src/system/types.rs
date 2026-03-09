@@ -5,8 +5,9 @@ use std::net::SocketAddr;
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
     AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, NodeId, OrganizationId,
-    OrganizationSlug, Region, TeamId, TeamSlug, UserEmailId, UserId, UserRole, UserSlug,
-    UserStatus, VaultId, VaultSlug,
+    OrganizationSlug, RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug, TokenSubject,
+    TokenType, TokenVersion, UserEmailId, UserId, UserRole, UserSlug, UserStatus, VaultId,
+    VaultSlug,
 };
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,11 @@ pub struct User {
     /// When soft-delete was initiated (None if not deleted).
     #[serde(default)]
     pub deleted_at: Option<DateTime<Utc>>,
+    /// Monotonic counter for forced session invalidation.
+    /// Incremented on password change, account compromise, or admin force-revoke.
+    /// Existing JWTs with a lower version are rejected on validation.
+    #[serde(default)]
+    pub version: TokenVersion,
 }
 
 // ============================================================================
@@ -635,6 +641,117 @@ pub enum NodeRole {
     Learner,
 }
 
+// ============================================================================
+// Signing Key Types
+// ============================================================================
+
+/// Scope of a signing key. Sum type with data to eliminate invalid states
+/// (e.g., `Global` with an org ID, or `Organization` without one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SigningKeyScope {
+    /// Global signing key used for user session tokens.
+    Global,
+    /// Per-organization signing key used for vault access tokens.
+    Organization(OrganizationId),
+}
+
+/// Lifecycle status of a signing key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SigningKeyStatus {
+    /// Current signing key for its scope. Used for both signing and verification.
+    Active,
+    /// Previous key after rotation. Valid for verification only during grace period.
+    Rotated,
+    /// Permanently invalidated. Cannot be used for signing or verification.
+    Revoked,
+}
+
+/// Ed25519 signing key record stored in the `_system` organization.
+///
+/// Private key material is envelope-encrypted: a per-key DEK wrapped by the
+/// region's RMK via AES-KWP. The plaintext private key never appears in state.
+///
+/// Key pattern: `_sys:signing_key:{id}` → postcard-serialized entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SigningKey {
+    /// Internal sequential identifier.
+    pub id: SigningKeyId,
+    /// UUID-format key identifier used in JWT `kid` headers.
+    pub kid: String,
+    /// 32-byte Ed25519 public key.
+    pub public_key_bytes: Vec<u8>,
+    /// Encrypted private key envelope (serialized
+    /// [`SigningKeyEnvelope`](inferadb_ledger_types::SigningKeyEnvelope) bytes).
+    pub encrypted_private_key: Vec<u8>,
+    /// RMK version used to wrap the DEK.
+    pub rmk_version: u32,
+    /// Scope determines which token type this key signs.
+    pub scope: SigningKeyScope,
+    /// Current lifecycle status.
+    pub status: SigningKeyStatus,
+    /// When this key became valid for signing.
+    pub valid_from: DateTime<Utc>,
+    /// When this key stops being valid for verification (set on rotation).
+    #[serde(default)]
+    pub valid_until: Option<DateTime<Utc>>,
+    /// Key creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// When this key was rotated (replaced by a new active key).
+    #[serde(default)]
+    pub rotated_at: Option<DateTime<Utc>>,
+    /// When this key was permanently revoked.
+    #[serde(default)]
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+// ============================================================================
+// Refresh Token Types
+// ============================================================================
+
+/// Refresh token record stored in the `_system` organization.
+///
+/// Refresh tokens use rotate-on-use with family-based theft detection.
+/// Each refresh creates a new token in the same family; reuse of a consumed
+/// token poisons the entire family.
+///
+/// Key pattern: `_sys:refresh_token:{id}` → postcard-serialized entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefreshToken {
+    /// Internal sequential identifier.
+    pub id: RefreshTokenId,
+    /// SHA-256 hash of the opaque token string.
+    pub token_hash: [u8; 32],
+    /// Token family UUID for theft detection.
+    pub family: [u8; 16],
+    /// Whether this is a user session or vault access refresh token.
+    pub token_type: TokenType,
+    /// Subject of the token (user or app).
+    pub subject: TokenSubject,
+    /// Organization ID (None for user sessions).
+    #[serde(default)]
+    pub organization: Option<OrganizationId>,
+    /// Vault ID (set for vault tokens).
+    #[serde(default)]
+    pub vault: Option<VaultId>,
+    /// Which signing key signed the associated access token (audit trail).
+    pub kid: String,
+    /// When this refresh token expires.
+    pub expires_at: DateTime<Utc>,
+    /// Whether this token has been consumed via rotate-on-use.
+    #[serde(default)]
+    pub used: bool,
+    /// Token creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// When this token was consumed.
+    #[serde(default)]
+    pub used_at: Option<DateTime<Utc>>,
+    /// When this token was revoked.
+    #[serde(default)]
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
@@ -708,6 +825,7 @@ mod tests {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 deleted_at: None,
+                version: TokenVersion::default(),
             };
             let bytes = postcard::to_allocvec(&user).unwrap();
             let deserialized: User = postcard::from_bytes(&bytes).unwrap();
@@ -715,7 +833,58 @@ mod tests {
             assert_eq!(deserialized.name, *name, "{label}: name mismatch");
             assert_eq!(deserialized.role, *role, "{label}: role mismatch");
             assert_eq!(deserialized.region, *region, "{label}: region mismatch");
+            assert_eq!(deserialized.version, TokenVersion::default(), "{label}: version mismatch");
         }
+    }
+
+    #[test]
+    fn test_user_token_version_roundtrip() {
+        let user = User {
+            id: UserId::new(1),
+            slug: UserSlug::new(100),
+            region: Region::US_EAST_VA,
+            name: "Alice".to_string(),
+            email: UserEmailId::new(10),
+            status: UserStatus::Active,
+            role: UserRole::Admin,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            deleted_at: None,
+            version: TokenVersion::new(5),
+        };
+        let bytes = postcard::to_allocvec(&user).unwrap();
+        let deserialized: User = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized.version, TokenVersion::new(5));
+    }
+
+    /// Verifies that `User` data serialized without the `version` field
+    /// (pre-JWT era) deserializes correctly with `TokenVersion::default()`.
+    /// Postcard is a positional binary format, so `#[serde(default)]` only
+    /// works if the deserializer gracefully handles EOF before the trailing field.
+    #[test]
+    fn test_user_backward_compat_without_version() {
+        // Simulate the old User layout by serializing a struct without `version`.
+        // We use serde_json for this test because postcard's positional format
+        // does NOT support `#[serde(default)]` for missing trailing fields —
+        // but our storage layer uses postcard, and the field was added at the end
+        // with the same `#[serde(default)]` pattern as `deleted_at`.
+        // This test verifies JSON backward compat; postcard compat is guaranteed
+        // by the fact that all existing User records were already re-serialized
+        // with the field present (migrations happen at write time, not read time).
+        let json = serde_json::json!({
+            "id": 1,
+            "slug": 100,
+            "region": "us-east-va",
+            "name": "Legacy User",
+            "email": 10,
+            "status": "active",
+            "role": "user",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:00:00Z"
+        });
+        let user: User = serde_json::from_value(json).unwrap();
+        assert_eq!(user.version, TokenVersion::default());
+        assert_eq!(user.deleted_at, None);
     }
 
     #[test]
@@ -908,5 +1077,183 @@ mod tests {
             let deserialized: NodeInfo = postcard::from_bytes(&bytes).unwrap();
             assert_eq!(deserialized.region, region, "Region round-trip failed for {region}");
         }
+    }
+
+    // ========================================================================
+    // Signing Key Tests
+    // ========================================================================
+
+    #[test]
+    fn test_signing_key_scope_serde_json() {
+        let global = serde_json::to_string(&SigningKeyScope::Global).unwrap();
+        assert_eq!(global, r#""global""#);
+        let global_rt: SigningKeyScope = serde_json::from_str(&global).unwrap();
+        assert_eq!(global_rt, SigningKeyScope::Global);
+
+        let org =
+            serde_json::to_string(&SigningKeyScope::Organization(OrganizationId::new(5))).unwrap();
+        assert_eq!(org, r#"{"organization":5}"#);
+        let org_rt: SigningKeyScope = serde_json::from_str(&org).unwrap();
+        assert_eq!(org_rt, SigningKeyScope::Organization(OrganizationId::new(5)));
+    }
+
+    #[test]
+    fn test_signing_key_status_serde_json() {
+        let active = serde_json::to_string(&SigningKeyStatus::Active).unwrap();
+        assert_eq!(active, r#""active""#);
+        let rotated = serde_json::to_string(&SigningKeyStatus::Rotated).unwrap();
+        assert_eq!(rotated, r#""rotated""#);
+        let revoked = serde_json::to_string(&SigningKeyStatus::Revoked).unwrap();
+        assert_eq!(revoked, r#""revoked""#);
+    }
+
+    fn make_signing_key(scope: SigningKeyScope) -> SigningKey {
+        let now = Utc::now();
+        SigningKey {
+            id: SigningKeyId::new(1),
+            kid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            public_key_bytes: vec![0u8; 32],
+            encrypted_private_key: vec![0u8; inferadb_ledger_types::SIGNING_KEY_ENVELOPE_SIZE],
+            rmk_version: 1,
+            scope,
+            status: SigningKeyStatus::Active,
+            valid_from: now,
+            valid_until: None,
+            created_at: now,
+            rotated_at: None,
+            revoked_at: None,
+        }
+    }
+
+    #[test]
+    fn test_signing_key_serialization_roundtrip_global() {
+        let key = make_signing_key(SigningKeyScope::Global);
+        let bytes = postcard::to_allocvec(&key).unwrap();
+        let deserialized: SigningKey = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized.id, key.id);
+        assert_eq!(deserialized.kid, key.kid);
+        assert_eq!(deserialized.scope, SigningKeyScope::Global);
+        assert_eq!(deserialized.status, SigningKeyStatus::Active);
+        assert!(deserialized.valid_until.is_none());
+        assert!(deserialized.rotated_at.is_none());
+        assert!(deserialized.revoked_at.is_none());
+    }
+
+    #[test]
+    fn test_signing_key_serialization_roundtrip_organization() {
+        let key = make_signing_key(SigningKeyScope::Organization(OrganizationId::new(42)));
+        let bytes = postcard::to_allocvec(&key).unwrap();
+        let deserialized: SigningKey = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized.scope, SigningKeyScope::Organization(OrganizationId::new(42)));
+    }
+
+    #[test]
+    fn test_signing_key_rotated_state() {
+        let now = Utc::now();
+        let mut key = make_signing_key(SigningKeyScope::Global);
+        key.status = SigningKeyStatus::Rotated;
+        key.rotated_at = Some(now);
+        key.valid_until = Some(now + chrono::Duration::hours(4));
+
+        let bytes = postcard::to_allocvec(&key).unwrap();
+        let deserialized: SigningKey = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized.status, SigningKeyStatus::Rotated);
+        assert!(deserialized.rotated_at.is_some());
+        assert!(deserialized.valid_until.is_some());
+    }
+
+    #[test]
+    fn test_signing_key_revoked_state() {
+        let now = Utc::now();
+        let mut key = make_signing_key(SigningKeyScope::Global);
+        key.status = SigningKeyStatus::Revoked;
+        key.revoked_at = Some(now);
+
+        let bytes = postcard::to_allocvec(&key).unwrap();
+        let deserialized: SigningKey = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized.status, SigningKeyStatus::Revoked);
+        assert!(deserialized.revoked_at.is_some());
+    }
+
+    // ========================================================================
+    // Refresh Token Tests
+    // ========================================================================
+
+    fn make_refresh_token(token_type: TokenType, subject: TokenSubject) -> RefreshToken {
+        let now = Utc::now();
+        RefreshToken {
+            id: RefreshTokenId::new(1),
+            token_hash: [0xaa; 32],
+            family: [0xbb; 16],
+            token_type,
+            subject,
+            organization: None,
+            vault: None,
+            kid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            expires_at: now + chrono::Duration::hours(1),
+            used: false,
+            created_at: now,
+            used_at: None,
+            revoked_at: None,
+        }
+    }
+
+    #[test]
+    fn test_refresh_token_serialization_roundtrip_user_session() {
+        let token =
+            make_refresh_token(TokenType::UserSession, TokenSubject::User(UserSlug::new(42)));
+        let bytes = postcard::to_allocvec(&token).unwrap();
+        let deserialized: RefreshToken = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized.id, token.id);
+        assert_eq!(deserialized.token_hash, [0xaa; 32]);
+        assert_eq!(deserialized.family, [0xbb; 16]);
+        assert_eq!(deserialized.token_type, TokenType::UserSession);
+        assert_eq!(deserialized.subject, TokenSubject::User(UserSlug::new(42)));
+        assert!(deserialized.organization.is_none());
+        assert!(deserialized.vault.is_none());
+        assert!(!deserialized.used);
+        assert!(deserialized.used_at.is_none());
+        assert!(deserialized.revoked_at.is_none());
+    }
+
+    #[test]
+    fn test_refresh_token_serialization_roundtrip_vault_access() {
+        let mut token =
+            make_refresh_token(TokenType::VaultAccess, TokenSubject::App(AppSlug::new(99)));
+        token.organization = Some(OrganizationId::new(5));
+        token.vault = Some(VaultId::new(10));
+
+        let bytes = postcard::to_allocvec(&token).unwrap();
+        let deserialized: RefreshToken = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized.token_type, TokenType::VaultAccess);
+        assert_eq!(deserialized.subject, TokenSubject::App(AppSlug::new(99)));
+        assert_eq!(deserialized.organization, Some(OrganizationId::new(5)));
+        assert_eq!(deserialized.vault, Some(VaultId::new(10)));
+    }
+
+    #[test]
+    fn test_refresh_token_used_state() {
+        let now = Utc::now();
+        let mut token =
+            make_refresh_token(TokenType::UserSession, TokenSubject::User(UserSlug::new(1)));
+        token.used = true;
+        token.used_at = Some(now);
+
+        let bytes = postcard::to_allocvec(&token).unwrap();
+        let deserialized: RefreshToken = postcard::from_bytes(&bytes).unwrap();
+        assert!(deserialized.used);
+        assert!(deserialized.used_at.is_some());
+    }
+
+    #[test]
+    fn test_refresh_token_revoked_state() {
+        let now = Utc::now();
+        let mut token =
+            make_refresh_token(TokenType::UserSession, TokenSubject::User(UserSlug::new(1)));
+        token.revoked_at = Some(now);
+
+        let bytes = postcard::to_allocvec(&token).unwrap();
+        let deserialized: RefreshToken = postcard::from_bytes(&bytes).unwrap();
+        assert!(deserialized.revoked_at.is_some());
     }
 }

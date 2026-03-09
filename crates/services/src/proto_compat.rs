@@ -92,6 +92,7 @@ pub(crate) fn error_code_to_status(code: LedgerErrorCode, message: String) -> St
         LedgerErrorCode::PermissionDenied => Status::permission_denied(message),
         LedgerErrorCode::InvalidArgument => Status::invalid_argument(message),
         LedgerErrorCode::Internal => Status::internal(message),
+        LedgerErrorCode::Unauthenticated => Status::unauthenticated(message),
     }
 }
 

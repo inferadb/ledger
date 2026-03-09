@@ -254,3 +254,57 @@ State proofs require full bucket contents (not O(log n) like Merkle trees):
 | Pagination completeness | No         | Cannot prove no omissions |
 
 For verifiable list operations, maintain your own state via `WatchBlocks` subscription.
+
+## JWT Token Signing
+
+Ledger signs JWT tokens using Ed25519 (EdDSA). This is separate from the data integrity hashing above — Ed25519 is used for token authentication, not for chain verification.
+
+### Algorithm
+
+**EdDSA with Ed25519** — the only supported algorithm. Enforced at two levels:
+
+1. Raw JWT header pre-check: reject any `alg` value that is not exactly the string `"EdDSA"`
+2. Library-level: `Validation::algorithms(&[Algorithm::EdDSA])`
+
+### Key Identifier Format
+
+Each signing key has a `kid` (Key ID) in UUID format. Non-UUID `kid` values are rejected before any state lookup to prevent cache pollution.
+
+### Signing Key Envelope Encryption
+
+Private key material is envelope-encrypted at rest using the Region Master Key (RMK):
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  SigningKeyEnvelope (100 bytes fixed)                    │
+├─────────────────────────────────────────────────────────┤
+│  wrapped_dek    : 40 bytes  (AES-KWP wrapped DEK)      │
+│  nonce          : 12 bytes  (AES-256-GCM nonce)        │
+│  ciphertext     : 32 bytes  (encrypted Ed25519 key)    │
+│  auth_tag       : 16 bytes  (GCM authentication tag)   │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Encryption flow:**
+
+1. Generate fresh DEK via `generate_dek()`
+2. Wrap DEK with RMK via `wrap_dek(&dek, rmk)` (AES-KWP)
+3. Encrypt Ed25519 private key (32 bytes) with DEK using AES-256-GCM
+4. Use `kid` as AAD (additional authenticated data) to bind ciphertext to key identity
+
+**Decryption flow:**
+
+1. Unwrap DEK with RMK via `unwrap_dek(&wrapped_dek, rmk)`
+2. Decrypt ciphertext with DEK using AES-256-GCM with `kid` as AAD
+3. Return private key bytes in `Zeroizing<Vec<u8>>` (zeroized on drop)
+
+### Refresh Token Hash
+
+Refresh tokens are hashed with SHA-256 for storage lookup:
+
+```
+token_string = "ilrt_" + base64url(32 random bytes)    # 48 chars
+token_hash   = SHA-256(token_string)                    # 32 bytes, stored in state
+```
+
+The `ilrt_` prefix (InferaDB Ledger Refresh Token) enables secret scanning tool detection.

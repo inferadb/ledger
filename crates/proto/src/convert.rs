@@ -31,10 +31,14 @@
 
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
-    BlockRetentionMode, BlockRetentionPolicy, EmailVerifyTokenId, LedgerNodeId, OrganizationId,
-    OrganizationSlug, UserEmailId, UserSlug, VaultSlug,
+    AppSlug as DomainAppSlug, BlockRetentionMode, BlockRetentionPolicy, EmailVerifyTokenId,
+    LedgerNodeId, OrganizationId, OrganizationSlug, UserEmailId, UserSlug, VaultSlug,
     events::{EventAction, EventEmission, EventEntry, EventOutcome, EventScope},
     merkle::MerkleProof as InternalMerkleProof,
+    token::{
+        TokenPair as DomainTokenPair, TokenType, UserSessionClaims as DomainUserSessionClaims,
+        ValidatedToken, VaultTokenClaims as DomainVaultTokenClaims,
+    },
 };
 use openraft::Vote;
 use tonic::Status;
@@ -967,6 +971,167 @@ pub fn user_role_from_i32(value: i32) -> Result<inferadb_ledger_types::UserRole,
     inferadb_ledger_types::UserRole::try_from(proto_role)
 }
 
+// =============================================================================
+// TokenPair conversions (domain::TokenPair <-> proto::TokenPair)
+// =============================================================================
+
+/// Converts a domain [`TokenPair`](DomainTokenPair) to its protobuf representation.
+///
+/// The domain `token_type` field is intentionally dropped — the proto response
+/// context already implies the token type (user session vs vault access).
+impl From<DomainTokenPair> for proto::TokenPair {
+    fn from(pair: DomainTokenPair) -> Self {
+        proto::TokenPair {
+            access_token: pair.access_token,
+            refresh_token: pair.refresh_token,
+            access_expires_at: Some(datetime_to_proto_timestamp(&pair.access_expires_at)),
+            refresh_expires_at: Some(datetime_to_proto_timestamp(&pair.refresh_expires_at)),
+        }
+    }
+}
+
+// =============================================================================
+// ValidatedToken conversions (domain::ValidatedToken -> proto::ValidateTokenResponse)
+// =============================================================================
+
+/// Converts a domain [`ValidatedToken`] to its protobuf
+/// [`ValidateTokenResponse`](proto::ValidateTokenResponse).
+///
+/// Dispatches on the `ValidatedToken` variant to populate the `oneof claims` field
+/// and set the `token_type` / `subject` / `expires_at` from the underlying claims.
+impl From<ValidatedToken> for proto::ValidateTokenResponse {
+    fn from(validated: ValidatedToken) -> Self {
+        match validated {
+            ValidatedToken::UserSession(claims) => proto::ValidateTokenResponse {
+                subject: claims.sub.clone(),
+                token_type: TokenType::UserSession.to_string(),
+                expires_at: Some(datetime_from_epoch_secs(claims.exp)),
+                claims: Some(proto::validate_token_response::Claims::UserSession(
+                    proto::UserSessionClaims {
+                        user_slug: claims.user.value(),
+                        role: claims.role.clone(),
+                    },
+                )),
+            },
+            ValidatedToken::VaultAccess(claims) => proto::ValidateTokenResponse {
+                subject: claims.sub.clone(),
+                token_type: TokenType::VaultAccess.to_string(),
+                expires_at: Some(datetime_from_epoch_secs(claims.exp)),
+                claims: Some(proto::validate_token_response::Claims::VaultAccess(
+                    proto::VaultAccessClaims {
+                        org_slug: claims.org.value(),
+                        app_slug: claims.app.value(),
+                        vault_slug: claims.vault.value(),
+                        scopes: claims.scopes.clone(),
+                    },
+                )),
+            },
+        }
+    }
+}
+
+/// Converts a [`ValidateTokenResponse`](proto::ValidateTokenResponse) to its domain
+/// [`ValidatedToken`].
+///
+/// Returns `INVALID_ARGUMENT` when:
+/// - The `claims` oneof is absent
+/// - The `token_type` string is unrecognized
+/// - Required timestamp fields are missing
+impl TryFrom<proto::ValidateTokenResponse> for ValidatedToken {
+    type Error = Status;
+
+    fn try_from(resp: proto::ValidateTokenResponse) -> Result<Self, Status> {
+        let claims = resp
+            .claims
+            .ok_or_else(|| Status::invalid_argument("validate token response missing claims"))?;
+
+        let expires_at = resp.expires_at.ok_or_else(|| {
+            Status::invalid_argument("validate token response missing expires_at")
+        })?;
+        let exp = expires_at.seconds;
+
+        match claims {
+            proto::validate_token_response::Claims::UserSession(c) => {
+                Ok(ValidatedToken::UserSession(DomainUserSessionClaims {
+                    iss: String::new(),
+                    sub: resp.subject,
+                    aud: Vec::new(),
+                    exp,
+                    iat: 0,
+                    nbf: 0,
+                    jti: String::new(),
+                    token_type: TokenType::UserSession,
+                    user: UserSlug::new(c.user_slug),
+                    role: c.role,
+                    version: Default::default(),
+                }))
+            },
+            proto::validate_token_response::Claims::VaultAccess(c) => {
+                Ok(ValidatedToken::VaultAccess(DomainVaultTokenClaims {
+                    iss: String::new(),
+                    sub: resp.subject,
+                    aud: Vec::new(),
+                    exp,
+                    iat: 0,
+                    nbf: 0,
+                    jti: String::new(),
+                    token_type: TokenType::VaultAccess,
+                    org: OrganizationSlug::new(c.org_slug),
+                    app: DomainAppSlug::new(c.app_slug),
+                    vault: VaultSlug::new(c.vault_slug),
+                    scopes: c.scopes,
+                }))
+            },
+        }
+    }
+}
+
+// =============================================================================
+// SigningKeyScope conversions (proto enum <-> i32 helper)
+// =============================================================================
+
+/// Converts a raw `i32` proto enum value to a validated `SigningKeyScope` proto enum.
+///
+/// Returns [`Status::invalid_argument`] for `UNSPECIFIED` — callers must explicitly
+/// choose `GLOBAL` or `ORGANIZATION`.
+///
+/// Note: The domain `SigningKeyScope` type (in the state crate) carries an
+/// `OrganizationId` payload for the `Organization` variant. Full domain conversion
+/// requires the state crate and lives in the services layer.
+pub fn signing_key_scope_from_i32(value: i32) -> Result<proto::SigningKeyScope, Status> {
+    let scope = proto::SigningKeyScope::try_from(value).map_err(|_| {
+        Status::invalid_argument(format!("unknown signing key scope value: {value}"))
+    })?;
+    match scope {
+        proto::SigningKeyScope::Unspecified => {
+            Err(Status::invalid_argument("signing key scope must be specified"))
+        },
+        _ => Ok(scope),
+    }
+}
+
+/// Converts a signing key status string (`"active"`, `"rotated"`, `"revoked"`) to
+/// the proto `PublicKeyInfo.status` field value.
+///
+/// Note: The domain `SigningKeyStatus` enum is in the state crate. Full domain ↔ proto
+/// conversion lives in the services layer. This helper validates the string format
+/// at the proto boundary.
+pub fn validate_signing_key_status(status: &str) -> Result<&str, Status> {
+    match status {
+        "active" | "rotated" | "revoked" => Ok(status),
+        _ => Err(Status::invalid_argument(format!("unknown signing key status: {status}"))),
+    }
+}
+
+// =============================================================================
+// Timestamp helper for epoch seconds
+// =============================================================================
+
+/// Converts epoch seconds to a [`prost_types::Timestamp`].
+fn datetime_from_epoch_secs(epoch_secs: i64) -> prost_types::Timestamp {
+    prost_types::Timestamp { seconds: epoch_secs, nanos: 0 }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
@@ -1064,9 +1229,10 @@ mod tests {
                 "MustNotExist",
                 inferadb_ledger_types::SetCondition::MustNotExist,
                 Box::new(|p| {
-                    assert!(
-                        matches!(p.condition, Some(proto::set_condition::Condition::NotExists(true)))
-                    );
+                    assert!(matches!(
+                        p.condition,
+                        Some(proto::set_condition::Condition::NotExists(true))
+                    ));
                 }),
             ),
             (
@@ -1083,9 +1249,10 @@ mod tests {
                 "VersionEquals(42)",
                 inferadb_ledger_types::SetCondition::VersionEquals(42),
                 Box::new(|p| {
-                    assert!(
-                        matches!(p.condition, Some(proto::set_condition::Condition::Version(42)))
-                    );
+                    assert!(matches!(
+                        p.condition,
+                        Some(proto::set_condition::Condition::Version(42))
+                    ));
                 }),
             ),
             (
@@ -1444,7 +1611,11 @@ mod tests {
 
     #[test]
     fn test_proto_to_set_condition() {
-        let cases: &[(&str, Option<proto::set_condition::Condition>, Option<inferadb_ledger_types::SetCondition>)] = &[
+        let cases: &[(
+            &str,
+            Option<proto::set_condition::Condition>,
+            Option<inferadb_ledger_types::SetCondition>,
+        )] = &[
             (
                 "NotExists(true) → MustNotExist",
                 Some(proto::set_condition::Condition::NotExists(true)),
@@ -1465,11 +1636,7 @@ mod tests {
                 Some(proto::set_condition::Condition::ValueEquals(vec![1, 2, 3])),
                 Some(inferadb_ledger_types::SetCondition::ValueEquals(vec![1, 2, 3])),
             ),
-            (
-                "None → None",
-                None,
-                None,
-            ),
+            ("None → None", None, None),
             (
                 "NotExists(false) → MustExist (inverted)",
                 Some(proto::set_condition::Condition::NotExists(false)),
@@ -1731,10 +1898,7 @@ mod tests {
             ("Success", EventOutcome::Success, proto::EventOutcome::Success),
             (
                 "Failed",
-                EventOutcome::Failed {
-                    code: "E1001".to_string(),
-                    detail: "disk full".to_string(),
-                },
+                EventOutcome::Failed { code: "E1001".to_string(), detail: "disk full".to_string() },
                 proto::EventOutcome::Failed,
             ),
             (
@@ -2307,5 +2471,256 @@ mod tests {
         use inferadb_ledger_types::UserRole;
         let result = user_role_from_i32(0); // 0 = Unspecified
         assert_eq!(result.expect("unspecified should map to User"), UserRole::User);
+    }
+
+    // -------------------------------------------------------------------------
+    // TokenPair conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn token_pair_domain_to_proto() {
+        use inferadb_ledger_types::token::{TokenPair as DomainTP, TokenType};
+
+        let dt = DateTime::from_timestamp(1700000000, 500_000_000).unwrap();
+        let pair = DomainTP {
+            access_token: "access.jwt".to_string(),
+            refresh_token: "ilrt_refresh".to_string(),
+            access_expires_at: dt,
+            refresh_expires_at: dt,
+            token_type: TokenType::UserSession,
+        };
+
+        let proto_pair: proto::TokenPair = pair.into();
+        assert_eq!(proto_pair.access_token, "access.jwt");
+        assert_eq!(proto_pair.refresh_token, "ilrt_refresh");
+        let ts = proto_pair.access_expires_at.unwrap();
+        assert_eq!(ts.seconds, 1700000000);
+        assert_eq!(ts.nanos, 500_000_000);
+    }
+
+    // -------------------------------------------------------------------------
+    // ValidatedToken conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn validated_token_user_session_to_proto() {
+        use inferadb_ledger_types::{
+            TokenVersion,
+            token::{TokenType, UserSessionClaims, ValidatedToken as DomainVT},
+        };
+
+        let claims = UserSessionClaims {
+            iss: "inferadb".to_string(),
+            sub: "user:42".to_string(),
+            aud: vec!["inferadb-control".to_string()],
+            exp: 1700001800,
+            iat: 1700000000,
+            nbf: 1700000000,
+            jti: "test-jti".to_string(),
+            token_type: TokenType::UserSession,
+            user: UserSlug::new(42),
+            role: "admin".to_string(),
+            version: TokenVersion::new(1),
+        };
+
+        let resp: proto::ValidateTokenResponse = DomainVT::UserSession(claims).into();
+        assert_eq!(resp.subject, "user:42");
+        assert_eq!(resp.token_type, "user_session");
+        assert_eq!(resp.expires_at.unwrap().seconds, 1700001800);
+
+        let user_claims = match resp.claims.unwrap() {
+            proto::validate_token_response::Claims::UserSession(c) => c,
+            _ => panic!("expected UserSession claims"),
+        };
+        assert_eq!(user_claims.user_slug, 42);
+        assert_eq!(user_claims.role, "admin");
+    }
+
+    #[test]
+    fn validated_token_vault_access_to_proto() {
+        use inferadb_ledger_types::token::{
+            TokenType, ValidatedToken as DomainVT, VaultTokenClaims,
+        };
+
+        let claims = VaultTokenClaims {
+            iss: "inferadb".to_string(),
+            sub: "app:99".to_string(),
+            aud: vec!["inferadb-engine".to_string()],
+            exp: 1700000300,
+            iat: 1700000000,
+            nbf: 1700000000,
+            jti: "test-jti-2".to_string(),
+            token_type: TokenType::VaultAccess,
+            org: OrganizationSlug::new(10),
+            app: inferadb_ledger_types::AppSlug::new(99),
+            vault: VaultSlug::new(50),
+            scopes: vec!["vault:read".to_string()],
+        };
+
+        let resp: proto::ValidateTokenResponse = DomainVT::VaultAccess(claims).into();
+        assert_eq!(resp.subject, "app:99");
+        assert_eq!(resp.token_type, "vault_access");
+
+        let vault_claims = match resp.claims.unwrap() {
+            proto::validate_token_response::Claims::VaultAccess(c) => c,
+            _ => panic!("expected VaultAccess claims"),
+        };
+        assert_eq!(vault_claims.org_slug, 10);
+        assert_eq!(vault_claims.app_slug, 99);
+        assert_eq!(vault_claims.vault_slug, 50);
+        assert_eq!(vault_claims.scopes, vec!["vault:read"]);
+    }
+
+    #[test]
+    fn validate_token_response_proto_to_domain_user_session() {
+        let resp = proto::ValidateTokenResponse {
+            subject: "user:42".to_string(),
+            token_type: "user_session".to_string(),
+            expires_at: Some(prost_types::Timestamp { seconds: 1700001800, nanos: 0 }),
+            claims: Some(proto::validate_token_response::Claims::UserSession(
+                proto::UserSessionClaims { user_slug: 42, role: "admin".to_string() },
+            )),
+        };
+
+        let validated: ValidatedToken = resp.try_into().unwrap();
+        match validated {
+            ValidatedToken::UserSession(c) => {
+                assert_eq!(c.sub, "user:42");
+                assert_eq!(c.user.value(), 42);
+                assert_eq!(c.role, "admin");
+                assert_eq!(c.exp, 1700001800);
+            },
+            _ => panic!("expected UserSession"),
+        }
+    }
+
+    #[test]
+    fn validate_token_response_proto_to_domain_vault_access() {
+        let resp = proto::ValidateTokenResponse {
+            subject: "app:99".to_string(),
+            token_type: "vault_access".to_string(),
+            expires_at: Some(prost_types::Timestamp { seconds: 1700000300, nanos: 0 }),
+            claims: Some(proto::validate_token_response::Claims::VaultAccess(
+                proto::VaultAccessClaims {
+                    org_slug: 10,
+                    app_slug: 99,
+                    vault_slug: 50,
+                    scopes: vec!["entity:write".to_string()],
+                },
+            )),
+        };
+
+        let validated: ValidatedToken = resp.try_into().unwrap();
+        match validated {
+            ValidatedToken::VaultAccess(c) => {
+                assert_eq!(c.sub, "app:99");
+                assert_eq!(c.org.value(), 10);
+                assert_eq!(c.app.value(), 99);
+                assert_eq!(c.vault.value(), 50);
+                assert_eq!(c.scopes, vec!["entity:write"]);
+            },
+            _ => panic!("expected VaultAccess"),
+        }
+    }
+
+    #[test]
+    fn validate_token_response_missing_claims_rejected() {
+        let resp = proto::ValidateTokenResponse {
+            subject: "user:1".to_string(),
+            token_type: "user_session".to_string(),
+            expires_at: Some(prost_types::Timestamp { seconds: 0, nanos: 0 }),
+            claims: None,
+        };
+
+        let result: Result<ValidatedToken, Status> = resp.try_into();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn validate_token_response_missing_expires_at_rejected() {
+        let resp = proto::ValidateTokenResponse {
+            subject: "user:1".to_string(),
+            token_type: "user_session".to_string(),
+            expires_at: None,
+            claims: Some(proto::validate_token_response::Claims::UserSession(
+                proto::UserSessionClaims { user_slug: 1, role: "user".to_string() },
+            )),
+        };
+
+        let result: Result<ValidatedToken, Status> = resp.try_into();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    // -------------------------------------------------------------------------
+    // SigningKeyScope helper tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn signing_key_scope_from_i32_global() {
+        let scope = signing_key_scope_from_i32(1).unwrap();
+        assert_eq!(scope, proto::SigningKeyScope::Global);
+    }
+
+    #[test]
+    fn signing_key_scope_from_i32_organization() {
+        let scope = signing_key_scope_from_i32(2).unwrap();
+        assert_eq!(scope, proto::SigningKeyScope::Organization);
+    }
+
+    #[test]
+    fn signing_key_scope_from_i32_unspecified_rejected() {
+        let result = signing_key_scope_from_i32(0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn signing_key_scope_from_i32_unknown_rejected() {
+        let result = signing_key_scope_from_i32(99);
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // SigningKeyStatus helper tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn validate_signing_key_status_valid() {
+        assert_eq!(validate_signing_key_status("active").unwrap(), "active");
+        assert_eq!(validate_signing_key_status("rotated").unwrap(), "rotated");
+        assert_eq!(validate_signing_key_status("revoked").unwrap(), "revoked");
+    }
+
+    #[test]
+    fn validate_signing_key_status_invalid() {
+        assert!(validate_signing_key_status("unknown").is_err());
+        assert!(validate_signing_key_status("").is_err());
+        assert!(validate_signing_key_status("Active").is_err()); // case-sensitive
+    }
+
+    // -------------------------------------------------------------------------
+    // TokenPair roundtrip test
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn token_pair_roundtrip_timestamps_preserved() {
+        use inferadb_ledger_types::token::{TokenPair as DomainTP, TokenType};
+
+        let access_dt = DateTime::from_timestamp(1700001800, 0).unwrap();
+        let refresh_dt = DateTime::from_timestamp(1700086200, 0).unwrap();
+
+        let pair = DomainTP {
+            access_token: "a".to_string(),
+            refresh_token: "r".to_string(),
+            access_expires_at: access_dt,
+            refresh_expires_at: refresh_dt,
+            token_type: TokenType::UserSession,
+        };
+
+        let proto_pair: proto::TokenPair = pair.into();
+        assert_eq!(proto_pair.access_expires_at.unwrap().seconds, 1700001800);
+        assert_eq!(proto_pair.refresh_expires_at.unwrap().seconds, 1700086200);
     }
 }

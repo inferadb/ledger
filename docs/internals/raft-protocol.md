@@ -69,7 +69,7 @@ Sent by leaders to replicate log entries and maintain heartbeats. Empty `entries
 
 Sent by leaders to followers that are too far behind to catch up via log replay. Transfers a zstd-compressed, SHA-256-checksummed snapshot file in chunks.
 
-The snapshot is a binary file containing: LSNP magic, version header, `AppliedStateCore` (postcard-serialized), 9 externalized table sections, entity data, and event data — all within a single zstd-compressed stream with a 32-byte SHA-256 checksum footer over the compressed bytes.
+The snapshot is a binary file containing: LSNP magic, version header, `AppliedStateCore` (postcard-serialized), 12 externalized table sections, entity data, and event data — all within a single zstd-compressed stream with a 32-byte SHA-256 checksum footer over the compressed bytes.
 
 **Request:**
 

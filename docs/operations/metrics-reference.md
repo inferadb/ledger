@@ -128,7 +128,7 @@ rate(ledger_idempotency_cache_hits_total[5m]) /
 
 **Labels:**
 
-- `service`: `WriteService`, `ReadService`, `AdminService`, `HealthService`
+- `service`: `ReadService`, `WriteService`, `AdminService`, `OrganizationService`, `VaultService`, `UserService`, `AppService`, `TokenService`, `EventsService`, `HealthService`, `DiscoveryService`, `RaftService`
 - `method`: RPC method name
 - `status`: gRPC status code
 
@@ -182,6 +182,72 @@ ledger_determinism_bug_total > 0
 | `ledger_serialization_postcard_encode_seconds` | Histogram | `entry_type`              | Postcard encoding time   |
 | `ledger_serialization_postcard_decode_seconds` | Histogram | `entry_type`              | Postcard decoding time   |
 | `ledger_serialization_bytes`                   | Histogram | `direction`, `entry_type` | Serialized payload sizes |
+
+## Token Service
+
+| Metric                                    | Type      | Labels       | Description                            |
+| ----------------------------------------- | --------- | ------------ | -------------------------------------- |
+| `ledger_token_operations_total`           | Counter   | `op`         | Token operations by type               |
+| `ledger_token_validation_latency_seconds` | Histogram | -            | Token validation latency               |
+| `ledger_refresh_token_reuse_total`        | Counter   | -            | Refresh token reuse detections (theft) |
+| `ledger_signing_key_transitions_total`    | Counter   | `from`, `to` | Signing key status transitions         |
+
+**Labels:**
+
+- `op`: `create_session`, `validate`, `refresh`, `revoke`, `revoke_all`, `create_vault_token`, `create_key`, `rotate_key`, `revoke_key`
+- `from`/`to`: `active`, `rotated`, `revoked`
+
+## Background Jobs
+
+| Metric                                        | Type      | Labels          | Description                |
+| --------------------------------------------- | --------- | --------------- | -------------------------- |
+| `ledger_background_job_duration_seconds`      | Histogram | `job`           | Duration of each job cycle |
+| `ledger_background_job_runs_total`            | Counter   | `job`, `result` | Total cycles executed      |
+| `ledger_background_job_items_processed_total` | Counter   | `job`           | Work items processed       |
+
+**Labels:**
+
+- `job`: `gc`, `compaction`, `integrity_scrub`, `auto_recovery`, `backup`, `dek_rewrap`, `orphan_cleanup`, `saga_orchestrator`, `token_maintenance`, `ttl_gc`, `learner_refresh`, `organization_purge`, `user_retention`, `events_gc`, `resource_metrics`
+- `result`: `success`, `failure`
+
+## Resource Saturation
+
+| Metric                           | Type    | Labels     | Description            |
+| -------------------------------- | ------- | ---------- | ---------------------- |
+| `ledger_disk_total_bytes`        | Gauge   | `path`     | Total disk space       |
+| `ledger_disk_available_bytes`    | Gauge   | `path`     | Available disk space   |
+| `ledger_page_cache_hits_total`   | Counter | -          | Page cache hits        |
+| `ledger_page_cache_misses_total` | Counter | -          | Page cache misses      |
+| `ledger_btree_depth`             | Gauge   | `vault_id` | B-tree depth per vault |
+| `ledger_btree_splits_total`      | Counter | -          | B-tree leaf splits     |
+
+## SLI Metrics
+
+| Metric                            | Type      | Labels                                       | Description                      |
+| --------------------------------- | --------- | -------------------------------------------- | -------------------------------- |
+| `ledger_grpc_sli_latency_seconds` | Histogram | `service`, `method`, `status`, `error_class` | Per-RPC latency with SLI buckets |
+
+**SLI histogram buckets**: 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 10.0 seconds.
+
+## Hot Key Detection
+
+| Metric                            | Type    | Labels     | Description                |
+| --------------------------------- | ------- | ---------- | -------------------------- |
+| `ledger_hot_key_detections_total` | Counter | `vault_id` | Hot key detection events   |
+| `ledger_hot_key_current_count`    | Gauge   | -          | Currently tracked hot keys |
+
+## Rate Limiting
+
+| Metric                             | Type    | Labels            | Description                       |
+| ---------------------------------- | ------- | ----------------- | --------------------------------- |
+| `ledger_rate_limit_exceeded_total` | Counter | `organization_id` | Rate limit violations             |
+| `ledger_rate_limit_queue_depth`    | Gauge   | -                 | Pending proposals in rate limiter |
+
+## Quota
+
+| Metric                        | Type    | Labels                        | Description      |
+| ----------------------------- | ------- | ----------------------------- | ---------------- |
+| `ledger_quota_exceeded_total` | Counter | `organization_id`, `resource` | Quota violations |
 
 ## Alert Recommendations
 

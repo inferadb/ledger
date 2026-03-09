@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ConfigError,
+    jwt::JwtConfig,
     observability::{HotKeyConfig, MetricsCardinalityConfig},
     resilience::{RateLimitConfig, ValidationConfig},
     storage::{BTreeCompactionConfig, IntegrityConfig},
@@ -53,6 +54,9 @@ pub struct RuntimeConfig {
     /// Event logging configuration (hot-reloadable subset).
     #[serde(default)]
     pub events: Option<RuntimeEventsConfig>,
+    /// JWT token configuration (TTLs, clock skew, issuer).
+    #[serde(default)]
+    pub jwt: Option<JwtConfig>,
 }
 
 /// Runtime-reconfigurable subset of event logging configuration.

@@ -297,6 +297,18 @@ pub enum EventAction {
     UserErased,
     /// Flat-to-regional user migration completed.
     UsersMigrated,
+    /// Token (user session or vault access) created.
+    TokenCreated,
+    /// Token refreshed (rotate-on-use).
+    TokenRefreshed,
+    /// Token revoked.
+    TokenRevoked,
+    /// Signing key created.
+    SigningKeyCreated,
+    /// Signing key rotated.
+    SigningKeyRotated,
+    /// Signing key revoked.
+    SigningKeyRevoked,
 
     // ── Organization scope ──────────────────────────────────
     /// Vault created.
@@ -370,7 +382,13 @@ impl EventAction {
             | EventAction::BackupRestored
             | EventAction::SnapshotCreated
             | EventAction::UserErased
-            | EventAction::UsersMigrated => EventScope::System,
+            | EventAction::UsersMigrated
+            | EventAction::TokenCreated
+            | EventAction::TokenRefreshed
+            | EventAction::TokenRevoked
+            | EventAction::SigningKeyCreated
+            | EventAction::SigningKeyRotated
+            | EventAction::SigningKeyRevoked => EventScope::System,
 
             // Organization scope
             EventAction::VaultCreated
@@ -434,6 +452,12 @@ impl EventAction {
             EventAction::SnapshotCreated => "ledger.snapshot.created",
             EventAction::UserErased => "ledger.user.erased",
             EventAction::UsersMigrated => "ledger.user.migrated",
+            EventAction::TokenCreated => "ledger.token.created",
+            EventAction::TokenRefreshed => "ledger.token.refreshed",
+            EventAction::TokenRevoked => "ledger.token.revoked",
+            EventAction::SigningKeyCreated => "ledger.signing_key.created",
+            EventAction::SigningKeyRotated => "ledger.signing_key.rotated",
+            EventAction::SigningKeyRevoked => "ledger.signing_key.revoked",
             // Organization scope
             EventAction::VaultCreated => "ledger.vault.created",
             EventAction::VaultDeleted => "ledger.vault.deleted",
@@ -495,6 +519,12 @@ impl EventAction {
             EventAction::SnapshotCreated => "snapshot_created",
             EventAction::UserErased => "user_erased",
             EventAction::UsersMigrated => "users_migrated",
+            EventAction::TokenCreated => "token_created",
+            EventAction::TokenRefreshed => "token_refreshed",
+            EventAction::TokenRevoked => "token_revoked",
+            EventAction::SigningKeyCreated => "signing_key_created",
+            EventAction::SigningKeyRotated => "signing_key_rotated",
+            EventAction::SigningKeyRevoked => "signing_key_revoked",
             EventAction::VaultCreated => "vault_created",
             EventAction::VaultDeleted => "vault_deleted",
             EventAction::WriteCommitted => "write_committed",
@@ -551,6 +581,12 @@ impl EventAction {
         EventAction::SnapshotCreated,
         EventAction::UserErased,
         EventAction::UsersMigrated,
+        EventAction::TokenCreated,
+        EventAction::TokenRefreshed,
+        EventAction::TokenRevoked,
+        EventAction::SigningKeyCreated,
+        EventAction::SigningKeyRotated,
+        EventAction::SigningKeyRevoked,
         EventAction::VaultCreated,
         EventAction::VaultDeleted,
         EventAction::WriteCommitted,
@@ -963,8 +999,8 @@ mod tests {
 
     #[test]
     fn event_action_all_count() {
-        // 40 system + 11 organization = 51 total
-        assert_eq!(EventAction::ALL.len(), 51);
+        // 46 system + 11 organization = 57 total
+        assert_eq!(EventAction::ALL.len(), 57);
     }
 
     // ── EventOutcome ────────────────────────────────────────

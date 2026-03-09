@@ -427,21 +427,22 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // For protected regions, validate sufficient in-region nodes for quorum
         self.validate_region_nodes(region)?;
 
-        // Resolve admin_slug → UserId
-        let admin_slug_proto = req.admin.ok_or_else(|| {
-            Status::invalid_argument("admin is required for organization creation")
-        })?;
-        let admin_user_slug = inferadb_ledger_types::UserSlug::new(admin_slug_proto.slug);
-        let sys_svc_admin = SystemOrganizationService::new(self.ctx.state.clone());
-        let admin_user_id = sys_svc_admin
-            .get_user_id_by_slug(admin_user_slug)
-            .map_err(|e| Status::internal(format!("Failed to resolve admin slug: {e}")))?
-            .ok_or_else(|| {
-                Status::invalid_argument(format!(
-                    "Admin user with slug {} not found",
-                    admin_slug_proto.slug
-                ))
-            })?;
+        // Resolve admin_slug → UserId (optional — if absent, org has no admin member)
+        let admin_user_id = if let Some(admin_slug_proto) = req.admin {
+            let admin_user_slug = inferadb_ledger_types::UserSlug::new(admin_slug_proto.slug);
+            let sys_svc_admin = SystemOrganizationService::new(self.ctx.state.clone());
+            sys_svc_admin
+                .get_user_id_by_slug(admin_user_slug)
+                .map_err(|e| Status::internal(format!("Failed to resolve admin slug: {e}")))?
+                .ok_or_else(|| {
+                    Status::invalid_argument(format!(
+                        "Admin user with slug {} not found",
+                        admin_slug_proto.slug
+                    ))
+                })?
+        } else {
+            inferadb_ledger_types::UserId::new(0)
+        };
 
         // Generate a Snowflake slug for the organization
         let slug = inferadb_ledger_types::snowflake::generate_organization_slug()

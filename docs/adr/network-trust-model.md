@@ -45,11 +45,13 @@ TLS is supported for transport encryption (defense in depth) but not enforced fo
 - Kubernetes service meshes (Istio, Linkerd) can provide transparent mTLS without application changes
 - No benefit over network-level isolation when all callers are trusted internal services
 
-### Why Not JWT/OAuth2?
+### Why Not JWT/OAuth2 for Ledger's Own Authentication?
 
 - Adds 0.1–1ms per request for token parsing, signature verification, and expiry checks
 - Requires token issuance infrastructure and clock synchronization across the cluster
 - Authorization system depending on authorization to function is architecturally unsound
+
+> **Note:** Ledger now provides a `TokenService` that **issues** JWTs for upstream services (Engine and Control) to authenticate their end users. This is a token _issuance_ service, not authentication of Ledger's own API — requests to Ledger remain unauthenticated at the application layer. See [INTEGRATION.md](../../INTEGRATION.md) for the JWT integration guide.
 
 ## Consequences
 

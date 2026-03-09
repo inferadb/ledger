@@ -34,7 +34,7 @@ Each region's Raft group gets isolated database files under a dedicated director
 | Decision                  | Rationale                                           |
 | ------------------------- | --------------------------------------------------- |
 | Per-region database files | Isolates write locks, enables per-region encryption |
-| Table-based storage       | 20 tables for different data types (see tables.rs)  |
+| Table-based storage       | 21 tables for different data types (see tables.rs)  |
 | Dual-slot commit          | Atomic commits using header slot flipping           |
 | Snapshots by height       | Predictable naming; simple retention policy         |
 
@@ -58,7 +58,7 @@ Key operations:
 
 ### State Storage
 
-The database uses 20 tables (see `crates/store/src/tables.rs`):
+The database uses 21 tables (see `crates/store/src/tables.rs`):
 
 | Table                 | Key Format                              | Purpose                             |
 | --------------------- | --------------------------------------- | ----------------------------------- |
@@ -79,6 +79,10 @@ The database uses 20 tables (see `crates/store/src/tables.rs`):
 | VaultHeights          | `{org_id:8BE}{vault_id:8BE}`            | Per-vault blockchain heights        |
 | VaultHashes           | `{org_id:8BE}{vault_id:8BE}`            | Per-vault previous block hashes     |
 | VaultHealth           | `{org_id:8BE}{vault_id:8BE}`            | Per-vault health status             |
+| CompactionMeta        | `{key}`                                 | B+ tree compaction metadata         |
+| UserSlugIndex         | `{slug:8BE}`                            | Slug→user_id lookup                 |
+| TeamSlugIndex         | `{slug:8BE}`                            | Slug→(org_id, team_id) lookup       |
+| AppSlugIndex          | `{slug:8BE}`                            | Slug→(org_id, app_id) lookup        |
 
 **Key format**: `vault_id (8 bytes BE) + bucket_id (1 byte) + local_key`
 
@@ -90,7 +94,7 @@ The Raft state machine uses a two-tier persistence model:
 
 1. **`AppliedStateCore`** — A compact struct (<512 bytes) containing `last_applied`, `membership`, `region_height`, and `previous_region_hash`. Stored in the `RaftState` table with a 2-byte version sentinel prefix (`[0x00, 0x01]`).
 
-2. **Externalized tables** — Nine dedicated B+ tree tables (`OrganizationMeta`, `VaultMeta`, `VaultHeights`, `VaultHashes`, `VaultHealth`, `Sequences`, `ClientSequences`, `OrganizationSlugIndex`, `VaultSlugIndex`) store per-entity state that previously lived in a single serialized `AppliedState` blob.
+2. **Externalized tables** — Twelve dedicated B+ tree tables (`OrganizationMeta`, `VaultMeta`, `VaultHeights`, `VaultHashes`, `VaultHealth`, `Sequences`, `ClientSequences`, `OrganizationSlugIndex`, `VaultSlugIndex`, `UserSlugIndex`, `TeamSlugIndex`, `AppSlugIndex`) store per-entity state that previously lived in a single serialized `AppliedState` blob.
 
 Both tiers are written atomically in a single `WriteTransaction` during each apply cycle. The in-memory `AppliedState` remains the hot cache for reads — externalized tables are the persistence layer only.
 
@@ -120,7 +124,7 @@ Snapshots use a file-based streaming format with zstd compression and SHA-256 in
 ├─────────────────────────────────────────────┤
 │ Header section: AppliedStateCore (postcard)  │
 ├─────────────────────────────────────────────┤
-│ Table sections × 9 (externalized tables)    │
+│ Table sections × 12 (externalized tables)   │
 │   Each: table_id + entry_count + key/value  │
 ├─────────────────────────────────────────────┤
 │ Entity section: all entities across vaults  │
@@ -317,7 +321,7 @@ fn acquire_lock(data_dir: &Path) -> Result<FileLock> {
 2. **State consistency**: `state.db` reflects all applied log entries up to `applied_index`
 3. **Block archive append-only**: Segment files never modified after creation
 4. **Snapshot validity**: Snapshot `state_root` matches block header at `region_height`
-5. **Externalized table atomicity**: `AppliedStateCore` and all 9 externalized tables are written in a single `WriteTransaction` — either all succeed or none are visible
+5. **Externalized table atomicity**: `AppliedStateCore` and all 12 externalized tables are written in a single `WriteTransaction` — either all succeed or none are visible
 6. **Snapshot integrity**: SHA-256 checksum over compressed bytes is verified before any decompression or state changes during installation
 
 ## Format Compatibility

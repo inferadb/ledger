@@ -460,6 +460,16 @@ pub struct Config {
     #[builder(default)]
     pub events: inferadb_ledger_types::events::EventConfig,
 
+    // === JWT ===
+    /// JWT token configuration (TTLs, issuer, clock skew, key rotation grace).
+    ///
+    /// Controls session and vault token lifetimes, signing key rotation
+    /// grace periods, and clock skew tolerance.
+    #[arg(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub jwt: inferadb_ledger_types::config::JwtConfig,
+
     // === Saga Orchestrator ===
     /// Saga orchestrator configuration for cross-organization operations.
     ///
@@ -497,6 +507,25 @@ pub struct Config {
     #[serde(default)]
     #[builder(default)]
     pub tiered_storage: inferadb_ledger_types::config::TieredStorageConfig,
+
+    // === Rate Limiting ===
+    /// Rate limit configuration for per-client and per-organization request throttling.
+    ///
+    /// Controls token bucket capacities and refill rates. When absent, uses
+    /// hardcoded defaults (client burst=100, org burst=1000).
+    #[arg(skip)]
+    #[serde(default)]
+    pub rate_limit: Option<inferadb_ledger_types::config::RateLimitConfig>,
+
+    // === Token Maintenance ===
+    /// Token maintenance job interval in seconds (default: 300 = 5 minutes).
+    ///
+    /// Controls how often expired refresh tokens are cleaned up and rotated
+    /// signing keys past their grace period are transitioned to revoked.
+    #[arg(skip)]
+    #[serde(default = "default_token_maintenance_interval_secs")]
+    #[builder(default = default_token_maintenance_interval_secs())]
+    pub token_maintenance_interval_secs: u64,
 }
 
 // Default value functions
@@ -511,6 +540,9 @@ fn default_region() -> inferadb_ledger_types::Region {
 
 fn default_cluster() -> Option<u32> {
     Some(3)
+}
+fn default_token_maintenance_interval_secs() -> u64 {
+    300 // 5 minutes
 }
 fn default_peers_ttl_secs() -> u64 {
     3600 // 1 hour
@@ -549,10 +581,13 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             backup: None,
             events: inferadb_ledger_types::events::EventConfig::default(),
+            jwt: inferadb_ledger_types::config::JwtConfig::default(),
             saga: inferadb_ledger_types::config::SagaConfig::default(),
             cleanup: inferadb_ledger_types::config::CleanupConfig::default(),
             integrity: inferadb_ledger_types::config::IntegrityConfig::default(),
             tiered_storage: inferadb_ledger_types::config::TieredStorageConfig::default(),
+            rate_limit: None,
+            token_maintenance_interval_secs: default_token_maintenance_interval_secs(),
         }
     }
 }

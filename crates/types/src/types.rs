@@ -324,6 +324,100 @@ impl Default for ClientAssertionId {
     }
 }
 
+define_id!(
+    /// Internal sequential identifier for a signing key.
+    ///
+    /// Wraps an `i64` assigned by the Raft leader from the
+    /// `_meta:seq:signing_key` sequence counter.
+    ///
+    /// # Display
+    ///
+    /// Formats with `sigkey:` prefix: `sigkey:1`.
+    SigningKeyId, i64, "sigkey"
+);
+
+impl Default for SigningKeyId {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+define_id!(
+    /// Internal sequential identifier for a refresh token.
+    ///
+    /// Wraps an `i64` assigned by the Raft leader from the
+    /// `_meta:seq:refresh_token` sequence counter.
+    ///
+    /// # Display
+    ///
+    /// Formats with `rtoken:` prefix: `rtoken:42`.
+    RefreshTokenId, i64, "rtoken"
+);
+
+impl Default for RefreshTokenId {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+// ============================================================================
+// TokenVersion
+// ============================================================================
+
+/// Monotonic counter for forced session invalidation.
+///
+/// Incremented on password change, account compromise, or admin force-revoke.
+/// Stored on the `User` entity and embedded in JWT claims. During token
+/// validation, the claim's version is compared against the current stored
+/// version — a mismatch means the session was force-invalidated.
+///
+/// # Display
+///
+/// Formats with `v` prefix: `v0`, `v3`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TokenVersion(u64);
+
+impl TokenVersion {
+    /// Creates a new version from a raw counter value.
+    #[inline]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the raw counter value.
+    #[inline]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+
+    /// Returns the next version (current + 1), saturating at `u64::MAX`.
+    #[inline]
+    pub const fn increment(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+impl From<u64> for TokenVersion {
+    #[inline]
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<TokenVersion> for u64 {
+    #[inline]
+    fn from(v: TokenVersion) -> Self {
+        v.0
+    }
+}
+
+impl fmt::Display for TokenVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "v{}", self.0)
+    }
+}
+
 // ============================================================================
 // Region Type
 // ============================================================================
@@ -1515,6 +1609,81 @@ mod tests {
     // ========================================================================
     // RegionBlock Tests
     // ========================================================================
+
+    // ========================================================================
+    // TokenVersion Tests
+    // ========================================================================
+
+    #[test]
+    fn test_token_version_default_is_zero() {
+        let v = TokenVersion::default();
+        assert_eq!(v.value(), 0);
+        assert_eq!(v, TokenVersion::new(0));
+    }
+
+    #[test]
+    fn test_token_version_new_and_value() {
+        let v = TokenVersion::new(42);
+        assert_eq!(v.value(), 42);
+    }
+
+    #[test]
+    fn test_token_version_increment() {
+        let v0 = TokenVersion::default();
+        let v1 = v0.increment();
+        let v2 = v1.increment();
+        assert_eq!(v0.value(), 0);
+        assert_eq!(v1.value(), 1);
+        assert_eq!(v2.value(), 2);
+    }
+
+    #[test]
+    fn test_token_version_display() {
+        assert_eq!(format!("{}", TokenVersion::new(0)), "v0");
+        assert_eq!(format!("{}", TokenVersion::new(5)), "v5");
+        assert_eq!(format!("{}", TokenVersion::new(999)), "v999");
+    }
+
+    #[test]
+    fn test_token_version_from_u64() {
+        let v: TokenVersion = 10_u64.into();
+        assert_eq!(v.value(), 10);
+        let raw: u64 = TokenVersion::new(7).into();
+        assert_eq!(raw, 7);
+    }
+
+    #[test]
+    fn test_token_version_serde_roundtrip() {
+        let v = TokenVersion::new(42);
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, "42");
+        let deserialized: TokenVersion = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, v);
+    }
+
+    #[test]
+    fn test_token_version_ordering() {
+        assert!(TokenVersion::new(0) < TokenVersion::new(1));
+        assert!(TokenVersion::new(5) > TokenVersion::new(3));
+        assert_eq!(TokenVersion::new(2), TokenVersion::new(2));
+    }
+
+    #[test]
+    fn test_token_version_copy() {
+        let v = TokenVersion::new(10);
+        let v2 = v;
+        assert_eq!(v, v2);
+    }
+
+    #[test]
+    fn test_token_version_hash_map_key() {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        map.insert(TokenVersion::new(1), "first");
+        map.insert(TokenVersion::new(2), "second");
+        assert_eq!(map.get(&TokenVersion::new(1)), Some(&"first"));
+        assert_eq!(map.get(&TokenVersion::new(3)), None);
+    }
 
     #[test]
     fn test_extract_vault_block_selects_correct_height() {

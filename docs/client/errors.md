@@ -16,9 +16,11 @@ Ledger uses standard gRPC status codes with additional context in error details.
 | 3    | `INVALID_ARGUMENT`    | Malformed request               | No                 |
 | 5    | `NOT_FOUND`           | Resource doesn't exist          | No                 |
 | 6    | `ALREADY_EXISTS`      | Resource already exists         | No                 |
+| 8    | `RESOURCE_EXHAUSTED`  | Rate limit or quota exceeded    | Yes (with backoff) |
 | 9    | `FAILED_PRECONDITION` | State requirements not met      | Maybe              |
 | 13   | `INTERNAL`            | Server error                    | Yes (with backoff) |
 | 14   | `UNAVAILABLE`         | Service temporarily unavailable | Yes (with backoff) |
+| 16   | `UNAUTHENTICATED`     | Missing or invalid token        | No (re-auth first) |
 
 ## Write Errors
 
@@ -199,15 +201,53 @@ grpcurl -plaintext \
 
 **Resolution**: Wait for current snapshot to complete.
 
+## Token Errors
+
+Token-related operations (via `TokenService`) return specific error conditions:
+
+### Validation Errors
+
+| Error                  | gRPC Code          | Description                                    |
+| ---------------------- | ------------------ | ---------------------------------------------- |
+| `Expired`              | `UNAUTHENTICATED`  | Token has expired                              |
+| `InvalidSignature`     | `UNAUTHENTICATED`  | Token signature verification failed            |
+| `Revoked`              | `UNAUTHENTICATED`  | Token was explicitly revoked                   |
+| `InvalidAudience`      | `UNAUTHENTICATED`  | Token audience does not match expected service |
+| `InvalidIssuer`        | `UNAUTHENTICATED`  | Token issuer does not match                    |
+| `MissingClaim`         | `INVALID_ARGUMENT` | A required JWT claim is missing                |
+| `InvalidTokenType`     | `INVALID_ARGUMENT` | Token type does not match expected type        |
+| `TokenVersionMismatch` | `UNAUTHENTICATED`  | Session force-invalidated (version bump)       |
+| `InvalidScope`         | `INVALID_ARGUMENT` | Requested scope is not allowed                 |
+
+### Signing Key Errors
+
+| Error                | gRPC Code             | Description                                   |
+| -------------------- | --------------------- | --------------------------------------------- |
+| `NoActiveSigningKey` | `FAILED_PRECONDITION` | No active signing key for the requested scope |
+| `SigningKeyNotFound` | `NOT_FOUND`           | Signing key not found by `kid`                |
+| `SigningKeyRevoked`  | `FAILED_PRECONDITION` | Signing key has been revoked                  |
+| `SigningKeyExpired`  | `FAILED_PRECONDITION` | Signing key has expired past its grace period |
+
+### Refresh Token Errors
+
+| Error                 | gRPC Code         | Description                                  |
+| --------------------- | ----------------- | -------------------------------------------- |
+| `InvalidRefreshToken` | `UNAUTHENTICATED` | Refresh token is invalid or expired          |
+| `RefreshTokenReuse`   | `UNAUTHENTICATED` | Refresh token reuse detected; family revoked |
+
+> **Note:** Refresh token reuse triggers family poisoning — all tokens in the same family are eventually revoked. This is a theft detection mechanism and cannot be reversed.
+
 ## Error Details
 
 Ledger includes structured error details when available:
 
 ```protobuf
-message ErrorDetail {
-  string code = 1;          // Ledger-specific error code
-  string message = 2;       // Human-readable description
-  map<string, string> metadata = 3;  // Additional context
+message ErrorDetails {
+  string error_code = 1;                  // Machine-readable error code (e.g., "3203")
+  bool is_retryable = 2;                  // Whether the client should retry
+  optional int32 retry_after_ms = 3;      // Suggested retry delay (rate-limit/backpressure)
+  map<string, string> context = 4;        // Structured key-value context
+  optional string suggested_action = 5;   // Human-readable recovery guidance
 }
 ```
 
@@ -297,4 +337,4 @@ grpcurl -plaintext \
 
 The idempotency cache ensures the operation is only applied once.
 
-> **Note**: The idempotency cache is in-memory and does not survive leader failover. After a failover, a retried request may execute twice if the original response was not received. For operations requiring exactly-once semantics across failovers, use application-level idempotency keys stored in the vault itself.
+> **Note**: The idempotency cache is replicated via Raft and survives leader failover within the 24-hour TTL window. Retried requests with matching `(client_id, sequence)` return `ALREADY_COMMITTED` after leader change.

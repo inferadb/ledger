@@ -9,6 +9,8 @@
 
 #[doc(hidden)]
 pub mod api_version;
+/// JWT signing, validation, and key management.
+pub mod jwt;
 #[doc(hidden)]
 pub mod peer_maintenance;
 pub(crate) mod proto_compat;

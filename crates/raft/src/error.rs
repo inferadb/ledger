@@ -96,6 +96,14 @@ pub enum SagaError {
     /// Unexpected response from state machine.
     #[snafu(display("Unexpected saga response ({code}): {description}"))]
     UnexpectedSagaResponse { code: inferadb_ledger_types::LedgerErrorCode, description: String },
+
+    /// Signing key generation failed.
+    #[snafu(display("Key generation failed: {message}"))]
+    KeyGeneration { message: String },
+
+    /// Signing key envelope encryption failed.
+    #[snafu(display("Key encryption failed: {message}"))]
+    KeyEncryption { message: String },
 }
 
 // ============================================================================

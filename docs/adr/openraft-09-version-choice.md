@@ -55,10 +55,10 @@ let (log_storage, state_machine) = Adaptor::new(log_store);
 The custom `RaftLogStore` implementation integrates directly with InferaDB's embedded storage engine:
 
 1. **Embedded B+ tree log storage** — Raft log entries stored in the same B+ tree engine as application data, sharing the page cache and dual-slot commit protocol
-2. **Custom snapshot format** — File-based streaming snapshot packages `AppliedStateCore` with 9 externalized table sections, entity data, and event data, using zstd compression + SHA-256 integrity verification
+2. **Custom snapshot format** — File-based streaming snapshot packages `AppliedStateCore` with 12 externalized table sections, entity data, and event data, using zstd compression + SHA-256 integrity verification
 3. **Integrated state management** — `StateLayer` for state root computation, per-vault block heights, and bucket-based commitment tracking
 4. **Compile-time table safety** — `RaftLog` and `RaftState` tables share the same type-safe `Table` trait as application tables
-5. **Deterministic ID generation** — `SequenceCounters` within `AppliedState` ensure organization/vault/user IDs are consistent across Raft replays
+5. **Deterministic ID generation** — `SequenceCounters` within `AppliedState` ensure organization/vault/user/signing-key/refresh-token IDs are consistent across Raft replays
 
 Using OpenRaft's built-in storage implementations would require: abandoning the embedded B+ tree, maintaining a separate storage format for Raft data, and losing the shared page cache — fundamentally incompatible with the project's architecture.
 

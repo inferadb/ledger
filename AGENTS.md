@@ -48,10 +48,10 @@ Activate at session start: `mcp__plugin_serena_serena__activate_project`
 
 **A task is not complete until all of these pass — no "pre-existing issue" exceptions:**
 
-- `cargo build --workspace` — no errors or warnings
-- `cargo test --workspace --lib` — all unit tests pass
+- `cargo +1.92 build --workspace` — no errors or warnings
+- `cargo +1.92 test --workspace --lib` — all unit tests pass
 - `cargo +1.92 clippy --workspace --all-targets -- -D warnings` — no warnings
-- `cargo +nightly fmt --all -- --check` — no formatting issues
+- `cargo +nightly fmt --check` — no formatting issues
 
 **Review workflow:**
 
@@ -83,11 +83,19 @@ Use `just` for common tasks (see `Justfile` for all commands):
 just              # list available commands
 just check        # pre-commit: fmt + clippy + test
 just check-quick  # fast pre-commit: fmt + clippy only
+just ci           # CI validation: fmt + clippy + doc + test
+just ready        # pre-PR: proto + fmt + clippy + test
 just test         # unit tests only
-just test-integration  # integration tests (spawns clusters)
+just test-ff      # unit tests, stop on first failure
+just test-integration     # integration tests (spawns clusters)
+just test-integration-ff  # integration tests, stop on first failure
+just test-stress  # stress/scale tests
+just test-recovery # crash recovery tests (store crate)
 just test-all     # all tests including slow/ignored
 just fmt          # format code
 just clippy       # run linter
+just doc          # build rustdoc
+just doc-check    # build rustdoc with -D warnings
 just proto        # generate protobuf code
 just run          # run server (dev mode)
 ```
@@ -99,13 +107,13 @@ cargo +1.92 build -p <crate>               # build specific crate
 cargo +1.92 test -p <crate>                # test specific crate
 cargo +1.92 test <name> -- --nocapture     # run single test with output
 cargo +nightly fmt                         # format (nightly required)
-cargo +1.92 clippy --all-targets -- -D warnings
+cargo +1.92 clippy --workspace --all-targets -- -D warnings
 ```
 
 ## Architecture
 
 ```
-gRPC Services: ReadService | WriteService | AdminService | HealthService
+gRPC Services (12): Read, Write, Admin, Organization, Vault, User, App, Token, Events, Health, Discovery, Raft
        ↓
 inferadb-ledger-services — gRPC service implementations, server assembly
        ↓

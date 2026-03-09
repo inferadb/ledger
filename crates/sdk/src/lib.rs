@@ -75,6 +75,7 @@ pub mod mock;
 mod retry;
 pub mod server;
 mod streaming;
+pub mod token;
 mod tracing;
 
 // Public API exports
@@ -110,4 +111,5 @@ pub use server::{
     DnsConfig, FileConfig, ResolvedServer, ServerResolver, ServerSelector, ServerSource,
 };
 pub use streaming::{HeightTracker, PositionTracker, ReconnectingStream};
+pub use token::{PublicKeyInfo, TokenPair, ValidatedToken};
 pub use tracing::TraceConfig;

@@ -79,11 +79,17 @@ Implementation details for contributors and advanced operators.
 
 ## gRPC Services
 
-| Service                  | Purpose                                  |
-| ------------------------ | ---------------------------------------- |
-| `HealthService`          | Liveness and readiness checks            |
-| `ReadService`            | Query entities, relationships, state     |
-| `WriteService`           | Create/update entities and relationships |
-| `AdminService`           | Organization, vault, cluster management  |
-| `EventsService`          | Audit event queries and ingestion        |
-| `SystemDiscoveryService` | Peer discovery and cluster bootstrap     |
+| Service                  | Purpose                                                    |
+| ------------------------ | ---------------------------------------------------------- |
+| `ReadService`            | Query entities, relationships, state                       |
+| `WriteService`           | Create/update entities and relationships                   |
+| `AdminService`           | Cluster management, configuration, backups                 |
+| `OrganizationService`    | Organization CRUD, members, teams                          |
+| `VaultService`           | Vault CRUD and health                                      |
+| `UserService`            | User accounts, emails, verification                        |
+| `AppService`             | Application management, credentials, connections           |
+| `TokenService`           | JWT token lifecycle (sessions, vault tokens, signing keys) |
+| `EventsService`          | Audit event queries and ingestion                          |
+| `HealthService`          | Liveness, readiness, and dependency checks                 |
+| `SystemDiscoveryService` | Peer discovery and cluster bootstrap                       |
+| `RaftService`            | Node-to-node Raft consensus RPCs                           |

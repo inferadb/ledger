@@ -826,6 +826,132 @@ impl RegionKeyManager for SecretsManagerKeyManager {
     }
 }
 
+// ─── InMemoryKeyManager ─────────────────────────────────────────
+
+/// In-memory key manager for testing and development.
+///
+/// Stores RMK material in a `HashMap` behind a `RwLock`. Supports
+/// programmatic key insertion, rotation, and decommission without
+/// external dependencies (no files, env vars, or secrets managers).
+///
+/// # Usage
+///
+/// ```no_run
+/// # use inferadb_ledger_store::crypto::InMemoryKeyManager;
+/// # use inferadb_ledger_types::types::Region;
+/// let km = InMemoryKeyManager::generate_for_regions(&[Region::GLOBAL]);
+/// ```
+pub struct InMemoryKeyManager {
+    /// Key material: `(region, version) → key bytes`.
+    keys: RwLock<HashMap<(Region, u32), [u8; 32]>>,
+}
+
+impl InMemoryKeyManager {
+    /// Creates an empty key manager with no keys.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { keys: RwLock::new(HashMap::new()) }
+    }
+
+    /// Creates a key manager pre-seeded with a random version-1 key for each region.
+    #[must_use]
+    pub fn generate_for_regions(regions: &[Region]) -> Self {
+        let mut keys = HashMap::new();
+        for &region in regions {
+            let mut key = [0u8; 32];
+            rand::Rng::fill_bytes(&mut rand::rng(), &mut key);
+            keys.insert((region, 1), key);
+        }
+        Self { keys: RwLock::new(keys) }
+    }
+
+    /// Inserts a key for a specific region and version.
+    pub fn insert(&self, region: Region, version: u32, key: [u8; 32]) {
+        if let Ok(mut keys) = self.keys.write() {
+            keys.insert((region, version), key);
+        }
+    }
+
+    /// Returns the highest version number for a region, or `None` if no keys exist.
+    fn highest_version(&self, region: Region) -> Option<u32> {
+        self.keys.read().ok()?.keys().filter(|(r, _)| *r == region).map(|(_, v)| *v).max()
+    }
+}
+
+impl Default for InMemoryKeyManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RegionKeyManager for InMemoryKeyManager {
+    fn current_rmk(&self, region: Region) -> Result<RegionMasterKey> {
+        let version = self.highest_version(region).ok_or_else(|| Error::Encryption {
+            reason: format!("No RMK configured for region {region}"),
+        })?;
+        self.rmk_by_version(region, version)
+    }
+
+    fn rmk_by_version(&self, region: Region, version: u32) -> Result<RegionMasterKey> {
+        let keys = self
+            .keys
+            .read()
+            .map_err(|_| Error::Encryption { reason: "RwLock poisoned".to_string() })?;
+        let key = keys.get(&(region, version)).ok_or_else(|| Error::Encryption {
+            reason: format!("No RMK for region {region} version {version}"),
+        })?;
+        Ok(RegionMasterKey::new(version, *key))
+    }
+
+    fn list_versions(&self, region: Region) -> Result<Vec<RmkVersionInfo>> {
+        let keys = self
+            .keys
+            .read()
+            .map_err(|_| Error::Encryption { reason: "RwLock poisoned".to_string() })?;
+        let mut versions: Vec<u32> =
+            keys.keys().filter(|(r, _)| *r == region).map(|(_, v)| *v).collect();
+        versions.sort_unstable();
+        let highest = versions.last().copied().unwrap_or(0);
+        Ok(versions
+            .into_iter()
+            .map(|version| {
+                let status =
+                    if version == highest { RmkStatus::Active } else { RmkStatus::Deprecated };
+                RmkVersionInfo { region, version, status, created_at: chrono::Utc::now() }
+            })
+            .collect())
+    }
+
+    fn rotate_rmk(&self, region: Region) -> Result<u32> {
+        let new_version = self.highest_version(region).unwrap_or(0) + 1;
+        let mut key = [0u8; 32];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut key);
+        self.insert(region, new_version, key);
+        zeroize::Zeroize::zeroize(&mut key);
+        Ok(new_version)
+    }
+
+    fn decommission_rmk(&self, region: Region, version: u32) -> Result<()> {
+        let mut keys = self
+            .keys
+            .write()
+            .map_err(|_| Error::Encryption { reason: "RwLock poisoned".to_string() })?;
+        if keys.remove(&(region, version)).is_some() {
+            Ok(())
+        } else {
+            Err(Error::Encryption {
+                reason: format!("No RMK for region {region} version {version}"),
+            })
+        }
+    }
+
+    fn health_check(&self, region: Region) -> Result<()> {
+        // Verify we can load the current key
+        let _ = self.current_rmk(region)?;
+        Ok(())
+    }
+}
+
 /// Converts a hex ASCII digit to its numeric value.
 fn hex_digit(c: u8) -> Option<u8> {
     match c {

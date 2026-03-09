@@ -14,10 +14,10 @@ use std::{
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_raft::{
     AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, EventsGarbageCollector,
-    GrpcRaftNetworkFactory, IntegrityScrubberJob, LearnerRefreshJob, LedgerNodeId,
+    GrpcRaftNetworkFactory, HotKeyDetector, IntegrityScrubberJob, LearnerRefreshJob, LedgerNodeId,
     LedgerTypeConfig, OrganizationPurgeJob, OrphanCleanupJob, RaftLogStore, RaftManager,
-    RaftManagerConfig, ResourceMetricsCollector, RuntimeConfigHandle, SagaOrchestrator,
-    TtlGarbageCollector,
+    RaftManagerConfig, RateLimiter, ResourceMetricsCollector, RuntimeConfigHandle,
+    SagaOrchestrator, TokenMaintenanceJob, TtlGarbageCollector,
     event_writer::{EventHandle, EventWriter},
 };
 use inferadb_ledger_services::LedgerServer;
@@ -137,6 +137,9 @@ pub struct BootstrappedNode {
     /// Organization purge background task handle (leader-only).
     #[allow(dead_code)] // retained to keep background task alive
     pub org_purge_handle: tokio::task::JoinHandle<()>,
+    /// Token maintenance background task handle (leader-only).
+    #[allow(dead_code)] // retained to keep background task alive
+    pub token_maintenance_handle: tokio::task::JoinHandle<()>,
     /// Snapshot demotion background task handle (only active when warm tier is configured).
     #[allow(dead_code)] // retained to keep background task alive
     pub snapshot_demotion_handle: Option<tokio::task::JoinHandle<()>>,
@@ -167,6 +170,7 @@ pub async fn bootstrap_node(
     data_dir: &std::path::Path,
     health_state: inferadb_ledger_raft::HealthState,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    key_manager: Option<Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>>,
 ) -> Result<BootstrappedNode, BootstrapError> {
     // Validate bootstrap configuration
     config.validate().map_err(|e| BootstrapError::Config { message: e.to_string() })?;
@@ -330,6 +334,29 @@ pub async fn bootstrap_node(
             message: format!("failed to register system region: {e}"),
         })?;
 
+    // Create JwtEngine when a key_manager is provided (enables TokenService).
+    let jwt_engine = key_manager
+        .as_ref()
+        .map(|_| Arc::new(inferadb_ledger_services::jwt::JwtEngine::new(config.jwt.clone())));
+
+    // Create rate limiter and hot key detector.
+    // Uses config-provided limits if available, otherwise hardcoded defaults.
+    // Runtime reconfiguration updates the atomic fields via UpdateConfig RPC.
+    let rate_limiter = if let Some(ref rl) = config.rate_limit {
+        Arc::new(RateLimiter::new(
+            rl.client_burst,
+            rl.client_rate,
+            rl.organization_burst,
+            rl.organization_rate,
+            rl.backpressure_threshold,
+            config.region.as_str(),
+        ))
+    } else {
+        Arc::new(RateLimiter::new(100, 50.0, 1000, 500.0, 100, config.region.as_str()))
+    };
+    let hot_key_config = inferadb_ledger_types::config::HotKeyConfig::default();
+    let hot_key_detector = Arc::new(HotKeyDetector::new(&hot_key_config));
+
     let server = LedgerServer::builder()
         .manager(manager)
         .addr(config.listen_addr)
@@ -338,10 +365,15 @@ pub async fn bootstrap_node(
         .health_state(health_state.clone())
         .shutdown_rx(Some(shutdown_rx))
         .runtime_config(Some(runtime_config.clone()))
+        .organization_rate_limiter(Some(rate_limiter))
+        .hot_key_detector(Some(hot_key_detector))
         .data_dir(Some(data_dir.to_path_buf()))
         .events_db(Some((*events_db).clone()))
         .event_handle(Some(event_handle))
         .region(config.region)
+        .jwt_config(Some(config.jwt.clone()))
+        .jwt_engine(jwt_engine)
+        .key_manager(key_manager.clone())
         .build();
     // Wire backup support into server if configured.
     // Done post-construction because bon type-state builders don't support
@@ -573,6 +605,7 @@ pub async fn bootstrap_node(
         .event_handle(event_handle_for_saga)
         .interval(Duration::from_secs(config.saga.poll_interval_secs))
         .watchdog_handle(watchdog.map(|w| w.register("saga_orchestrator", 60)))
+        .key_manager(key_manager)
         .build()
         .start();
     tracing::info!("Started saga orchestrator");
@@ -609,6 +642,17 @@ pub async fn bootstrap_node(
         .build()
         .start();
     tracing::info!("Started organization purge job");
+
+    // Start token maintenance job for expired token cleanup and signing key lifecycle
+    let token_maintenance_handle = TokenMaintenanceJob::builder()
+        .raft(raft.clone())
+        .node_id(node_id)
+        .state(state.clone())
+        .interval(Duration::from_secs(config.token_maintenance_interval_secs))
+        .watchdog_handle(watchdog.map(|w| w.register("token_maintenance", 600)))
+        .build()
+        .start();
+    tracing::info!("Started token maintenance job");
 
     // Start snapshot demotion task if warm tier is configured.
     // Periodically moves old snapshots from local SSD to object storage.
@@ -653,6 +697,7 @@ pub async fn bootstrap_node(
         orphan_cleanup_handle,
         integrity_scrub_handle,
         org_purge_handle,
+        token_maintenance_handle,
         snapshot_demotion_handle,
     })
 }
@@ -787,7 +832,7 @@ mod tests {
 
         let health = inferadb_ledger_raft::HealthState::new();
         let (_tx, rx) = tokio::sync::watch::channel(false);
-        let result = bootstrap_node(&config, &data_dir, health, rx).await;
+        let result = bootstrap_node(&config, &data_dir, health, rx, None).await;
         assert!(result.is_ok(), "bootstrap should succeed: {:?}", result.err());
     }
 
@@ -799,8 +844,9 @@ mod tests {
 
         let health = inferadb_ledger_raft::HealthState::new();
         let (_tx, rx) = tokio::sync::watch::channel(false);
-        let node =
-            bootstrap_node(&config, &data_dir, health, rx).await.expect("bootstrap should succeed");
+        let node = bootstrap_node(&config, &data_dir, health, rx, None)
+            .await
+            .expect("bootstrap should succeed");
 
         // Per-region databases should be under global/ directory
         let global_dir = data_dir.join("global");
@@ -829,8 +875,9 @@ mod tests {
 
         let health = inferadb_ledger_raft::HealthState::new();
         let (_tx, rx) = tokio::sync::watch::channel(false);
-        let node =
-            bootstrap_node(&config, &data_dir, health, rx).await.expect("bootstrap should succeed");
+        let node = bootstrap_node(&config, &data_dir, health, rx, None)
+            .await
+            .expect("bootstrap should succeed");
 
         // events.db is still created (needed for snapshot restore), but GC is not started
         assert!(
@@ -854,7 +901,7 @@ mod tests {
         let config = Config::for_test(1, 50054, data_dir.clone());
         let health = inferadb_ledger_raft::HealthState::new();
         let (_tx, rx) = tokio::sync::watch::channel(false);
-        let result = bootstrap_node(&config, &data_dir, health, rx).await;
+        let result = bootstrap_node(&config, &data_dir, health, rx, None).await;
 
         let err = match result {
             Err(e) => e.to_string(),

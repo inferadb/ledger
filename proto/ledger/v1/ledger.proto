@@ -2076,6 +2076,185 @@ message RemoveAppVaultRequest {
 message RemoveAppVaultResponse {}
 
 // =============================================================================
+// Token Service
+// =============================================================================
+
+// JWT token lifecycle: session creation, vault token issuance, refresh,
+// revocation, and signing key management.
+service TokenService {
+  // Create a user session token pair (access + refresh).
+  rpc CreateUserSession(CreateUserSessionRequest) returns (CreateUserSessionResponse);
+
+  // Validate an access token and return parsed claims.
+  // Returns UNAUTHENTICATED for expired/invalid tokens.
+  rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse);
+
+  // Create a vault access token pair for an app.
+  rpc CreateVaultToken(CreateVaultTokenRequest) returns (CreateVaultTokenResponse);
+
+  // Refresh an access token using a refresh token.
+  // Implements rotation: old refresh token is consumed, new pair issued.
+  rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+
+  // Revoke a refresh token and its entire token family.
+  rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse);
+
+  // Revoke all sessions for a user (increments token version).
+  rpc RevokeAllUserSessions(RevokeAllUserSessionsRequest) returns (RevokeAllUserSessionsResponse);
+
+  // Create a new signing key for the given scope.
+  rpc CreateSigningKey(CreateSigningKeyRequest) returns (CreateSigningKeyResponse);
+
+  // Rotate a signing key: creates a replacement and marks the old key as rotated.
+  rpc RotateSigningKey(RotateSigningKeyRequest) returns (RotateSigningKeyResponse);
+
+  // Revoke a signing key immediately (no grace period).
+  rpc RevokeSigningKey(RevokeSigningKeyRequest) returns (RevokeSigningKeyResponse);
+
+  // Get active public keys for token verification (JWKS-style).
+  rpc GetPublicKeys(GetPublicKeysRequest) returns (GetPublicKeysResponse);
+}
+
+// Scope discriminator for signing keys.
+enum SigningKeyScope {
+  SIGNING_KEY_SCOPE_UNSPECIFIED = 0;
+  SIGNING_KEY_SCOPE_GLOBAL = 1;
+  SIGNING_KEY_SCOPE_ORGANIZATION = 2;
+}
+
+// ── Token Types ──
+
+message TokenPair {
+  string access_token = 1;
+  string refresh_token = 2;
+  google.protobuf.Timestamp access_expires_at = 3;
+  google.protobuf.Timestamp refresh_expires_at = 4;
+}
+
+// ── User Session RPCs ──
+
+message CreateUserSessionRequest {
+  UserSlug user = 1;
+}
+
+message CreateUserSessionResponse {
+  TokenPair tokens = 1;
+}
+
+// ── Token Validation ──
+
+// Validate an access token and return parsed claims on success.
+// On validation failure, returns a gRPC error (UNAUTHENTICATED/PERMISSION_DENIED)
+// with the failure reason in the status message — not a valid=false response.
+message ValidateTokenRequest {
+  string token = 1;
+  string expected_audience = 2;
+}
+
+message ValidateTokenResponse {
+  string subject = 1;
+  string token_type = 2;                 // "user_session" | "vault_access"
+  google.protobuf.Timestamp expires_at = 3;
+  // Type-specific claims. oneof enforces valid combinations at the proto level.
+  oneof claims {
+    UserSessionClaims user_session = 4;
+    VaultAccessClaims vault_access = 5;
+  }
+}
+
+message UserSessionClaims {
+  uint64 user_slug = 1;
+  string role = 2;                       // "user" | "admin"
+}
+
+message VaultAccessClaims {
+  uint64 org_slug = 1;
+  uint64 app_slug = 2;
+  uint64 vault_slug = 3;
+  repeated string scopes = 4;
+}
+
+// ── Vault Token RPCs ──
+
+message CreateVaultTokenRequest {
+  OrganizationSlug organization = 1;
+  AppSlug app = 2;
+  VaultSlug vault = 3;
+  repeated string scopes = 4;
+}
+
+message CreateVaultTokenResponse {
+  TokenPair tokens = 1;
+}
+
+// ── Unified Refresh/Revoke RPCs ──
+
+message RefreshTokenRequest {
+  string refresh_token = 1;
+}
+
+message RefreshTokenResponse {
+  TokenPair tokens = 1;
+}
+
+message RevokeTokenRequest {
+  string refresh_token = 1;
+}
+
+message RevokeTokenResponse {}
+
+message RevokeAllUserSessionsRequest {
+  UserSlug user = 1;
+}
+
+message RevokeAllUserSessionsResponse {
+  uint64 revoked_count = 1;
+}
+
+// ── Signing Key Management RPCs ──
+
+message CreateSigningKeyRequest {
+  SigningKeyScope scope = 1;
+  optional OrganizationSlug organization = 2;  // Required when scope=SIGNING_KEY_SCOPE_ORGANIZATION
+}
+
+message CreateSigningKeyResponse {
+  PublicKeyInfo key = 1;
+}
+
+message RotateSigningKeyRequest {
+  string kid = 1;
+  uint64 grace_period_secs = 2;          // 0 = use default from JwtConfig
+}
+
+message RotateSigningKeyResponse {
+  PublicKeyInfo new_key = 1;
+}
+
+message RevokeSigningKeyRequest {
+  string kid = 1;
+}
+
+message RevokeSigningKeyResponse {}
+
+message GetPublicKeysRequest {
+  optional OrganizationSlug organization = 1;  // Absent = global keys
+}
+
+message GetPublicKeysResponse {
+  repeated PublicKeyInfo keys = 1;
+}
+
+message PublicKeyInfo {
+  string kid = 1;
+  bytes public_key = 2;                  // 32-byte Ed25519 public key
+  string status = 3;                     // "active" | "rotated" | "revoked"
+  google.protobuf.Timestamp valid_from = 4;
+  google.protobuf.Timestamp valid_until = 5; // Null if active
+  google.protobuf.Timestamp created_at = 6;
+}
+
+// =============================================================================
 // Events Service
 // =============================================================================
 
@@ -2561,7 +2740,8 @@ message RotateBlindingKeyResponse {
   uint64 total_entries = 1;
   // Entries re-hashed so far (0 on initial response).
   uint64 entries_rehashed = 2;
-  // Whether the rotation is already complete (true if zero entries).
+  // Whether the rehash is complete. Always false in the initial response;
+  // poll GetBlindingKeyRehashStatus for the authoritative value.
   bool complete = 3;
 }
 

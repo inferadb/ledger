@@ -1,10 +1,10 @@
 # InferaDB Ledger Design Document
 
-| Field   | Value                                                    |
-| ------- | -------------------------------------------------------- |
-| Status  | Living                                                   |
-| Created | 2026-01-09                                               |
-| Updated | 2026-03-03                                               |
+| Field   | Value                                                   |
+| ------- | ------------------------------------------------------- |
+| Status  | Living                                                  |
+| Created | 2026-01-09                                              |
+| Updated | 2026-03-03                                              |
 | Source  | [DESIGN.md](DESIGN.md) (canonical, checked into `main`) |
 
 ---
@@ -706,6 +706,126 @@ Background GC removes expired entities, emitting `ExpireEntity` operations for a
 
 ---
 
+## JWT Token Architecture
+
+Ledger is the JWT source of truth for the InferaDB platform. All token signing, validation, and revocation flows through Ledger's Raft consensus layer, providing cryptographic auditability and strong consistency for authentication state.
+
+### Token Types
+
+| Type         | Audience           | Purpose                  | Access TTL | Refresh TTL |
+| ------------ | ------------------ | ------------------------ | ---------- | ----------- |
+| User Session | `inferadb-control` | Control web/API sessions | 30 min     | 14 days     |
+| Vault Access | `inferadb-engine`  | Engine data operations   | 15 min     | 1 hour      |
+
+All tokens use **EdDSA (Ed25519)** signatures. Algorithm enforcement is defense-in-depth: raw JWT header pre-check rejects non-EdDSA `alg` values before any cryptographic operation, and the `jsonwebtoken` library validation is restricted to `[EdDSA]`.
+
+### Signing Key Envelope Encryption
+
+Signing key private material is envelope-encrypted using the same RMK infrastructure as page encryption, adapted for a fixed 32-byte Ed25519 private key:
+
+```
+SigningKeyEnvelope (100 bytes fixed layout):
+┌──────────────┬───────────┬──────────────┬──────────────┐
+│ wrapped_dek  │   nonce   │  ciphertext  │  auth_tag    │
+│   (40 B)     │  (12 B)   │   (32 B)     │   (16 B)     │
+└──────────────┴───────────┴──────────────┴──────────────┘
+```
+
+1. **DEK generation**: Random 256-bit key
+2. **DEK wrapping**: AES-KWP with Region Master Key → 40-byte wrapped DEK
+3. **Private key encryption**: AES-256-GCM with random nonce, `kid` as AAD
+4. **AAD binding**: The `kid` (UUID) serves as Additional Authenticated Data, preventing envelope transplant attacks (swapping envelopes between keys)
+
+On key load, the JwtEngine unwraps the DEK via RMK, decrypts the private key, builds the signing credential, and zeroizes plaintext key bytes via `Zeroizing<Vec<u8>>`.
+
+**Trade-off**: Raft log entries contain wrapped signing key material (envelope-encrypted, not plaintext). This is mitigated by log compaction and the fact that extracting the private key requires the RMK. On RMK rotation, the DEK re-wrap job updates signing key envelopes.
+
+### JwtEngine Cache Design
+
+The `JwtEngine` uses `ArcSwap<HashMap<String, CachedKey>>` for lock-free reads on every validation:
+
+```
+JwtEngine
+├── config: JwtConfig
+└── cache: ArcSwap<HashMap<kid → CachedKey>>
+    └── CachedKey
+        ├── decoding_key: DecodingKey  (public key, safe to cache)
+        ├── status: SigningKeyStatus
+        └── valid_until: Option<DateTime<Utc>>
+```
+
+**Copy-on-write updates**: `load_key()` clones the current map, inserts the new entry, and atomically swaps via `ArcSwap::store()`. Concurrent readers see either the old or new map — never a partial state.
+
+**Zeroization policy**:
+
+- `EncodingKey` (signing credential with private key) is **not cached** — built on-demand per sign operation, then dropped
+- `DecodingKey` (public key only) is cached — no secret material
+- Private key bytes are wrapped in `Zeroizing<Vec<u8>>` during decrypt-to-sign flow
+
+### Refresh Token Family Theft Detection
+
+Refresh tokens implement **rotate-on-use** with family-based theft detection:
+
+```
+Family A (created at login):
+  RT-1 ──use──▶ RT-2 ──use──▶ RT-3 (current)
+                  │
+                  └── RT-1 reused (theft!) ──▶ Family A poisoned
+```
+
+Each refresh token belongs to a **family** (random 16-byte ID assigned at initial token creation). The state machine tracks:
+
+1. **`used_at` timestamp**: Set atomically when a refresh token is consumed
+2. **`poisoned` flag**: Set on the family when reuse is detected
+
+**Reuse detection flow** (state machine authority):
+
+1. `RefreshToken` RPC arrives with token hash
+2. State machine looks up token → checks `used_at`
+3. If `used_at` is set → token already consumed → **poison the family** (O(1) flag set)
+4. All future operations against this family return `RefreshTokenReuse`
+5. Background `TokenMaintenanceJob` GCs poisoned families
+
+**Why state machine authority matters**: The Raft state machine is the single arbiter of token state. Two concurrent refresh attempts with the same token are serialized by Raft — one succeeds, the other detects reuse. No distributed locking needed.
+
+### Cascade Revocation
+
+Entity lifecycle changes trigger cascade token revocation through the Raft state machine:
+
+| Event                        | Revocation Scope                      | Mechanism                                           |
+| ---------------------------- | ------------------------------------- | --------------------------------------------------- |
+| App disabled                 | All tokens for app (all vaults)       | `RevokeAllSubjectTokens(App(slug))`                 |
+| App-vault connection removed | Tokens for app+vault pair             | `RevokeAppVaultTokens(app, vault)`                  |
+| Organization deleted         | All signing keys + all refresh tokens | `delete_org_signing_keys` + subject index scan      |
+| Password change              | All user sessions                     | `RevokeAllUserSessions` (increments `TokenVersion`) |
+
+**TokenVersion for immediate user invalidation**: Each user has an atomic `TokenVersion` counter. `RevokeAllUserSessions` increments it. `ValidateToken` compares the token's `version` claim against current state — stale versions are rejected without waiting for token expiry.
+
+### Scope Policy
+
+Vault tokens carry `scopes: Vec<String>` (e.g., `["read", "write"]`). On token creation, requested scopes must be a subset of the app-vault connection's `allowed_scopes`.
+
+**Refresh uses current policy**: When a vault token is refreshed, scopes are read from the current `allowed_scopes` on the app-vault connection — not intersected with the original grant. This means:
+
+- Scopes reduced on connection → new token has reduced scopes
+- Scopes expanded on connection → new token gains expanded scopes
+- Connection removed → refresh fails with error
+- App disabled → refresh rejected
+
+This "current policy is authoritative" design avoids stale scope grants and ensures policy changes take effect at the next refresh boundary.
+
+### Security Boundaries
+
+**Network trust**: Ledger runs behind WireGuard VPN. Token RPCs do not require `authentication_proof` — upstream services (Control, Engine) authenticate callers. Planned: mTLS between services as defense-in-depth.
+
+**Validation consistency**: `ValidateToken` reads local Raft state (no leader forwarding). After `RevokeAllUserSessions`, followers may briefly validate revoked tokens until replication catches up (milliseconds). For security-critical operations, forward to leader or accept the brief window.
+
+**kid validation**: UUID format check before state lookup prevents cache pollution from arbitrary strings. Unknown and revoked kids return identical `UNAUTHENTICATED` (no key existence leakage).
+
+**Timing side channels**: Refresh token hash comparison (SHA-256) is not constant-time. Practical risk is low: 256-bit entropy input and Raft consensus noise dwarf timing signal.
+
+---
+
 ## Client Idempotency & Retry Semantics
 
 Clients include `(client_id, idempotency_key)` with each request:
@@ -1386,37 +1506,37 @@ struct SnapshotStateData {
 
 Key design decisions and their rationale:
 
-| Area             | Decision                                                  | Rationale                                                                                  |
-| ---------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Table count      | 19 compile-time tables                                    | Slug indexes, vault-scoped state tables, and audit event tables require dedicated storage   |
-| Batch timeout    | 5ms (env var default), 2ms (runtime `BatchWriter`)        | Runtime batch writer uses tighter timing for lower latency; env vars allow operator override |
-| `TxId` generation | Generated in response path after Raft commit             | Avoids assigning IDs to proposals that may not commit; UUID generation is cheap             |
-| Identifier types | Newtypes via `define_id!` macro                           | Type safety prevents `OrganizationId`/`VaultId` confusion at compile time                  |
-| `VaultBlock`     | `BlockHeader` + `transactions` split                      | Header alone needed for most operations (hashing, forwarding); avoids copying tx data      |
-| `StateLayer`     | Indexes in `Database`; root in `VaultCommitment`          | Decouples state storage from commitment tracking; enables per-vault isolation               |
-| `TableIterator`  | Streaming with `VecDeque` buffer + resume-key             | Memory-efficient for large tables (millions of entries)                                     |
-| Directory layout | Per-region directory trees with single-file ACID B-trees  | Per-region isolation, independent encryption keys, no cross-region write lock contention    |
-| Snapshot format  | Per-region with multi-vault metadata                      | Aligns with Raft snapshot semantics (one snapshot per Raft group / region)                  |
-| Health checks    | Kubernetes three-probe pattern + dependency validation    | Required for production Kubernetes deployments                                              |
-| Write path       | 13 steps including validation, rate limiting, hot keys    | Defense-in-depth: input validation, rate limiting, hot key detection, deadline checking     |
-| Encryption       | Per-page DEK + RMK envelope encryption                    | Unique DEK per page enables key rotation without re-encrypting data; AES-KWP is nonce-free |
+| Area              | Decision                                                 | Rationale                                                                                    |
+| ----------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Table count       | 19 compile-time tables                                   | Slug indexes, vault-scoped state tables, and audit event tables require dedicated storage    |
+| Batch timeout     | 5ms (env var default), 2ms (runtime `BatchWriter`)       | Runtime batch writer uses tighter timing for lower latency; env vars allow operator override |
+| `TxId` generation | Generated in response path after Raft commit             | Avoids assigning IDs to proposals that may not commit; UUID generation is cheap              |
+| Identifier types  | Newtypes via `define_id!` macro                          | Type safety prevents `OrganizationId`/`VaultId` confusion at compile time                    |
+| `VaultBlock`      | `BlockHeader` + `transactions` split                     | Header alone needed for most operations (hashing, forwarding); avoids copying tx data        |
+| `StateLayer`      | Indexes in `Database`; root in `VaultCommitment`         | Decouples state storage from commitment tracking; enables per-vault isolation                |
+| `TableIterator`   | Streaming with `VecDeque` buffer + resume-key            | Memory-efficient for large tables (millions of entries)                                      |
+| Directory layout  | Per-region directory trees with single-file ACID B-trees | Per-region isolation, independent encryption keys, no cross-region write lock contention     |
+| Snapshot format   | Per-region with multi-vault metadata                     | Aligns with Raft snapshot semantics (one snapshot per Raft group / region)                   |
+| Health checks     | Kubernetes three-probe pattern + dependency validation   | Required for production Kubernetes deployments                                               |
+| Write path        | 13 steps including validation, rate limiting, hot keys   | Defense-in-depth: input validation, rate limiting, hot key detection, deadline checking      |
+| Encryption        | Per-page DEK + RMK envelope encryption                   | Unique DEK per page enables key rotation without re-encrypting data; AES-KWP is nonce-free   |
 
 **Source file cross-references:**
 
 | DESIGN.md Section | Primary Source Files                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------ |
 | Block Structure   | `crates/types/src/types.rs`                                                          |
-| Write Path        | `crates/services/src/services/write.rs`                                                  |
-| Read Path         | `crates/services/src/services/read.rs`                                                   |
+| Write Path        | `crates/services/src/services/write.rs`                                              |
+| Read Path         | `crates/services/src/services/read.rs`                                               |
 | State Layer       | `crates/state/src/state.rs`                                                          |
 | Storage Backend   | `crates/store/src/db.rs`, `crates/store/src/tables.rs`                               |
 | Region Router     | `crates/raft/src/region_router.rs`                                                   |
-| Region Resolver   | `crates/services/src/services/region_resolver.rs`                                        |
+| Region Resolver   | `crates/services/src/services/region_resolver.rs`                                    |
 | Raft Consensus    | `crates/raft/src/raft_manager.rs`, `crates/raft/src/raft_network.rs`                 |
 | ID Generation     | `crates/types/src/types.rs` (`define_id!` macro)                                     |
 | Key Encoding      | `crates/state/src/keys.rs`                                                           |
 | Batching          | `crates/raft/src/batching.rs`                                                        |
-| Health Checks     | `crates/services/src/services/health.rs`, `crates/raft/src/dependency_health.rs`         |
+| Health Checks     | `crates/services/src/services/health.rs`, `crates/raft/src/dependency_health.rs`     |
 | Graceful Shutdown | `crates/raft/src/graceful_shutdown.rs`                                               |
 | Metrics           | `crates/raft/src/metrics.rs`                                                         |
 | Snapshots         | `crates/state/src/snapshot.rs`                                                       |
@@ -1435,13 +1555,13 @@ Key design decisions and their rationale:
 
 | Date       | Change                                                                                                     |
 | ---------- | ---------------------------------------------------------------------------------------------------------- |
-| 2026-03-03 | Document hygiene: metadata block, audience guide, deduplicated invariants, expanded references              |
-| 2026-03-01 | Regional data residency, multi-region architecture, cross-region saga orchestration                         |
+| 2026-03-03 | Document hygiene: metadata block, audience guide, deduplicated invariants, expanded references             |
+| 2026-03-01 | Regional data residency, multi-region architecture, cross-region saga orchestration                        |
 | 2026-02-26 | Graceful leader transfer protocol, shutdown phase transitions                                              |
 | 2026-02-22 | Dual-ID architecture (`OrganizationSlug`, `VaultSlug`), namespace → organization rename                    |
 | 2026-02-06 | Proto conversion deduplication, Raft proposal timeout, write path expanded to 13 steps                     |
 | 2026-01-28 | Encryption at rest (per-page envelope encryption, RMK lifecycle), crypto-shredding, tiered storage         |
-| 2026-01-28 | Health checks (three-probe pattern), graceful shutdown, backup and restore, degraded operation modes        |
+| 2026-01-28 | Health checks (three-probe pattern), graceful shutdown, backup and restore, degraded operation modes       |
 | 2026-01-15 | Observability (Prometheus metrics, SLI/SLO), rate limiting, hot key detection, input validation            |
 | 2026-01-10 | Core architecture: state layer, bucket-based state roots, transaction batching, Raft consensus integration |
 | 2026-01-09 | Initial design document                                                                                    |

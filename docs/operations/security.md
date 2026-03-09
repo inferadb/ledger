@@ -4,7 +4,7 @@ Ledger's security model and deployment considerations.
 
 ## Design Philosophy
 
-Ledger is designed to run **within a secure network perimeter**. It does not include built-in authentication or authorization because it operates as an internal service accessed only by trusted components (Engine and Control).
+Ledger is designed to run **within a secure network perimeter**. It does not authenticate incoming gRPC connections — access control is enforced at the network layer by restricting connectivity to trusted components (Engine and Control). However, Ledger serves as the **JWT signing authority** for the InferaDB platform, issuing and validating tokens consumed by Engine and Control for end-user authentication.
 
 ### Trust Model
 
@@ -26,12 +26,12 @@ Ledger is designed to run **within a secure network perimeter**. It does not inc
 └─────────────────────────────────────────────────────────────┘
 ```
 
-| Component        | Trust Level      | Access                            |
-| ---------------- | ---------------- | --------------------------------- |
-| Engine           | Fully trusted    | Read/Write to any vault           |
-| Control          | Fully trusted    | Admin operations, user management |
-| Ledger nodes     | Mutually trusted | Raft consensus                    |
-| External clients | Not supported    | Must go through Engine/Control    |
+| Component        | Trust Level      | Access                                                     |
+| ---------------- | ---------------- | ---------------------------------------------------------- |
+| Engine           | Fully trusted    | Read/Write to any vault                                    |
+| Control          | Fully trusted    | Admin operations, user management, token lifecycle         |
+| Ledger nodes     | Mutually trusted | Raft consensus                                             |
+| External clients | Not supported    | Authenticate via Ledger-issued JWTs through Engine/Control |
 
 ## Network Security
 
@@ -182,7 +182,7 @@ let client = Client::connect(
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
 | Full Byzantine fault tolerance | Trusted network assumption; see [Raft Message Validation](#raft-message-validation) for defensive measures |
 | DDoS protection                | Internal service; external traffic blocked at perimeter                                                    |
-| Client authentication          | Engine/Control handle user authentication                                                                  |
+| Client authentication          | Engine/Control authenticate end users via Ledger-issued JWTs                                               |
 | Audit logging for compliance   | Cryptographic chain is the audit log                                                                       |
 
 ### Raft Message Validation
@@ -251,9 +251,24 @@ metadata:
   name: ledger-config
 type: Opaque
 stringData:
-  # No secrets required for Ledger itself
+  # RMK (Region Master Key) protects signing key material at rest
+  # Provisioned via key manager backend (Infisical, Vault, AWS KMS, etc.)
   # TLS certs if using service mesh
 ```
+
+### JWT Signing Key Protection
+
+Ledger's TokenService manages Ed25519 signing keys for JWT issuance. Private key material is protected via envelope encryption:
+
+1. **Region Master Key (RMK)** — provisioned externally (e.g., AWS KMS, Infisical)
+2. **Data Encryption Key (DEK)** — generated per signing key, wrapped by RMK via AES-KWP
+3. **Private key** — encrypted with DEK using AES-256-GCM, with `kid` as AAD
+
+The `SigningKeyEnvelope` binary format: `wrapped_dek(40) + nonce(12) + ciphertext(32) + auth_tag(16) = 100 bytes`.
+
+Private key material is zeroized on drop (`Zeroizing<Vec<u8>>`). `EncodingKey` is built on-demand per signing operation, never cached. Only public `DecodingKey` is cached for the validation hot path.
+
+See [INTEGRATION.md](../INTEGRATION.md) for key rotation runbook and [ADR: Network Trust Model](../adr/network-trust-model.md) for the trust boundary design.
 
 ### Audit Trail
 

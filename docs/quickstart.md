@@ -206,8 +206,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 See the [SDK Guide](client/sdk.md) for comprehensive documentation including TLS, retries, streaming, and distributed tracing.
 
+### Token Operations
+
+```rust
+use inferadb_ledger_sdk::token::TokenPair;
+
+// Create a user session
+let pair: TokenPair = client.create_user_session(user_slug).await?;
+println!("Access token: {}", pair.access_token);
+
+// Validate a token
+let claims = client.validate_token(&pair.access_token).await?;
+
+// Refresh before expiry (rotate-on-use)
+let new_pair = client.refresh_token(&pair.refresh_token).await?;
+```
+
 ## Next Steps
 
 - [Client API](client/api.md) - Full API reference
+- [SDK Guide](client/sdk.md) - Rust SDK with token, user, app, event operations
 - [Deployment Guide](operations/deployment.md) - Production setup
 - [Architecture Overview](overview.md) - System design

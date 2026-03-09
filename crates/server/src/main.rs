@@ -119,9 +119,10 @@ async fn main() -> Result<(), ServerError> {
     let (graceful_shutdown, shutdown_rx) =
         inferadb_ledger_raft::GracefulShutdown::new(shutdown_config, health_state.clone());
 
-    let node = bootstrap::bootstrap_node(&config, &data_dir, health_state.clone(), shutdown_rx)
-        .await
-        .map_err(ServerError::Bootstrap)?;
+    let node =
+        bootstrap::bootstrap_node(&config, &data_dir, health_state.clone(), shutdown_rx, None)
+            .await
+            .map_err(ServerError::Bootstrap)?;
 
     // Mark node as ready now that bootstrap is complete
     health_state.mark_ready();

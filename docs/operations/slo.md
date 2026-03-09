@@ -16,13 +16,16 @@ These boundaries enable accurate p50/p95/p99 calculation at the latency ranges t
 
 ### Latency
 
-| Operation             | p50 Target | p95 Target | p99 Target | Metric                                       |
-| --------------------- | ---------- | ---------- | ---------- | -------------------------------------------- |
-| Read (single entity)  | < 1ms      | < 5ms      | < 10ms     | `ledger_read_latency_seconds`                |
-| Write (single entity) | < 5ms      | < 25ms     | < 50ms     | `ledger_write_latency_seconds`               |
-| Batch write           | < 10ms     | < 50ms     | < 100ms    | `ledger_write_latency_seconds`               |
-| Raft apply            | < 1ms      | < 5ms      | < 25ms     | `inferadb_ledger_raft_apply_latency_seconds` |
-| Batch flush           | < 5ms      | < 25ms     | < 100ms    | `ledger_batch_flush_latency_seconds`         |
+| Operation             | p50 Target | p95 Target | p99 Target | Metric                                           |
+| --------------------- | ---------- | ---------- | ---------- | ------------------------------------------------ |
+| Read (single entity)  | < 1ms      | < 5ms      | < 10ms     | `ledger_read_latency_seconds`                    |
+| Write (single entity) | < 5ms      | < 25ms     | < 50ms     | `ledger_write_latency_seconds`                   |
+| Batch write           | < 10ms     | < 50ms     | < 100ms    | `ledger_write_latency_seconds`                   |
+| Raft apply            | < 1ms      | < 5ms      | < 25ms     | `inferadb_ledger_raft_apply_latency_seconds`     |
+| Batch flush           | < 5ms      | < 25ms     | < 100ms    | `ledger_batch_flush_latency_seconds`             |
+| Token validation      | < 1ms      | < 5ms      | < 10ms     | `ledger_token_validation_latency_seconds`        |
+| Token refresh         | < 5ms      | < 25ms     | < 50ms     | `ledger_token_operations_total{op="refresh"}`    |
+| Signing key rotation  | < 10ms     | < 50ms     | < 100ms    | `ledger_token_operations_total{op="rotate_key"}` |
 
 ### Availability
 

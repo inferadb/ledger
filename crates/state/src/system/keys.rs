@@ -1,9 +1,24 @@
 //! Key patterns for the `_system` organization.
 
+use std::fmt::Write;
+
 use inferadb_ledger_types::{
     AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, NodeId, OrganizationId,
-    OrganizationSlug, Region, TeamId, TeamSlug, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
+    OrganizationSlug, RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug, TokenSubject,
+    UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
+
+use super::types::SigningKeyScope;
+
+/// Encodes a byte slice as lowercase hexadecimal.
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        // write! to a String is infallible
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
 
 /// Key pattern generators for `_system` organization entities.
 ///
@@ -489,6 +504,192 @@ impl SystemKeys {
 
     /// Prefix for erasure audit records.
     pub const ERASURE_AUDIT_PREFIX: &'static str = "_audit:erasure:";
+
+    // ========================================================================
+    // Signing Key Keys
+    // ========================================================================
+
+    /// Primary key for a signing key record.
+    ///
+    /// Pattern: `_sys:signing_key:{id}`
+    pub fn signing_key(id: SigningKeyId) -> String {
+        format!("_sys:signing_key:{}", id.value())
+    }
+
+    /// Parses a signing key ID from a signing key primary key.
+    ///
+    /// Returns `None` if the key doesn't match `_sys:signing_key:{id}`.
+    pub fn parse_signing_key(key: &str) -> Option<SigningKeyId> {
+        key.strip_prefix(Self::SIGNING_KEY_PREFIX).and_then(|id| id.parse().ok())
+    }
+
+    /// Index key for signing key lookup by kid (UUID key identifier).
+    ///
+    /// Pattern: `_idx:signing_key:kid:{kid}` → `SigningKeyId`
+    pub fn signing_key_kid_index(kid: &str) -> String {
+        format!("_idx:signing_key:kid:{kid}")
+    }
+
+    /// Index key for the current active signing key of a given scope.
+    ///
+    /// Pattern: `_idx:signing_key:scope:global` or
+    /// `_idx:signing_key:scope:org:{org_id}`
+    ///
+    /// Points to the current active key's kid. Replaced atomically on rotation.
+    pub fn signing_key_scope_index(scope: &SigningKeyScope) -> String {
+        match scope {
+            SigningKeyScope::Global => "_idx:signing_key:scope:global".to_string(),
+            SigningKeyScope::Organization(org_id) => {
+                format!("_idx:signing_key:scope:org:{}", org_id.value())
+            },
+        }
+    }
+
+    /// Prefix for iterating all signing keys belonging to an organization.
+    ///
+    /// Pattern: `_sys:signing_key:org:{org_id}:`
+    ///
+    /// Used for org deletion cascade — iterates all keys for an org.
+    pub fn signing_key_org_prefix(org: OrganizationId) -> String {
+        format!("_sys:signing_key:org:{}:", org.value())
+    }
+
+    /// Prefix for all signing key primary keys.
+    pub const SIGNING_KEY_PREFIX: &'static str = "_sys:signing_key:";
+
+    /// Prefix for signing key kid index entries.
+    pub const SIGNING_KEY_KID_INDEX_PREFIX: &'static str = "_idx:signing_key:kid:";
+
+    /// Prefix for signing key scope index entries.
+    pub const SIGNING_KEY_SCOPE_INDEX_PREFIX: &'static str = "_idx:signing_key:scope:";
+
+    /// Prefix for signing key org index entries.
+    pub const SIGNING_KEY_ORG_PREFIX: &'static str = "_sys:signing_key:org:";
+
+    /// Key for the signing key ID sequence counter.
+    ///
+    /// Pattern: `_meta:seq:signing_key` → next `SigningKeyId`
+    pub const SIGNING_KEY_SEQ_KEY: &'static str = "_meta:seq:signing_key";
+
+    // ========================================================================
+    // Refresh Token Keys
+    // ========================================================================
+
+    /// Primary key for a refresh token record.
+    ///
+    /// Pattern: `_sys:refresh_token:{id}`
+    pub fn refresh_token(id: RefreshTokenId) -> String {
+        format!("_sys:refresh_token:{}", id.value())
+    }
+
+    /// Parses a refresh token ID from a refresh token primary key.
+    ///
+    /// Returns `None` if the key doesn't match `_sys:refresh_token:{id}`.
+    pub fn parse_refresh_token(key: &str) -> Option<RefreshTokenId> {
+        key.strip_prefix(Self::REFRESH_TOKEN_PREFIX).and_then(|id| id.parse().ok())
+    }
+
+    /// Index key for refresh token lookup by SHA-256 hash.
+    ///
+    /// Pattern: `_idx:refresh_token:hash:{hex}` → `RefreshTokenId`
+    pub fn refresh_token_hash_index(hash: &[u8; 32]) -> String {
+        format!("_idx:refresh_token:hash:{}", encode_hex(hash))
+    }
+
+    /// Prefix for iterating all refresh tokens in a token family.
+    ///
+    /// Pattern: `_idx:refresh_token:family:{hex}:`
+    pub fn refresh_token_family_prefix(family: &[u8; 16]) -> String {
+        format!("_idx:refresh_token:family:{}:", encode_hex(family))
+    }
+
+    /// Index entry for a refresh token within its family.
+    ///
+    /// Pattern: `_idx:refresh_token:family:{hex}:{id}` → `RefreshTokenId`
+    pub fn refresh_token_family_entry(family: &[u8; 16], id: RefreshTokenId) -> String {
+        format!("_idx:refresh_token:family:{}:{}", encode_hex(family), id.value())
+    }
+
+    /// Prefix for iterating all refresh tokens belonging to a subject.
+    ///
+    /// Pattern: `_idx:refresh_token:user:{slug}:` or
+    /// `_idx:refresh_token:app:{slug}:`
+    pub fn refresh_token_subject_prefix(subject: &TokenSubject) -> String {
+        match subject {
+            TokenSubject::User(slug) => {
+                format!("_idx:refresh_token:user:{}:", slug.value())
+            },
+            TokenSubject::App(slug) => {
+                format!("_idx:refresh_token:app:{}:", slug.value())
+            },
+        }
+    }
+
+    /// Index entry for a refresh token within its subject index.
+    ///
+    /// Pattern: `_idx:refresh_token:{user|app}:{slug}:{id}` → `RefreshTokenId`
+    pub fn refresh_token_subject_entry(subject: &TokenSubject, id: RefreshTokenId) -> String {
+        match subject {
+            TokenSubject::User(slug) => {
+                format!("_idx:refresh_token:user:{}:{}", slug.value(), id.value())
+            },
+            TokenSubject::App(slug) => {
+                format!("_idx:refresh_token:app:{}:{}", slug.value(), id.value())
+            },
+        }
+    }
+
+    /// Prefix for iterating all refresh tokens for a specific app+vault pair.
+    ///
+    /// Pattern: `_idx:refresh_token:app_vault:{app_slug}:{vault_id}:`
+    ///
+    /// Used for vault disconnect cascade — avoids O(n) scan of all app tokens.
+    pub fn refresh_token_app_vault_prefix(app: AppSlug, vault: VaultId) -> String {
+        format!("_idx:refresh_token:app_vault:{}:{}:", app.value(), vault.value())
+    }
+
+    /// Index entry for a refresh token within its app+vault index.
+    ///
+    /// Pattern: `_idx:refresh_token:app_vault:{app_slug}:{vault_id}:{id}`
+    pub fn refresh_token_app_vault_entry(
+        app: AppSlug,
+        vault: VaultId,
+        id: RefreshTokenId,
+    ) -> String {
+        format!("_idx:refresh_token:app_vault:{}:{}:{}", app.value(), vault.value(), id.value())
+    }
+
+    /// Marker key for a poisoned token family (reuse detected).
+    ///
+    /// Pattern: `_idx:refresh_token:family_poisoned:{hex}`
+    ///
+    /// Presence of this key means the family is poisoned. O(1) check in
+    /// `UseRefreshToken`. Background `TokenMaintenanceJob` garbage-collects
+    /// poisoned families.
+    pub fn refresh_token_family_poisoned(family: &[u8; 16]) -> String {
+        format!("_idx:refresh_token:family_poisoned:{}", encode_hex(family))
+    }
+
+    /// Prefix for all refresh token primary keys.
+    pub const REFRESH_TOKEN_PREFIX: &'static str = "_sys:refresh_token:";
+
+    /// Prefix for refresh token hash index entries.
+    pub const REFRESH_TOKEN_HASH_INDEX_PREFIX: &'static str = "_idx:refresh_token:hash:";
+
+    /// Prefix for refresh token family index entries.
+    pub const REFRESH_TOKEN_FAMILY_PREFIX: &'static str = "_idx:refresh_token:family:";
+
+    /// Prefix for poisoned family markers.
+    pub const REFRESH_TOKEN_FAMILY_POISONED_PREFIX: &'static str =
+        "_idx:refresh_token:family_poisoned:";
+
+    /// Prefix for refresh token app_vault index entries.
+    pub const REFRESH_TOKEN_APP_VAULT_PREFIX: &'static str = "_idx:refresh_token:app_vault:";
+
+    /// Key for the refresh token ID sequence counter.
+    ///
+    /// Pattern: `_meta:seq:refresh_token` → next `RefreshTokenId`
+    pub const REFRESH_TOKEN_SEQ_KEY: &'static str = "_meta:seq:refresh_token";
 }
 
 #[cfg(test)]
@@ -764,5 +965,265 @@ mod tests {
         assert_ne!(SystemKeys::APP_PREFIX, SystemKeys::APP_ASSERTION_PREFIX);
         assert_ne!(SystemKeys::APP_PREFIX, SystemKeys::APP_VAULT_PREFIX);
         assert_ne!(SystemKeys::APP_ASSERTION_PREFIX, SystemKeys::APP_VAULT_PREFIX);
+    }
+
+    // =========================================================================
+    // Signing key tests
+    // =========================================================================
+
+    #[test]
+    fn test_signing_key_generation() {
+        let cases: Vec<(&str, String, &str)> = vec![
+            ("signing_key", SystemKeys::signing_key(SigningKeyId::new(7)), "_sys:signing_key:7"),
+            (
+                "signing_key_kid_index",
+                SystemKeys::signing_key_kid_index("550e8400-e29b-41d4-a716-446655440000"),
+                "_idx:signing_key:kid:550e8400-e29b-41d4-a716-446655440000",
+            ),
+            (
+                "signing_key_scope_index_global",
+                SystemKeys::signing_key_scope_index(&SigningKeyScope::Global),
+                "_idx:signing_key:scope:global",
+            ),
+            (
+                "signing_key_scope_index_org",
+                SystemKeys::signing_key_scope_index(&SigningKeyScope::Organization(
+                    OrganizationId::new(42),
+                )),
+                "_idx:signing_key:scope:org:42",
+            ),
+            (
+                "signing_key_org_prefix",
+                SystemKeys::signing_key_org_prefix(OrganizationId::new(42)),
+                "_sys:signing_key:org:42:",
+            ),
+        ];
+        for (label, actual, expected) in &cases {
+            assert_eq!(actual, expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn test_signing_key_parse_roundtrip() {
+        assert_eq!(SystemKeys::parse_signing_key("_sys:signing_key:7"), Some(SigningKeyId::new(7)));
+        assert_eq!(SystemKeys::parse_signing_key("_sys:signing_key:abc"), None);
+        assert_eq!(SystemKeys::parse_signing_key("other:7"), None);
+    }
+
+    #[test]
+    fn test_signing_key_prefix_consistency() {
+        let cases: Vec<(&str, String, &[&str])> = vec![
+            (
+                "signing_key",
+                SystemKeys::signing_key(SigningKeyId::new(1)),
+                &[SystemKeys::SIGNING_KEY_PREFIX, SystemKeys::SYS_PREFIX],
+            ),
+            (
+                "signing_key_kid_index",
+                SystemKeys::signing_key_kid_index("abc"),
+                &[SystemKeys::SIGNING_KEY_KID_INDEX_PREFIX, SystemKeys::INDEX_PREFIX],
+            ),
+            (
+                "signing_key_scope_index_global",
+                SystemKeys::signing_key_scope_index(&SigningKeyScope::Global),
+                &[SystemKeys::SIGNING_KEY_SCOPE_INDEX_PREFIX, SystemKeys::INDEX_PREFIX],
+            ),
+            (
+                "signing_key_scope_index_org",
+                SystemKeys::signing_key_scope_index(&SigningKeyScope::Organization(
+                    OrganizationId::new(1),
+                )),
+                &[SystemKeys::SIGNING_KEY_SCOPE_INDEX_PREFIX, SystemKeys::INDEX_PREFIX],
+            ),
+            (
+                "signing_key_org_prefix",
+                SystemKeys::signing_key_org_prefix(OrganizationId::new(1)),
+                &[SystemKeys::SIGNING_KEY_ORG_PREFIX, SystemKeys::SYS_PREFIX],
+            ),
+        ];
+        for (label, key, prefixes) in &cases {
+            for prefix in *prefixes {
+                assert!(key.starts_with(prefix), "{label} should start with {prefix}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_signing_key_sequence_key() {
+        assert_eq!(SystemKeys::SIGNING_KEY_SEQ_KEY, "_meta:seq:signing_key");
+        assert!(SystemKeys::SIGNING_KEY_SEQ_KEY.starts_with(SystemKeys::META_PREFIX));
+    }
+
+    #[test]
+    fn test_signing_key_scope_index_isolation() {
+        // Global and org scope indexes must produce different keys
+        let global = SystemKeys::signing_key_scope_index(&SigningKeyScope::Global);
+        let org = SystemKeys::signing_key_scope_index(&SigningKeyScope::Organization(
+            OrganizationId::new(1),
+        ));
+        assert_ne!(global, org);
+    }
+
+    // =========================================================================
+    // Refresh token tests
+    // =========================================================================
+
+    #[test]
+    fn test_refresh_token_key_generation() {
+        let hash: [u8; 32] = [0xab; 32];
+        let family: [u8; 16] = [0xcd; 16];
+
+        let cases: Vec<(&str, String, &str)> = vec![
+            (
+                "refresh_token",
+                SystemKeys::refresh_token(RefreshTokenId::new(99)),
+                "_sys:refresh_token:99",
+            ),
+            (
+                "refresh_token_hash_index",
+                SystemKeys::refresh_token_hash_index(&hash),
+                "_idx:refresh_token:hash:abababababababababababababababababababababababababababababababab",
+            ),
+            (
+                "refresh_token_family_prefix",
+                SystemKeys::refresh_token_family_prefix(&family),
+                "_idx:refresh_token:family:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd:",
+            ),
+            (
+                "refresh_token_family_entry",
+                SystemKeys::refresh_token_family_entry(&family, RefreshTokenId::new(5)),
+                "_idx:refresh_token:family:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd:5",
+            ),
+            (
+                "refresh_token_subject_prefix_user",
+                SystemKeys::refresh_token_subject_prefix(&TokenSubject::User(UserSlug::new(42))),
+                "_idx:refresh_token:user:42:",
+            ),
+            (
+                "refresh_token_subject_prefix_app",
+                SystemKeys::refresh_token_subject_prefix(&TokenSubject::App(AppSlug::new(99))),
+                "_idx:refresh_token:app:99:",
+            ),
+            (
+                "refresh_token_subject_entry_user",
+                SystemKeys::refresh_token_subject_entry(
+                    &TokenSubject::User(UserSlug::new(42)),
+                    RefreshTokenId::new(7),
+                ),
+                "_idx:refresh_token:user:42:7",
+            ),
+            (
+                "refresh_token_subject_entry_app",
+                SystemKeys::refresh_token_subject_entry(
+                    &TokenSubject::App(AppSlug::new(99)),
+                    RefreshTokenId::new(3),
+                ),
+                "_idx:refresh_token:app:99:3",
+            ),
+            (
+                "refresh_token_app_vault_prefix",
+                SystemKeys::refresh_token_app_vault_prefix(AppSlug::new(10), VaultId::new(20)),
+                "_idx:refresh_token:app_vault:10:20:",
+            ),
+            (
+                "refresh_token_app_vault_entry",
+                SystemKeys::refresh_token_app_vault_entry(
+                    AppSlug::new(10),
+                    VaultId::new(20),
+                    RefreshTokenId::new(30),
+                ),
+                "_idx:refresh_token:app_vault:10:20:30",
+            ),
+            (
+                "refresh_token_family_poisoned",
+                SystemKeys::refresh_token_family_poisoned(&family),
+                "_idx:refresh_token:family_poisoned:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            ),
+        ];
+        for (label, actual, expected) in &cases {
+            assert_eq!(actual, expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn test_refresh_token_parse_roundtrip() {
+        assert_eq!(
+            SystemKeys::parse_refresh_token("_sys:refresh_token:99"),
+            Some(RefreshTokenId::new(99))
+        );
+        assert_eq!(SystemKeys::parse_refresh_token("_sys:refresh_token:abc"), None);
+        assert_eq!(SystemKeys::parse_refresh_token("other:99"), None);
+    }
+
+    #[test]
+    fn test_refresh_token_prefix_consistency() {
+        let hash: [u8; 32] = [0x01; 32];
+        let family: [u8; 16] = [0x02; 16];
+
+        let cases: Vec<(&str, String, &[&str])> = vec![
+            (
+                "refresh_token",
+                SystemKeys::refresh_token(RefreshTokenId::new(1)),
+                &[SystemKeys::REFRESH_TOKEN_PREFIX, SystemKeys::SYS_PREFIX],
+            ),
+            (
+                "refresh_token_hash_index",
+                SystemKeys::refresh_token_hash_index(&hash),
+                &[SystemKeys::REFRESH_TOKEN_HASH_INDEX_PREFIX, SystemKeys::INDEX_PREFIX],
+            ),
+            (
+                "refresh_token_family_prefix",
+                SystemKeys::refresh_token_family_prefix(&family),
+                &[SystemKeys::REFRESH_TOKEN_FAMILY_PREFIX, SystemKeys::INDEX_PREFIX],
+            ),
+            (
+                "refresh_token_family_poisoned",
+                SystemKeys::refresh_token_family_poisoned(&family),
+                &[SystemKeys::REFRESH_TOKEN_FAMILY_POISONED_PREFIX, SystemKeys::INDEX_PREFIX],
+            ),
+            (
+                "refresh_token_app_vault_prefix",
+                SystemKeys::refresh_token_app_vault_prefix(AppSlug::new(1), VaultId::new(2)),
+                &[SystemKeys::REFRESH_TOKEN_APP_VAULT_PREFIX, SystemKeys::INDEX_PREFIX],
+            ),
+        ];
+        for (label, key, prefixes) in &cases {
+            for prefix in *prefixes {
+                assert!(key.starts_with(prefix), "{label} should start with {prefix}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_refresh_token_sequence_key() {
+        assert_eq!(SystemKeys::REFRESH_TOKEN_SEQ_KEY, "_meta:seq:refresh_token");
+        assert!(SystemKeys::REFRESH_TOKEN_SEQ_KEY.starts_with(SystemKeys::META_PREFIX));
+    }
+
+    #[test]
+    fn test_refresh_token_family_prefix_does_not_collide_with_poisoned() {
+        let family: [u8; 16] = [0xff; 16];
+        let family_prefix = SystemKeys::refresh_token_family_prefix(&family);
+        let poisoned = SystemKeys::refresh_token_family_poisoned(&family);
+        assert_ne!(family_prefix, poisoned);
+        // family prefix starts with "family:" while poisoned starts with "family_poisoned:"
+        assert!(family_prefix.contains(":family:"));
+        assert!(poisoned.contains(":family_poisoned:"));
+    }
+
+    #[test]
+    fn test_signing_key_and_refresh_token_prefixes_do_not_collide() {
+        assert_ne!(SystemKeys::SIGNING_KEY_PREFIX, SystemKeys::REFRESH_TOKEN_PREFIX);
+        assert_ne!(
+            SystemKeys::SIGNING_KEY_KID_INDEX_PREFIX,
+            SystemKeys::REFRESH_TOKEN_HASH_INDEX_PREFIX
+        );
+    }
+
+    #[test]
+    fn test_encode_hex() {
+        assert_eq!(encode_hex(&[0x00, 0xff, 0xab]), "00ffab");
+        assert_eq!(encode_hex(&[]), "");
+        assert_eq!(encode_hex(&[0x01]), "01");
     }
 }

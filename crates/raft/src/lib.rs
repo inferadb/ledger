@@ -120,6 +120,8 @@ pub mod snapshot;
 #[doc(hidden)]
 pub mod state_root_verifier;
 #[doc(hidden)]
+pub mod token_maintenance;
+#[doc(hidden)]
 pub mod ttl_gc;
 #[doc(hidden)]
 pub mod types;
@@ -171,6 +173,8 @@ pub use resource_metrics::ResourceMetricsCollector;
 pub use runtime_config::RuntimeConfigHandle;
 #[doc(hidden)]
 pub use saga_orchestrator::SagaOrchestrator;
+#[doc(hidden)]
+pub use token_maintenance::TokenMaintenanceJob;
 #[doc(hidden)]
 pub use ttl_gc::TtlGarbageCollector;
 #[doc(hidden)]

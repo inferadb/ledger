@@ -90,7 +90,7 @@ Formal guarantees the system maintains under all conditions.
 
 | #   | Invariant                        | Description                                                                                                                                   |
 | --- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| 35  | Externalized table atomicity     | `AppliedStateCore` and all 9 externalized tables are written in a single `WriteTransaction` — either all succeed or none are visible          |
+| 35  | Externalized table atomicity     | `AppliedStateCore` and all 12 externalized tables are written in a single `WriteTransaction` — either all succeed or none are visible         |
 | 36  | Core blob compactness            | `AppliedStateCore` serialized size remains <512 bytes regardless of cluster scale (organizations, vaults, client sequences)                   |
 | 37  | Table reconstruction correctness | `load_state_from_tables()` reconstructs an `AppliedState` identical to the in-memory state at the time of the last `save_state_core()` commit |
 
@@ -120,6 +120,18 @@ Formal guarantees the system maintains under all conditions.
 | 47  | Vault divergence write isolation | Vault divergence does not block writes to other vaults in the same region             |
 | 48  | Vault recovery independence      | Vault recovery requires no region-wide coordination                                   |
 | 49  | Determinism bug surfacing        | Determinism bugs surface during recovery replay                                       |
+
+## Token Lifecycle Invariants
+
+| #   | Invariant                        | Description                                                                                                |
+| --- | -------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| 50  | Signing key monotonicity         | Signing key status transitions are one-way: Active → Rotated → Revoked. No reverse transitions.            |
+| 51  | Single active key per scope      | At most one signing key with status Active exists per `SigningKeyScope` (Global or Organization)           |
+| 52  | Token version monotonicity       | `TokenVersion` on a User entity only increments, never decrements                                          |
+| 53  | Family poisoning irreversibility | Once a refresh token family is poisoned (reuse detected), all tokens in that family are eventually revoked |
+| 54  | Refresh token rotate-on-use      | A refresh token can be used at most once; reuse poisons the entire family (theft detection)                |
+| 55  | Deterministic token timestamps   | All time-dependent logic in Raft apply handlers uses `proposed_at` from `RaftPayload`, never `Utc::now()`  |
+| 56  | Cascade revocation completeness  | App disable revokes all app tokens; vault disconnect revokes app+vault tokens; org deletion revokes all    |
 
 ## Storage Layer Boundaries
 

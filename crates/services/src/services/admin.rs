@@ -2098,8 +2098,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
     /// Initiates rotation of the email blinding key by recording the new version through Raft.
     ///
-    /// The actual re-hashing of email HMAC entries is performed asynchronously by a background
-    /// job (not part of this RPC). Callers should poll `GetBlindingKeyRehashStatus` for progress.
+    /// Returns `complete: false` after committing the version change. The actual re-hashing
+    /// of email HMAC entries is performed asynchronously by a background job.
+    /// Poll `GetBlindingKeyRehashStatus` to track progress; `complete: true` there means
+    /// the rehash is finished.
     async fn rotate_blinding_key(
         &self,
         request: Request<RotateBlindingKeyRequest>,
@@ -2212,7 +2214,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 Ok(Response::new(RotateBlindingKeyResponse {
                     total_entries: 0,
                     entries_rehashed: 0,
-                    complete: true,
+                    complete: false,
                 }))
             },
             LedgerResponse::Error { code, message } => {

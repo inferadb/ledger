@@ -30,6 +30,8 @@ pub mod hash;
 pub mod merkle;
 /// Snowflake-style globally unique ID generation.
 pub mod snowflake;
+/// JWT token types for user sessions and vault access.
+pub mod token;
 /// Core domain types: identifiers, blocks, transactions, operations.
 pub mod types;
 /// Input validation for gRPC request fields.
@@ -44,6 +46,10 @@ pub use error_code::LedgerErrorCode;
 pub use hash::{
     BucketHasher, EMPTY_HASH, Hash, ZERO_HASH, bucket_id, compute_chain_commitment,
     compute_tx_merkle_root, hash_eq, sha256, sha256_concat, tx_hash, vault_entry_hash,
+};
+pub use token::{
+    SESSION_AUDIENCE, SIGNING_KEY_ENVELOPE_SIZE, SigningKeyEnvelope, TokenError, TokenPair,
+    TokenSubject, TokenType, UserSessionClaims, VAULT_AUDIENCE, ValidatedToken, VaultTokenClaims,
 };
 pub use types::{
     // Constants
@@ -71,15 +77,21 @@ pub use types::{
     OrganizationSlug,
     // Resource accounting
     OrganizationUsage,
+    // Refresh token identifier
+    RefreshTokenId,
     // Region types
     Region,
     RegionBlock,
     RegionParseError,
     Relationship,
     SetCondition,
+    // Signing key identifier
+    SigningKeyId,
     // Team identifiers
     TeamId,
     TeamSlug,
+    // Token version counter
+    TokenVersion,
     Transaction,
     TransactionValidationError,
     TxId,

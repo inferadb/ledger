@@ -25,7 +25,7 @@ The storage must support single-writer MVCC, crash safety, and efficient B+ tree
 
 ### Rationale
 
-1. **Fixed schema, compile-time tables.** Ledger has exactly 20 tables known at compile time (`TableId` enum). Generic key-value stores add overhead for schema-agnostic operation that we don't need. Our `Table` trait with associated `KeyType`/`ValueType` types provides compile-time type safety.
+1. **Fixed schema, compile-time tables.** Ledger has exactly 21 tables known at compile time (`TableId` enum). Generic key-value stores add overhead for schema-agnostic operation that we don't need. Our `Table` trait with associated `KeyType`/`ValueType` types provides compile-time type safety.
 
 2. **Single-writer model.** Raft serializes all writes through a single state machine. This eliminates the need for MVCC write concurrency, lock-free structures, or write-write conflict resolution. A `Mutex<()>` write lock is sufficient.
 
@@ -56,10 +56,12 @@ Page Layout (leaf):
 `NODE_HEADER_SIZE` is 16 bytes. The `next_leaf` field stores a `PageId` pointing to the next leaf in key order, forming a singly-linked list across all leaves. This enables O(1) leaf-to-leaf advancement during range scans (replacing O(depth) tree re-descent at each leaf boundary).
 
 The leaf linked list is maintained by split and merge operations:
+
 - **Split**: `left.next_leaf = right.page_id`, `right.next_leaf = old_left.next_leaf`
 - **Merge**: `left.next_leaf = right.next_leaf` (right page is freed)
 
 Key offsets:
+
 - `LEAF_BLOOM_OFFSET = PAGE_HEADER_SIZE + NODE_HEADER_SIZE` (32)
 - `LEAF_CELL_PTRS_OFFSET = LEAF_BLOOM_OFFSET + BLOOM_FILTER_SIZE` (288)
 

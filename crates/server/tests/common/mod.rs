@@ -42,7 +42,7 @@ use inferadb_ledger_raft::{
 };
 use inferadb_ledger_services::LedgerServer;
 use inferadb_ledger_state::StateLayer;
-use inferadb_ledger_store::FileBackend;
+use inferadb_ledger_store::{FileBackend, crypto::InMemoryKeyManager};
 use inferadb_ledger_test_utils::TestDir;
 use openraft::Raft;
 use tokio::time::timeout;
@@ -124,6 +124,11 @@ impl TestCluster {
         let base_port = allocate_ports(size as u16);
         let mut nodes = Vec::with_capacity(size);
 
+        // Shared key manager for all nodes (enables TokenService with JWT support).
+        // Uses ALL_REGIONS to cover both GLOBAL (user sessions) and org-scoped keys.
+        let key_manager: Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager> =
+            Arc::new(InMemoryKeyManager::generate_for_regions(&inferadb_ledger_types::ALL_REGIONS));
+
         // Step 1: Start the bootstrap node as a SINGLE-NODE cluster (no peers)
         // This allows it to immediately become leader, then we dynamically add nodes
         let addr: SocketAddr = format!("127.0.0.1:{}", base_port).parse().unwrap();
@@ -144,6 +149,20 @@ impl TestCluster {
             single: true, // Single-node mode for immediate bootstrap
             backup: Some(backup_config),
             raft: Some(test_raft_config()),
+            // Fast saga poll for auto-bootstrap integration tests (default 30s too slow)
+            saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
+            token_maintenance_interval_secs: 3, // Fast maintenance for integration tests
+            // Low rate limits for fast integration testing of rate limit behavior
+            rate_limit: Some(
+                inferadb_ledger_types::config::RateLimitConfig::builder()
+                    .client_burst(5_u64)
+                    .client_rate(2.0)
+                    .organization_burst(1000_u64)
+                    .organization_rate(500.0)
+                    .backpressure_threshold(100_u64)
+                    .build()
+                    .expect("valid rate limit config"),
+            ),
             ..inferadb_ledger_server::config::Config::default()
         };
 
@@ -155,6 +174,7 @@ impl TestCluster {
             &data_dir,
             health_state.clone(),
             shutdown_rx,
+            Some(key_manager.clone()),
         )
         .await
         .expect("bootstrap node");
@@ -230,6 +250,18 @@ impl TestCluster {
                 join: true, // Join mode: wait to be added to existing cluster
                 backup: Some(backup_config),
                 raft: Some(test_raft_config()),
+                saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
+                token_maintenance_interval_secs: 3, // Fast maintenance for integration tests
+                rate_limit: Some(
+                    inferadb_ledger_types::config::RateLimitConfig::builder()
+                        .client_burst(5_u64)
+                        .client_rate(2.0)
+                        .organization_burst(1000_u64)
+                        .organization_rate(500.0)
+                        .backpressure_threshold(100_u64)
+                        .build()
+                        .expect("valid rate limit config"),
+                ),
                 ..inferadb_ledger_server::config::Config::default()
             };
 
@@ -244,6 +276,7 @@ impl TestCluster {
                 &data_dir,
                 health_state.clone(),
                 shutdown_rx,
+                Some(key_manager.clone()),
             )
             .await
             .expect("bootstrap node");
@@ -1038,4 +1071,40 @@ pub async fn create_health_client_from_url(
         endpoint.to_string(),
     )
     .await
+}
+
+/// Helper to create an app service client for a node.
+#[allow(dead_code)]
+pub async fn create_app_client(
+    addr: SocketAddr,
+) -> Result<
+    inferadb_ledger_proto::proto::app_service_client::AppServiceClient<tonic::transport::Channel>,
+    tonic::transport::Error,
+> {
+    let endpoint = format!("http://{}", addr);
+    inferadb_ledger_proto::proto::app_service_client::AppServiceClient::connect(endpoint).await
+}
+
+/// Helper to create a user service client for a node.
+#[allow(dead_code)]
+pub async fn create_user_client(
+    addr: SocketAddr,
+) -> Result<
+    inferadb_ledger_proto::proto::user_service_client::UserServiceClient<tonic::transport::Channel>,
+    tonic::transport::Error,
+> {
+    let endpoint = format!("http://{}", addr);
+    inferadb_ledger_proto::proto::user_service_client::UserServiceClient::connect(endpoint).await
+}
+
+pub async fn create_token_client(
+    addr: SocketAddr,
+) -> Result<
+    inferadb_ledger_proto::proto::token_service_client::TokenServiceClient<
+        tonic::transport::Channel,
+    >,
+    tonic::transport::Error,
+> {
+    let endpoint = format!("http://{}", addr);
+    inferadb_ledger_proto::proto::token_service_client::TokenServiceClient::connect(endpoint).await
 }

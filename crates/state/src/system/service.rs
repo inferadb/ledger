@@ -13,7 +13,8 @@ use chrono::Utc;
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
     EmailVerifyTokenId, NodeId, Operation, OrganizationId, OrganizationSlug, Region, SetCondition,
-    UserEmailId, UserId, UserRole, UserSlug, UserStatus, VaultId, VaultSlug, decode, encode,
+    TokenVersion, UserEmailId, UserId, UserRole, UserSlug, UserStatus, VaultId, VaultSlug, decode,
+    encode,
 };
 use snafu::{ResultExt, Snafu};
 use tracing::warn;
@@ -49,6 +50,7 @@ pub const SYSTEM_VAULT_ID: VaultId = VaultId::new(0);
 
 /// Errors from system organization operations.
 #[derive(Debug, Snafu)]
+#[snafu(visibility(pub(super)))]
 pub enum SystemError {
     /// Underlying state layer operation failed.
     #[snafu(display("State layer error: {source}"))]
@@ -88,7 +90,7 @@ pub type Result<T> = std::result::Result<T, SystemError>;
 /// All _system data is stored in organization_id=0, vault_id=0.
 /// StateLayer is internally thread-safe via inferadb-ledger-store's MVCC.
 pub struct SystemOrganizationService<B: StorageBackend> {
-    state: Arc<StateLayer<B>>,
+    pub(super) state: Arc<StateLayer<B>>,
 }
 
 impl<B: StorageBackend> SystemOrganizationService<B> {
@@ -1299,6 +1301,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             created_at: now,
             updated_at: now,
             deleted_at: None,
+            version: TokenVersion::default(),
         };
         let user_key = SystemKeys::user_key(user_id);
         let user_value = encode(&user).context(CodecSnafu)?;
@@ -2783,6 +2786,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             deleted_at: None,
+            version: TokenVersion::default(),
         }
     }
 

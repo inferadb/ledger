@@ -10,8 +10,9 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
-    AppId, AppSlug, ClientAssertionId, Hash, OrganizationId, OrganizationSlug, Region,
-    SetCondition, TeamId, TeamSlug, Transaction, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
+    AppId, AppSlug, ClientAssertionId, Hash, OrganizationId, OrganizationSlug, RefreshTokenId,
+    Region, SetCondition, SigningKeyId, TeamId, TeamSlug, TokenSubject, TokenType, TokenVersion,
+    Transaction, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
 // Re-export domain types that originated here but now live in types crate.
 pub use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId};
@@ -458,6 +459,129 @@ pub enum LedgerRequest {
         /// Vault to disconnect.
         vault: VaultId,
     },
+
+    // ── Signing Key Management ──
+    /// Creates a new signing key for JWT token signing.
+    ///
+    /// The service layer generates the Ed25519 keypair, encrypts the private
+    /// key with the RMK (envelope encryption), and proposes this entry.
+    /// The state machine stores the key entity and indexes.
+    CreateSigningKey {
+        /// Key scope: Global (user sessions) or Organization (vault tokens).
+        scope: inferadb_ledger_state::system::SigningKeyScope,
+        /// UUID-format key identifier (generated before proposal).
+        kid: String,
+        /// 32-byte Ed25519 public key.
+        public_key_bytes: Vec<u8>,
+        /// `SigningKeyEnvelope` serialized bytes (100 bytes).
+        encrypted_private_key: Vec<u8>,
+        /// RMK version used to wrap the DEK.
+        rmk_version: u32,
+    },
+
+    /// Rotates a signing key by creating a new active key and transitioning
+    /// the old key to Rotated (grace period) or Revoked (immediate).
+    RotateSigningKey {
+        /// Kid of the key being rotated.
+        old_kid: String,
+        /// Kid of the replacement key.
+        new_kid: String,
+        /// 32-byte Ed25519 public key for the new key.
+        new_public_key_bytes: Vec<u8>,
+        /// Encrypted private key bytes for the new key.
+        new_encrypted_private_key: Vec<u8>,
+        /// RMK version used to wrap the new key's DEK.
+        rmk_version: u32,
+        /// Grace period in seconds. 0 = immediate revocation of old key.
+        grace_period_secs: u64,
+    },
+
+    /// Immediately revokes a signing key (Active or Rotated → Revoked).
+    RevokeSigningKey {
+        /// Kid of the key to revoke.
+        kid: String,
+    },
+
+    /// Transitions a rotated signing key past its grace period to Revoked.
+    /// Used by `TokenMaintenanceJob` — state changes must go through Raft.
+    TransitionSigningKeyRevoked {
+        /// Kid of the rotated key to transition.
+        kid: String,
+    },
+
+    // ── Refresh Token Management ──
+    /// Creates a refresh token record (paired with an access token).
+    CreateRefreshToken {
+        /// SHA-256 hash of the opaque refresh token string.
+        token_hash: [u8; 32],
+        /// Token family UUID for theft detection.
+        family: [u8; 16],
+        /// Whether this is a user session or vault access token.
+        token_type: TokenType,
+        /// Subject: User or App.
+        subject: TokenSubject,
+        /// Organization (None for user sessions).
+        organization: Option<OrganizationId>,
+        /// Vault (set for vault tokens).
+        vault: Option<VaultId>,
+        /// Which signing key signed the associated access token.
+        kid: String,
+        /// Refresh TTL in seconds. Apply handler computes `expires_at`
+        /// as `proposed_at + ttl_secs`.
+        ttl_secs: u64,
+    },
+
+    /// Atomically consumes a refresh token and creates a replacement.
+    ///
+    /// The state machine is the authority for all validation: used, expired,
+    /// revoked, family poisoned, version mismatch, app enabled, vault connected.
+    UseRefreshToken {
+        /// Hash of the token being consumed.
+        old_token_hash: [u8; 32],
+        /// Hash of the replacement token.
+        new_token_hash: [u8; 32],
+        /// Current active signing key kid for the new access token.
+        new_kid: String,
+        /// Refresh TTL in seconds for the new token.
+        ttl_secs: u64,
+        /// For user session refresh: the `TokenVersion` the caller observed.
+        /// State machine rejects if current version differs.
+        /// None for vault token refresh.
+        expected_version: Option<TokenVersion>,
+    },
+
+    /// Revokes all tokens in a family.
+    RevokeTokenFamily {
+        /// Token family UUID to revoke.
+        family: [u8; 16],
+    },
+
+    /// Revokes all refresh tokens for a subject (user or app).
+    /// Used for app disable cascade.
+    RevokeAllSubjectTokens {
+        /// Subject whose tokens to revoke.
+        subject: TokenSubject,
+    },
+
+    /// Revokes all refresh tokens for a specific app+vault combination.
+    /// Used for vault disconnect cascade.
+    RevokeAppVaultTokens {
+        /// App whose vault tokens to revoke. Uses `AppSlug` (not `AppId`)
+        /// because the refresh token subject index stores `TokenSubject::App(AppSlug)`.
+        app: AppSlug,
+        /// Vault to revoke tokens for.
+        vault: VaultId,
+    },
+
+    /// Atomically revokes all user sessions and increments `TokenVersion`.
+    RevokeAllUserSessions {
+        /// User whose sessions to revoke.
+        user: UserId,
+    },
+
+    /// Deletes expired refresh tokens and garbage-collects poisoned families.
+    /// Used by `TokenMaintenanceJob`. Apply handler uses `proposed_at` as cutoff.
+    DeleteExpiredRefreshTokens,
 }
 
 /// System-level requests that modify `_system` organization.
@@ -998,6 +1122,86 @@ pub enum LedgerResponse {
         /// Organization the app belongs to.
         organization_id: OrganizationId,
     },
+
+    // ── Signing Key Responses ──
+    /// Signing key created.
+    SigningKeyCreated {
+        /// Assigned internal signing key ID.
+        id: SigningKeyId,
+        /// UUID-format key identifier.
+        kid: String,
+    },
+
+    /// Signing key rotated (old key transitioned, new key active).
+    SigningKeyRotated {
+        /// Kid of the key that was rotated out.
+        old_kid: String,
+        /// Kid of the new active key.
+        new_kid: String,
+    },
+
+    /// Signing key revoked.
+    SigningKeyRevoked {
+        /// Kid of the revoked key.
+        kid: String,
+    },
+
+    /// Rotated signing key transitioned to Revoked (grace period expired).
+    SigningKeyTransitioned {
+        /// Kid of the transitioned key.
+        kid: String,
+    },
+
+    // ── Refresh Token Responses ──
+    /// Refresh token created.
+    RefreshTokenCreated {
+        /// Assigned internal refresh token ID.
+        id: RefreshTokenId,
+    },
+
+    /// Refresh token rotated (old consumed, new created).
+    RefreshTokenRotated {
+        /// Assigned ID for the new refresh token.
+        new_id: RefreshTokenId,
+        /// For user sessions: authoritative `TokenVersion` at Raft commit time.
+        /// Service signs the access token using this version.
+        token_version: Option<TokenVersion>,
+        /// For vault tokens: current `allowed_scopes` from `AppVaultConnection`.
+        /// Used directly as the new access token's scopes.
+        allowed_scopes: Option<Vec<String>>,
+    },
+
+    /// Token family revoked.
+    TokenFamilyRevoked {
+        /// Number of tokens revoked in the family.
+        count: u64,
+    },
+
+    /// All tokens for a subject revoked.
+    SubjectTokensRevoked {
+        /// Number of tokens revoked.
+        count: u64,
+    },
+
+    /// All tokens for an app+vault combination revoked.
+    AppVaultTokensRevoked {
+        /// Number of tokens revoked.
+        count: u64,
+    },
+
+    /// All user sessions revoked and `TokenVersion` incremented.
+    AllUserSessionsRevoked {
+        /// Number of tokens revoked.
+        count: u64,
+        /// New `TokenVersion` after increment.
+        version: TokenVersion,
+    },
+
+    /// Expired refresh tokens deleted and poisoned families cleaned.
+    ExpiredRefreshTokensDeleted {
+        /// Number of tokens cleaned up.
+        count: u64,
+    },
 }
 
 impl fmt::Display for LedgerResponse {
@@ -1148,6 +1352,39 @@ impl fmt::Display for LedgerResponse {
             },
             LedgerResponse::AppVaultRemoved { organization_id } => {
                 write!(f, "AppVaultRemoved(org={})", organization_id)
+            },
+            LedgerResponse::SigningKeyCreated { id, kid } => {
+                write!(f, "SigningKeyCreated(id={}, kid={})", id, kid)
+            },
+            LedgerResponse::SigningKeyRotated { old_kid, new_kid } => {
+                write!(f, "SigningKeyRotated(old={}, new={})", old_kid, new_kid)
+            },
+            LedgerResponse::SigningKeyRevoked { kid } => {
+                write!(f, "SigningKeyRevoked(kid={})", kid)
+            },
+            LedgerResponse::SigningKeyTransitioned { kid } => {
+                write!(f, "SigningKeyTransitioned(kid={})", kid)
+            },
+            LedgerResponse::RefreshTokenCreated { id } => {
+                write!(f, "RefreshTokenCreated(id={})", id)
+            },
+            LedgerResponse::RefreshTokenRotated { new_id, .. } => {
+                write!(f, "RefreshTokenRotated(new_id={})", new_id)
+            },
+            LedgerResponse::TokenFamilyRevoked { count } => {
+                write!(f, "TokenFamilyRevoked(count={})", count)
+            },
+            LedgerResponse::SubjectTokensRevoked { count } => {
+                write!(f, "SubjectTokensRevoked(count={})", count)
+            },
+            LedgerResponse::AppVaultTokensRevoked { count } => {
+                write!(f, "AppVaultTokensRevoked(count={})", count)
+            },
+            LedgerResponse::AllUserSessionsRevoked { count, version } => {
+                write!(f, "AllUserSessionsRevoked(count={}, version={})", count, version)
+            },
+            LedgerResponse::ExpiredRefreshTokensDeleted { count } => {
+                write!(f, "ExpiredRefreshTokensDeleted(count={})", count)
             },
         }
     }
@@ -1476,6 +1713,456 @@ mod tests {
         let bytes2 = postcard::to_allocvec(&decoded).expect("re-serialize");
 
         assert_eq!(bytes1, bytes2, "re-serialization with commitments should be stable");
+    }
+
+    // ============================================
+    // Signing Key & Refresh Token Variant Tests
+    // ============================================
+
+    #[test]
+    fn test_create_signing_key_serialization() {
+        let request = LedgerRequest::CreateSigningKey {
+            scope: inferadb_ledger_state::system::SigningKeyScope::Global,
+            kid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            public_key_bytes: vec![0xAA; 32],
+            encrypted_private_key: vec![0xBB; 100],
+            rmk_version: 1,
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerRequest::CreateSigningKey {
+                scope, kid, public_key_bytes, rmk_version, ..
+            } => {
+                assert_eq!(scope, inferadb_ledger_state::system::SigningKeyScope::Global);
+                assert_eq!(kid, "550e8400-e29b-41d4-a716-446655440000");
+                assert_eq!(public_key_bytes.len(), 32);
+                assert_eq!(rmk_version, 1);
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_create_signing_key_org_scope_serialization() {
+        let request = LedgerRequest::CreateSigningKey {
+            scope: inferadb_ledger_state::system::SigningKeyScope::Organization(
+                OrganizationId::new(42),
+            ),
+            kid: "key-uuid".to_string(),
+            public_key_bytes: vec![0xCC; 32],
+            encrypted_private_key: vec![0xDD; 100],
+            rmk_version: 2,
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerRequest::CreateSigningKey { scope, rmk_version, .. } => {
+                assert_eq!(
+                    scope,
+                    inferadb_ledger_state::system::SigningKeyScope::Organization(
+                        OrganizationId::new(42)
+                    )
+                );
+                assert_eq!(rmk_version, 2);
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_rotate_signing_key_serialization() {
+        let request = LedgerRequest::RotateSigningKey {
+            old_kid: "old-kid".to_string(),
+            new_kid: "new-kid".to_string(),
+            new_public_key_bytes: vec![0xAA; 32],
+            new_encrypted_private_key: vec![0xBB; 100],
+            rmk_version: 3,
+            grace_period_secs: 14400,
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerRequest::RotateSigningKey {
+                old_kid,
+                new_kid,
+                grace_period_secs,
+                rmk_version,
+                ..
+            } => {
+                assert_eq!(old_kid, "old-kid");
+                assert_eq!(new_kid, "new-kid");
+                assert_eq!(grace_period_secs, 14400);
+                assert_eq!(rmk_version, 3);
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_revoke_signing_key_serialization() {
+        let request = LedgerRequest::RevokeSigningKey { kid: "kid-to-revoke".to_string() };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerRequest::RevokeSigningKey { kid } => {
+                assert_eq!(kid, "kid-to-revoke");
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_transition_signing_key_revoked_serialization() {
+        let request = LedgerRequest::TransitionSigningKeyRevoked { kid: "rotated-kid".to_string() };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerRequest::TransitionSigningKeyRevoked { kid } => {
+                assert_eq!(kid, "rotated-kid");
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_create_refresh_token_serialization() {
+        let request = LedgerRequest::CreateRefreshToken {
+            token_hash: [0x11; 32],
+            family: [0x22; 16],
+            token_type: TokenType::UserSession,
+            subject: TokenSubject::User(UserSlug::new(99)),
+            organization: None,
+            vault: None,
+            kid: "signing-kid".to_string(),
+            ttl_secs: 1_209_600,
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerRequest::CreateRefreshToken {
+                token_hash,
+                family,
+                token_type,
+                subject,
+                organization,
+                vault,
+                kid,
+                ttl_secs,
+            } => {
+                assert_eq!(token_hash, [0x11; 32]);
+                assert_eq!(family, [0x22; 16]);
+                assert_eq!(token_type, TokenType::UserSession);
+                assert_eq!(subject, TokenSubject::User(UserSlug::new(99)));
+                assert!(organization.is_none());
+                assert!(vault.is_none());
+                assert_eq!(kid, "signing-kid");
+                assert_eq!(ttl_secs, 1_209_600);
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_create_refresh_token_vault_serialization() {
+        let request = LedgerRequest::CreateRefreshToken {
+            token_hash: [0xAA; 32],
+            family: [0xBB; 16],
+            token_type: TokenType::VaultAccess,
+            subject: TokenSubject::App(AppSlug::new(55)),
+            organization: Some(OrganizationId::new(7)),
+            vault: Some(VaultId::new(3)),
+            kid: "org-kid".to_string(),
+            ttl_secs: 3600,
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerRequest::CreateRefreshToken {
+                token_type, subject, organization, vault, ..
+            } => {
+                assert_eq!(token_type, TokenType::VaultAccess);
+                assert_eq!(subject, TokenSubject::App(AppSlug::new(55)));
+                assert_eq!(organization, Some(OrganizationId::new(7)));
+                assert_eq!(vault, Some(VaultId::new(3)));
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_use_refresh_token_serialization() {
+        let request = LedgerRequest::UseRefreshToken {
+            old_token_hash: [0x33; 32],
+            new_token_hash: [0x44; 32],
+            new_kid: "active-kid".to_string(),
+            ttl_secs: 1_209_600,
+            expected_version: Some(TokenVersion::new(5)),
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerRequest::UseRefreshToken {
+                old_token_hash,
+                new_token_hash,
+                new_kid,
+                ttl_secs,
+                expected_version,
+            } => {
+                assert_eq!(old_token_hash, [0x33; 32]);
+                assert_eq!(new_token_hash, [0x44; 32]);
+                assert_eq!(new_kid, "active-kid");
+                assert_eq!(ttl_secs, 1_209_600);
+                assert_eq!(expected_version, Some(TokenVersion::new(5)));
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_use_refresh_token_no_version_serialization() {
+        let request = LedgerRequest::UseRefreshToken {
+            old_token_hash: [0x55; 32],
+            new_token_hash: [0x66; 32],
+            new_kid: "vault-kid".to_string(),
+            ttl_secs: 3600,
+            expected_version: None,
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerRequest::UseRefreshToken { expected_version, .. } => {
+                assert!(expected_version.is_none());
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_revoke_token_family_serialization() {
+        let request = LedgerRequest::RevokeTokenFamily { family: [0xAB; 16] };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerRequest::RevokeTokenFamily { family } => {
+                assert_eq!(family, [0xAB; 16]);
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_revoke_all_subject_tokens_serialization() {
+        let request =
+            LedgerRequest::RevokeAllSubjectTokens { subject: TokenSubject::App(AppSlug::new(77)) };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerRequest::RevokeAllSubjectTokens { subject } => {
+                assert_eq!(subject, TokenSubject::App(AppSlug::new(77)));
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_revoke_app_vault_tokens_serialization() {
+        let request =
+            LedgerRequest::RevokeAppVaultTokens { app: AppSlug::new(10), vault: VaultId::new(20) };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerRequest::RevokeAppVaultTokens { app, vault } => {
+                assert_eq!(app, AppSlug::new(10));
+                assert_eq!(vault, VaultId::new(20));
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_revoke_all_user_sessions_serialization() {
+        let request = LedgerRequest::RevokeAllUserSessions { user: UserId::new(42) };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerRequest::RevokeAllUserSessions { user } => {
+                assert_eq!(user, UserId::new(42));
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_delete_expired_refresh_tokens_serialization() {
+        let request = LedgerRequest::DeleteExpiredRefreshTokens;
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        assert_eq!(request, deserialized);
+    }
+
+    // ── Response Variant Tests ──
+
+    #[test]
+    fn test_signing_key_created_response_serialization() {
+        let response = LedgerResponse::SigningKeyCreated {
+            id: SigningKeyId::new(1),
+            kid: "test-kid".to_string(),
+        };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "SigningKeyCreated(id=sigkey:1, kid=test-kid)");
+    }
+
+    #[test]
+    fn test_signing_key_rotated_response_serialization() {
+        let response = LedgerResponse::SigningKeyRotated {
+            old_kid: "old".to_string(),
+            new_kid: "new".to_string(),
+        };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "SigningKeyRotated(old=old, new=new)");
+    }
+
+    #[test]
+    fn test_signing_key_revoked_response_serialization() {
+        let response = LedgerResponse::SigningKeyRevoked { kid: "revoked-kid".to_string() };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "SigningKeyRevoked(kid=revoked-kid)");
+    }
+
+    #[test]
+    fn test_signing_key_transitioned_response_serialization() {
+        let response =
+            LedgerResponse::SigningKeyTransitioned { kid: "transitioned-kid".to_string() };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+    }
+
+    #[test]
+    fn test_refresh_token_created_response_serialization() {
+        let response = LedgerResponse::RefreshTokenCreated { id: RefreshTokenId::new(99) };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "RefreshTokenCreated(id=rtoken:99)");
+    }
+
+    #[test]
+    fn test_refresh_token_rotated_response_serialization() {
+        let response = LedgerResponse::RefreshTokenRotated {
+            new_id: RefreshTokenId::new(100),
+            token_version: Some(TokenVersion::new(3)),
+            allowed_scopes: None,
+        };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "RefreshTokenRotated(new_id=rtoken:100)");
+    }
+
+    #[test]
+    fn test_refresh_token_rotated_with_scopes_serialization() {
+        let response = LedgerResponse::RefreshTokenRotated {
+            new_id: RefreshTokenId::new(101),
+            token_version: None,
+            allowed_scopes: Some(vec!["vault:read".to_string(), "entity:write".to_string()]),
+        };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+    }
+
+    #[test]
+    fn test_token_family_revoked_response_serialization() {
+        let response = LedgerResponse::TokenFamilyRevoked { count: 5 };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "TokenFamilyRevoked(count=5)");
+    }
+
+    #[test]
+    fn test_all_user_sessions_revoked_response_serialization() {
+        let response =
+            LedgerResponse::AllUserSessionsRevoked { count: 10, version: TokenVersion::new(2) };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "AllUserSessionsRevoked(count=10, version=v2)");
+    }
+
+    #[test]
+    fn test_expired_refresh_tokens_deleted_response_serialization() {
+        let response = LedgerResponse::ExpiredRefreshTokensDeleted { count: 42 };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "ExpiredRefreshTokensDeleted(count=42)");
+    }
+
+    #[test]
+    fn test_subject_tokens_revoked_response_serialization() {
+        let response = LedgerResponse::SubjectTokensRevoked { count: 3 };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "SubjectTokensRevoked(count=3)");
+    }
+
+    #[test]
+    fn test_app_vault_tokens_revoked_response_serialization() {
+        let response = LedgerResponse::AppVaultTokensRevoked { count: 7 };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "AppVaultTokensRevoked(count=7)");
     }
 
     // ============================================

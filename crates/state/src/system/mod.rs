@@ -11,6 +11,7 @@ mod cluster;
 mod keys;
 mod saga;
 mod service;
+pub mod token;
 mod types;
 
 pub use cluster::{
@@ -20,7 +21,8 @@ pub use cluster::{
 pub use inferadb_ledger_types::{UserRole, UserStatus};
 pub use keys::SystemKeys;
 pub use saga::{
-    CreateOrganizationInput, CreateOrganizationSaga, CreateOrganizationSagaState, CreateUserInput,
+    CreateOrganizationInput, CreateOrganizationSaga, CreateOrganizationSagaState,
+    CreateSigningKeyInput, CreateSigningKeySaga, CreateSigningKeySagaState, CreateUserInput,
     CreateUserSaga, CreateUserSagaState, DeleteUserInput, DeleteUserSaga, DeleteUserSagaState,
     MAX_RETRIES, MigrateOrgInput, MigrateOrgSaga, MigrateOrgSagaState, MigrateUserInput,
     MigrateUserSaga, MigrateUserSagaState, SAGA_POLL_INTERVAL, Saga, SagaId, SagaLockKey, SagaStep,
@@ -29,12 +31,17 @@ pub use saga::{
 pub use service::{
     SYSTEM_ORGANIZATION_ID, SYSTEM_VAULT_ID, SystemError, SystemOrganizationService,
 };
+pub use token::{
+    AllUserSessionsRevocationResult, ExpiredTokenCleanupResult, FamilyRevocationResult,
+    SubjectRevocationResult,
+};
 pub use types::{
     App, AppCredentialType, AppCredentials, AppVaultConnection, ClientAssertionCredentialConfig,
     ClientAssertionEntry, ClientSecretCredential, EmailVerificationToken, ErasureAuditRecord,
     MigrationSummary, MtlsCredential, NodeInfo, NodeRole, OrganizationDirectoryEntry,
     OrganizationDirectoryStatus, OrganizationMember, OrganizationMemberRole, OrganizationProfile,
     OrganizationRegistry, OrganizationStatus, OrganizationTier, PendingOrganizationProfile,
-    SubjectKey, TeamMember, TeamMemberRole, TeamProfile, User, UserDirectoryEntry,
-    UserDirectoryStatus, UserEmail, UserMigrationEntry,
+    RefreshToken, SigningKey, SigningKeyScope, SigningKeyStatus, SubjectKey, TeamMember,
+    TeamMemberRole, TeamProfile, User, UserDirectoryEntry, UserDirectoryStatus, UserEmail,
+    UserMigrationEntry,
 };

@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
 use inferadb_ledger_types::{
     AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, Hash, Operation, OrganizationId,
-    OrganizationSlug, Region, TeamId, TeamSlug, Transaction, UserEmailId, UserId, UserSlug,
-    VaultId, VaultSlug,
+    OrganizationSlug, RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug, Transaction,
+    UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
 use openraft::{LogId, StoredMembership};
 use serde::{Deserialize, Serialize};
@@ -205,6 +205,12 @@ pub struct SequenceCounters {
     /// Next client assertion ID.
     #[serde(default)]
     pub client_assertion: ClientAssertionId,
+    /// Next signing key ID.
+    #[serde(default)]
+    pub signing_key: SigningKeyId,
+    /// Next refresh token ID.
+    #[serde(default)]
+    pub refresh_token: RefreshTokenId,
 }
 
 impl Default for SequenceCounters {
@@ -218,6 +224,8 @@ impl Default for SequenceCounters {
             team: TeamId::new(0),
             app: AppId::new(0),
             client_assertion: ClientAssertionId::new(0),
+            signing_key: SigningKeyId::new(0),
+            refresh_token: RefreshTokenId::new(0),
         }
     }
 }
@@ -234,6 +242,8 @@ impl SequenceCounters {
             team: TeamId::new(1),
             app: AppId::new(1),
             client_assertion: ClientAssertionId::new(1),
+            signing_key: SigningKeyId::new(1),
+            refresh_token: RefreshTokenId::new(1),
         }
     }
 
@@ -290,6 +300,20 @@ impl SequenceCounters {
     pub fn next_client_assertion(&mut self) -> ClientAssertionId {
         let id = self.client_assertion;
         self.client_assertion = ClientAssertionId::new(id.value() + 1);
+        id
+    }
+
+    /// Returns and increments the next signing key ID.
+    pub fn next_signing_key(&mut self) -> SigningKeyId {
+        let id = self.signing_key;
+        self.signing_key = SigningKeyId::new(id.value() + 1);
+        id
+    }
+
+    /// Returns and increments the next refresh token ID.
+    pub fn next_refresh_token(&mut self) -> RefreshTokenId {
+        let id = self.refresh_token;
+        self.refresh_token = RefreshTokenId::new(id.value() + 1);
         id
     }
 }

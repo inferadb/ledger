@@ -15,7 +15,8 @@ use inferadb_ledger_store::{
 };
 use inferadb_ledger_types::{
     AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, OrganizationId, OrganizationSlug,
-    Region, TeamId, TeamSlug, UserEmailId, UserId, UserSlug, VaultId, VaultSlug, decode, encode,
+    RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug, UserEmailId, UserId, UserSlug, VaultId,
+    VaultSlug, decode, encode,
 };
 use openraft::{Entry, LogId, StorageError, Vote};
 use parking_lot::RwLock;
@@ -504,9 +505,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
     /// Flushes accumulated external writes into their respective B+ tree tables.
     ///
-    /// Writes to all 9 external tables: `OrganizationMeta`, `VaultMeta`,
+    /// Writes to all 12 external tables: `OrganizationMeta`, `VaultMeta`,
     /// `VaultHeights`, `VaultHashes`, `VaultHealth`, `Sequences`,
-    /// `ClientSequences`, `OrganizationSlugIndex`, `VaultSlugIndex`.
+    /// `ClientSequences`, `OrganizationSlugIndex`, `VaultSlugIndex`,
+    /// `UserSlugIndex`, `TeamSlugIndex`, `AppSlugIndex`.
     ///
     /// Handles both inserts and deletes (slug index deletions on org/vault
     /// removal, client sequence eviction).
@@ -834,6 +836,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 "client_assertion" => {
                     state.sequences.client_assertion = ClientAssertionId::new(value as i64);
                 },
+                "signing_key" => {
+                    state.sequences.signing_key = SigningKeyId::new(value as i64);
+                },
+                "refresh_token" => {
+                    state.sequences.refresh_token = RefreshTokenId::new(value as i64);
+                },
                 unknown => {
                     warn!(key = unknown, "Unknown sequence key in Sequences table, skipping");
                 },
@@ -1135,8 +1143,8 @@ mod tests {
     use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
     use inferadb_ledger_store::{FileBackend, tables};
     use inferadb_ledger_types::{
-        AppId, ClientAssertionId, OrganizationId, OrganizationSlug, Region, TeamId, UserEmailId,
-        VaultId, VaultSlug, decode, encode,
+        AppId, ClientAssertionId, OrganizationId, OrganizationSlug, RefreshTokenId, Region,
+        SigningKeyId, TeamId, UserEmailId, VaultId, VaultSlug, decode, encode,
     };
     use openraft::{CommittedLeaderId, LogId};
     use tempfile::tempdir;
@@ -1166,6 +1174,8 @@ mod tests {
                 team: TeamId::new(0),
                 app: AppId::new(0),
                 client_assertion: ClientAssertionId::new(0),
+                signing_key: SigningKeyId::new(0),
+                refresh_token: RefreshTokenId::new(0),
             },
             ..Default::default()
         };
@@ -1284,6 +1294,12 @@ mod tests {
             "client_assertion".to_string(),
             state.sequences.client_assertion.value() as u64,
         ));
+        pending
+            .sequences
+            .push(("signing_key".to_string(), state.sequences.signing_key.value() as u64));
+        pending
+            .sequences
+            .push(("refresh_token".to_string(), state.sequences.refresh_token.value() as u64));
 
         for ((org_id, vault_id, client_id), sequence) in &state.client_sequences {
             let key = PendingExternalWrites::client_sequence_key(
@@ -1816,6 +1832,8 @@ mod tests {
                 team: TeamId::new(0),
                 app: AppId::new(0),
                 client_assertion: ClientAssertionId::new(0),
+                signing_key: SigningKeyId::new(0),
+                refresh_token: RefreshTokenId::new(0),
             },
             ..Default::default()
         };
@@ -1919,6 +1937,8 @@ mod tests {
                 team: TeamId::new(0),
                 app: AppId::new(0),
                 client_assertion: ClientAssertionId::new(0),
+                signing_key: SigningKeyId::new(0),
+                refresh_token: RefreshTokenId::new(0),
             },
             ..Default::default()
         };
