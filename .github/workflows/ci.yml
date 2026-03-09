@@ -312,15 +312,14 @@ jobs:
         run: |
           cargo llvm-cov --workspace --lib \
             --ignore-filename-regex 'proto|ledger\.v1' \
-            --codecov \
-            --output-path codecov.json
+            --lcov \
+            --output-path lcov.info
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5.5.2
+      - name: Report coverage
+        uses: evansims/coverlint@aa15ba0901ffaad70113c3ab5a54bf2e676614f8 # v1.2.5
         with:
-          files: ./codecov.json
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
+          format: lcov
+          path: lcov.info
 
   # Build documentation
   docs:
