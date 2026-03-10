@@ -500,7 +500,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
@@ -582,7 +582,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
@@ -893,7 +893,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                 // We still check both responses defensively.
                 if let Some(LedgerResponse::Error { code, message }) = responses.get(1) {
                     ctx.set_error(code.grpc_code_name(), message);
-                    return Err(crate::proto_compat::error_code_to_status(
+                    return Err(super::helpers::error_code_to_status(
                         *code,
                         format!("Saga persistence failed: {message}"),
                     ));
@@ -917,7 +917,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                     },
                     Some(LedgerResponse::Error { code, message }) => {
                         ctx.set_error(code.grpc_code_name(), message);
-                        Err(crate::proto_compat::error_code_to_status(*code, message.clone()))
+                        Err(super::helpers::error_code_to_status(*code, message.clone()))
                     },
                     _ => {
                         ctx.set_error("UnexpectedResponse", "Unexpected batch response");
@@ -927,7 +927,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
@@ -1029,7 +1029,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
@@ -1191,7 +1191,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
@@ -1296,7 +1296,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
@@ -1441,7 +1441,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
@@ -1517,7 +1517,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
@@ -1588,7 +1588,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");

@@ -176,7 +176,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
@@ -269,7 +269,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");

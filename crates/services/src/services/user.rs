@@ -351,7 +351,7 @@ impl proto::user_service_server::UserService for UserService {
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(
+                Err(super::helpers::error_code_to_status(
                     code,
                     format!("User update failed: {message}"),
                 ))
@@ -416,7 +416,7 @@ impl proto::user_service_server::UserService for UserService {
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(
+                Err(super::helpers::error_code_to_status(
                     code,
                     format!("User deletion failed: {message}"),
                 ))
@@ -582,7 +582,7 @@ impl proto::user_service_server::UserService for UserService {
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(
+                Err(super::helpers::error_code_to_status(
                     code,
                     format!("Email creation failed: {message}"),
                 ))
@@ -653,7 +653,7 @@ impl proto::user_service_server::UserService for UserService {
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(
+                Err(super::helpers::error_code_to_status(
                     code,
                     format!("Email deletion failed: {message}"),
                 ))
@@ -804,7 +804,7 @@ impl proto::user_service_server::UserService for UserService {
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(
+                Err(super::helpers::error_code_to_status(
                     code,
                     format!("Email verification failed: {message}"),
                 ))
@@ -1027,7 +1027,7 @@ impl proto::user_service_server::UserService for UserService {
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(crate::proto_compat::error_code_to_status(
+                Err(super::helpers::error_code_to_status(
                     code,
                     format!("Erasure failed: {message}"),
                 ))

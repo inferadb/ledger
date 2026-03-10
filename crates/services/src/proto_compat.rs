@@ -15,8 +15,6 @@ use inferadb_ledger_proto::{
 use inferadb_ledger_state::system::{
     OrganizationMemberRole, OrganizationStatus, OrganizationTier, TeamMemberRole,
 };
-use inferadb_ledger_types::ErrorCode;
-use tonic::Status;
 
 /// Converts a domain `OrganizationStatus` to its proto representation.
 pub(crate) fn organization_status_to_proto(
@@ -80,22 +78,6 @@ pub(crate) fn team_member_role_to_proto(role: TeamMemberRole) -> proto::Organiza
     match role {
         TeamMemberRole::Manager => proto::OrganizationTeamMemberRole::Manager,
         TeamMemberRole::Member => proto::OrganizationTeamMemberRole::Member,
-    }
-}
-
-/// Maps a [`ErrorCode`] to the corresponding gRPC [`Status`].
-///
-/// Used by service-layer error handlers to convert structured state-machine
-/// error codes into the correct gRPC status without string matching.
-pub(crate) fn error_code_to_status(code: ErrorCode, message: String) -> Status {
-    match code {
-        ErrorCode::NotFound => Status::not_found(message),
-        ErrorCode::AlreadyExists => Status::already_exists(message),
-        ErrorCode::FailedPrecondition => Status::failed_precondition(message),
-        ErrorCode::PermissionDenied => Status::permission_denied(message),
-        ErrorCode::InvalidArgument => Status::invalid_argument(message),
-        ErrorCode::Internal => Status::internal(message),
-        ErrorCode::Unauthenticated => Status::unauthenticated(message),
     }
 }
 

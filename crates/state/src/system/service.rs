@@ -1810,12 +1810,9 @@ mod tests {
     use inferadb_ledger_types::{Region, UserRole, UserSlug, UserStatus};
 
     use super::*;
-    use crate::engine::InMemoryStorageEngine;
 
     fn create_test_service() -> SystemOrganizationService<inferadb_ledger_store::InMemoryBackend> {
-        let engine = InMemoryStorageEngine::open().unwrap();
-        let state = Arc::new(StateLayer::new(engine.db()));
-        SystemOrganizationService::new(state)
+        crate::system::create_test_service()
     }
 
     #[test]

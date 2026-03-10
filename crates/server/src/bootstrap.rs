@@ -337,10 +337,13 @@ pub async fn bootstrap_node(
             message: format!("failed to register system region: {e}"),
         })?;
 
-    // Create JwtEngine when a key_manager is provided (enables TokenService).
-    let jwt_engine = key_manager
-        .as_ref()
-        .map(|_| Arc::new(inferadb_ledger_services::jwt::JwtEngine::new(config.jwt.clone())));
+    // Create TokenServiceConfig when a key_manager is provided (enables TokenService).
+    let token_service_config =
+        key_manager.as_ref().map(|km| inferadb_ledger_services::server::TokenServiceConfig {
+            jwt_engine: Arc::new(inferadb_ledger_services::jwt::JwtEngine::new(config.jwt.clone())),
+            jwt_config: config.jwt.clone(),
+            key_manager: km.clone(),
+        });
 
     // Create rate limiter and hot key detector.
     // Uses config-provided limits if available, otherwise hardcoded defaults.
@@ -378,9 +381,7 @@ pub async fn bootstrap_node(
         .events_db(Some((*events_db).clone()))
         .event_handle(Some(event_handle))
         .region(config.region)
-        .jwt_config(Some(config.jwt.clone()))
-        .jwt_engine(jwt_engine)
-        .key_manager(key_manager.clone())
+        .token_service(token_service_config)
         .proposal_timeout(proposal_timeout)
         .health_check_config(config.health_check.clone())
         .max_read_forward_lag(config.max_read_forward_lag)

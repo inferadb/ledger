@@ -844,8 +844,6 @@ fn hex_digit(c: u8) -> Option<u8> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
-    use std::sync::Arc;
-
     use chrono::{Duration, Utc};
     use inferadb_ledger_types::{
         AppSlug, OrganizationId, RefreshTokenId, SigningKeyId, TokenSubject, TokenType, UserSlug,
@@ -853,15 +851,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::{
-        engine::InMemoryStorageEngine, state::StateLayer,
-        system::service::SystemOrganizationService,
-    };
+    use crate::system::service::SystemOrganizationService;
 
     fn create_test_service() -> SystemOrganizationService<inferadb_ledger_store::InMemoryBackend> {
-        let engine = InMemoryStorageEngine::open().unwrap();
-        let state = Arc::new(StateLayer::new(engine.db()));
-        SystemOrganizationService::new(state)
+        crate::system::create_test_service()
     }
 
     fn make_signing_key(

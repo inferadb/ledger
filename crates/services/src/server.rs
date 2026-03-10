@@ -41,6 +41,20 @@ use crate::{
     },
 };
 
+/// Bundled configuration for the optional `TokenService`.
+///
+/// Replaces three separate `Option` fields on `LedgerServer` that had to be
+/// provided all-or-nothing. With this struct, partial configuration is
+/// impossible — either the entire token service is configured or it isn't.
+pub struct TokenServiceConfig {
+    /// JWT engine for token signing and validation.
+    pub jwt_engine: Arc<JwtEngine>,
+    /// JWT configuration (token TTLs, issuer, clock skew).
+    pub jwt_config: inferadb_ledger_types::config::JwtConfig,
+    /// Region key manager for signing key envelope encryption.
+    pub key_manager: Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>,
+}
+
 /// The main Ledger gRPC server.
 ///
 /// Combines all services with the Raft consensus layer and state storage.
@@ -122,20 +136,12 @@ pub struct LedgerServer {
     /// Included in discovery responses so peers know this node's region.
     #[builder(default = inferadb_ledger_types::Region::GLOBAL)]
     region: inferadb_ledger_types::Region,
-    /// JWT engine for token signing and validation (optional).
+    /// Token service configuration (JWT engine, config, key manager).
     ///
-    /// When provided alongside `jwt_config` and `key_manager`, the `TokenService`
-    /// is registered and exposes session/vault token lifecycle RPCs.
+    /// When provided, the `TokenService` is registered and exposes
+    /// session/vault token lifecycle RPCs.
     #[builder(default)]
-    jwt_engine: Option<Arc<JwtEngine>>,
-    /// JWT configuration (token TTLs, issuer, clock skew).
-    #[builder(default)]
-    jwt_config: Option<inferadb_ledger_types::config::JwtConfig>,
-    /// Region key manager for signing key envelope encryption.
-    ///
-    /// Used by `TokenService` to decrypt signing keys on cache miss.
-    #[builder(default)]
-    key_manager: Option<Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>>,
+    token_service: Option<TokenServiceConfig>,
 }
 
 impl LedgerServer {
@@ -266,20 +272,19 @@ impl LedgerServer {
         let vault_service = VaultService::new(svc_ctx.clone());
         let user_service = UserService::new(svc_ctx.clone());
 
-        // TokenService is optional — registered when jwt_engine, jwt_config,
-        // and key_manager are all provided.
-        let token_service = if let (Some(jwt_engine), Some(jwt_config), Some(key_manager)) =
-            (self.jwt_engine, self.jwt_config, self.key_manager)
-        {
-            let mut svc =
-                TokenServiceImpl::new(svc_ctx.clone(), jwt_engine, jwt_config, key_manager);
+        // TokenService is optional — registered when token_service config is provided.
+        let token_service = self.token_service.map(|ts| {
+            let mut svc = TokenServiceImpl::new(
+                svc_ctx.clone(),
+                ts.jwt_engine,
+                ts.jwt_config,
+                ts.key_manager,
+            );
             if let Some(ref limiter) = self.organization_rate_limiter {
                 svc = svc.with_rate_limiter(limiter.clone());
             }
-            Some(svc)
-        } else {
-            None
-        };
+            svc
+        });
 
         let app_service = AppService::new(svc_ctx);
 

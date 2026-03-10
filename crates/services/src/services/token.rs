@@ -22,14 +22,12 @@ use inferadb_ledger_raft::{
     types::{LedgerRequest, LedgerResponse},
 };
 use inferadb_ledger_state::system::{
-    App, AppVaultConnection, SYSTEM_VAULT_ID, SigningKey, SigningKeyScope, SigningKeyStatus,
-    SystemKeys,
+    App, AppVaultConnection, SigningKey, SigningKeyScope, SigningKeyStatus,
 };
 use inferadb_ledger_store::crypto::RegionKeyManager;
 use inferadb_ledger_types::{
     OrganizationId as DomainOrganizationId, UserRole, VaultId as DomainVaultId,
     config::JwtConfig,
-    decode,
     events::{EventAction, EventOutcome as EventOutcomeType},
     token::{TokenSubject, TokenType, ValidatedToken},
 };
@@ -160,15 +158,13 @@ impl TokenServiceImpl {
         app_id: inferadb_ledger_types::AppId,
         vault_id: DomainVaultId,
     ) -> Result<AppVaultConnection, Status> {
-        let key = SystemKeys::app_vault_key(org_id, app_id, vault_id);
-        let entity = self
-            .ctx
-            .state
-            .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
-            .map_err(|e| Status::internal(format!("Failed to read vault connection: {e}")))?
-            .ok_or_else(|| Status::not_found("Vault connection not found"))?;
-        decode::<AppVaultConnection>(&entity.value)
-            .map_err(|e| Status::internal(format!("Failed to decode vault connection: {e}")))
+        super::helpers::read_vault_connection(
+            &self.ctx.state,
+            org_id,
+            app_id,
+            vault_id,
+            Status::not_found("Vault connection not found"),
+        )
     }
 
     /// Converts a domain `SigningKey` to a proto `PublicKeyInfo`.

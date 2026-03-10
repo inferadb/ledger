@@ -608,7 +608,6 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `GroupMembership`: Per-Raft-group role assignments (Voter/Learner per node per region)
 - `ClusterMembership`: Node registry with heartbeat tracking, wraps `GroupMembership`
 - `SystemRole` enum: `Voter`, `Learner` — per-region role for each node
-- `LearnerCacheConfig`: Cache staleness configuration for learner nodes
 - **Insights**: `GroupMembership` maps `(node_id, region)` → `SystemRole`, enabling per-region voter/learner assignments. `ClusterMembership` composes `GroupMembership` with `NodeInfo` registry.
 
 #### `system/saga.rs`

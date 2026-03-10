@@ -43,3 +43,14 @@ pub use types::{
     TeamMemberRole, TeamProfile, User, UserDirectoryEntry, UserDirectoryStatus, UserEmail,
     UserMigrationEntry,
 };
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
+pub(crate) fn create_test_service()
+-> SystemOrganizationService<inferadb_ledger_store::InMemoryBackend> {
+    use std::sync::Arc;
+
+    let engine = crate::engine::InMemoryStorageEngine::open().unwrap();
+    let state = Arc::new(crate::state::StateLayer::new(engine.db()));
+    SystemOrganizationService::new(state)
+}

@@ -209,15 +209,13 @@ impl AppService {
         app_id: DomainAppId,
         vault_id: inferadb_ledger_types::VaultId,
     ) -> Result<AppVaultConnection, Status> {
-        let key = SystemKeys::app_vault_key(org_id, app_id, vault_id);
-        let entity = self
-            .ctx
-            .state
-            .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
-            .map_err(|e| Status::internal(format!("Failed to read vault connection: {e}")))?
-            .ok_or_else(|| Status::internal("Vault connection not found after mutation"))?;
-        decode::<AppVaultConnection>(&entity.value)
-            .map_err(|e| Status::internal(format!("Failed to decode vault connection: {e}")))
+        super::helpers::read_vault_connection(
+            &self.ctx.state,
+            org_id,
+            app_id,
+            vault_id,
+            Status::internal("Vault connection not found after mutation"),
+        )
     }
 
     /// Converts a domain `AppVaultConnection` to a proto `AppVaultConnectionInfo`.
@@ -340,7 +338,7 @@ impl proto::app_service_server::AppService for AppService {
                 Ok(Response::new(CreateAppResponse { app: Some(info) }))
             },
             LedgerResponse::Error { code, message } => {
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             other => {
                 tracing::error!(?other, "Unexpected response from state machine");
@@ -436,7 +434,7 @@ impl proto::app_service_server::AppService for AppService {
                 Ok(Response::new(UpdateAppResponse { app: Some(info) }))
             },
             LedgerResponse::Error { code, message } => {
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             other => {
                 tracing::error!(?other, "Unexpected response from state machine");
@@ -478,7 +476,7 @@ impl proto::app_service_server::AppService for AppService {
                 Ok(Response::new(DeleteAppResponse {}))
             },
             LedgerResponse::Error { code, message } => {
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             other => {
                 tracing::error!(?other, "Unexpected response from state machine");
@@ -535,7 +533,7 @@ impl proto::app_service_server::AppService for AppService {
                 Ok(Response::new(SetAppEnabledResponse { app: Some(info) }))
             },
             LedgerResponse::Error { code, message } => {
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             other => {
                 tracing::error!(?other, "Unexpected response from state machine");
@@ -594,7 +592,7 @@ impl proto::app_service_server::AppService for AppService {
                 Ok(Response::new(SetAppCredentialEnabledResponse { app: Some(info) }))
             },
             LedgerResponse::Error { code, message } => {
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             other => {
                 tracing::error!(?other, "Unexpected response from state machine");
@@ -698,7 +696,7 @@ impl proto::app_service_server::AppService for AppService {
                 Ok(Response::new(RotateAppClientSecretResponse { secret: plaintext_secret }))
             },
             LedgerResponse::Error { code, message } => {
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             other => {
                 tracing::error!(?other, "Unexpected response from state machine");
@@ -841,7 +839,7 @@ impl proto::app_service_server::AppService for AppService {
                 }))
             },
             LedgerResponse::Error { code, message } => {
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             other => {
                 tracing::error!(?other, "Unexpected response from state machine");
@@ -901,7 +899,7 @@ impl proto::app_service_server::AppService for AppService {
                 Ok(Response::new(DeleteAppClientAssertionResponse {}))
             },
             LedgerResponse::Error { code, message } => {
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             other => {
                 tracing::error!(?other, "Unexpected response from state machine");
@@ -962,7 +960,7 @@ impl proto::app_service_server::AppService for AppService {
                 Ok(Response::new(SetAppClientAssertionEnabledResponse {}))
             },
             LedgerResponse::Error { code, message } => {
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             other => {
                 tracing::error!(?other, "Unexpected response from state machine");
@@ -1038,7 +1036,7 @@ impl proto::app_service_server::AppService for AppService {
                 }))
             },
             LedgerResponse::Error { code, message } => {
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             other => {
                 tracing::error!(?other, "Unexpected response from state machine");
@@ -1099,7 +1097,7 @@ impl proto::app_service_server::AppService for AppService {
                 }))
             },
             LedgerResponse::Error { code, message } => {
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             other => {
                 tracing::error!(?other, "Unexpected response from state machine");
@@ -1156,7 +1154,7 @@ impl proto::app_service_server::AppService for AppService {
                 Ok(Response::new(RemoveAppVaultResponse {}))
             },
             LedgerResponse::Error { code, message } => {
-                Err(crate::proto_compat::error_code_to_status(code, message))
+                Err(super::helpers::error_code_to_status(code, message))
             },
             other => {
                 tracing::error!(?other, "Unexpected response from state machine");

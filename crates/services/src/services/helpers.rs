@@ -9,11 +9,11 @@ use inferadb_ledger_proto::proto;
 use inferadb_ledger_raft::{graceful_shutdown::HealthState, metrics, rate_limit::RateLimiter};
 use inferadb_ledger_state::{
     StateLayer,
-    system::{App, SYSTEM_VAULT_ID, SystemKeys},
+    system::{App, AppVaultConnection, SYSTEM_VAULT_ID, SystemKeys},
 };
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{
-    AppId, OrganizationId, VaultId, config::ValidationConfig, decode, validation,
+    AppId, ErrorCode, OrganizationId, VaultId, config::ValidationConfig, decode, validation,
 };
 use tempfile::TempDir;
 use tonic::Status;
@@ -293,4 +293,41 @@ pub(crate) fn create_replay_context() -> Result<(TempDir, StateLayer<FileBackend
 /// pattern used across read service methods.
 pub(crate) fn storage_err(e: impl Display) -> Status {
     Status::internal(format!("Storage error: {e}"))
+}
+
+/// Reads and decodes an [`AppVaultConnection`] from the system vault.
+///
+/// The caller provides the `not_found` status so that post-mutation reads
+/// (which indicate a bug) can use `Status::internal` while user-facing
+/// lookups use `Status::not_found`.
+pub(crate) fn read_vault_connection(
+    state: &StateLayer<FileBackend>,
+    org_id: OrganizationId,
+    app_id: AppId,
+    vault_id: VaultId,
+    not_found: Status,
+) -> Result<AppVaultConnection, Status> {
+    let key = SystemKeys::app_vault_key(org_id, app_id, vault_id);
+    let entity = state
+        .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
+        .map_err(|e| Status::internal(format!("Failed to read vault connection: {e}")))?
+        .ok_or(not_found)?;
+    decode::<AppVaultConnection>(&entity.value)
+        .map_err(|e| Status::internal(format!("Failed to decode vault connection: {e}")))
+}
+
+/// Maps a [`ErrorCode`] to the corresponding gRPC [`Status`].
+///
+/// Used by service-layer error handlers to convert structured state-machine
+/// error codes into the correct gRPC status without string matching.
+pub(crate) fn error_code_to_status(code: ErrorCode, message: String) -> Status {
+    match code {
+        ErrorCode::NotFound => Status::not_found(message),
+        ErrorCode::AlreadyExists => Status::already_exists(message),
+        ErrorCode::FailedPrecondition => Status::failed_precondition(message),
+        ErrorCode::PermissionDenied => Status::permission_denied(message),
+        ErrorCode::InvalidArgument => Status::invalid_argument(message),
+        ErrorCode::Internal => Status::internal(message),
+        ErrorCode::Unauthenticated => Status::unauthenticated(message),
+    }
 }
