@@ -385,7 +385,7 @@ fn default_max_backup_retention_days() -> u32 {
 ///     .expect("valid backup config");
 /// assert_eq!(config.retention_count, 7);
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BackupConfig {
     /// Backup destination path (local directory or object store URL).
     ///
@@ -439,27 +439,15 @@ impl BackupConfig {
         #[builder(default = default_backup_interval_secs())] interval_secs: u64,
         #[builder(default = default_max_backup_retention_days())] max_backup_retention_days: u32,
     ) -> Result<Self, ConfigError> {
-        if destination.is_empty() {
-            return Err(ConfigError::Validation {
-                message: "backup destination must not be empty".to_string(),
-            });
-        }
-        if retention_count == 0 {
-            return Err(ConfigError::Validation {
-                message: "backup retention_count must be >= 1".to_string(),
-            });
-        }
-        if enabled && interval_secs < 60 {
-            return Err(ConfigError::Validation {
-                message: "backup interval_secs must be >= 60 when enabled".to_string(),
-            });
-        }
-        if max_backup_retention_days == 0 {
-            return Err(ConfigError::Validation {
-                message: "backup max_backup_retention_days must be >= 1".to_string(),
-            });
-        }
-        Ok(Self { destination, retention_count, enabled, interval_secs, max_backup_retention_days })
+        let config = Self {
+            destination,
+            retention_count,
+            enabled,
+            interval_secs,
+            max_backup_retention_days,
+        };
+        config.validate()?;
+        Ok(config)
     }
 
     /// Validates an existing backup configuration (e.g., after deserialization).

@@ -61,7 +61,7 @@ fn try_encode<T: serde::Serialize>(value: &T, context: &str) -> Option<Vec<u8>> 
 /// the apply handler is already inside a Raft commit. The saga ID is derived
 /// deterministically from the scope to ensure all replicas produce identical
 /// state when applying the same log entry.
-fn write_signing_key_saga<B: StorageBackend>(
+fn write_signing_key_saga_record<B: StorageBackend>(
     state_layer: &Arc<StateLayer<B>>,
     scope: SigningKeyScope,
 ) {
@@ -707,7 +707,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             assigned_sequence = new_sequence;
                         }
 
-                        // Clone and update the sequence
                         let mut tx_with_seq = tx.clone();
                         tx_with_seq.sequence = new_sequence;
                         tx_with_seq
@@ -3470,7 +3469,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                                     // Write CreateSigningKeySaga for this org's signing key.
                                     // The saga orchestrator picks it up on the next poll cycle.
-                                    write_signing_key_saga(
+                                    write_signing_key_saga_record(
                                         state_layer,
                                         SigningKeyScope::Organization(organization_id),
                                     );
@@ -4292,21 +4291,5 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// compute the same hash for the same log entry.
     pub(super) fn compute_vault_block_hash(&self, entry: &VaultEntry) -> Hash {
         inferadb_ledger_types::vault_entry_hash(entry)
-    }
-
-    /// Computes a block hash (used in tests).
-    #[allow(dead_code)] // reserved for block hash computation in state machine
-    pub(super) fn compute_block_hash(
-        &self,
-        organization: OrganizationId,
-        vault: VaultId,
-        height: u64,
-    ) -> Hash {
-        use inferadb_ledger_types::sha256;
-        let mut data = Vec::new();
-        data.extend_from_slice(&organization.value().to_le_bytes());
-        data.extend_from_slice(&vault.value().to_le_bytes());
-        data.extend_from_slice(&height.to_le_bytes());
-        sha256(&data)
     }
 }

@@ -1841,6 +1841,7 @@ dependencies = [
  "prost-types",
  "rand 0.10.0",
  "seahash",
+ "serde",
  "serde_json",
  "sha2",
  "snafu",

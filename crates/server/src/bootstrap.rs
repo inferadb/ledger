@@ -357,6 +357,10 @@ pub async fn bootstrap_node(
     let hot_key_config = inferadb_ledger_types::config::HotKeyConfig::default();
     let hot_key_detector = Arc::new(HotKeyDetector::new(&hot_key_config));
 
+    // Extract proposal_timeout from Raft config (otherwise LedgerServer uses its 30s default).
+    let proposal_timeout =
+        config.raft.as_ref().map(|r| r.proposal_timeout).unwrap_or(Duration::from_secs(30));
+
     let server = LedgerServer::builder()
         .manager(manager)
         .addr(config.listen_addr)
@@ -374,6 +378,9 @@ pub async fn bootstrap_node(
         .jwt_config(Some(config.jwt.clone()))
         .jwt_engine(jwt_engine)
         .key_manager(key_manager.clone())
+        .proposal_timeout(proposal_timeout)
+        .health_check_config(config.health_check.clone())
+        .max_read_forward_lag(config.max_read_forward_lag)
         .build();
     // Wire backup support into server if configured.
     // Done post-construction because bon type-state builders don't support

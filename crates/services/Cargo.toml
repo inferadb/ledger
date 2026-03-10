@@ -58,7 +58,8 @@ tempfile.workspace = true
 # Raft (for type bounds in service signatures)
 openraft.workspace = true
 
-# Serialization (used by proto_compat, runtime_config)
+# Serialization (used by proto_compat, runtime_config, jwt)
+serde.workspace = true
 serde_json.workspace = true
 
 # Error handling

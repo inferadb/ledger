@@ -238,9 +238,17 @@ impl RuntimeConfig {
     #[must_use]
     pub fn detailed_diff(&self, other: &RuntimeConfig) -> Vec<ConfigChange> {
         // Serialize both to JSON values for recursive comparison.
-        // Serialization cannot fail for these types (all fields are serde-compatible).
-        let old_json = serde_json::to_value(self).unwrap_or_default();
-        let new_json = serde_json::to_value(other).unwrap_or_default();
+        // Serialization is infallible: all fields are primitive types (integers, bools, enums).
+        #[expect(
+            clippy::expect_used,
+            reason = "infallible: RuntimeConfig fields are all serde-primitive"
+        )]
+        let old_json = serde_json::to_value(self).expect("RuntimeConfig serialization");
+        #[expect(
+            clippy::expect_used,
+            reason = "infallible: RuntimeConfig fields are all serde-primitive"
+        )]
+        let new_json = serde_json::to_value(other).expect("RuntimeConfig serialization");
         let mut changes = Vec::new();
         collect_json_diffs("", &old_json, &new_json, &mut changes);
         changes

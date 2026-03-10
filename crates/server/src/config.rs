@@ -10,177 +10,23 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use bon::Builder;
 use clap::Parser;
+pub use inferadb_ledger_types::config::OtelConfig;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use snafu::Snafu;
 
 use crate::node_id;
 
-/// Configuration for log sampling.
-///
-/// Controls tail sampling behavior: which events are logged based on
-/// outcome, latency, and organization priority.
-#[derive(Debug, Clone, Deserialize, JsonSchema, bon::Builder)]
-#[builder(derive(Debug))]
-pub struct LogSamplingConfig {
-    /// Sample rate for error outcomes (0.0-1.0). Default: 1.0 (100%).
-    #[serde(default = "default_error_rate")]
-    #[builder(default = default_error_rate())]
-    pub error_rate: f64,
-
-    /// Sample rate for slow requests (0.0-1.0). Default: 1.0 (100%).
-    #[serde(default = "default_slow_rate")]
-    #[builder(default = default_slow_rate())]
-    pub slow_rate: f64,
-
-    /// Sample rate for VIP organizations (0.0-1.0). Default: 0.5 (50%).
-    #[serde(default = "default_vip_rate")]
-    #[builder(default = default_vip_rate())]
-    pub vip_rate: f64,
-
-    /// Sample rate for successful write operations (0.0-1.0). Default: 0.1 (10%).
-    #[serde(default = "default_write_rate")]
-    #[builder(default = default_write_rate())]
-    pub write_rate: f64,
-
-    /// Sample rate for successful read operations (0.0-1.0). Default: 0.01 (1%).
-    #[serde(default = "default_read_rate")]
-    #[builder(default = default_read_rate())]
-    pub read_rate: f64,
-
-    /// Threshold for slow read operations, in milliseconds. Default: 10.0.
-    #[serde(default = "default_slow_threshold_read_ms")]
-    #[builder(default = default_slow_threshold_read_ms())]
-    pub slow_threshold_read_ms: f64,
-
-    /// Threshold for slow write operations, in milliseconds. Default: 100.0.
-    #[serde(default = "default_slow_threshold_write_ms")]
-    #[builder(default = default_slow_threshold_write_ms())]
-    pub slow_threshold_write_ms: f64,
-
-    /// Threshold for slow admin operations, in milliseconds. Default: 1000.0.
-    #[serde(default = "default_slow_threshold_admin_ms")]
-    #[builder(default = default_slow_threshold_admin_ms())]
-    pub slow_threshold_admin_ms: f64,
-}
-
-impl Default for LogSamplingConfig {
-    fn default() -> Self {
-        Self {
-            error_rate: default_error_rate(),
-            slow_rate: default_slow_rate(),
-            vip_rate: default_vip_rate(),
-            write_rate: default_write_rate(),
-            read_rate: default_read_rate(),
-            slow_threshold_read_ms: default_slow_threshold_read_ms(),
-            slow_threshold_write_ms: default_slow_threshold_write_ms(),
-            slow_threshold_admin_ms: default_slow_threshold_admin_ms(),
-        }
-    }
-}
-
-impl LogSamplingConfig {
-    /// Creates a disabled sampling config (samples nothing except errors).
-    #[allow(dead_code)] // reserved for future use when logging can be selectively disabled
-    pub fn disabled() -> Self {
-        Self {
-            error_rate: 1.0,
-            slow_rate: 0.0,
-            vip_rate: 0.0,
-            write_rate: 0.0,
-            read_rate: 0.0,
-            slow_threshold_read_ms: f64::MAX,
-            slow_threshold_write_ms: f64::MAX,
-            slow_threshold_admin_ms: f64::MAX,
-        }
-    }
-
-    /// Creates a configuration with test-suitable values (all rates set to 100%).
-    pub fn for_test() -> Self {
-        Self {
-            error_rate: 1.0,
-            slow_rate: 1.0,
-            vip_rate: 1.0,
-            write_rate: 1.0,
-            read_rate: 1.0,
-            slow_threshold_read_ms: default_slow_threshold_read_ms(),
-            slow_threshold_write_ms: default_slow_threshold_write_ms(),
-            slow_threshold_admin_ms: default_slow_threshold_admin_ms(),
-        }
-    }
-
-    /// Validates sampling configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError`] if any rate is outside 0.0-1.0 or any
-    /// threshold is non-positive.
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        // Validate rates are in range 0.0-1.0
-        let rates = [
-            ("error_rate", self.error_rate),
-            ("slow_rate", self.slow_rate),
-            ("vip_rate", self.vip_rate),
-            ("write_rate", self.write_rate),
-            ("read_rate", self.read_rate),
-        ];
-
-        for (name, rate) in rates {
-            if !(0.0..=1.0).contains(&rate) {
-                return Err(ConfigError::Validation {
-                    message: format!(
-                        "logging.sampling.{} must be between 0.0 and 1.0, got {}",
-                        name, rate
-                    ),
-                });
-            }
-        }
-
-        // Validate thresholds are positive
-        let thresholds = [
-            ("slow_threshold_read_ms", self.slow_threshold_read_ms),
-            ("slow_threshold_write_ms", self.slow_threshold_write_ms),
-            ("slow_threshold_admin_ms", self.slow_threshold_admin_ms),
-        ];
-
-        for (name, threshold) in thresholds {
-            if threshold <= 0.0 {
-                return Err(ConfigError::Validation {
-                    message: format!(
-                        "logging.sampling.{} must be positive, got {}",
-                        name, threshold
-                    ),
-                });
-            }
-        }
-
-        Ok(())
-    }
-}
-
-pub use inferadb_ledger_types::config::OtelConfig;
-
 /// Configuration for request logging.
-///
-/// Provides comprehensive request-level logging with 50+ contextual
-/// fields for debugging and observability.
 ///
 /// # Environment Variables
 ///
-/// Configures via environment variables with the `INFERADB__LEDGER__LOGGING__` prefix:
-///
 /// ```bash
-/// INFERADB__LEDGER__LOGGING__SAMPLING__WRITE_RATE=0.1
 /// INFERADB__LEDGER__LOGGING__OTEL__ENDPOINT=http://localhost:4317
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, bon::Builder)]
 #[builder(derive(Debug))]
 pub struct LoggingConfig {
-    /// Sampling configuration for request logging.
-    #[serde(default)]
-    #[builder(default)]
-    pub sampling: LogSamplingConfig,
-
     /// OpenTelemetry/OTLP export configuration.
     #[serde(default)]
     #[builder(default)]
@@ -188,48 +34,20 @@ pub struct LoggingConfig {
 }
 
 impl LoggingConfig {
-    /// Creates a configuration with test-suitable values (all sampling enabled).
+    /// Creates a configuration with test-suitable values.
     pub fn for_test() -> Self {
-        Self { sampling: LogSamplingConfig::for_test(), otel: OtelConfig::for_test() }
+        Self { otel: OtelConfig::for_test() }
     }
 
     /// Validates logging configuration.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError`] if sampling, VIP, or OTEL sub-configuration
-    /// is invalid.
+    /// Returns [`ConfigError`] if OTEL configuration is invalid.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        self.sampling.validate()?;
         self.otel.validate()?;
         Ok(())
     }
-}
-
-// Log sampling default value functions
-fn default_error_rate() -> f64 {
-    1.0
-}
-fn default_slow_rate() -> f64 {
-    1.0
-}
-fn default_vip_rate() -> f64 {
-    0.5
-}
-fn default_write_rate() -> f64 {
-    0.1
-}
-fn default_read_rate() -> f64 {
-    0.01
-}
-fn default_slow_threshold_read_ms() -> f64 {
-    10.0
-}
-fn default_slow_threshold_write_ms() -> f64 {
-    100.0
-}
-fn default_slow_threshold_admin_ms() -> f64 {
-    1000.0
 }
 
 /// Log output format.
@@ -508,6 +326,30 @@ pub struct Config {
     #[builder(default)]
     pub tiered_storage: inferadb_ledger_types::config::TieredStorageConfig,
 
+    // === Health Checks ===
+    /// Dependency health check configuration for readiness probes.
+    ///
+    /// Controls timeouts, cache TTL, and Raft lag thresholds for disk
+    /// writability, peer reachability, and consensus lag checks.
+    #[arg(skip)]
+    #[serde(default)]
+    pub health_check: Option<inferadb_ledger_types::config::HealthCheckConfig>,
+
+    // === Read Forwarding ===
+    /// Maximum Raft log lag before forwarding reads to the leader.
+    ///
+    /// When a follower's applied index trails its last log index by more
+    /// than this threshold, reads are transparently forwarded to the leader
+    /// to avoid serving stale data. Default: 0 (forward unless fully caught up).
+    #[arg(
+        long = "max-read-lag",
+        env = "INFERADB__LEDGER__MAX_READ_FORWARD_LAG",
+        default_value_t = 0
+    )]
+    #[serde(default)]
+    #[builder(default)]
+    pub max_read_forward_lag: u64,
+
     // === Rate Limiting ===
     /// Rate limit configuration for per-client and per-organization request throttling.
     ///
@@ -586,6 +428,8 @@ impl Default for Config {
             cleanup: inferadb_ledger_types::config::CleanupConfig::default(),
             integrity: inferadb_ledger_types::config::IntegrityConfig::default(),
             tiered_storage: inferadb_ledger_types::config::TieredStorageConfig::default(),
+            max_read_forward_lag: 0,
+            health_check: None,
             rate_limit: None,
             token_maintenance_interval_secs: default_token_maintenance_interval_secs(),
         }
@@ -710,8 +554,7 @@ impl Config {
     /// - `--single`: Single-node deployment
     /// - `--join`: Join existing cluster
     /// - `--cluster N`: Coordinated bootstrap (N must be >= 2)
-    /// - Logging sampling rates must be 0.0-1.0
-    /// - Logging thresholds must be positive
+    /// - OTEL configuration must be valid
     ///
     /// # Errors
     ///
@@ -1103,177 +946,31 @@ mod tests {
         assert!(config.peers_as_file_path().is_none());
     }
 
-    // === Log Sampling Config Tests ===
-
-    #[test]
-    fn test_log_sampling_config_defaults() {
-        let config = LogSamplingConfig::default();
-        assert!((config.error_rate - 1.0).abs() < f64::EPSILON);
-        assert!((config.slow_rate - 1.0).abs() < f64::EPSILON);
-        assert!((config.vip_rate - 0.5).abs() < f64::EPSILON);
-        assert!((config.write_rate - 0.1).abs() < f64::EPSILON);
-        assert!((config.read_rate - 0.01).abs() < f64::EPSILON);
-        assert!((config.slow_threshold_read_ms - 10.0).abs() < f64::EPSILON);
-        assert!((config.slow_threshold_write_ms - 100.0).abs() < f64::EPSILON);
-        assert!((config.slow_threshold_admin_ms - 1000.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_log_sampling_config_disabled() {
-        let config = LogSamplingConfig::disabled();
-        assert!((config.error_rate - 1.0).abs() < f64::EPSILON); // Errors always sampled
-        assert!((config.slow_rate - 0.0).abs() < f64::EPSILON);
-        assert!((config.vip_rate - 0.0).abs() < f64::EPSILON);
-        assert!((config.write_rate - 0.0).abs() < f64::EPSILON);
-        assert!((config.read_rate - 0.0).abs() < f64::EPSILON);
-        assert!(config.slow_threshold_read_ms > 1_000_000.0); // Effectively disabled
-    }
-
-    #[test]
-    fn test_log_sampling_config_for_test() {
-        let config = LogSamplingConfig::for_test();
-        // Test config samples everything
-        assert!((config.error_rate - 1.0).abs() < f64::EPSILON);
-        assert!((config.slow_rate - 1.0).abs() < f64::EPSILON);
-        assert!((config.vip_rate - 1.0).abs() < f64::EPSILON);
-        assert!((config.write_rate - 1.0).abs() < f64::EPSILON);
-        assert!((config.read_rate - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_log_sampling_config_validate_rates() {
-        // Valid rates
-        let config = LogSamplingConfig::builder()
-            .error_rate(0.0)
-            .slow_rate(0.5)
-            .vip_rate(1.0)
-            .write_rate(0.1)
-            .read_rate(0.01)
-            .build();
-        assert!(config.validate().is_ok());
-
-        // Invalid: rate > 1.0
-        let config = LogSamplingConfig::builder().error_rate(1.5).build();
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("error_rate"));
-        assert!(err.to_string().contains("0.0 and 1.0"));
-
-        // Invalid: rate < 0.0
-        let config = LogSamplingConfig::builder().write_rate(-0.1).build();
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("write_rate"));
-    }
-
-    #[test]
-    fn test_log_sampling_config_validate_thresholds() {
-        // Valid thresholds
-        let config = LogSamplingConfig::builder()
-            .slow_threshold_read_ms(5.0)
-            .slow_threshold_write_ms(50.0)
-            .slow_threshold_admin_ms(500.0)
-            .build();
-        assert!(config.validate().is_ok());
-
-        // Invalid: threshold <= 0
-        let config = LogSamplingConfig::builder().slow_threshold_read_ms(0.0).build();
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("slow_threshold_read_ms"));
-        assert!(err.to_string().contains("positive"));
-
-        let config = LogSamplingConfig::builder().slow_threshold_write_ms(-10.0).build();
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("slow_threshold_write_ms"));
-    }
+    // === Logging Config Tests ===
 
     #[test]
     fn test_logging_config_defaults() {
         let config = LoggingConfig::default();
-        // Sampling defaults are covered by sampling config tests
-        assert!((config.sampling.read_rate - 0.01).abs() < f64::EPSILON);
+        assert!(!config.otel.enabled);
     }
 
     #[test]
     fn test_logging_config_for_test() {
         let config = LoggingConfig::for_test();
-        // Test config samples everything
-        assert!((config.sampling.read_rate - 1.0).abs() < f64::EPSILON);
-        assert!((config.sampling.write_rate - 1.0).abs() < f64::EPSILON);
+        // for_test uses OtelConfig::for_test() defaults (disabled for unit tests)
+        assert!(!config.otel.enabled);
     }
 
     #[test]
     fn test_logging_config_validate() {
-        // Valid config
         let config = LoggingConfig::default();
         assert!(config.validate().is_ok());
-
-        // Invalid sampling config propagates error
-        let config = LoggingConfig {
-            sampling: LogSamplingConfig::builder().error_rate(2.0).build(),
-            ..LoggingConfig::default()
-        };
-        assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_config_includes_logging() {
         let config = Config::default();
         assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_config_for_test_uses_test_logging() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let data_dir = temp_dir.path().to_path_buf();
-        let config = Config::for_test(1, 50051, data_dir);
-
-        // for_test uses LoggingConfig::for_test() which samples everything
-        assert!((config.logging.sampling.read_rate - 1.0).abs() < f64::EPSILON);
-        assert!((config.logging.sampling.write_rate - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_config_validate_includes_logging() {
-        // Config with invalid logging should fail validation
-        let config = Config {
-            logging: LoggingConfig {
-                sampling: LogSamplingConfig::builder().vip_rate(-0.5).build(),
-                ..LoggingConfig::default()
-            },
-            ..Config::default()
-        };
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("vip_rate"));
-    }
-
-    #[test]
-    fn test_log_sampling_config_builder() {
-        let config = LogSamplingConfig::builder()
-            .error_rate(0.9)
-            .slow_rate(0.8)
-            .vip_rate(0.7)
-            .write_rate(0.5)
-            .read_rate(0.1)
-            .slow_threshold_read_ms(20.0)
-            .slow_threshold_write_ms(200.0)
-            .slow_threshold_admin_ms(2000.0)
-            .build();
-
-        assert!((config.error_rate - 0.9).abs() < f64::EPSILON);
-        assert!((config.slow_rate - 0.8).abs() < f64::EPSILON);
-        assert!((config.vip_rate - 0.7).abs() < f64::EPSILON);
-        assert!((config.write_rate - 0.5).abs() < f64::EPSILON);
-        assert!((config.read_rate - 0.1).abs() < f64::EPSILON);
-        assert!((config.slow_threshold_read_ms - 20.0).abs() < f64::EPSILON);
-        assert!((config.slow_threshold_write_ms - 200.0).abs() < f64::EPSILON);
-        assert!((config.slow_threshold_admin_ms - 2000.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_logging_config_builder() {
-        let sampling = LogSamplingConfig::builder().read_rate(0.05).build();
-        let config = LoggingConfig::builder().sampling(sampling).build();
-
-        assert!((config.sampling.read_rate - 0.05).abs() < f64::EPSILON);
     }
 
     // === OTEL Config Tests ===
@@ -1395,7 +1092,6 @@ mod tests {
         // Invalid OTEL config should fail validation
         let config = LoggingConfig {
             otel: OtelConfig::builder().enabled(true).build(), // Missing endpoint
-            ..LoggingConfig::default()
         };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("endpoint"));

@@ -117,7 +117,7 @@ pub enum JwtError {
 ///
 /// - `SigningKeyScope::Global` → `Region::GLOBAL` (always provisioned, validated at startup).
 /// - `SigningKeyScope::Organization(id)` → the organization's assigned region.
-pub fn scope_to_region<B: StorageBackend>(
+pub(crate) fn scope_to_region<B: StorageBackend>(
     scope: &SigningKeyScope,
     system_service: &SystemOrganizationService<B>,
 ) -> Result<Region, JwtError> {
@@ -282,12 +282,7 @@ impl JwtEngine {
             version,
         };
 
-        let cached = self.require_cached_key(kid)?;
-        let mut header = Header::new(Algorithm::EdDSA);
-        header.kid = Some(kid.to_string());
-        let encoding_key = encoding_key_from_private_bytes(&cached.private_key_bytes);
-        let token = jsonwebtoken::encode(&header, &claims, &encoding_key).context(SigningSnafu)?;
-
+        let token = self.encode_claims(&claims, kid)?;
         Ok((token, expires_at))
     }
 
@@ -322,13 +317,21 @@ impl JwtEngine {
             scopes: scopes.to_vec(),
         };
 
+        let token = self.encode_claims(&claims, kid)?;
+        Ok((token, expires_at))
+    }
+
+    /// Encodes claims into a signed JWT using the cached signing key.
+    fn encode_claims<T: serde::Serialize>(
+        &self,
+        claims: &T,
+        kid: &str,
+    ) -> Result<String, JwtError> {
         let cached = self.require_cached_key(kid)?;
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some(kid.to_string());
         let encoding_key = encoding_key_from_private_bytes(&cached.private_key_bytes);
-        let token = jsonwebtoken::encode(&header, &claims, &encoding_key).context(SigningSnafu)?;
-
-        Ok((token, expires_at))
+        jsonwebtoken::encode(&header, claims, &encoding_key).context(SigningSnafu)
     }
 
     /// Computes `(now, expires_at)` from a TTL in seconds.
@@ -521,7 +524,7 @@ fn encoding_key_from_private_bytes(private_key: &[u8]) -> EncodingKey {
 /// is used as AAD to cryptographically bind ciphertext to key identity.
 ///
 /// Returns `(envelope, rmk_version)`.
-pub fn encrypt_private_key(
+pub(crate) fn encrypt_private_key(
     private_key: &[u8],
     kid: &str,
     rmk: &RegionMasterKey,
@@ -550,7 +553,7 @@ pub fn encrypt_private_key(
 /// the DEK using AES-256-GCM. The `kid` is verified as AAD.
 ///
 /// Returns the plaintext private key bytes in a [`Zeroizing`] wrapper.
-pub fn decrypt_private_key(
+pub(crate) fn decrypt_private_key(
     envelope: &SigningKeyEnvelope,
     kid: &str,
     rmk: &RegionMasterKey,
@@ -579,7 +582,7 @@ pub fn decrypt_private_key(
 /// GitHub secret scanning, etc.).
 ///
 /// Returns `(token_string, sha256_hash)`.
-pub fn generate_refresh_token() -> (String, [u8; 32]) {
+pub(crate) fn generate_refresh_token() -> (String, [u8; 32]) {
     let mut random_bytes = [0u8; 32];
     rand::RngExt::fill(&mut rand::rng(), &mut random_bytes);
 
@@ -596,7 +599,7 @@ pub fn generate_refresh_token() -> (String, [u8; 32]) {
 }
 
 /// Generates a random 16-byte family identifier for refresh token theft detection.
-pub fn generate_family_id() -> [u8; 16] {
+pub(crate) fn generate_family_id() -> [u8; 16] {
     let mut family = [0u8; 16];
     rand::RngExt::fill(&mut rand::rng(), &mut family);
     family

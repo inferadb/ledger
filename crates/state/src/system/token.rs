@@ -57,16 +57,9 @@ fn check_revocation_truncation(truncated: bool, operation: &str, revoked: u64) -
     Ok(())
 }
 
-/// Result of revoking tokens by family.
+/// Result of revoking tokens (by family, subject, or org).
 #[derive(Debug)]
-pub struct FamilyRevocationResult {
-    /// Number of individual tokens revoked.
-    pub revoked_count: u64,
-}
-
-/// Result of revoking tokens by subject.
-#[derive(Debug)]
-pub struct SubjectRevocationResult {
+pub struct RevocationResult {
     /// Number of individual tokens revoked.
     pub revoked_count: u64,
 }
@@ -462,7 +455,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         &self,
         family: &[u8; 16],
         now: DateTime<Utc>,
-    ) -> Result<FamilyRevocationResult> {
+    ) -> Result<RevocationResult> {
         let prefix = SystemKeys::refresh_token_family_prefix(family);
         let entries = self
             .state
@@ -519,7 +512,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
         check_revocation_truncation(truncated, "revoke_token_family", revoked_count)?;
 
-        Ok(FamilyRevocationResult { revoked_count })
+        Ok(RevocationResult { revoked_count })
     }
 
     /// Revokes all refresh tokens for a given subject (user or app).
@@ -529,7 +522,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         &self,
         subject: &TokenSubject,
         now: DateTime<Utc>,
-    ) -> Result<SubjectRevocationResult> {
+    ) -> Result<RevocationResult> {
         let prefix = SystemKeys::refresh_token_subject_prefix(subject);
         self.revoke_families_from_index(&prefix, now)
     }
@@ -542,7 +535,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         app: AppSlug,
         vault: VaultId,
         now: DateTime<Utc>,
-    ) -> Result<SubjectRevocationResult> {
+    ) -> Result<RevocationResult> {
         let prefix = SystemKeys::refresh_token_app_vault_prefix(app, vault);
         self.revoke_families_from_index(&prefix, now)
     }
@@ -554,7 +547,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         &self,
         org: OrganizationId,
         now: DateTime<Utc>,
-    ) -> Result<SubjectRevocationResult> {
+    ) -> Result<RevocationResult> {
         let entries = self
             .state
             .list_entities(
@@ -592,7 +585,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
         check_revocation_truncation(truncated, "revoke_all_org_refresh_tokens", total_revoked)?;
 
-        Ok(SubjectRevocationResult { revoked_count: total_revoked })
+        Ok(RevocationResult { revoked_count: total_revoked })
     }
 
     /// Deletes expired refresh tokens and garbage-collects poisoned families.
@@ -791,7 +784,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         &self,
         prefix: &str,
         now: DateTime<Utc>,
-    ) -> Result<SubjectRevocationResult> {
+    ) -> Result<RevocationResult> {
         let entries = self
             .state
             .list_entities(SYSTEM_VAULT_ID, Some(prefix), None, MAX_TOKEN_SCAN)
@@ -841,7 +834,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
         check_revocation_truncation(truncated, "revoke_families_from_index", total_revoked)?;
 
-        Ok(SubjectRevocationResult { revoked_count: total_revoked })
+        Ok(RevocationResult { revoked_count: total_revoked })
     }
 }
 

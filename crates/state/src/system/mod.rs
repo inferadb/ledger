@@ -31,10 +31,7 @@ pub use saga::{
 pub use service::{
     SYSTEM_ORGANIZATION_ID, SYSTEM_VAULT_ID, SystemError, SystemOrganizationService,
 };
-pub use token::{
-    AllUserSessionsRevocationResult, ExpiredTokenCleanupResult, FamilyRevocationResult,
-    SubjectRevocationResult,
-};
+pub use token::{AllUserSessionsRevocationResult, ExpiredTokenCleanupResult, RevocationResult};
 pub use types::{
     App, AppCredentialType, AppCredentials, AppVaultConnection, ClientAssertionCredentialConfig,
     ClientAssertionEntry, ClientSecretCredential, EmailVerificationToken, ErasureAuditRecord,

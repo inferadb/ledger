@@ -97,6 +97,17 @@ impl TestNode {
 /// each spawning 1-3 tokio runtimes), so we use 50ms heartbeat and 150-300ms
 /// election timeouts — 2x faster than production while remaining stable under
 /// CPU contention from parallel test execution.
+fn test_rate_limit_config() -> inferadb_ledger_types::config::RateLimitConfig {
+    inferadb_ledger_types::config::RateLimitConfig::builder()
+        .client_burst(5_u64)
+        .client_rate(2.0)
+        .organization_burst(1000_u64)
+        .organization_rate(500.0)
+        .backpressure_threshold(100_u64)
+        .build()
+        .expect("valid rate limit config")
+}
+
 fn test_raft_config() -> inferadb_ledger_types::config::RaftConfig {
     inferadb_ledger_types::config::RaftConfig::builder()
         .heartbeat_interval(Duration::from_millis(50))
@@ -153,16 +164,7 @@ impl TestCluster {
             saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
             token_maintenance_interval_secs: 3, // Fast maintenance for integration tests
             // Low rate limits for fast integration testing of rate limit behavior
-            rate_limit: Some(
-                inferadb_ledger_types::config::RateLimitConfig::builder()
-                    .client_burst(5_u64)
-                    .client_rate(2.0)
-                    .organization_burst(1000_u64)
-                    .organization_rate(500.0)
-                    .backpressure_threshold(100_u64)
-                    .build()
-                    .expect("valid rate limit config"),
-            ),
+            rate_limit: Some(test_rate_limit_config()),
             ..inferadb_ledger_server::config::Config::default()
         };
 
@@ -972,46 +974,6 @@ impl ExternalCluster {
     }
 }
 
-/// Generic polling helper for eventually-consistent checks.
-///
-/// Calls `f` repeatedly until it returns `Some(T)`, with the given interval
-/// between attempts. Returns `None` if the timeout expires.
-pub async fn poll_until<F, Fut, T>(
-    timeout_duration: Duration,
-    interval: Duration,
-    f: F,
-) -> Option<T>
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Option<T>>,
-{
-    let start = tokio::time::Instant::now();
-
-    while start.elapsed() < timeout_duration {
-        if let Some(result) = f().await {
-            return Some(result);
-        }
-        tokio::time::sleep(interval).await;
-    }
-
-    None
-}
-
-/// Helper to create an admin client from a URL string.
-pub async fn create_admin_client_from_url(
-    endpoint: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient<
-        tonic::transport::Channel,
-    >,
-    tonic::transport::Error,
-> {
-    inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::connect(
-        endpoint.to_string(),
-    )
-    .await
-}
-
 /// Helper to create a vault client for a node.
 #[allow(dead_code)]
 pub async fn create_vault_client(
@@ -1083,18 +1045,6 @@ pub async fn create_app_client(
 > {
     let endpoint = format!("http://{}", addr);
     inferadb_ledger_proto::proto::app_service_client::AppServiceClient::connect(endpoint).await
-}
-
-/// Helper to create a user service client for a node.
-#[allow(dead_code)]
-pub async fn create_user_client(
-    addr: SocketAddr,
-) -> Result<
-    inferadb_ledger_proto::proto::user_service_client::UserServiceClient<tonic::transport::Channel>,
-    tonic::transport::Error,
-> {
-    let endpoint = format!("http://{}", addr);
-    inferadb_ledger_proto::proto::user_service_client::UserServiceClient::connect(endpoint).await
 }
 
 pub async fn create_token_client(

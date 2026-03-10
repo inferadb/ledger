@@ -214,25 +214,8 @@ pub struct SequenceCounters {
 }
 
 impl Default for SequenceCounters {
+    /// Defaults all counters to 1 (0 is reserved for `_system` org).
     fn default() -> Self {
-        Self {
-            organization: OrganizationId::new(0),
-            vault: VaultId::new(0),
-            user: UserId::new(0),
-            user_email: UserEmailId::new(0),
-            email_verify: EmailVerifyTokenId::new(0),
-            team: TeamId::new(0),
-            app: AppId::new(0),
-            client_assertion: ClientAssertionId::new(0),
-            signing_key: SigningKeyId::new(0),
-            refresh_token: RefreshTokenId::new(0),
-        }
-    }
-}
-
-impl SequenceCounters {
-    /// Creates new counters with initial values.
-    pub fn new() -> Self {
         Self {
             organization: OrganizationId::new(1),
             vault: VaultId::new(1),
@@ -245,6 +228,13 @@ impl SequenceCounters {
             signing_key: SigningKeyId::new(1),
             refresh_token: RefreshTokenId::new(1),
         }
+    }
+}
+
+impl SequenceCounters {
+    /// Creates new counters starting at 1 (delegates to `Default`).
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Returns and increments the next organization ID.

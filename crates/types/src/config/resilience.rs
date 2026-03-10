@@ -238,7 +238,7 @@ const MIN_PRE_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 ///     .build()
 ///     .expect("valid shutdown config");
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ShutdownConfig {
     /// Seconds to wait after marking readiness as failing before draining.
     ///

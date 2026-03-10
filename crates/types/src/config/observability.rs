@@ -61,7 +61,7 @@ const fn default_trace_raft_rpcs() -> bool {
 /// INFERADB__LEDGER__LOGGING__OTEL__ENDPOINT=http://localhost:4317
 /// INFERADB__LEDGER__LOGGING__OTEL__TRANSPORT=grpc
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, bon::Builder)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, bon::Builder)]
 #[builder(derive(Debug))]
 pub struct OtelConfig {
     /// Whether OTLP export is enabled. Default: false.

@@ -32,21 +32,18 @@ pub fn encode_event_key(org_id: OrganizationId, timestamp_ns: u64, event_id: &[u
     key
 }
 
-/// Decoded components of an event key.
+/// Decoded components of an event key (test utility).
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecodedEventKey {
-    /// Organization ID (raw i64, matching storage key encoding).
-    pub org_id: OrganizationId,
-    /// Event timestamp in nanoseconds since Unix epoch.
-    pub timestamp_ns: u64,
-    /// Seahash of the event ID (uniqueness suffix).
-    pub event_hash: u64,
+struct DecodedEventKey {
+    org_id: OrganizationId,
+    timestamp_ns: u64,
+    event_hash: u64,
 }
 
-/// Decodes a 24-byte event key into its components.
-///
-/// Returns `None` if the key is not exactly 24 bytes.
-pub fn decode_event_key(key: &[u8]) -> Option<DecodedEventKey> {
+/// Decodes a 24-byte event key into its components (test utility).
+#[cfg(test)]
+fn decode_event_key(key: &[u8]) -> Option<DecodedEventKey> {
     if key.len() != EVENT_KEY_LEN {
         return None;
     }

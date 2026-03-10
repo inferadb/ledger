@@ -73,7 +73,7 @@ impl std::fmt::Display for TokenSubject {
 ///
 /// Identity-only: user + role. No org membership — Control resolves
 /// that separately per request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserSessionClaims {
     /// Issuer (always `"inferadb"`).
     pub iss: String,
@@ -103,7 +103,7 @@ pub struct UserSessionClaims {
 /// Claims embedded in a vault access JWT.
 ///
 /// Scoped to a single app+vault combination with explicit permission grants.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultTokenClaims {
     /// Issuer (always `"inferadb"`).
     pub iss: String,
@@ -133,7 +133,7 @@ pub struct VaultTokenClaims {
 }
 
 /// Validated token with parsed claims.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidatedToken {
     /// Validated user session with claims.
     UserSession(UserSessionClaims),

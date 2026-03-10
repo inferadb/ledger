@@ -2031,30 +2031,6 @@ mod tests {
         assert_eq!(user_id_a2, user_id_b2, "Second user ID must match");
     }
 
-    /// Verifies block hashes are deterministic.
-    ///
-    /// The same (organization, vault, height) must always produce the same block hash.
-    #[tokio::test]
-    async fn test_deterministic_block_hash() {
-        let dir_a = tempdir().expect("create temp dir a");
-        let dir_b = tempdir().expect("create temp dir b");
-
-        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.db"))
-            .expect("open store a");
-        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.db"))
-            .expect("open store b");
-
-        // Same inputs must produce same hash
-        let hash_a = store_a.compute_block_hash(OrganizationId::new(1), VaultId::new(2), 3);
-        let hash_b = store_b.compute_block_hash(OrganizationId::new(1), VaultId::new(2), 3);
-
-        assert_eq!(hash_a, hash_b, "Block hashes must be deterministic");
-
-        // Different inputs must produce different hashes
-        let hash_c = store_a.compute_block_hash(OrganizationId::new(1), VaultId::new(2), 4);
-        assert_ne!(hash_a, hash_c, "Different inputs should produce different hashes");
-    }
-
     /// Verifies vault height tracking is deterministic.
     ///
     /// Writes to the same vault must increment height consistently across nodes.

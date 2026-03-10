@@ -101,6 +101,10 @@ pub struct SagaOrchestrator<B: StorageBackend + 'static> {
     /// needs RMK to encrypt the private key material).
     #[builder(default)]
     key_manager: Option<Arc<dyn RegionKeyManager>>,
+    /// Set once global signing key is confirmed (active key or saga found).
+    /// Short-circuits future `check_global_signing_key_bootstrap` calls to O(1).
+    #[builder(default)]
+    global_key_confirmed: std::sync::atomic::AtomicBool,
 }
 
 impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
@@ -1377,8 +1381,15 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     /// Called on every leader poll cycle. Idempotent — if a saga or active key
     /// already exists, this is a no-op.
     async fn check_global_signing_key_bootstrap(&self) {
+        use std::sync::atomic::Ordering;
+
         // Skip if no key manager configured (signing keys not enabled)
         if self.key_manager.is_none() {
+            return;
+        }
+
+        // Short-circuit: once confirmed, never check again
+        if self.global_key_confirmed.load(Ordering::Relaxed) {
             return;
         }
 
@@ -1386,8 +1397,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
         // Check if active global key exists
         match sys_service.get_active_signing_key(&SigningKeyScope::Global) {
-            Ok(Some(_)) => return, // Key already exists
-            Ok(None) => {},        // Need to bootstrap
+            Ok(Some(_)) => {
+                self.global_key_confirmed.store(true, Ordering::Relaxed);
+                return;
+            },
+            Ok(None) => {}, // Need to bootstrap
             Err(e) => {
                 warn!(error = %e, "Failed to check global signing key status");
                 return;
@@ -1421,6 +1435,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             }
         });
         if has_global_key_saga {
+            self.global_key_confirmed.store(true, Ordering::Relaxed);
             return;
         }
 

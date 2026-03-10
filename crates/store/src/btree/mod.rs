@@ -308,7 +308,11 @@ impl<P: PageProvider> BTree<P> {
                                     SearchResult::NotFound(new_idx) => {
                                         leaf.insert(new_idx, key, value)?;
                                     },
-                                    _ => unreachable!(),
+                                    _ => {
+                                        return Err(Error::Corrupted {
+                                            reason: "key still present after delete during insert-replace".to_string(),
+                                        });
+                                    },
                                 }
                             } else {
                                 // Need to split
