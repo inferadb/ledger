@@ -792,12 +792,12 @@ Each refresh token belongs to a **family** (random 16-byte ID assigned at initia
 
 Entity lifecycle changes trigger cascade token revocation through the Raft state machine:
 
-| Event                        | Revocation Scope                      | Mechanism                                           |
-| ---------------------------- | ------------------------------------- | --------------------------------------------------- |
-| App disabled                 | All tokens for app (all vaults)       | `RevokeAllSubjectTokens(App(slug))`                 |
-| App-vault connection removed | Tokens for app+vault pair             | `RevokeAppVaultTokens(app, vault)`                  |
-| Organization deleted         | All signing keys + all refresh tokens | `delete_org_signing_keys` + subject index scan      |
-| Password change              | All user sessions                     | `RevokeAllUserSessions` (increments `TokenVersion`) |
+| Event                        | Revocation Scope                      | Mechanism                                                  |
+| ---------------------------- | ------------------------------------- | ---------------------------------------------------------- |
+| App disabled                 | All tokens for app (all vaults)       | Inline cascade in `SetAppEnabled` apply handler            |
+| App-vault connection removed | Tokens for app+vault pair             | Inline cascade in `RemoveAppVault` apply handler           |
+| Organization deleted         | All signing keys + all refresh tokens | `delete_org_signing_keys` + subject index scan             |
+| Password change              | All user sessions                     | `RevokeAllUserSessions` (increments `TokenVersion`)        |
 
 **TokenVersion for immediate user invalidation**: Each user has an atomic `TokenVersion` counter. `RevokeAllUserSessions` increments it. `ValidateToken` compares the token's `version` claim against current state — stale versions are rejected without waiting for token expiry.
 

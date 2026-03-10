@@ -80,6 +80,21 @@ pub enum SystemError {
         /// Description of the entity that already exists.
         entity: String,
     },
+
+    /// A revocation scan was truncated at `MAX_TOKEN_SCAN`, meaning not all
+    /// tokens were processed. This is a security error — partial revocation
+    /// leaves tokens valid that should have been revoked.
+    #[snafu(display(
+        "Revocation scan truncated at {limit} entries for {operation} — {revoked} tokens revoked before truncation"
+    ))]
+    RevocationIncomplete {
+        /// The operation that was truncated.
+        operation: String,
+        /// The scan limit that was hit.
+        limit: usize,
+        /// Number of tokens successfully revoked before truncation.
+        revoked: u64,
+    },
 }
 
 /// Result type for system organization operations.

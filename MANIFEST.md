@@ -5,7 +5,7 @@
 InferaDB Ledger is a blockchain database for cryptographically verifiable authorization, built in Rust with a layered architecture:
 
 ```
-gRPC Services (Admin, Read, Write, Events, Health, Discovery, Raft)
+gRPC Services (Admin, Read, Write, Organization, Vault, User, App, Token, Events, Health, Discovery, Raft)
  ↓
  raft — openraft consensus, batching, rate limiting, multi-region
  ↓
@@ -39,8 +39,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Re-exports core types, errors, hashing utilities, and codec
 - **Key Types/Functions**:
-- Public modules: `codec`, `config`, `email_hash`, `error`, `events`, `hash`, `merkle`, `snowflake`, `types`, `validation`
-- Re-exports: `OrganizationId`, `OrganizationSlug`, `OrganizationUsage`, `VaultId`, `VaultSlug`, `ShardId`, `UserId`, `UserSlug`, `BlockHeader`, `Transaction`, `Entity`, `Relationship`, `Operation`, `EmailBlindingKey`, `compute_email_hmac`, `normalize_email`, etc.
+- Public modules: `codec`, `config`, `email_hash`, `error`, `events`, `hash`, `merkle`, `snowflake`, `token`, `types`, `validation`
+- Re-exports: `OrganizationId`, `OrganizationSlug`, `OrganizationUsage`, `VaultId`, `VaultSlug`, `ShardId`, `UserId`, `UserSlug`, `BlockHeader`, `Transaction`, `Entity`, `Relationship`, `Operation`, `EmailBlindingKey`, `compute_email_hmac`, `normalize_email`, `TokenVersion`, `TokenType`, `TokenSubject`, `UserSessionClaims`, `VaultTokenClaims`, `TokenPair`, `ValidatedToken`, `TokenError`, `SigningKeyEnvelope`, etc.
 - **Insights**: Clean public API surface, excellent organization
 
 #### `codec.rs`
@@ -63,7 +63,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `config/raft.rs` — `RaftConfig`, `BatchConfig`, `ClientSequenceEvictionConfig`
 - `config/resilience.rs` — `RateLimitConfig`, `ShutdownConfig` (with `leader_transfer_timeout_secs`, default 10, 0 disables), `HealthCheckConfig`, `ValidationConfig`, `SagaConfig`, `CleanupConfig`, `MigrationConfig`
 - `config/observability.rs` — `HotKeyConfig`, `MetricsCardinalityConfig` (note: `AuditConfig` previously here was removed — replaced by `EventConfig` in `events.rs`)
-- `config/runtime.rs` — `RuntimeConfig`, `RuntimeEventsConfig`, `ConfigChange`, `NonReconfigurableField`
+- `config/jwt.rs` — `JwtConfig` (issuer, session/vault access/refresh TTLs, clock skew leeway, key rotation grace period). bon fallible builder with validation (TTLs > 0, refresh > access for each pair, clock skew < min access TTL). Wired into `RuntimeConfig` (optional) and server `Config`.
+- `config/runtime.rs` — `RuntimeConfig`, `RuntimeEventsConfig`, `ConfigChange`, `NonReconfigurableField`. Optional `jwt: Option<JwtConfig>` for runtime reconfiguration.
 - `config/encryption.rs` — `EncryptionConfig` (enabled, key_source, algorithm, dek_cache_capacity, strict_memory_protection), `KeySource` enum (Env, File), `EncryptionAlgorithm` enum (Aes256Gcm), `RewrapConfig` (enabled, batch_size, interval_secs, target_rmk_version). Envelope encryption at-rest configuration for all persisted data (pages, snapshots, Raft logs) via DEK/RMK wrapping. Unit tests.
 - `config/key_management.rs` — `RmkStatus` enum (Active, Deprecated, Decommissioned), `RmkVersionInfo` (region, version, status, created_at), `KeyManagerBackend` enum (SecretsManager, Env, File), `SecretsManagerConfig`, `SecretsProvider` enum (Infisical, Vault, AwsKms, GcpKms, AzureKeyVault). Region Master Key lifecycle and key manager backend selection.
 - **Key Types/Functions**:
@@ -77,7 +78,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Structured error taxonomy with numeric codes, retryability, and guidance
 - **Key Types/Functions**:
-- `ErrorCode`: 33 numeric codes spanning 1000-1101 (storage), 2000-2102 (consensus), 3000-3207 (application) for classification. Includes region-aware codes: `AppInsufficientRegionNodes` (3206), `AppInvalidRegionAssignment` (3207), `AppOrganizationMigrating` (3106), `AppUserMigrating` (3107)
+- `ErrorCode`: 34 numeric codes spanning 1000-1101 (storage), 2000-2102 (consensus), 3000-3207 (application) for classification. Includes `Unauthenticated` for token validation failures. Includes region-aware codes: `AppInsufficientRegionNodes` (3206), `AppInvalidRegionAssignment` (3207), `AppOrganizationMigrating` (3106), `AppUserMigrating` (3107)
 - `LedgerError`: Domain-level errors with `#[snafu]` for context propagation
 - `StorageError`: Storage layer errors (IO, corruption, capacity)
 - `ConsensusError`: Raft consensus errors (leadership, quorum, log gaps)
@@ -112,7 +113,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `OrganizationId(i64)`: Internal storage key (display `"org:42"`), generated via `define_id!`
 - `OrganizationSlug(u64)`: External Snowflake identifier (display raw number), hand-implemented (not `define_id!` — `u64` not `i64`, no prefix)
 - `VaultSlug(u64)`: External Snowflake identifier for vaults (same hand-implemented pattern as `OrganizationSlug`)
-- `VaultId`, `UserId`, `ShardId`: Newtype IDs (replaced type aliases)
+- `VaultId`, `UserId`, `ShardId`, `SigningKeyId`, `RefreshTokenId`: Newtype IDs (replaced type aliases)
+- `TokenVersion(u64)`: Monotonic counter for forced session invalidation (manual impl, not `define_id!` — needs `Default` and `increment()`)
 - `BlockHeader`: height, organization, vault, previous_hash, tx_merkle_root, state_root, timestamp, term, committed_index
 - `Transaction`: id, client_id, sequence, actor, operations, timestamp (fallible builder with validation)
 - `Operation`: 5 variants (CreateRelationship, DeleteRelationship, SetEntity, DeleteEntity, ExpireEntity)
@@ -158,6 +160,21 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - Unit tests (13 traditional + 2 property tests)
 - **Insights**: `Debug` intentionally redacts key material. Property tests verify HMAC collision resistance and output format consistency. Enables global email uniqueness enforcement across regions without storing plaintext personal data.
 
+#### `token.rs`
+
+- **Purpose**: JWT token types, claims, errors, and signing key envelope for the token authentication system
+- **Key Types/Functions**:
+- `TokenType` enum: `UserSession`, `VaultAccess` (snake_case serde)
+- `TokenSubject` enum: `User(UserSlug)`, `App(AppSlug)` — refresh token subject disambiguation
+- `UserSessionClaims`: JWT claims for user sessions (iss, sub, aud, exp, iat, nbf, jti, token_type, user, role, version)
+- `VaultTokenClaims`: JWT claims for vault access tokens (iss, sub, aud, exp, iat, nbf, jti, token_type, org, app, vault, scopes)
+- `TokenPair`: Access token + refresh token with expiry times
+- `ValidatedToken` enum: `UserSession(UserSessionClaims)` | `VaultAccess(VaultTokenClaims)`
+- `TokenError`: 15-variant snafu error enum (Expired, InvalidSignature, Revoked, InvalidAudience, NoActiveSigningKey, RefreshTokenReuse, TokenVersionMismatch, etc.)
+- `SigningKeyEnvelope`: 100-byte fixed binary layout (`wrapped_dek(40) + nonce(12) + ciphertext(32) + auth_tag(16)`) for envelope-encrypted Ed25519 private keys. `to_bytes()`/`from_bytes()` serialization.
+- `SESSION_AUDIENCE` (`"inferadb-control"`), `VAULT_AUDIENCE` (`"inferadb-engine"`): Compile-time audience constants
+- **Insights**: Claims use `#[serde(rename = "type")]` on `token_type` field (reserved keyword). `SigningKeyEnvelope` is a byte container only — actual crypto operations (`generate_dek`, `wrap_dek`, `unwrap_dek`) are called from `services/src/jwt.rs`. `TokenError` is domain-level only; JWT library errors live in `JwtError` (services crate) to prevent `types` from depending on `jsonwebtoken`.
+
 #### `events.rs`
 
 - **Purpose**: Core domain types for the organization-scoped event logging system
@@ -166,7 +183,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `EmissionMeta`: Thin deserialization target for `scan_apply_phase()` — reads only the `emission` discriminant (~2 bytes) to filter handler-phase events without full deserialization
 - `EventMeta`: Thin GC wrapper — postcard deserializes `emission` (field 1) and `expires_at` (field 2) to check expiry without full deserialization
 - `EventScope`: `System` (org_id=0) or `Organization` — compile-time mapped from `EventAction`
-- `EventAction`: 28 variants (17 system, 11 org) with exhaustive `scope()`, `event_type()`, `as_str()` — adding a variant without updating all three is a compile error. System variants include `UserErased` and `UsersMigrated` for crypto-shredding and flat-to-regional migration.
+- `EventAction`: 34 variants (23 system, 11 org) — includes 6 token-related variants: `SigningKeyCreated`, `SigningKeyRotated`, `SigningKeyRevoked`, `TokenCreated`, `TokenRevoked`, `TokenRefreshed` with exhaustive `scope()`, `event_type()`, `as_str()` — adding a variant without updating all three is a compile error. System variants include `UserErased` and `UsersMigrated` for crypto-shredding and flat-to-regional migration.
 - `EventEmission`: `ApplyPhase` (deterministic, all replicas) or `HandlerPhase { node_id }` (node-local)
 - `EventOutcome`: `Success`, `Failed { code, detail }`, `Denied { reason }`
 - `EventConfig`: Master config with `enabled`, `default_ttl_days` (90), `max_details_size_bytes` (4096), `system_log_enabled`, `organization_log_enabled`, `max_snapshot_events` (100,000), `ingestion: IngestionConfig`
@@ -574,10 +591,11 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### `system/mod.rs`
 
-- **Purpose**: `_system` organization for cluster metadata, sagas, service discovery
+- **Purpose**: `_system` organization for cluster metadata, sagas, service discovery, and token management
 - **Key Types/Functions**:
-- Submodules: `cluster`, `keys`, `saga`, `service`, `types`
-- **Insights**: System organization stores metadata (cluster config, node registry, distributed transactions).
+- Submodules: `cluster`, `keys`, `saga`, `service`, `token`, `types`
+- Re-exports: `SigningKey`, `SigningKeyScope`, `SigningKeyStatus`, `RefreshToken`, `CreateSigningKeySaga`, `CreateSigningKeySagaState`, `CreateSigningKeyInput`, `FamilyRevocationResult`, `SubjectRevocationResult`, `AllUserSessionsRevocationResult`, `ExpiredTokenCleanupResult`
+- **Insights**: System organization stores metadata (cluster config, node registry, distributed transactions). Token submodule provides signing key and refresh token state operations.
 
 #### `system/cluster.rs`
 
@@ -593,10 +611,13 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Distributed transaction orchestration (saga pattern)
 - **Key Types/Functions**:
-- `Saga`: Multi-step distributed transaction
+- `Saga`: Multi-step distributed transaction — includes `CreateSigningKey` variant
 - `SagaStep`: Individual step with compensating action
 - `SagaExecutor`: Orchestrates execution, handles failures
-- **Insights**: Saga pattern for cross-region transactions. Compensating actions ensure eventual consistency.
+- `CreateSigningKeySaga`: 5-state saga (`Pending → KeyGenerated → Completed | Failed | TimedOut`) for auto-bootstrapping signing keys
+- `CreateSigningKeyInput`: Saga input with `scope: SigningKeyScope`
+- `SagaLockKey::SigningKeyScope(SigningKeyScope)`: Lock key variant for concurrent saga prevention
+- **Insights**: Saga pattern for cross-region transactions. Compensating actions ensure eventual consistency. `CreateSigningKeySaga` is simpler than multi-group sagas — single-group, no compensation logic.
 
 #### `system/service.rs`
 
@@ -608,22 +629,40 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `register_user_directory()`, `get_user_directory()`, `get_user_id_by_slug()`, `get_user_directory_by_slug()`, `update_user_directory_status()`, `update_user_directory_region()`, `list_user_directory()`: User directory management
 - `register_email_hash()`, `get_email_hash()`, `remove_email_hash()`: Email hash indexing
 - `get_blinding_key_version()`, `set_blinding_key_version()`: Blinding key lifecycle
-- **Insights**: Slug index always created alongside organization registration. Vault slug index uses entity-storage pattern (`_idx:vault:slug:{slug}` → VaultId). Name-based lookup removed (organization names are not unique). Comprehensive user directory with email hash privacy support.
+- Token operations (defined in `system/token.rs`, implemented as methods on `SystemOrganizationService`): signing key CRUD, refresh token lifecycle, family revocation, cascade operations
+- **Insights**: Slug index always created alongside organization registration. Vault slug index uses entity-storage pattern (`_idx:vault:slug:{slug}` → VaultId). Name-based lookup removed (organization names are not unique). Comprehensive user directory with email hash privacy support. Token operations extend the service via `impl` blocks in the sibling `token.rs` file (using `pub(super)` field visibility).
 
 #### `system/keys.rs`
 
-- **Purpose**: Key encoding for system organization entries
+- **Purpose**: Key encoding for system organization entries, signing keys, and refresh tokens
 - **Key Types/Functions**:
 - `ORG_PREFIX` (`"org:"`), `ORG_SEQ_KEY` (`"_meta:seq:organization"`): Key constants
 - `organization_key(OrganizationId)`, `organization_slug_key(OrganizationSlug)`: Key constructors
 - `vault_slug_key(VaultSlug)`: Vault slug index key constructor (format: `"_idx:vault:slug:{slug}"`)
 - `parse_organization_key()`: Key parser
-- **Insights**: Dedicated key scheme for system metadata. Org slug index: `"_idx:org:slug:{slug}"`. Vault slug index: `"_idx:vault:slug:{slug}"`. Name-based index removed (organization names are not unique).
+- Signing key keys: `signing_key(id)`, `signing_key_kid_index(kid)`, `signing_key_scope_index(scope)`, `signing_key_org_prefix(org)`, `SIGNING_KEY_SEQ_KEY`
+- Refresh token keys: `refresh_token(id)`, `refresh_token_hash_index(hash)`, `refresh_token_family_prefix(family)`, `refresh_token_family_entry(family, id)`, `refresh_token_subject_prefix(subject)`, `refresh_token_subject_entry(subject, id)`, `refresh_token_app_vault_prefix(app, vault)`, `refresh_token_app_vault_entry(app, vault, id)`, `refresh_token_family_poisoned(family)`, `REFRESH_TOKEN_SEQ_KEY`
+- **Insights**: Dedicated key scheme for system metadata. Signing key scope index points to the current active key's kid (replaced atomically on rotation). Refresh token indexes use hex-encoded family/hash bytes. `_entry` variants write individual index entries (needed by token state operations). Poisoned family key is an O(1) existence check for reuse detection.
 
 #### `system/types.rs`
 
-- **Purpose**: Type definitions for system organization (cluster membership, saga state, service records)
-- **Insights**: Decoupled from user-facing types to maintain clean separation.
+- **Purpose**: Type definitions for system organization (cluster membership, saga state, service records, signing keys, refresh tokens)
+- **Key Types/Functions**:
+- `SigningKeyScope` enum: `Global` | `Organization(OrganizationId)` — sum type eliminating invalid states
+- `SigningKeyStatus` enum: `Active` | `Rotated` | `Revoked`
+- `SigningKey` struct: 13 fields (kid, public_key_bytes, encrypted_private_key, rmk_version, scope, status, valid_from, valid_until, etc.)
+- `RefreshToken` struct: 13 fields (token_hash, family, token_type, subject, organization, vault, kid, expires_at, used, etc.)
+- `User` struct: includes `version: TokenVersion` field for forced session invalidation
+- **Insights**: Decoupled from user-facing types to maintain clean separation. `SigningKeyScope` carries `OrganizationId` data to eliminate the invalid state of Global+org_id. No `SigningAlgorithm` enum — EdDSA is the only algorithm (add enum when/if needed).
+
+#### `system/token.rs`
+
+- **Purpose**: State operations for signing keys and refresh tokens, implemented as methods on `SystemOrganizationService`
+- **Key Types/Functions**:
+- Signing key ops: `store_signing_key()`, `get_signing_key_by_kid()`, `get_active_signing_key()`, `list_signing_keys()`, `update_signing_key_status()`, `delete_org_signing_keys()`, `list_rotated_keys_past_grace()`
+- Refresh token ops: `store_refresh_token()`, `get_refresh_token_by_hash()`, `mark_refresh_token_used()`, `poison_token_family()`, `is_family_poisoned()`, `revoke_token_family()`, `revoke_all_subject_tokens()`, `revoke_app_vault_tokens()`, `revoke_all_org_refresh_tokens()`, `delete_expired_refresh_tokens()`, `gc_poisoned_families()`, `increment_user_token_version()`, `revoke_all_user_sessions()`
+- Result types: `FamilyRevocationResult`, `SubjectRevocationResult`, `AllUserSessionsRevocationResult`, `ExpiredTokenCleanupResult`
+- **Insights**: Uses `pub(super)` on `SystemOrganizationService` fields to extend the service from a sibling file. Family revocation uses `HashSet` to deduplicate families when iterating subject/app_vault indexes. `gc_poisoned_families` requires hex parsing since family bytes are hex-encoded in keys. 32 unit tests.
 
 ---
 
@@ -661,16 +700,20 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `vault_entry_to_proto_block()`: Accepts explicit `VaultSlug` parameter (not derived from internal `VaultId`)
 - Events conversions: `From<EventScope>`, `From<&EventOutcome>`, `From<&EventEmission>`, `From<&EventEntry>` (both directions), `TryFrom<proto::EventEntry>` for domain `EventEntry`, datetime↔Timestamp helpers
 - `impl std::str::FromStr for EventAction`: Iterates `EventAction::ALL` array, matches via `as_str()`
-- Covers all domain types: Block, Transaction, Operation, Entity, Relationship, VaultSlug, EventEntry, etc.
-- Unit tests + Proptests validating round-trip conversions (including events)
-- **Insights**: Deduplication effort (Phase 2 Task 15) removed duplicate helper functions. Events proto conversion flattens Rust's data-carrying enums (`EventOutcome::Failed { code, detail }`) into separate proto fields (outcome enum + optional error_code + error_detail). Comprehensive test coverage prevents serialization bugs.
+- Token conversions: `DomainTokenPair → proto::TokenPair`, `ValidatedToken ↔ ValidateTokenResponse`, `signing_key_scope_from_i32()` (`UNSPECIFIED=0` → `InvalidArgument`), `validate_signing_key_status()`, `UserSessionClaims`/`VaultAccessClaims` proto ↔ domain
+- Covers all domain types: Block, Transaction, Operation, Entity, Relationship, VaultSlug, EventEntry, TokenPair, ValidatedToken, etc.
+- Unit tests + Proptests validating round-trip conversions (including events and tokens)
+- **Insights**: Deduplication effort (Phase 2 Task 15) removed duplicate helper functions. Events proto conversion flattens Rust's data-carrying enums. Token conversions for `SigningKeyScope` domain enum (carries `OrganizationId`) and `PublicKeyInfo ↔ SigningKey` deferred to services layer where both proto and state crate types are available.
 
 #### `generated/ledger.v1.rs`
 
 - **Purpose**: prost-generated Rust code from proto definitions
 - **Key Types/Functions**:
 - All gRPC message types: ReadRequest, WriteRequest, CreateVaultRequest, VaultSlug, etc.
-- Service traits: ReadService, WriteService, AdminService, EventsService, HealthService, SystemDiscoveryService, RaftService
+- Service traits: ReadService, WriteService, AdminService, EventsService, TokenService, HealthService, SystemDiscoveryService, RaftService
+- TokenService RPCs: `CreateUserSession`, `ValidateToken`, `CreateVaultToken`, `RefreshToken`, `RevokeToken`, `RevokeAllUserSessions`, `CreateSigningKey`, `RotateSigningKey`, `RevokeSigningKey`, `GetPublicKeys`
+- Token messages: `TokenPair`, `CreateUserSessionRequest/Response`, `ValidateTokenRequest/Response` (with `oneof claims` for `UserSessionClaims`/`VaultAccessClaims`), `CreateVaultTokenRequest/Response`, `RefreshTokenRequest/Response`, `RevokeTokenRequest/Response`, `RevokeAllUserSessionsRequest/Response`, `CreateSigningKeyRequest/Response`, `RotateSigningKeyRequest/Response`, `RevokeSigningKeyRequest/Response`, `GetPublicKeysRequest/Response`, `PublicKeyInfo`
+- `SigningKeyScope` proto enum: `UNSPECIFIED=0`, `GLOBAL=1`, `ORGANIZATION=2`
 - AdminService leader transfer RPCs: `TransferLeadership(TransferLeadershipRequest) -> TransferLeadershipResponse`
 - RaftService internal RPCs: `TriggerElection(TriggerElectionRequest) -> TriggerElectionResponse`
 - Leader transfer messages: `TransferLeadershipRequest` (target_node_id, timeout_ms), `TransferLeadershipResponse` (success, new_leader_id, message), `TriggerElectionRequest` (leader_term, leader_id), `TriggerElectionResponse` (accepted, message)
@@ -694,7 +737,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Public API surface (2 stable modules: `metrics`, `trace_context`; remaining modules including `snapshot` are `#[doc(hidden)]`)
 - **Key Types/Functions**:
-- Re-exports: `LedgerTypeConfig`, `LedgerNodeId`, `RaftLogStore`, `RateLimiter`, `HotKeyDetector`, `GracefulShutdown`, `EventsGarbageCollector`, `SagaOrchestrator`, `OrphanCleanupJob`, `IntegrityScrubberJob`, etc. (`LedgerServer` moved to `inferadb-ledger-services`)
+- Re-exports: `LedgerTypeConfig`, `LedgerNodeId`, `RaftLogStore`, `RateLimiter`, `HotKeyDetector`, `GracefulShutdown`, `EventsGarbageCollector`, `SagaOrchestrator`, `OrphanCleanupJob`, `IntegrityScrubberJob`, `TokenMaintenanceJob`, etc. (`LedgerServer` moved to `inferadb-ledger-services`)
 - Note: `LedgerRequest` is NOT re-exported (access via `types::LedgerRequest`). `RaftPayload` is NOT re-exported either (access via `log_storage` internals). `RaftPayload` wraps `LedgerRequest` with `proposed_at` for deterministic timestamps.
 - 30+ `#[doc(hidden)] pub mod` declarations for server-internal infrastructure (includes `event_writer`, `events_gc`, `snapshot`, `leader_transfer`)
 - **Insights**: Phase 2 Task 2 cleaned up public API. 2 stable modules + many doc-hidden modules. `leader_transfer` module added for graceful leadership handoff. Excellent encapsulation.
@@ -704,10 +747,10 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: openraft LogStore and StateMachine implementation, log storage, externalized state persistence, streaming snapshot building
 - **Structure**:
 - `log_storage/mod.rs` — Metadata constants, `ShardChainState`, re-exports, test suite (test fixtures use `wrap_payload` helper to construct `EntryPayload::Normal(RaftPayload { ... })`, includes deterministic timestamp tests, eviction tests, pending writes tests, state persistence tests)
-- `log_storage/types.rs` — `AppliedState`, `AppliedStateCore` (5-field persistence struct for new snapshot format), `PendingExternalWrites` (14-field accumulator for externalized table writes), `ClientSequenceEntry` (sequence + last_seen + idempotency_key + request_hash), `OrganizationMeta` (fields: `organization: OrganizationId`, `slug`, `name`, `shard: ShardId`, `status`, `tier`, `pending_shard: Option<ShardId>`, `storage_bytes`), `VaultMeta` (fields: `organization: OrganizationId`, `vault: VaultId`, `slug`, `name`, `health`), `SequenceCounters`, `VaultHealthStatus`. `AppliedState` maintains bidirectional slug ↔ internal ID maps for both organizations and vaults. Deleted: `CombinedSnapshot` (replaced by file-based streaming snapshots).
+- `log_storage/types.rs` — `AppliedState`, `AppliedStateCore` (5-field persistence struct for new snapshot format), `PendingExternalWrites` (14-field accumulator for externalized table writes), `ClientSequenceEntry` (sequence + last_seen + idempotency_key + request_hash), `OrganizationMeta` (fields: `organization: OrganizationId`, `slug`, `name`, `shard: ShardId`, `status`, `tier`, `pending_shard: Option<ShardId>`, `storage_bytes`), `VaultMeta` (fields: `organization: OrganizationId`, `vault: VaultId`, `slug`, `name`, `health`), `SequenceCounters` (includes `signing_key` and `refresh_token` fields with `next_signing_key()`/`next_refresh_token()` methods), `VaultHealthStatus`. `AppliedState` maintains bidirectional slug ↔ internal ID maps for both organizations and vaults. Deleted: `CombinedSnapshot` (replaced by file-based streaming snapshots).
 - `log_storage/accessor.rs` — `AppliedStateAccessor` (19 pub query methods including org/vault slug resolution), `IdempotencyCheckResult` enum (`AlreadyCommitted`/`KeyReused`/`Miss`), `client_idempotency_check()` for cross-failover deduplication via replicated `ClientSequenceEntry`. Idempotency unit tests.
 - `log_storage/store.rs` — `RaftLogStore` struct definition with `client_sequence_eviction: ClientSequenceEvictionConfig` field, creation/config/accessor methods, optional `event_writer: Option<EventWriter<B>>`. New externalized state methods: `flush_external_writes()` (writes 9 tables atomically), `save_state_core()` (version-sentinel + AppliedStateCore + flush in single WriteTransaction), `load_state_from_tables()` (three-way format detection: new/old/fresh). 15+ persistence tests + benchmark test.
-- `log_storage/operations.rs` — `apply_request()` and `apply_request_with_events()` state machine dispatch logic. `apply_request_with_events` accepts `&mut PendingExternalWrites` parameter and mirrors all 12 `LedgerRequest` variants' state mutations to the accumulator for externalized persistence.
+- `log_storage/operations.rs` — `apply_request()` and `apply_request_with_events()` state machine dispatch logic. Handles all 23 `LedgerRequest` variants including 11 token variants. Token apply handlers: `CreateSigningKey` (idempotent for saga retry), `RotateSigningKey` (grace period or immediate revocation), `RevokeSigningKey`, `TransitionSigningKeyRevoked` (background job), `CreateRefreshToken`, `UseRefreshToken` (atomic check-and-consume with poisoned-family detection, version binding, scope re-validation), `RevokeTokenFamily`, `RevokeAllSubjectTokens`, `RevokeAppVaultTokens`, `RevokeAllUserSessions` (atomic: revoke + version increment), `DeleteExpiredRefreshTokens` (+ poisoned family GC). Cascade hooks: `SetAppEnabled` revokes subject tokens on disable, `RemoveAppVault` revokes app-vault tokens, `PurgeOrganization`/`DeleteOrganization` cascade signing key deletion and refresh token revocation. All time-dependent logic uses `proposed_at` from `RaftPayload`.
 - `log_storage/raft_impl.rs` — `RaftLogReader`, `LedgerSnapshotBuilder` (reads from DB, not in-memory `Arc<RwLock<AppliedState>>`), `RaftStorage` trait impls. `apply_to_state_machine` creates `PendingExternalWrites`, passes through apply loop, saves via `save_state_core()`. Client sequence TTL eviction triggers on `log_id.index % eviction_interval`. `write_snapshot_to_file()` uses `SnapshotWriter` for zstd-compressed, SHA-256 checksummed file-based snapshots. `install_snapshot()` uses `SyncSnapshotReader` with `block_in_place()` for sync zstd decoding — streams directly into WriteTransactions with zero staging. `collect_snapshot_events()` uses org_ids + timestamp cutoff via `scan_apply_phase_ranged()`.
 - **Key Types/Functions**:
 - `RaftLogStore`: Implements openraft's `RaftStorage` trait (combined log + state machine)
@@ -746,7 +789,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: LedgerServer builder with all gRPC services and Raft integration
 - **Key Types/Functions**:
-- `LedgerServer::builder()`: bon-based builder with 20+ config options
+- `LedgerServer::builder()`: bon-based builder with 20+ config options including `jwt_engine`, `jwt_config`, `key_manager` for TokenService
 - `serve(addr) -> Result<()>`: Start gRPC server with all services
 - `serve_with_shutdown(addr, shutdown_signal) -> Result<()>`: Graceful shutdown support
 - `health_state: HealthState` field — threaded to `WriteService` and `AdminService` for drain-phase proposal rejection
@@ -762,8 +805,10 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `RaftPayload`: Wrapper around `LedgerRequest` with leader-assigned `proposed_at: DateTime<Utc>` timestamp. Ensures all replicas apply with identical timestamps (deterministic apply-phase).
 - `LedgerTypeConfig`: openraft type config with `D = RaftPayload` (was `D = LedgerRequest`)
 - `LedgerNodeId`: Newtype for node ID (Snowflake ID)
-- `LedgerRequest`: 12 variants (Write, CreateOrganization, CreateVault, DeleteOrganization, DeleteVault, SuspendOrganization, ResumeOrganization, StartMigration, CompleteMigration, UpdateVaultHealth, BatchWrite, System(SystemRequest)) — `SystemRequest` has 12 sub-variants (CreateUser, AddNode, RemoveNode, UpdateOrganizationRouting, RegisterEmailHash, RemoveEmailHash, SetBlindingKeyVersion, UpdateRehashProgress, ClearRehashProgress, UpdateUserDirectoryStatus, EraseUser, MigrateExistingUsers)
-- `LedgerResponse`: Operation results (OrganizationCreated with slug, VaultCreated with slug, success/error)
+- `LedgerRequest`: 23 variants — 12 original (Write, CreateOrganization, CreateVault, DeleteOrganization, DeleteVault, SuspendOrganization, ResumeOrganization, StartMigration, CompleteMigration, UpdateVaultHealth, BatchWrite, System(SystemRequest)) + 11 token variants:
+  - Signing keys: `CreateSigningKey`, `RotateSigningKey`, `RevokeSigningKey`, `TransitionSigningKeyRevoked`
+  - Refresh tokens: `CreateRefreshToken`, `UseRefreshToken`, `RevokeTokenFamily`, `RevokeAllSubjectTokens`, `RevokeAppVaultTokens`, `RevokeAllUserSessions`, `DeleteExpiredRefreshTokens`
+- `LedgerResponse`: Operation results (OrganizationCreated, VaultCreated, success/error) + 11 token response variants: `SigningKeyCreated`, `SigningKeyRotated`, `SigningKeyRevoked`, `SigningKeyTransitioned`, `RefreshTokenCreated`, `RefreshTokenRotated` (with `token_version` + `allowed_scopes`), `TokenFamilyRevoked`, `SubjectTokensRevoked`, `AppVaultTokensRevoked`, `AllUserSessionsRevoked`, `ExpiredRefreshTokensDeleted`
 - **Insights**: Type-safe Raft integration. `RaftPayload` wraps `LedgerRequest` at the proposal boundary so leaders embed wall-clock timestamps — all replicas apply with the same timestamp, producing byte-identical event storage, B+ tree keys, and pagination cursors across nodes. Both `CreateOrganization` and `CreateVault` include pre-generated slugs (`OrganizationSlug`/`VaultSlug`) for atomic slug index insertion during state machine apply.
 
 #### `error.rs`
@@ -845,13 +890,43 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `extract_transport_metadata()`: SDK version, forwarded-for headers
 - **Insights**: Central point for metadata injection/extraction. Supports tracing and debugging.
 
+#### `services/token.rs`
+
+- **Purpose**: TokenService gRPC implementation — JWT token creation, validation, refresh, revocation, and signing key management
+- **Key Types/Functions**:
+- `TokenServiceImpl`: Struct with `ServiceContext`, `Arc<JwtEngine>`, `JwtConfig`, `Arc<dyn RegionKeyManager>`, optional `RateLimiter`
+- `create_user_session()`: Forwarded to leader — resolves user, verifies active, signs access token, generates refresh token, proposes `CreateRefreshToken` through Raft
+- `validate_token()`: Local read — defense-in-depth algorithm enforcement (raw header pre-check + library-level), `kid` UUID format validation, grace period check for Rotated keys, `TokenVersion` check for user sessions
+- `create_vault_token()`: Forwarded to leader — resolves org/app/vault, verifies app enabled + connection exists + scopes subset, signs vault access token, generates refresh token
+- `refresh_token()`: Forwarded to leader — unified for both token types. Minimal service work (hash + propose `UseRefreshToken`). State machine is authority for validation, version checking, scope re-validation. Signs new access token using authoritative data from Raft response.
+- `revoke_token()`, `revoke_all_user_sessions()`: Forwarded to leader — family revocation and atomic token+version revocation
+- `create_signing_key()`, `rotate_signing_key()`, `revoke_signing_key()`: Signing key lifecycle with envelope encryption
+- `get_public_keys()`: Local read — returns active + rotated (exclude revoked)
+- Rate limiting on `create_vault_token` via per-app `app:{id}` client key
+- **Insights**: Write RPCs forwarded to leader for consistent reads. `ValidateToken` and `GetPublicKeys` read local state. `RefreshTokenRotated` response carries authoritative `token_version` and `allowed_scopes` — prevents TOCTOU races.
+
+#### `jwt.rs` (in `inferadb-ledger-services`)
+
+- **Purpose**: JWT signing/validation engine with ArcSwap cache, envelope encryption, and refresh token utilities
+- **Key Types/Functions**:
+- `JwtEngine`: Lock-free validation via `ArcSwap<HashMap<String, Arc<CachedSigningKey>>>`. `CachedSigningKey` holds `DecodingKey` (public, cached) + `Zeroizing<Vec<u8>>` private key bytes (zeroized on drop). `EncodingKey` built on-demand per signing op (not cached — opaque, can't be zeroized).
+- `sign_user_session()`, `sign_vault_token()`: Build `EncodingKey` from cached private bytes, sign, drop. Sets `nbf = iat`.
+- `validate()`: Defense-in-depth algorithm enforcement (raw header string check + `Validation::algorithms(&[Algorithm::EdDSA])`). `kid` UUID format validation before state lookup. Error normalization (identical UNAUTHENTICATED for "kid not found" and "signature invalid"). Grace period check for Rotated keys.
+- `load_key()`, `evict_key()`, `get_cached_key()`, `has_cached_key()`: ArcSwap copy-on-write cache management
+- `JwtError`: 7-variant snafu error (Signing, Decoding, KeyDecryption, KeyEncryption, Token, OrganizationNotFound, StateLookup)
+- `scope_to_region()`: `SigningKeyScope::Global → Region::GLOBAL`, `Organization(id) → org's region`
+- `encrypt_private_key()` / `decrypt_private_key()`: Envelope encryption using existing `store::crypto::operations` (generate_dek, wrap_dek, unwrap_dek). `kid` as AAD.
+- `generate_refresh_token() -> (String, [u8; 32])`: `ilrt_{base64url(32 bytes)}` format (48 chars). SHA-256 hash of full prefixed string.
+- `generate_family_id() -> [u8; 16]`: 16 random bytes
+- **Insights**: `jsonwebtoken` v10 with `rust_crypto` feature for auto CryptoProvider registration. DER encoding asymmetry: `from_ed_der(raw_32_bytes)` for decoding, `from_ed_der(pkcs8_48_bytes)` for encoding. Refresh token `ilrt_` prefix enables secret scanning tool detection (truffleHog, GitHub scanning). 35+ unit tests.
+
 #### Additional Services
 
 - `services/raft.rs`: RaftService (inter-node Raft RPCs) including `TriggerElection` RPC handler — validates leader term (rejects stale), calls `raft.trigger().elect()`, records metrics via `record_trigger_election()`. Routes to the correct region via `RaftManager`.
 - `services/discovery.rs`: DiscoveryService (cluster membership)
 - `services/forward_client.rs`: Leader forwarding
 - `services/events.rs`: `EventsService` — EventsService gRPC implementation with 4 RPCs (`ListEvents`, `GetEvent`, `CountEvents`, `IngestEvents`). `GetEvent` uses O(log n) `EventStore::get_by_id()` via secondary index (replaces former O(n) full-org scan with `COUNT_SCAN_LIMIT` cap, eliminating false-not-found for orgs with >100k events). `ListEvents` supports HMAC-signed `EventPageToken` pagination with in-memory filtering (actions, event_type_prefix, principal, outcome, emission_path, correlation_id). `IngestEvents` implements 10-step pipeline: master switch → source allow-list → batch size → rate limit → org resolution → validation → write → metrics → log. Unit tests.
-- `services/slug_resolver.rs`: Organization and vault slug ↔ internal ID resolution at gRPC boundary. `SlugResolver` wraps `AppliedStateAccessor`. Organization methods: `extract_slug`, `resolve`, `resolve_slug`, `extract_and_resolve`, `extract_and_resolve_optional`. Vault methods: `extract_vault_slug`, `resolve_vault`, `resolve_vault_slug`, `extract_and_resolve_vault`, `extract_and_resolve_vault_optional`. Events method: `extract_and_resolve_for_events()` (slug=0 → system org bypass). Unit tests (14 org + 19 vault + 4 events).
+- `services/slug_resolver.rs`: Organization, vault, user, and app slug ↔ internal ID resolution at gRPC boundary. `SlugResolver` wraps `AppliedStateAccessor`. Organization methods: `extract_slug`, `resolve`, `resolve_slug`, `extract_and_resolve`, `extract_and_resolve_optional`. Vault methods: `extract_vault_slug`, `resolve_vault`, `resolve_vault_slug`, `extract_and_resolve_vault`, `extract_and_resolve_vault_optional`. App methods: `extract_app_slug`, `resolve_app`, `resolve_app_slug`, `extract_and_resolve_app`, `extract_and_resolve_app_optional`. Events method: `extract_and_resolve_for_events()` (slug=0 → system org bypass). Unit tests (14 org + 19 vault + 16 app + 4 events).
 - `services/region_resolver.rs`: Organization→region routing
 - `services/error_details.rs`: ErrorDetails proto builder
 
@@ -900,7 +975,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `logging.rs`: Canonical log lines (vault field, `set_target(organization, vault)`)
 - `proof.rs`: Merkle proof generation (accepts `vault_slug: Option<VaultSlug>` parameter)
 - `region_router.rs`: Dynamic region routing
-- `saga_orchestrator.rs`: Distributed transaction orchestration — CAS-based sequence ID allocation (prevents duplicates on leader failover), watchdog/metrics integration, configurable via `SagaConfig`, with optional `event_handle` for UserDeleted handler-phase events
+- `saga_orchestrator.rs`: Distributed transaction orchestration — CAS-based sequence ID allocation (prevents duplicates on leader failover), watchdog/metrics integration, configurable via `SagaConfig`, with optional `event_handle` for UserDeleted handler-phase events. JWT additions: `key_manager: Option<Arc<dyn RegionKeyManager>>` field, `execute_create_signing_key_step()` (2-step saga: generate keypair → encrypt → propose through Raft), `write_signing_key_saga()` (async method + synchronous free function for apply handler path), `check_global_signing_key_bootstrap()` (polls every leader cycle), org creation triggers (`CreateOrganizationWithProfile` + `CreateOrganizationSaga` completion)
+- `token_maintenance.rs`: Background job for token lifecycle maintenance. Two-phase cycle: (1) proposes `DeleteExpiredRefreshTokens` through Raft (handles expired token cleanup + poisoned family GC), (2) scans for rotated signing keys past grace period via `list_rotated_keys_past_grace()`, proposes `TransitionSigningKeyRevoked` for each. Configurable interval (default 300s). Generic metrics via `record_background_job_*` labels.
 - `dek_rewrap.rs`: Background job for re-wrapping Data Encryption Key sidecar metadata after Region Master Key rotation. `RewrapProgress` (AtomicU64 fields for lock-free admin queries), `DekRewrapJob<B>` (bon builder, periodic cycles, leader-only). Idempotent — pages already at target RMK version are skipped. Unit tests.
 - `region_storage.rs`: Per-region database file layout and lifecycle management. `RegionStorage` (holds raw database handles for state, blocks, events per region), `RegionStorageManager` (HashMap of open regions, directory layout enforcement: `global/` for GLOBAL Raft group, `regions/{name}/` for data regions). TOCTOU-safe region opening, legacy layout detection, 16KB page size. Unit tests.
 - `file_lock.rs`: Data directory locking
@@ -918,17 +994,18 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### `lib.rs`
 
-- **Purpose**: Re-exports public API (LedgerClient, ClientConfig, builders, error types, events types)
+- **Purpose**: Re-exports public API (LedgerClient, ClientConfig, builders, error types, events types, token types)
 - **Key Types/Functions**:
-- Modules: `client`, `config`, `connection`, `error`, `retry`, `circuit_breaker`, `discovery`, `metrics`, `streaming`, `tracing`, `builders`, `server`, `mock`
+- Modules: `client`, `config`, `connection`, `error`, `retry`, `circuit_breaker`, `discovery`, `metrics`, `streaming`, `token`, `tracing`, `builders`, `server`, `mock`
 - Events re-exports: `EventEmissionPath`, `EventFilter`, `EventOutcome`, `EventPage`, `EventScope`, `IngestRejection`, `IngestResult`, `SdkEventEntry`, `SdkIngestEventEntry`
-- **Insights**: Comprehensive SDK. All features needed for production use, including events query and ingestion.
+- Token re-exports: `TokenPair`, `ValidatedToken`, `PublicKeyInfo`
+- **Insights**: Comprehensive SDK. All features needed for production use, including events query/ingestion and JWT token management.
 
 #### `client.rs`
 
 - **Purpose**: LedgerClient with 40+ public methods, retry, cancellation, metrics, and comprehensive tests
 - **Key Types/Functions**:
-- `LedgerClient::new(config) -> Result<Self>`: Create client
+- `LedgerClient::new(config) -> Result<Self>`: Create client (50+ public methods)
 - Data ops: `read()`, `write()`, `batch_read()`, `batch_write()` (with `_with_token` variants for cancellation) — all accept `organization: OrganizationSlug, vault: Option<VaultSlug>`
 - Convenience ops: `set_entity(org, vault, key, value, expires_at, condition)`, `get_entity()`, `delete_entity()` — optional TTL and condition on set operations
 - `SetCondition::from_expected(expected: Option<impl Into<Vec<u8>>>) -> Self`: Convenience constructor — `None` maps to `MustNotExist`, `Some(value)` maps to `MustEqual(value)`
@@ -938,8 +1015,19 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - Events types: `EventScope`, `EventOutcome`, `EventEmissionPath` enums, `SdkEventEntry`, `EventPage` (with `has_next_page()`), `EventFilter` (builder with chainable filters: `start_time`, `end_time`, `actions`, `event_type_prefix`, `principal`, `outcome_*`, `*_phase_only`, `correlation_id`), `SdkIngestEventEntry` (builder with `detail`, `details`, `trace_id`, `correlation_id`, `vault_slug`, `timestamp`), `IngestResult`, `IngestRejection`
 - All methods use `with_retry_cancellable()` for retry + cancellation
 - `with_metrics()` wrapper for user-perceived latency
+- Token ops: `create_user_session(user)`, `validate_token(token, audience)`, `revoke_all_user_sessions(user)`, `refresh_token(refresh_token)`, `revoke_token(refresh_token)`, `create_vault_token(org, app, vault, scopes)`, `create_signing_key(scope, org)`, `rotate_signing_key(kid, grace_period)`, `revoke_signing_key(kid)`, `get_public_keys(org)`
 - Events unit tests
 - **Insights**: Clean API. Cancellation support via CancellationToken. Circuit breaker integrated. Metrics track end-to-end latency. Events SDK uses `from_proto`/`into_proto` associated functions (not From trait impls). `SetCondition::from_expected()` provides ergonomic CAS condition construction for compare-and-set patterns.
+
+#### `token.rs`
+
+- **Purpose**: SDK-side token types with proto conversion
+- **Key Types/Functions**:
+- `TokenPair`: Access token + refresh token + expiry times (uses `SystemTime`)
+- `ValidatedToken` enum: `UserSession` (user_slug, role) | `VaultAccess` (org_slug, app_slug, vault_slug, scopes)
+- `PublicKeyInfo`: kid, public_key, status, valid_from, valid_until, created_at
+- All types use `from_proto()` associated functions and `proto_timestamp_to_system_time()` for timestamp conversion
+- **Insights**: SDK types use `SystemTime` (not `DateTime<Utc>`) for timestamps, consistent with other SDK types. `proto_timestamp_to_system_time()` promoted to `pub(crate)` for cross-module use.
 
 #### `config.rs`
 
@@ -1088,17 +1176,19 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: Node bootstrap, lifecycle management, background job spawning, events system wiring
 - **Key Types/Functions**:
 - `bootstrap_node(config) -> Result<BootstrappedNode>`: Initialize node
-- `BootstrappedNode`: Handle to running node (server, Raft, 11 tracked background job handles)
-- Background job handles: `gc_handle`, `compactor_handle`, `recovery_handle`, `learner_refresh_handle`, `resource_metrics_handle`, `backup_handle` (optional), `events_gc_handle` (optional), `saga_handle`, `orphan_cleanup_handle`, `integrity_scrub_handle`, `snapshot_demotion_handle` (optional)
+- `BootstrappedNode`: Handle to running node (server, Raft, 12 tracked background job handles)
+- Background job handles: `gc_handle`, `compactor_handle`, `recovery_handle`, `learner_refresh_handle`, `resource_metrics_handle`, `backup_handle` (optional), `events_gc_handle` (optional), `saga_handle`, `orphan_cleanup_handle`, `integrity_scrub_handle`, `snapshot_demotion_handle` (optional), `token_maintenance_handle`
 - Events wiring: Opens `EventsDatabase` (`{data_dir}/events.db`), creates `EventWriter` and injects into `RaftLogStore` via `.with_event_writer()`, creates `EventHandle` (Arc-shared) for gRPC services, starts `EventsGarbageCollector` when `config.events.enabled`, passes `events_db` and `event_handle` to `LedgerServer`
+- JWT wiring: Creates `JwtEngine`, injects `jwt_config`, `jwt_engine`, and `key_manager` into `LedgerServer` and `SagaOrchestrator`. `InMemoryKeyManager` available for test environments.
+- Token maintenance: Spawns `TokenMaintenanceJob` with configurable interval (`token_maintenance_interval_secs`)
 - Tiered storage wiring: Conditional `TieredSnapshotManager` construction based on `warm_url`, background demotion task
-- **Insights**: Central orchestration point. Spawns 11 background jobs and holds `JoinHandle`s to keep them alive. Events GC and integrity scrubber run on all nodes (not leader-only). Saga orchestrator and orphan cleanup are leader-only.
+- **Insights**: Central orchestration point. Spawns 12 background jobs and holds `JoinHandle`s to keep them alive. Events GC and integrity scrubber run on all nodes (not leader-only). Saga orchestrator and orphan cleanup are leader-only. `InMemoryKeyManager` (in `store/src/crypto/key_manager.rs`) is public and test-friendly.
 
 #### `config.rs`
 
 - **Purpose**: ServerConfig with all subsystem configs, CLI/env-based configuration, and comprehensive tests
 - **Key Types/Functions**:
-- `Config`: Root config struct (raft, storage, batch, rate_limit, validation, tls, otel, events, etc.) via clap `#[derive(Parser)]`
+- `Config`: Root config struct (raft, storage, batch, rate_limit, validation, tls, otel, events, jwt, token_maintenance_interval_secs, etc.) via clap `#[derive(Parser)]`
 - `generate_runtime_config_schema()`: JSON Schema export for RuntimeConfig (used by `config schema` subcommand)
 - Env var overrides: `INFERADB__LEDGER__<FIELD>` convention
 - **Insights**: CLI args + env vars (no config file). Runtime reconfiguration via `UpdateConfig` RPC (JSON). JSON Schema export for validation.
@@ -1168,6 +1258,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `tests/stress_watch.rs`: Watch/streaming stress tests
 - `tests/get_node_info.rs`: Node info RPC
 - `tests/election.rs`: Raft election scenarios
+- `tests/token_lifecycle.rs`: JWT token lifecycle integration tests (21 tests covering user session lifecycle, vault token lifecycle, refresh token theft detection, concurrent refresh+revoke races, scope update on refresh, signing key rotation/revocation/auto-bootstrap, state machine determinism, token maintenance job, rate limiting)
 - `tests/integration.rs`: Main integration test binary entry point
 - `tests/stress.rs`: Stress test module entry point
 - `tests/external.rs`: External test module entry point
@@ -1265,7 +1356,7 @@ The codebase has exceptional test coverage:
 - **Crash recovery testing**: Crash injection tests in store crate using `CrashInjector`. Validates durability guarantees.
 - **Chaos testing**: Integration tests cover network partitions, node crashes, Byzantine faults. In-process unit tests for Byzantine scenarios.
 - **Benchmarks**: Criterion benchmarks for B+ tree, read/write operations, whitepaper validation. CI tracks regressions via benchmark.yml workflow.
-- **Integration tests**: Integration test files in server crate covering replication, failover, multi-region, backup/restore, rate limiting, cancellation, circuit breaker, API version, quotas, resource metrics, dependency health, canonical log lines, config reload, externalized state persistence, streaming snapshots, and stress testing.
+- **Integration tests**: Integration test files in server crate covering replication, failover, multi-region, backup/restore, rate limiting, cancellation, circuit breaker, API version, quotas, resource metrics, dependency health, canonical log lines, config reload, externalized state persistence, streaming snapshots, JWT token lifecycle (21 tests), and stress testing.
 - **Unit tests**: `#[test]` and `#[tokio::test]` functions across all crates. Coverage target: 90%+.
 
 ### 4. Security Practices
@@ -1278,6 +1369,8 @@ The codebase follows excellent security practices:
 - **No `.unwrap()`**: All error handling via snafu `.context()`. No panics in production code.
 - **Deterministic replication**: Apply-phase events are byte-identical across all Raft replicas — leader-assigned timestamps via `RaftPayload` ensure identical B+ tree keys, pagination cursors, and snapshot contents across nodes.
 - **Event logging**: Organization-scoped event logging system with queryable audit trails via gRPC `EventsService`. Tracks all mutations, denials, and admin operations. Two emission paths: apply-phase (deterministic, replicated) and handler-phase (node-local, best-effort). TTL-based retention with automatic garbage collection. O(log n) `GetEvent` via secondary index (no false-not-found at scale).
+- **JWT token security**: EdDSA (Ed25519) only — defense-in-depth algorithm enforcement (raw header string pre-check + library-level `Validation::algorithms`). `kid` UUID format validation before state lookup (prevents cache pollution). Error normalization (identical UNAUTHENTICATED for "kid not found" and "signature invalid"). Signing key private material: `Zeroizing<Vec<u8>>` for cached bytes, `EncodingKey` built on-demand per signing op (not cached). Refresh token `ilrt_` prefix for secret scanning tool detection. Refresh token theft detection via poisoned-family pattern (O(1) poison on reuse, background GC). Token version binding prevents race between refresh and concurrent revocation.
+- **Envelope encryption for signing keys**: Per-key DEK wrapped by RMK via AES-KWP, private key encrypted with AES-256-GCM using `kid` as AAD (binds ciphertext to key identity). Same pattern as page-level crypto.
 - **TLS support**: Client and server support TLS with optional mTLS (client certificates).
 - **Rate limiting**: 3-tier token bucket rate limiter (client/organization/backpressure) prevents abuse.
 - **Quota enforcement**: Per-organization resource quotas (vault count, storage size, request rate) prevent resource exhaustion.
@@ -1315,6 +1408,7 @@ The codebase includes numerous production-ready features:
 - **Externalized state & streaming snapshots**: AppliedState fields persisted to dedicated B+ tree tables (VaultHeights, VaultHashes, VaultHealth) instead of monolithic postcard blob. File-based streaming snapshots with zstd compression + SHA-256 checksums via `SnapshotWriter`/`SnapshotReader`. Three-way format detection for migration. Client sequence persistence with TTL eviction for cross-failover deduplication. Automatic write forwarding via `RaftManager`.
 - **Envelope encryption at rest**: AES-256-GCM per-page DEKs wrapped with Region Master Keys (RMK) via AES-KWP. Transparent `EncryptedBackend` wrapper. DEK cache for O(1) amortized decryption. Background `DekRewrapJob` for RMK rotation (re-wraps metadata only, never re-encrypts page bodies). Multi-provider key management (Infisical, Vault, AWS KMS, GCP KMS, Azure Key Vault).
 - **Per-region database layout**: `RegionStorageManager` enforces per-region directory tree (`global/` for control plane, `regions/{name}/` for data regions). Eliminates cross-region write-lock contention. Enables per-region encryption keys and independent scaling.
+- **JWT token system**: Full JWT lifecycle — user session tokens (global signing key, `TokenVersion` forced invalidation), vault access tokens (per-org signing key, scope-based authorization). `JwtEngine` with ArcSwap lock-free cache. Refresh token family-based theft detection (poisoned-family pattern). Signing key auto-bootstrap via saga orchestrator (global key on cluster init, org key on org creation). `TokenMaintenanceJob` background job (expired token cleanup, poisoned family GC, signing key grace period transition). Cascade revocation on app disable, vault disconnect, org deletion. Rate limiting on vault token creation via per-app client key.
 - **Privacy-preserving email hashing**: HMAC-SHA256 with `EmailBlindingKey` for global email uniqueness across regions without storing plaintext PII on the control plane.
 - **And more**...
 
@@ -1326,7 +1420,7 @@ The codebase has excellent documentation:
 - **Invariant docs**: `docs/specs/invariants.md` documents critical system invariants.
 - **Module docs**: All crates have module-level documentation with examples.
 - **rustdoc examples**: Many public functions have ` ```no_run ` examples (cargo test skips execution, cargo doc validates syntax).
-- **Architecture docs**: `docs/architecture/audit-protocol.md` documents the centralized audit architecture and shared event protocol for all InferaDB services.
+- **Architecture docs**: `docs/architecture/audit-protocol.md` documents the centralized audit architecture and shared event protocol for all InferaDB services. `DESIGN.md` includes JWT token architecture section (envelope encryption, ArcSwap cache, refresh token theft detection, cascade revocation, scope policy, security boundaries). `INTEGRATION.md` covers Control/Engine JWT integration guide with flow diagrams, SDK reference, security considerations, and key rotation runbook.
 - **Development docs**: `docs/development/events.md` — SDK usage guide for events client methods, EventFilter builder, query patterns, ingestion guide, adding new event types
 - **Operations docs**: `docs/operations/` covers alerting, API versioning, background jobs, capacity planning, configuration, dashboards, deployment, events, logging, metrics reference, multi-region, organization metrics, production deployment tutorial, region management, security, SLO, troubleshooting, vault repair, and a README. Includes `events.md` with full EventConfig reference, event catalog (system + org events), Prometheus metrics, and troubleshooting.
 - **Grafana dashboards**: `docs/operations/dashboards/grafana-events-v1.json` — Grafana dashboard for event monitoring (write rates, emission paths, denial tracking, GC health)
@@ -1359,10 +1453,10 @@ InferaDB Ledger is a **production-grade blockchain database** with exceptional e
 - **Zero `unsafe` code**, comprehensive error handling (snafu), structured error taxonomy
 - **Custom B+ tree engine** with ACID transactions, crash recovery, compaction
 - **Raft consensus** via openraft, batching, idempotency, multi-region horizontal scaling
-- **Enterprise features**: graceful shutdown with leader transfer (Draining phase, best-effort handoff before election timeout), circuit breaker, rate limiting, hot key detection, quota enforcement, backup/restore, tiered storage with multipart upload, API versioning, deadline propagation, dependency health checks, runtime reconfiguration, organization-scoped event logging, externalized state persistence, streaming snapshots, automatic write forwarding, and many more
+- **Enterprise features**: JWT token authentication (EdDSA, refresh token theft detection, signing key auto-bootstrap, cascade revocation), graceful shutdown with leader transfer (Draining phase, best-effort handoff before election timeout), circuit breaker, rate limiting, hot key detection, quota enforcement, backup/restore, tiered storage with multipart upload, API versioning, deadline propagation, dependency health checks, runtime reconfiguration, organization-scoped event logging, externalized state persistence, streaming snapshots, automatic write forwarding, and many more
 - **Excellent observability**: OpenTelemetry tracing, Prometheus metrics, canonical log lines, structured request logging, SDK-side metrics, queryable event audit trails via gRPC EventsService
 - **Comprehensive testing**: Unit tests, property-based tests (proptest), crash recovery tests, chaos tests, integration tests
-- **Security practices**: No unsafe, constant-time comparison, input validation, deterministic event replication via leader-assigned timestamps, event logging with audit trails, TLS/mTLS, rate limiting, quotas, envelope encryption at rest (AES-256-GCM with per-page DEKs wrapped by Region Master Keys), privacy-preserving email hashing (HMAC-SHA256 blinding)
+- **Security practices**: No unsafe, constant-time comparison, input validation, deterministic event replication via leader-assigned timestamps, event logging with audit trails, TLS/mTLS, rate limiting, quotas, envelope encryption at rest (AES-256-GCM with per-page DEKs wrapped by Region Master Keys), privacy-preserving email hashing (HMAC-SHA256 blinding), JWT token security (defense-in-depth algorithm enforcement, kid validation, signing key zeroization, refresh token theft detection)
 - **Documentation**: ADRs, invariant specs, module docs, rustdoc examples, operations guides, client guides, error code reference, events architecture doc, Grafana dashboard templates
 
 Overall assessment: **★★★★★ Exemplary codebase** ready for production deployment.

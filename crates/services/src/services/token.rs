@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use inferadb_ledger_proto::proto::{
     self, CreateSigningKeyRequest, CreateSigningKeyResponse, CreateUserSessionRequest,
     CreateUserSessionResponse, CreateVaultTokenRequest, CreateVaultTokenResponse,
@@ -37,7 +37,10 @@ use sha2::{Digest, Sha256};
 use tonic::{Request, Response, Status};
 
 use super::{service_infra::ServiceContext, slug_resolver::SlugResolver};
-use crate::jwt::{JwtEngine, encrypt_private_key, generate_family_id, generate_refresh_token};
+use crate::{
+    jwt::{JwtEngine, encrypt_private_key, generate_family_id, generate_refresh_token},
+    proto_compat::datetime_to_proto,
+};
 
 /// Token lifecycle service.
 ///
@@ -101,6 +104,35 @@ impl TokenServiceImpl {
         Ok(())
     }
 
+    /// Generates a new Ed25519 keypair, encrypts the private key with the scope's RMK,
+    /// and zeroizes the secret material. Returns `(kid, public_key_bytes, encrypted_private_key,
+    /// rmk_version)`.
+    fn generate_encrypted_keypair(
+        &self,
+        scope: &SigningKeyScope,
+    ) -> Result<(String, Vec<u8>, Vec<u8>, u32), Status> {
+        let mut secret_bytes = [0u8; 32];
+        rand::RngExt::fill(&mut rand::rng(), &mut secret_bytes);
+        let signing_key_dalek = ed25519_dalek::SigningKey::from_bytes(&secret_bytes);
+        let public_key_bytes = signing_key_dalek.verifying_key().to_bytes().to_vec();
+        drop(signing_key_dalek); // Triggers Zeroize on Drop (ed25519-dalek "zeroize" feature)
+        let kid = uuid::Uuid::new_v4().to_string();
+
+        let region = crate::jwt::scope_to_region(scope, &self.system_service())
+            .map_err(|e| Status::internal(format!("Failed to resolve region: {e}")))?;
+        let rmk = self
+            .key_manager
+            .current_rmk(region)
+            .map_err(|e| Status::internal(format!("Failed to load RMK: {e}")))?;
+        let (envelope, rmk_version) = encrypt_private_key(secret_bytes.as_ref(), &kid, &rmk)
+            .map_err(Self::jwt_error_to_status)?;
+
+        zeroize::Zeroize::zeroize(&mut secret_bytes);
+
+        let encrypted_private_key = envelope.to_bytes().to_vec();
+        Ok((kid, public_key_bytes, encrypted_private_key, rmk_version))
+    }
+
     /// Returns the active signing key for a scope, ensuring it's cached.
     fn active_key_for_scope(&self, scope: &SigningKeyScope) -> Result<SigningKey, Status> {
         let sys = self.system_service();
@@ -158,9 +190,9 @@ impl TokenServiceImpl {
             kid: key.kid.clone(),
             public_key: key.public_key_bytes.clone(),
             status: status.to_string(),
-            valid_from: Some(datetime_to_proto(key.valid_from)),
-            valid_until: key.valid_until.map(datetime_to_proto),
-            created_at: Some(datetime_to_proto(key.created_at)),
+            valid_from: Some(datetime_to_proto(&key.valid_from)),
+            valid_until: key.valid_until.as_ref().map(datetime_to_proto),
+            created_at: Some(datetime_to_proto(&key.created_at)),
         }
     }
 
@@ -174,34 +206,18 @@ impl TokenServiceImpl {
             JwtError::Token { source, .. } => match source {
                 TokenError::Expired => Status::unauthenticated("Token expired"),
                 TokenError::InvalidSignature => Status::unauthenticated("Invalid token"),
-                TokenError::Revoked => Status::unauthenticated("Token revoked"),
                 TokenError::InvalidAudience { expected } => {
                     Status::permission_denied(format!("Invalid audience: expected {expected}"))
                 },
-                TokenError::InvalidIssuer => Status::unauthenticated("Invalid issuer"),
                 TokenError::MissingClaim { claim } => {
                     Status::invalid_argument(format!("Missing required claim: {claim}"))
                 },
                 TokenError::InvalidTokenType { expected } => {
                     Status::invalid_argument(format!("Invalid token type: expected {expected}"))
                 },
-                TokenError::NoActiveSigningKey => {
-                    Status::failed_precondition("No active signing key for scope")
-                },
                 TokenError::SigningKeyNotFound { .. } => Status::not_found("Signing key not found"),
-                TokenError::SigningKeyRevoked { .. } => {
-                    Status::failed_precondition("Signing key revoked")
-                },
                 TokenError::SigningKeyExpired { .. } => {
                     Status::failed_precondition("Signing key expired")
-                },
-                TokenError::InvalidRefreshToken => Status::unauthenticated("Invalid refresh token"),
-                TokenError::RefreshTokenReuse => {
-                    Status::unauthenticated("Refresh token reuse detected")
-                },
-                TokenError::TokenVersionMismatch => Status::unauthenticated("Session invalidated"),
-                TokenError::InvalidScope { scope } => {
-                    Status::invalid_argument(format!("Invalid scope: {scope}"))
                 },
             },
             JwtError::Signing { .. } | JwtError::KeyEncryption | JwtError::KeyDecryption => {
@@ -216,12 +232,7 @@ impl TokenServiceImpl {
 
     /// Hashes a refresh token string with SHA-256.
     fn hash_refresh_token(token: &str) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(token.as_bytes());
-        let result = hasher.finalize();
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&result);
-        hash
+        Sha256::digest(token.as_bytes()).into()
     }
 
     /// Emits an audit event if event recording is configured.
@@ -330,8 +341,8 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let token_pair = proto::TokenPair {
             access_token,
             refresh_token: refresh_token_str,
-            access_expires_at: Some(datetime_to_proto(access_expires_at)),
-            refresh_expires_at: Some(datetime_to_proto(refresh_expires_at)),
+            access_expires_at: Some(datetime_to_proto(&access_expires_at)),
+            refresh_expires_at: Some(datetime_to_proto(&refresh_expires_at)),
         };
 
         Ok(Response::new(CreateUserSessionResponse { tokens: Some(token_pair) }))
@@ -359,8 +370,10 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             && !self.jwt_engine.has_cached_key(&kid)
         {
             let sys = self.system_service();
-            if let Ok(Some(key)) = sys.get_signing_key_by_kid(&kid) {
-                let _ = self.ensure_key_cached(&key);
+            if let Ok(Some(key)) = sys.get_signing_key_by_kid(&kid)
+                && let Err(e) = self.ensure_key_cached(&key)
+            {
+                tracing::warn!(kid = %kid, error = %e, "Failed to cache signing key during validation");
             }
         }
 
@@ -479,8 +492,8 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let token_pair = proto::TokenPair {
             access_token,
             refresh_token: refresh_token_str,
-            access_expires_at: Some(datetime_to_proto(access_expires_at)),
-            refresh_expires_at: Some(datetime_to_proto(refresh_expires_at)),
+            access_expires_at: Some(datetime_to_proto(&access_expires_at)),
+            refresh_expires_at: Some(datetime_to_proto(&refresh_expires_at)),
         };
 
         Ok(Response::new(CreateVaultTokenResponse { tokens: Some(token_pair) }))
@@ -591,7 +604,9 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
                         return Err(Status::internal("User session token has App subject"));
                     },
                 };
-                let version = raft_token_version.unwrap_or_default();
+                let version = raft_token_version.ok_or_else(|| {
+                    Status::internal("User session refresh missing token_version from Raft")
+                })?;
                 // Re-read user for role
                 let resolver = self.resolver();
                 let user_id = resolver.resolve_user(user_slug)?;
@@ -649,8 +664,8 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let token_pair = proto::TokenPair {
             access_token,
             refresh_token: new_refresh_str,
-            access_expires_at: Some(datetime_to_proto(access_expires_at)),
-            refresh_expires_at: Some(datetime_to_proto(refresh_expires_at)),
+            access_expires_at: Some(datetime_to_proto(&access_expires_at)),
+            refresh_expires_at: Some(datetime_to_proto(&refresh_expires_at)),
         };
 
         Ok(Response::new(RefreshTokenResponse { tokens: Some(token_pair) }))
@@ -776,60 +791,35 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             },
         };
 
-        // Generate Ed25519 keypair
-        let mut secret_bytes = [0u8; 32];
-        rand::RngExt::fill(&mut rand::rng(), &mut secret_bytes);
-        let signing_key_dalek = ed25519_dalek::SigningKey::from_bytes(&secret_bytes);
-        let public_key_bytes = signing_key_dalek.verifying_key().to_bytes().to_vec();
-
-        // Generate kid
-        let kid = uuid::Uuid::new_v4().to_string();
-
-        // Encrypt private key
-        let region = crate::jwt::scope_to_region(&scope, &self.system_service())
-            .map_err(|e| Status::internal(format!("Failed to resolve region: {e}")))?;
-        let rmk = self
-            .key_manager
-            .current_rmk(region)
-            .map_err(|e| Status::internal(format!("Failed to load RMK: {e}")))?;
-        let (envelope, rmk_version) = encrypt_private_key(secret_bytes.as_ref(), &kid, &rmk)
-            .map_err(Self::jwt_error_to_status)?;
-
-        // Zeroize secret bytes
-        zeroize::Zeroize::zeroize(&mut secret_bytes);
-
-        let encrypted_private_key = envelope.to_bytes().to_vec();
+        let (kid, public_key_bytes, encrypted_private_key, rmk_version) =
+            self.generate_encrypted_keypair(&scope)?;
 
         // Propose CreateSigningKey through Raft
         let ledger_request = LedgerRequest::CreateSigningKey {
             scope,
             kid: kid.clone(),
-            public_key_bytes: public_key_bytes.clone(),
+            public_key_bytes,
             encrypted_private_key,
             rmk_version,
         };
 
         self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
-        // Load key into JwtEngine cache
+        // Load key from state for cache and response (authoritative timestamps)
         let sys = self.system_service();
-        if let Ok(Some(key)) = sys.get_signing_key_by_kid(&kid) {
-            let _ = self.ensure_key_cached(&key);
+        let stored_key = sys
+            .get_signing_key_by_kid(&kid)
+            .map_err(|e| Status::internal(format!("Failed to read signing key: {e}")))?
+            .ok_or_else(|| Status::internal("Signing key not found after creation"))?;
+
+        if let Err(e) = self.ensure_key_cached(&stored_key) {
+            tracing::warn!(kid = %kid, error = %e, "Failed to cache signing key after creation");
         }
 
         self.emit_event(EventAction::SigningKeyCreated, &trace_ctx);
         ctx.set_success();
 
-        // Build response
-        let info = PublicKeyInfo {
-            kid,
-            public_key: public_key_bytes,
-            status: "active".to_string(),
-            valid_from: Some(datetime_to_proto(Utc::now())),
-            valid_until: None,
-            created_at: Some(datetime_to_proto(Utc::now())),
-        };
-
+        let info = Self::signing_key_to_public_info(&stored_key);
         Ok(Response::new(CreateSigningKeyResponse { key: Some(info) }))
     }
 
@@ -867,25 +857,10 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             return Err(Status::failed_precondition("Can only rotate an active key"));
         }
 
-        // Generate new Ed25519 keypair
-        let mut secret_bytes = [0u8; 32];
-        rand::RngExt::fill(&mut rand::rng(), &mut secret_bytes);
-        let signing_key_dalek = ed25519_dalek::SigningKey::from_bytes(&secret_bytes);
-        let new_public_key_bytes = signing_key_dalek.verifying_key().to_bytes().to_vec();
-        let new_kid = uuid::Uuid::new_v4().to_string();
+        let (new_kid, new_public_key_bytes, new_encrypted_private_key, rmk_version) =
+            self.generate_encrypted_keypair(&old_key.scope)?;
 
-        // Encrypt new private key
-        let region = crate::jwt::scope_to_region(&old_key.scope, &self.system_service())
-            .map_err(|e| Status::internal(format!("Failed to resolve region: {e}")))?;
-        let rmk = self
-            .key_manager
-            .current_rmk(region)
-            .map_err(|e| Status::internal(format!("Failed to load RMK: {e}")))?;
-        let (envelope, rmk_version) = encrypt_private_key(secret_bytes.as_ref(), &new_kid, &rmk)
-            .map_err(Self::jwt_error_to_status)?;
-
-        zeroize::Zeroize::zeroize(&mut secret_bytes);
-
+        // 0 means "use default from JwtConfig" (proto convention for unset).
         let grace_period_secs = if req.grace_period_secs == 0 {
             self.jwt_config.key_rotation_grace_secs
         } else {
@@ -895,18 +870,23 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let ledger_request = LedgerRequest::RotateSigningKey {
             old_kid: req.kid.clone(),
             new_kid: new_kid.clone(),
-            new_public_key_bytes: new_public_key_bytes.clone(),
-            new_encrypted_private_key: envelope.to_bytes().to_vec(),
+            new_public_key_bytes,
+            new_encrypted_private_key,
             rmk_version,
             grace_period_secs,
         };
 
         self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
-        // Load new key into cache; old key remains for grace period validation
+        // Load new key from state for cache and response (authoritative timestamps)
         let sys = self.system_service();
-        if let Ok(Some(key)) = sys.get_signing_key_by_kid(&new_kid) {
-            let _ = self.ensure_key_cached(&key);
+        let stored_key = sys
+            .get_signing_key_by_kid(&new_kid)
+            .map_err(|e| Status::internal(format!("Failed to read signing key: {e}")))?
+            .ok_or_else(|| Status::internal("Signing key not found after rotation"))?;
+
+        if let Err(e) = self.ensure_key_cached(&stored_key) {
+            tracing::warn!(kid = %new_kid, error = %e, "Failed to cache signing key after rotation");
         }
 
         // If effective grace period is 0 (immediate revocation), evict old key from cache
@@ -917,15 +897,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         self.emit_event(EventAction::SigningKeyRotated, &trace_ctx);
         ctx.set_success();
 
-        let info = PublicKeyInfo {
-            kid: new_kid,
-            public_key: new_public_key_bytes,
-            status: "active".to_string(),
-            valid_from: Some(datetime_to_proto(Utc::now())),
-            valid_until: None,
-            created_at: Some(datetime_to_proto(Utc::now())),
-        };
-
+        let info = Self::signing_key_to_public_info(&stored_key);
         Ok(Response::new(RotateSigningKeyResponse { new_key: Some(info) }))
     }
 
@@ -998,11 +970,6 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
     }
 }
 
-/// Converts a `DateTime<Utc>` to a proto `Timestamp`.
-fn datetime_to_proto(dt: DateTime<Utc>) -> prost_types::Timestamp {
-    prost_types::Timestamp { seconds: dt.timestamp(), nanos: dt.timestamp_subsec_nanos() as i32 }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1030,7 +997,7 @@ mod tests {
     #[test]
     fn datetime_to_proto_roundtrip() {
         let dt = Utc::now();
-        let proto = datetime_to_proto(dt);
+        let proto = datetime_to_proto(&dt);
         assert_eq!(proto.seconds, dt.timestamp());
         assert_eq!(proto.nanos, dt.timestamp_subsec_nanos() as i32);
     }
@@ -1147,47 +1114,5 @@ mod tests {
         let err = crate::jwt::JwtError::KeyEncryption;
         let status = TokenServiceImpl::jwt_error_to_status(err);
         assert_eq!(status.code(), tonic::Code::Internal);
-    }
-
-    #[test]
-    fn jwt_error_to_status_no_active_signing_key() {
-        use inferadb_ledger_types::token::TokenError;
-
-        use crate::jwt::JwtError;
-
-        let err = JwtError::Token {
-            source: TokenError::NoActiveSigningKey,
-            location: snafu::Location::new("", 0, 0),
-        };
-        let status = TokenServiceImpl::jwt_error_to_status(err);
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-    }
-
-    #[test]
-    fn jwt_error_to_status_refresh_token_reuse() {
-        use inferadb_ledger_types::token::TokenError;
-
-        use crate::jwt::JwtError;
-
-        let err = JwtError::Token {
-            source: TokenError::RefreshTokenReuse,
-            location: snafu::Location::new("", 0, 0),
-        };
-        let status = TokenServiceImpl::jwt_error_to_status(err);
-        assert_eq!(status.code(), tonic::Code::Unauthenticated);
-    }
-
-    #[test]
-    fn jwt_error_to_status_token_version_mismatch() {
-        use inferadb_ledger_types::token::TokenError;
-
-        use crate::jwt::JwtError;
-
-        let err = JwtError::Token {
-            source: TokenError::TokenVersionMismatch,
-            location: snafu::Location::new("", 0, 0),
-        };
-        let status = TokenServiceImpl::jwt_error_to_status(err);
-        assert_eq!(status.code(), tonic::Code::Unauthenticated);
     }
 }

@@ -1049,7 +1049,7 @@ async fn test_app_disabled_rejects_vault_refresh() {
     // Disable the app
     set_app_enabled(addr, org, app, false).await.expect("disable app");
 
-    // Wait for Raft cascade (app disable also revokes tokens via RevokeAllSubjectTokens)
+    // Wait for Raft cascade (app disable revokes tokens via inline cascade)
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Refresh should fail — app is disabled and tokens are revoked
@@ -1065,7 +1065,7 @@ async fn test_app_disabled_rejects_vault_refresh() {
 ///
 /// Disabling an app:
 /// 1. Immediately rejects new `CreateVaultToken` requests (FAILED_PRECONDITION)
-/// 2. Cascades `RevokeAllSubjectTokens` through Raft to revoke all existing tokens
+/// 2. Revokes all existing tokens via inline cascade in the SetAppEnabled apply handler
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_app_disabled_blocks_creation_and_revokes_tokens() {
     let cluster = TestCluster::new(1).await;
@@ -1119,8 +1119,8 @@ async fn test_app_disabled_blocks_creation_and_revokes_tokens() {
 /// App vault connection removed → vault token creation fails.
 ///
 /// After removing an app-vault connection, `CreateVaultToken` should fail because
-/// no connection exists. Additionally, `RevokeAppVaultTokens` cascades through
-/// Raft to revoke existing tokens for that app+vault combination.
+/// no connection exists. The RemoveAppVault apply handler inline-cascades
+/// revocation of existing tokens for that app+vault combination.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_connection_removed_blocks_creation_and_revokes_tokens() {
     let cluster = TestCluster::new(1).await;

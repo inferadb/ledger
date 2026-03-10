@@ -244,7 +244,7 @@ impl TlsConfig {
 
 ## Code Quality
 
-**Linting:** `cargo +1.92 clippy --all-targets -- -D warnings`
+**Linting:** `cargo +1.92 clippy --workspace --all-targets -- -D warnings`
 
 **Formatting:** `cargo +nightly fmt` (nightly required)
 

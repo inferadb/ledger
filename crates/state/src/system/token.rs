@@ -19,11 +19,42 @@ use super::{
 };
 
 /// Maximum number of entries scanned in a prefix iteration.
+///
+/// Scans that hit this limit log a warning — see [`warn_if_truncated`].
 const MAX_TOKEN_SCAN: usize = 100_000;
 
 /// Creates an unconditional, non-expiring `SetEntity` operation.
 fn set_entity(key: String, value: Vec<u8>) -> Operation {
     Operation::SetEntity { key, value, condition: None, expires_at: None }
+}
+
+/// Logs a warning if the scan result was truncated at `MAX_TOKEN_SCAN`.
+///
+/// Used by GC paths where truncation is non-fatal (the next cycle catches up).
+/// Security-critical revocation paths use [`check_revocation_truncation`] instead.
+fn warn_if_truncated(count: usize, operation: &str) {
+    if count >= MAX_TOKEN_SCAN {
+        warn!(
+            count,
+            limit = MAX_TOKEN_SCAN,
+            operation,
+            "Token scan hit MAX_TOKEN_SCAN limit — results may be incomplete"
+        );
+    }
+}
+
+/// Returns `RevocationIncomplete` if the scan was truncated.
+///
+/// Used by security-critical revocation paths where partial processing is an error.
+fn check_revocation_truncation(truncated: bool, operation: &str, revoked: u64) -> Result<()> {
+    if truncated {
+        return Err(super::service::SystemError::RevocationIncomplete {
+            operation: operation.to_owned(),
+            limit: MAX_TOKEN_SCAN,
+            revoked,
+        });
+    }
+    Ok(())
 }
 
 /// Result of revoking tokens by family.
@@ -185,14 +216,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
                 let mut keys = Vec::new();
                 for entry in entries {
-                    let key_str = String::from_utf8_lossy(&entry.key);
-                    // Skip org-scoped keys that share the prefix
-                    if key_str.contains(":org:") {
-                        continue;
-                    }
                     match decode::<SigningKey>(&entry.value) {
                         Ok(key) if key.scope == SigningKeyScope::Global => keys.push(key),
-                        Ok(_) => {}, // Not global scope, skip
+                        Ok(_) => {}, // Different scope, skip
                         Err(e) => {
                             warn!(error = %e, "Skipping corrupt signing key entry");
                         },
@@ -259,6 +285,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             None => return Ok(None),
         };
 
+        let previous_status = key.status;
         key.status = new_status;
         match new_status {
             SigningKeyStatus::Rotated => {
@@ -268,7 +295,6 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             SigningKeyStatus::Revoked => {
                 key.revoked_at = Some(now);
                 key.valid_until = valid_until;
-                // Remove from scope index if this was the active key
             },
             SigningKeyStatus::Active => {
                 // No timestamp changes for re-activation
@@ -280,8 +306,10 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
         let mut ops = vec![set_entity(primary_key, value)];
 
-        // If revoking an active key, remove the scope index entry
-        if new_status == SigningKeyStatus::Revoked {
+        // Only remove scope index when revoking a key that was previously Active.
+        // Rotated keys have already been replaced in the scope index by their
+        // successor, so deleting the index here would break active key lookup.
+        if new_status == SigningKeyStatus::Revoked && previous_status == SigningKeyStatus::Active {
             let scope_key = SystemKeys::signing_key_scope_index(&key.scope);
             ops.push(Operation::DeleteEntity { key: scope_key });
         }
@@ -427,7 +455,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
     /// Revokes all refresh tokens in a family and removes the poisoned marker.
     ///
-    /// Returns the number of tokens revoked.
+    /// The poisoned marker is only removed after all tokens are confirmed revoked.
+    /// If the scan is truncated at `MAX_TOKEN_SCAN`, the marker is preserved so
+    /// the next GC cycle retries the remaining tokens.
     pub fn revoke_token_family(
         &self,
         family: &[u8; 16],
@@ -438,6 +468,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             .state
             .list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, MAX_TOKEN_SCAN)
             .context(StateSnafu)?;
+        let truncated = entries.len() >= MAX_TOKEN_SCAN;
 
         let mut revoked_count = 0u64;
         let mut ops = Vec::new();
@@ -473,14 +504,20 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             }
         }
 
-        // Remove poisoned marker if present
-        ops.push(Operation::DeleteEntity {
-            key: SystemKeys::refresh_token_family_poisoned(family),
-        });
-
         if !ops.is_empty() {
             self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         }
+
+        // Only remove poisoned marker after all tokens are confirmed revoked.
+        // If truncated, the marker must remain so the next GC cycle retries.
+        if !truncated {
+            let marker_ops = vec![Operation::DeleteEntity {
+                key: SystemKeys::refresh_token_family_poisoned(family),
+            }];
+            self.state.apply_operations(SYSTEM_VAULT_ID, &marker_ops, 0).context(StateSnafu)?;
+        }
+
+        check_revocation_truncation(truncated, "revoke_token_family", revoked_count)?;
 
         Ok(FamilyRevocationResult { revoked_count })
     }
@@ -527,6 +564,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
                 MAX_TOKEN_SCAN,
             )
             .context(StateSnafu)?;
+        let mut truncated = entries.len() >= MAX_TOKEN_SCAN;
 
         let mut total_revoked = 0u64;
         let mut seen_families = std::collections::HashSet::new();
@@ -541,10 +579,18 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             };
 
             if token.organization == Some(org) && seen_families.insert(token.family) {
-                let result = self.revoke_token_family(&token.family, now)?;
-                total_revoked += result.revoked_count;
+                match self.revoke_token_family(&token.family, now) {
+                    Ok(result) => total_revoked += result.revoked_count,
+                    Err(super::service::SystemError::RevocationIncomplete { revoked, .. }) => {
+                        total_revoked += revoked;
+                        truncated = true;
+                    },
+                    Err(e) => return Err(e),
+                }
             }
         }
+
+        check_revocation_truncation(truncated, "revoke_all_org_refresh_tokens", total_revoked)?;
 
         Ok(SubjectRevocationResult { revoked_count: total_revoked })
     }
@@ -567,6 +613,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
                 MAX_TOKEN_SCAN,
             )
             .context(StateSnafu)?;
+        warn_if_truncated(entries.len(), "delete_expired_refresh_tokens");
 
         let mut expired_count = 0u64;
         let mut ops = Vec::new();
@@ -629,6 +676,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
                 MAX_TOKEN_SCAN,
             )
             .context(StateSnafu)?;
+        warn_if_truncated(entries.len(), "gc_poisoned_families");
 
         let mut cleaned = 0u64;
 
@@ -649,8 +697,18 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
                 },
             };
 
-            self.revoke_token_family(&family, now)?;
-            cleaned += 1;
+            match self.revoke_token_family(&family, now) {
+                Ok(_) => cleaned += 1,
+                Err(super::service::SystemError::RevocationIncomplete { revoked, .. }) => {
+                    // Partial revocation — poisoned marker preserved by revoke_token_family
+                    // so the next GC cycle will retry remaining tokens.
+                    tracing::warn!(
+                        revoked,
+                        "Poisoned family partially revoked — marker preserved for retry"
+                    );
+                },
+                Err(e) => return Err(e),
+            }
         }
 
         Ok(cleaned)
@@ -659,7 +717,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     /// Increments a user's token version and returns the new value.
     ///
     /// Used by `RevokeAllUserSessions` for forced session invalidation.
-    pub fn increment_user_token_version(
+    fn increment_user_token_version(
         &self,
         user_id: UserId,
         now: DateTime<Utc>,
@@ -698,10 +756,31 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         now: DateTime<Utc>,
     ) -> Result<AllUserSessionsRevocationResult> {
         let subject = TokenSubject::User(user_slug);
-        let revocation = self.revoke_all_subject_tokens(&subject, now)?;
+        let revocation_result = self.revoke_all_subject_tokens(&subject, now);
+
+        // Always bump the token version, even on partial revocation.
+        // The version bump is the backstop that invalidates all outstanding JWTs
+        // via the version check, regardless of whether individual token revocation
+        // completed fully.
+        let (revoked_count, was_incomplete) = match revocation_result {
+            Ok(result) => (result.revoked_count, false),
+            Err(super::service::SystemError::RevocationIncomplete { revoked, .. }) => {
+                (revoked, true)
+            },
+            Err(e) => return Err(e),
+        };
+
         let new_version = self.increment_user_token_version(user_id, now)?;
 
-        Ok(AllUserSessionsRevocationResult { revoked_count: revocation.revoked_count, new_version })
+        if was_incomplete {
+            warn!(
+                revoked_count,
+                new_version = new_version.value(),
+                "Partial revocation in revoke_all_user_sessions — version bumped as backstop"
+            );
+        }
+
+        Ok(AllUserSessionsRevocationResult { revoked_count, new_version })
     }
 
     /// Scans a token index prefix, resolves each entry to a token, and revokes
@@ -717,6 +796,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             .state
             .list_entities(SYSTEM_VAULT_ID, Some(prefix), None, MAX_TOKEN_SCAN)
             .context(StateSnafu)?;
+        let mut truncated = entries.len() >= MAX_TOKEN_SCAN;
 
         let mut total_revoked = 0u64;
         let mut seen_families = std::collections::HashSet::new();
@@ -745,11 +825,21 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
                 };
 
                 if seen_families.insert(token.family) {
-                    let result = self.revoke_token_family(&token.family, now)?;
-                    total_revoked += result.revoked_count;
+                    match self.revoke_token_family(&token.family, now) {
+                        Ok(result) => total_revoked += result.revoked_count,
+                        Err(super::service::SystemError::RevocationIncomplete {
+                            revoked, ..
+                        }) => {
+                            total_revoked += revoked;
+                            truncated = true;
+                        },
+                        Err(e) => return Err(e),
+                    }
                 }
             }
         }
+
+        check_revocation_truncation(truncated, "revoke_families_from_index", total_revoked)?;
 
         Ok(SubjectRevocationResult { revoked_count: total_revoked })
     }
@@ -1010,6 +1100,43 @@ mod tests {
 
         // Scope index should be removed — active key lookup returns None
         assert!(svc.get_active_signing_key(&SigningKeyScope::Global).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_revoke_rotated_key_preserves_successor_scope_index() {
+        let svc = create_test_service();
+        let scope = SigningKeyScope::Global;
+        let now = Utc::now();
+
+        // Key A is the active key — scope index points to "kid-A"
+        let key_a = make_signing_key(1, "kid-A", scope, SigningKeyStatus::Active);
+        svc.store_signing_key(&key_a).unwrap();
+        assert_eq!(svc.get_active_signing_key(&scope).unwrap().unwrap().kid, "kid-A");
+
+        // Key B replaces A as active — scope index now points to "kid-B"
+        let key_b = make_signing_key(2, "kid-B", scope, SigningKeyStatus::Active);
+        svc.store_signing_key(&key_b).unwrap();
+        assert_eq!(svc.get_active_signing_key(&scope).unwrap().unwrap().kid, "kid-B");
+
+        // Rotate A (Active → Rotated)
+        let grace_end = now + Duration::hours(4);
+        svc.update_signing_key_status("kid-A", SigningKeyStatus::Rotated, Some(grace_end), now)
+            .unwrap()
+            .unwrap();
+
+        // Revoke A (Rotated → Revoked) — must NOT delete scope index
+        svc.update_signing_key_status("kid-A", SigningKeyStatus::Revoked, None, now)
+            .unwrap()
+            .unwrap();
+
+        // Scope index must still point to B
+        let active = svc.get_active_signing_key(&scope).unwrap().unwrap();
+        assert_eq!(active.kid, "kid-B");
+
+        // Key A must be persisted as Revoked
+        let revoked_a = svc.get_signing_key_by_kid("kid-A").unwrap().unwrap();
+        assert_eq!(revoked_a.status, SigningKeyStatus::Revoked);
+        assert!(revoked_a.revoked_at.is_some());
     }
 
     #[test]

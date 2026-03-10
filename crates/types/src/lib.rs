@@ -48,8 +48,8 @@ pub use hash::{
     compute_tx_merkle_root, hash_eq, sha256, sha256_concat, tx_hash, vault_entry_hash,
 };
 pub use token::{
-    SESSION_AUDIENCE, SIGNING_KEY_ENVELOPE_SIZE, SigningKeyEnvelope, TokenError, TokenPair,
-    TokenSubject, TokenType, UserSessionClaims, VAULT_AUDIENCE, ValidatedToken, VaultTokenClaims,
+    SESSION_AUDIENCE, SIGNING_KEY_ENVELOPE_SIZE, SigningKeyEnvelope, TokenError, TokenSubject,
+    TokenType, UserSessionClaims, VAULT_AUDIENCE, ValidatedToken, VaultTokenClaims,
 };
 pub use types::{
     // Constants

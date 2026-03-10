@@ -1247,6 +1247,19 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         &self,
         saga: &mut CreateSigningKeySaga,
     ) -> Result<(), SagaError> {
+        // Check timeout before each step (30s — signing key creation is fast)
+        let timeout = Duration::from_secs(30);
+        if saga.is_timed_out(timeout) {
+            warn!(
+                saga_id = %saga.id,
+                scope = ?saga.input.scope,
+                elapsed_secs = (chrono::Utc::now() - saga.created_at).num_seconds(),
+                "CreateSigningKey saga timed out"
+            );
+            saga.transition(CreateSigningKeySagaState::TimedOut);
+            return Ok(());
+        }
+
         match saga.state.clone() {
             CreateSigningKeySagaState::Pending => {
                 // Idempotency: check if an active key already exists for this scope

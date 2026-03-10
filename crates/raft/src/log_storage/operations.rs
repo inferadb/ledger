@@ -17,8 +17,8 @@ use inferadb_ledger_state::{
 };
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
-    AppId, AppSlug, Hash, LedgerErrorCode, Operation, OrganizationId, TeamId, TeamSlug,
-    TokenSubject, TokenType, VaultEntry, VaultId, compute_tx_merkle_root, decode, encode,
+    AppId, AppSlug, Hash, LedgerErrorCode, Operation, OrganizationId, SetCondition, TeamId,
+    TeamSlug, TokenSubject, TokenType, VaultEntry, VaultId, compute_tx_merkle_root, decode, encode,
     events::{EventAction, EventEntry, EventOutcome},
 };
 
@@ -58,33 +58,55 @@ fn try_encode<T: serde::Serialize>(value: &T, context: &str) -> Option<Vec<u8>> 
 /// the record on its next poll cycle.
 ///
 /// This is a synchronous write through the state layer (not Raft) because
-/// the apply handler is already inside a Raft commit.
+/// the apply handler is already inside a Raft commit. The saga ID is derived
+/// deterministically from the scope to ensure all replicas produce identical
+/// state when applying the same log entry.
 fn write_signing_key_saga<B: StorageBackend>(
     state_layer: &Arc<StateLayer<B>>,
     scope: SigningKeyScope,
 ) {
-    let saga_id = uuid::Uuid::new_v4().to_string();
+    let saga_id = match &scope {
+        SigningKeyScope::Global => "create-signing-key-global".to_owned(),
+        SigningKeyScope::Organization(org_id) => {
+            format!("create-signing-key-org-{}", org_id.value())
+        },
+    };
     let saga = CreateSigningKeySaga::new(saga_id.clone(), CreateSigningKeyInput { scope });
     let wrapped = Saga::CreateSigningKey(saga);
 
     let key = format!("saga:{saga_id}");
     match serde_json::to_vec(&wrapped) {
         Ok(value) => {
-            let op =
-                Operation::SetEntity { key: key.clone(), value, condition: None, expires_at: None };
-            if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &[op], 0) {
-                tracing::error!(
-                    saga_id = %saga_id,
-                    scope = ?scope,
-                    error = %e,
-                    "Failed to write CreateSigningKeySaga record"
-                );
-            } else {
-                tracing::info!(
-                    saga_id = %saga_id,
-                    scope = ?scope,
-                    "Wrote CreateSigningKeySaga from apply handler"
-                );
+            let op = Operation::SetEntity {
+                key: key.clone(),
+                value,
+                condition: Some(SetCondition::MustNotExist),
+                expires_at: None,
+            };
+            match state_layer.apply_operations(SYSTEM_VAULT_ID, &[op], 0) {
+                Ok(_) => {
+                    tracing::info!(
+                        saga_id = %saga_id,
+                        scope = ?scope,
+                        "Wrote CreateSigningKeySaga from apply handler"
+                    );
+                },
+                Err(StateError::PreconditionFailed { .. }) => {
+                    // Expected on log replay — saga already exists from prior apply.
+                    tracing::info!(
+                        saga_id = %saga_id,
+                        scope = ?scope,
+                        "CreateSigningKeySaga already exists (idempotent replay)"
+                    );
+                },
+                Err(e) => {
+                    tracing::error!(
+                        saga_id = %saga_id,
+                        scope = ?scope,
+                        error = %e,
+                        "Failed to write CreateSigningKeySaga record"
+                    );
+                },
             }
         },
         Err(e) => {
@@ -4134,41 +4156,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     Err(e) => error_result(
                         LedgerErrorCode::Internal,
                         format!("Failed to revoke token family: {e}"),
-                    ),
-                }
-            },
-
-            LedgerRequest::RevokeAllSubjectTokens { subject } => {
-                let Some(state_layer) = &self.state_layer else {
-                    return error_result(LedgerErrorCode::Internal, "State layer not available");
-                };
-                let sys = SystemOrganizationService::new(state_layer.clone());
-
-                match sys.revoke_all_subject_tokens(subject, block_timestamp) {
-                    Ok(result) => {
-                        (LedgerResponse::SubjectTokensRevoked { count: result.revoked_count }, None)
-                    },
-                    Err(e) => error_result(
-                        LedgerErrorCode::Internal,
-                        format!("Failed to revoke subject tokens: {e}"),
-                    ),
-                }
-            },
-
-            LedgerRequest::RevokeAppVaultTokens { app, vault } => {
-                let Some(state_layer) = &self.state_layer else {
-                    return error_result(LedgerErrorCode::Internal, "State layer not available");
-                };
-                let sys = SystemOrganizationService::new(state_layer.clone());
-
-                match sys.revoke_app_vault_tokens(*app, *vault, block_timestamp) {
-                    Ok(result) => (
-                        LedgerResponse::AppVaultTokensRevoked { count: result.revoked_count },
-                        None,
-                    ),
-                    Err(e) => error_result(
-                        LedgerErrorCode::Internal,
-                        format!("Failed to revoke app vault tokens: {e}"),
                     ),
                 }
             },

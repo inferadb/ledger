@@ -3,7 +3,6 @@
 //! Domain-level types only — no dependency on `jsonwebtoken` or other
 //! crypto crates. JWT library errors live in `services/src/jwt.rs`.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 
@@ -133,21 +132,6 @@ pub struct VaultTokenClaims {
     pub scopes: Vec<String>,
 }
 
-/// Access + refresh token pair returned from create/refresh operations.
-#[derive(Debug, Clone)]
-pub struct TokenPair {
-    /// Signed JWT access token.
-    pub access_token: String,
-    /// Opaque refresh token (prefixed with `ilrt_`).
-    pub refresh_token: String,
-    /// Access token expiration.
-    pub access_expires_at: DateTime<Utc>,
-    /// Refresh token expiration.
-    pub refresh_expires_at: DateTime<Utc>,
-    /// Token type discriminator.
-    pub token_type: TokenType,
-}
-
 /// Validated token with parsed claims.
 #[derive(Debug, Clone)]
 pub enum ValidatedToken {
@@ -161,7 +145,7 @@ pub enum ValidatedToken {
 
 /// Domain-level token errors.
 ///
-/// Covers validation failures, revocation states, and missing keys.
+/// Covers validation failures and signing key lookup errors.
 /// Crypto/JWT library errors live in `services::jwt::JwtError`.
 #[derive(Debug, Snafu)]
 pub enum TokenError {
@@ -173,20 +157,12 @@ pub enum TokenError {
     #[snafu(display("Invalid token signature"))]
     InvalidSignature,
 
-    /// Token was explicitly revoked.
-    #[snafu(display("Token revoked"))]
-    Revoked,
-
     /// Token audience does not match the expected service.
     #[snafu(display("Invalid audience: expected {expected}"))]
     InvalidAudience {
         /// Expected audience value.
         expected: String,
     },
-
-    /// Token issuer does not match.
-    #[snafu(display("Invalid issuer"))]
-    InvalidIssuer,
 
     /// A required JWT claim is missing.
     #[snafu(display("Missing required claim: {claim}"))]
@@ -202,20 +178,9 @@ pub enum TokenError {
         expected: String,
     },
 
-    /// No active signing key exists for the requested scope.
-    #[snafu(display("No active signing key for scope"))]
-    NoActiveSigningKey,
-
     /// Signing key not found by kid.
     #[snafu(display("Signing key not found: {kid}"))]
     SigningKeyNotFound {
-        /// Key identifier.
-        kid: String,
-    },
-
-    /// Signing key has been revoked.
-    #[snafu(display("Signing key revoked: {kid}"))]
-    SigningKeyRevoked {
         /// Key identifier.
         kid: String,
     },
@@ -225,25 +190,6 @@ pub enum TokenError {
     SigningKeyExpired {
         /// Key identifier.
         kid: String,
-    },
-
-    /// Refresh token is invalid or expired.
-    #[snafu(display("Refresh token invalid or expired"))]
-    InvalidRefreshToken,
-
-    /// Refresh token reuse detected — family revoked.
-    #[snafu(display("Refresh token reuse detected: family revoked"))]
-    RefreshTokenReuse,
-
-    /// Token version mismatch — session force-invalidated.
-    #[snafu(display("Token version mismatch: session invalidated"))]
-    TokenVersionMismatch,
-
-    /// Requested scope is not allowed.
-    #[snafu(display("Invalid scope: {scope}"))]
-    InvalidScope {
-        /// The disallowed scope.
-        scope: String,
     },
 }
 
@@ -422,32 +368,20 @@ mod tests {
         let err = TokenError::SigningKeyNotFound { kid: "abc-123".to_string() };
         assert_eq!(err.to_string(), "Signing key not found: abc-123");
 
-        let err = TokenError::RefreshTokenReuse;
-        assert_eq!(err.to_string(), "Refresh token reuse detected: family revoked");
-
-        let err = TokenError::InvalidScope { scope: "admin:delete".to_string() };
-        assert_eq!(err.to_string(), "Invalid scope: admin:delete");
+        let err = TokenError::SigningKeyExpired { kid: "k-456".to_string() };
+        assert_eq!(err.to_string(), "Signing key expired: k-456");
     }
 
     #[test]
     fn all_token_error_variants_display() {
-        // Ensure every variant has a meaningful display string
         let variants: Vec<TokenError> = vec![
             TokenError::Expired,
             TokenError::InvalidSignature,
-            TokenError::Revoked,
             TokenError::InvalidAudience { expected: "x".into() },
-            TokenError::InvalidIssuer,
             TokenError::MissingClaim { claim: "sub".into() },
             TokenError::InvalidTokenType { expected: "user_session".into() },
-            TokenError::NoActiveSigningKey,
             TokenError::SigningKeyNotFound { kid: "k".into() },
-            TokenError::SigningKeyRevoked { kid: "k".into() },
             TokenError::SigningKeyExpired { kid: "k".into() },
-            TokenError::InvalidRefreshToken,
-            TokenError::RefreshTokenReuse,
-            TokenError::TokenVersionMismatch,
-            TokenError::InvalidScope { scope: "s".into() },
         ];
         for err in &variants {
             assert!(!err.to_string().is_empty());

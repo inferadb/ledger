@@ -556,23 +556,6 @@ pub enum LedgerRequest {
         family: [u8; 16],
     },
 
-    /// Revokes all refresh tokens for a subject (user or app).
-    /// Used for app disable cascade.
-    RevokeAllSubjectTokens {
-        /// Subject whose tokens to revoke.
-        subject: TokenSubject,
-    },
-
-    /// Revokes all refresh tokens for a specific app+vault combination.
-    /// Used for vault disconnect cascade.
-    RevokeAppVaultTokens {
-        /// App whose vault tokens to revoke. Uses `AppSlug` (not `AppId`)
-        /// because the refresh token subject index stores `TokenSubject::App(AppSlug)`.
-        app: AppSlug,
-        /// Vault to revoke tokens for.
-        vault: VaultId,
-    },
-
     /// Atomically revokes all user sessions and increments `TokenVersion`.
     RevokeAllUserSessions {
         /// User whose sessions to revoke.
@@ -1177,18 +1160,6 @@ pub enum LedgerResponse {
         count: u64,
     },
 
-    /// All tokens for a subject revoked.
-    SubjectTokensRevoked {
-        /// Number of tokens revoked.
-        count: u64,
-    },
-
-    /// All tokens for an app+vault combination revoked.
-    AppVaultTokensRevoked {
-        /// Number of tokens revoked.
-        count: u64,
-    },
-
     /// All user sessions revoked and `TokenVersion` incremented.
     AllUserSessionsRevoked {
         /// Number of tokens revoked.
@@ -1373,12 +1344,6 @@ impl fmt::Display for LedgerResponse {
             },
             LedgerResponse::TokenFamilyRevoked { count } => {
                 write!(f, "TokenFamilyRevoked(count={})", count)
-            },
-            LedgerResponse::SubjectTokensRevoked { count } => {
-                write!(f, "SubjectTokensRevoked(count={})", count)
-            },
-            LedgerResponse::AppVaultTokensRevoked { count } => {
-                write!(f, "AppVaultTokensRevoked(count={})", count)
             },
             LedgerResponse::AllUserSessionsRevoked { count, version } => {
                 write!(f, "AllUserSessionsRevoked(count={}, version={})", count, version)
@@ -1972,39 +1937,6 @@ mod tests {
     }
 
     #[test]
-    fn test_revoke_all_subject_tokens_serialization() {
-        let request =
-            LedgerRequest::RevokeAllSubjectTokens { subject: TokenSubject::App(AppSlug::new(77)) };
-
-        let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
-
-        match deserialized {
-            LedgerRequest::RevokeAllSubjectTokens { subject } => {
-                assert_eq!(subject, TokenSubject::App(AppSlug::new(77)));
-            },
-            _ => panic!("unexpected variant"),
-        }
-    }
-
-    #[test]
-    fn test_revoke_app_vault_tokens_serialization() {
-        let request =
-            LedgerRequest::RevokeAppVaultTokens { app: AppSlug::new(10), vault: VaultId::new(20) };
-
-        let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
-
-        match deserialized {
-            LedgerRequest::RevokeAppVaultTokens { app, vault } => {
-                assert_eq!(app, AppSlug::new(10));
-                assert_eq!(vault, VaultId::new(20));
-            },
-            _ => panic!("unexpected variant"),
-        }
-    }
-
-    #[test]
     fn test_revoke_all_user_sessions_serialization() {
         let request = LedgerRequest::RevokeAllUserSessions { user: UserId::new(42) };
 
@@ -2143,26 +2075,6 @@ mod tests {
         let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
         assert_eq!(response, deserialized);
         assert_eq!(format!("{response}"), "ExpiredRefreshTokensDeleted(count=42)");
-    }
-
-    #[test]
-    fn test_subject_tokens_revoked_response_serialization() {
-        let response = LedgerResponse::SubjectTokensRevoked { count: 3 };
-
-        let bytes = postcard::to_allocvec(&response).expect("serialize");
-        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
-        assert_eq!(response, deserialized);
-        assert_eq!(format!("{response}"), "SubjectTokensRevoked(count=3)");
-    }
-
-    #[test]
-    fn test_app_vault_tokens_revoked_response_serialization() {
-        let response = LedgerResponse::AppVaultTokensRevoked { count: 7 };
-
-        let bytes = postcard::to_allocvec(&response).expect("serialize");
-        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
-        assert_eq!(response, deserialized);
-        assert_eq!(format!("{response}"), "AppVaultTokensRevoked(count=7)");
     }
 
     // ============================================

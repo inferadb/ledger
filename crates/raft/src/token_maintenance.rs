@@ -65,22 +65,6 @@ pub struct TokenMaintenanceJob<B: StorageBackend + 'static> {
 }
 
 impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
-    /// Creates a maintenance job from a config interval in seconds.
-    pub fn from_interval_secs(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        node_id: LedgerNodeId,
-        state: Arc<StateLayer<B>>,
-        interval_secs: u64,
-    ) -> Self {
-        Self {
-            raft,
-            node_id,
-            state,
-            interval: Duration::from_secs(interval_secs),
-            watchdog_handle: None,
-        }
-    }
-
     /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
@@ -103,6 +87,7 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
         debug!(trace_id = %trace_ctx.trace_id, "Starting token maintenance cycle");
 
         let mut result = MaintenanceResult::default();
+        let mut had_errors = false;
 
         // Phase 1: Delete expired refresh tokens (the apply handler does the actual work)
         match self
@@ -125,6 +110,7 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
                 }
             },
             Err(e) => {
+                had_errors = true;
                 warn!(
                     trace_id = %trace_ctx.trace_id,
                     error = %e,
@@ -155,6 +141,7 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
                             );
                         },
                         Err(e) => {
+                            had_errors = true;
                             warn!(
                                 trace_id = %trace_ctx.trace_id,
                                 kid = %kid,
@@ -166,6 +153,7 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
                 }
             },
             Err(e) => {
+                had_errors = true;
                 warn!(
                     trace_id = %trace_ctx.trace_id,
                     error = %e,
@@ -176,7 +164,8 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
 
         let duration = cycle_start.elapsed().as_secs_f64();
         record_background_job_duration("token_maintenance", duration);
-        record_background_job_run("token_maintenance", "success");
+        let status = if had_errors { "failure" } else { "success" };
+        record_background_job_run("token_maintenance", status);
         record_background_job_items(
             "token_maintenance",
             result.expired_tokens_deleted + result.signing_keys_revoked,

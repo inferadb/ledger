@@ -212,6 +212,9 @@ impl RuntimeConfig {
         if let Some(ref ev) = self.events {
             ev.validate()?;
         }
+        if let Some(ref j) = self.jwt {
+            j.validate()?;
+        }
         Ok(())
     }
 

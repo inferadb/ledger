@@ -36,8 +36,8 @@ use inferadb_ledger_types::{
     events::{EventAction, EventEmission, EventEntry, EventOutcome, EventScope},
     merkle::MerkleProof as InternalMerkleProof,
     token::{
-        TokenPair as DomainTokenPair, TokenType, UserSessionClaims as DomainUserSessionClaims,
-        ValidatedToken, VaultTokenClaims as DomainVaultTokenClaims,
+        TokenType, UserSessionClaims as DomainUserSessionClaims, ValidatedToken,
+        VaultTokenClaims as DomainVaultTokenClaims,
     },
 };
 use openraft::Vote;
@@ -969,25 +969,6 @@ pub fn user_role_from_i32(value: i32) -> Result<inferadb_ledger_types::UserRole,
     let proto_role = proto::UserRole::try_from(value)
         .map_err(|_| Status::invalid_argument(format!("unknown user role value: {value}")))?;
     inferadb_ledger_types::UserRole::try_from(proto_role)
-}
-
-// =============================================================================
-// TokenPair conversions (domain::TokenPair <-> proto::TokenPair)
-// =============================================================================
-
-/// Converts a domain [`TokenPair`](DomainTokenPair) to its protobuf representation.
-///
-/// The domain `token_type` field is intentionally dropped — the proto response
-/// context already implies the token type (user session vs vault access).
-impl From<DomainTokenPair> for proto::TokenPair {
-    fn from(pair: DomainTokenPair) -> Self {
-        proto::TokenPair {
-            access_token: pair.access_token,
-            refresh_token: pair.refresh_token,
-            access_expires_at: Some(datetime_to_proto_timestamp(&pair.access_expires_at)),
-            refresh_expires_at: Some(datetime_to_proto_timestamp(&pair.refresh_expires_at)),
-        }
-    }
 }
 
 // =============================================================================
@@ -2474,31 +2455,6 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // TokenPair conversion tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn token_pair_domain_to_proto() {
-        use inferadb_ledger_types::token::{TokenPair as DomainTP, TokenType};
-
-        let dt = DateTime::from_timestamp(1700000000, 500_000_000).unwrap();
-        let pair = DomainTP {
-            access_token: "access.jwt".to_string(),
-            refresh_token: "ilrt_refresh".to_string(),
-            access_expires_at: dt,
-            refresh_expires_at: dt,
-            token_type: TokenType::UserSession,
-        };
-
-        let proto_pair: proto::TokenPair = pair.into();
-        assert_eq!(proto_pair.access_token, "access.jwt");
-        assert_eq!(proto_pair.refresh_token, "ilrt_refresh");
-        let ts = proto_pair.access_expires_at.unwrap();
-        assert_eq!(ts.seconds, 1700000000);
-        assert_eq!(ts.nanos, 500_000_000);
-    }
-
-    // -------------------------------------------------------------------------
     // ValidatedToken conversion tests
     // -------------------------------------------------------------------------
 
@@ -2698,29 +2654,5 @@ mod tests {
         assert!(validate_signing_key_status("unknown").is_err());
         assert!(validate_signing_key_status("").is_err());
         assert!(validate_signing_key_status("Active").is_err()); // case-sensitive
-    }
-
-    // -------------------------------------------------------------------------
-    // TokenPair roundtrip test
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn token_pair_roundtrip_timestamps_preserved() {
-        use inferadb_ledger_types::token::{TokenPair as DomainTP, TokenType};
-
-        let access_dt = DateTime::from_timestamp(1700001800, 0).unwrap();
-        let refresh_dt = DateTime::from_timestamp(1700086200, 0).unwrap();
-
-        let pair = DomainTP {
-            access_token: "a".to_string(),
-            refresh_token: "r".to_string(),
-            access_expires_at: access_dt,
-            refresh_expires_at: refresh_dt,
-            token_type: TokenType::UserSession,
-        };
-
-        let proto_pair: proto::TokenPair = pair.into();
-        assert_eq!(proto_pair.access_expires_at.unwrap().seconds, 1700001800);
-        assert_eq!(proto_pair.refresh_expires_at.unwrap().seconds, 1700086200);
     }
 }

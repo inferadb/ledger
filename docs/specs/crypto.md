@@ -144,19 +144,18 @@ leaf_contribution = (
 
 Incremental hash of all leaf contributions in lexicographic key order:
 
-```rust
-fn compute_bucket_root(entries: &[(Key, Value, ExpiresAt, Version)]) -> Hash {
-    let mut hasher = Sha256::new();
-    for (key, value, expires_at, version) in entries.iter().sorted_by_key(|e| &e.0) {
-        hasher.update(&(key.len() as u32).to_le_bytes());
-        hasher.update(key);
-        hasher.update(&(value.len() as u32).to_le_bytes());
-        hasher.update(value);
-        hasher.update(&expires_at.to_be_bytes());
-        hasher.update(&version.to_be_bytes());
-    }
-    hasher.finalize().into()
-}
+```
+compute_bucket_root(entries):
+    sort entries by key (lexicographic)
+    hasher = SHA-256()
+    for each (key, value, expires_at, version) in entries:
+        hasher.update(length_of(key) as little-endian uint32)
+        hasher.update(key)
+        hasher.update(length_of(value) as little-endian uint32)
+        hasher.update(value)
+        hasher.update(expires_at as big-endian uint64)
+        hasher.update(version as big-endian uint64)
+    return hasher.finalize()  // 32 bytes
 ```
 
 **Empty bucket**: `SHA-256("")`
@@ -193,43 +192,47 @@ message MerkleSibling {
 
 ### Verification Algorithm
 
-```rust
-fn verify_merkle_proof(leaf_hash: Hash, siblings: &[(Hash, Direction)], root: Hash) -> bool {
-    let mut current = leaf_hash;
-    for (sibling, direction) in siblings {
-        current = match direction {
-            Direction::Left  => sha256(sibling || current),  // Sibling LEFT of current
-            Direction::Right => sha256(current || sibling),  // Sibling RIGHT of current
-        };
-    }
-    current == root
-}
+```
+verify_merkle_proof(leaf_hash, siblings, root):
+    current = leaf_hash
+    for each (sibling_hash, direction) in siblings:
+        if direction == LEFT:
+            current = SHA-256(sibling_hash || current)   // Sibling before current
+        else:
+            current = SHA-256(current || sibling_hash)   // Sibling after current
+    return current == root
 ```
 
-`Direction::Left` = sibling concatenated BEFORE current hash.
-`Direction::Right` = sibling concatenated AFTER current hash.
+`LEFT` = sibling concatenated BEFORE current hash.
+`RIGHT` = sibling concatenated AFTER current hash.
 
 ## State Proof Format
 
 State proofs differ from transaction proofs—bucket-based hashing, not full Merkle tree.
 
-```rust
-struct StateProof {
-    key: Vec<u8>,
-    value: Vec<u8>,
-    expires_at: u64,
-    version: u64,
-    bucket_id: u8,
-    bucket_root: Hash,               // Computed from bucket contents
-    other_bucket_roots: [Hash; 255], // All other bucket roots
-}
 ```
+BucketEntry:
+    key:                bytes
+    value:              bytes
+    expires_at:         uint64
+    version:            uint64
+
+StateProof:
+    target_key:         bytes            // The key being proved
+    bucket_id:          uint8            // 0-255 (seahash(target_key) % 256)
+    bucket_entries:     BucketEntry[]    // All entries in this bucket
+    other_bucket_roots: Hash[255]        // All other bucket roots (32 bytes each)
+```
+
+The proof includes the full bucket contents so the verifier can recompute `bucket_root` independently.
 
 ### Verification
 
-1. Verify `seahash(key) % 256 == bucket_id`
-2. Verify `bucket_root` matches by hashing all bucket contents (requires full bucket)
-3. Verify `state_root == SHA-256(bucket_roots[0..256])` with provided roots
+1. Verify `seahash(target_key) % 256 == bucket_id`
+2. Verify `target_key` exists in `bucket_entries`
+3. Recompute `bucket_root = compute_bucket_root(bucket_entries)`
+4. Reconstruct all 256 bucket roots (computed root at `bucket_id`, provided roots elsewhere)
+5. Verify `state_root == SHA-256(bucket_roots[0..256])`
 
 ### Trade-offs
 
@@ -264,7 +267,7 @@ Ledger signs JWT tokens using Ed25519 (EdDSA). This is separate from the data in
 **EdDSA with Ed25519** — the only supported algorithm. Enforced at two levels:
 
 1. Raw JWT header pre-check: reject any `alg` value that is not exactly the string `"EdDSA"`
-2. Library-level: `Validation::algorithms(&[Algorithm::EdDSA])`
+2. Library-level: configure the JWT validation library to accept only the EdDSA algorithm
 
 ### Key Identifier Format
 
@@ -287,23 +290,23 @@ Private key material is envelope-encrypted at rest using the Region Master Key (
 
 **Encryption flow:**
 
-1. Generate fresh DEK via `generate_dek()`
-2. Wrap DEK with RMK via `wrap_dek(&dek, rmk)` (AES-KWP)
-3. Encrypt Ed25519 private key (32 bytes) with DEK using AES-256-GCM
+1. Generate fresh DEK (32 bytes from CSPRNG)
+2. Wrap DEK with RMK via AES-KWP
+3. Generate nonce (12 bytes from CSPRNG) and encrypt Ed25519 private key (32 bytes) with DEK using AES-256-GCM
 4. Use `kid` as AAD (additional authenticated data) to bind ciphertext to key identity
 
 **Decryption flow:**
 
 1. Unwrap DEK with RMK via `unwrap_dek(&wrapped_dek, rmk)`
 2. Decrypt ciphertext with DEK using AES-256-GCM with `kid` as AAD
-3. Return private key bytes in `Zeroizing<Vec<u8>>` (zeroized on drop)
+3. Return private key bytes in a zeroizing buffer (zeroized on deallocation/drop)
 
 ### Refresh Token Hash
 
 Refresh tokens are hashed with SHA-256 for storage lookup:
 
 ```
-token_string = "ilrt_" + base64url(32 random bytes)    # 48 chars
+token_string = "ilrt_" + base64url(32 CSPRNG bytes)     # 48 chars
 token_hash   = SHA-256(token_string)                    # 32 bytes, stored in state
 ```
 

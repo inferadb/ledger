@@ -208,7 +208,7 @@ for result in results.results {
 | Field               | Type             | Description                     |
 | ------------------- | ---------------- | ------------------------------- |
 | `organization_slug` | OrganizationSlug | Target organization             |
-| `vault`             | VaultSlug        | (Optional) Target vault         |
+| `vault_slug`        | VaultSlug        | (Optional) Target vault         |
 | `keys`              | string[]         | Keys to read (max 1000)         |
 | `consistency`       | ReadConsistency  | Consistency level for all reads |
 

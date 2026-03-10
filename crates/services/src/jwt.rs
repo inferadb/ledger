@@ -1,8 +1,8 @@
 //! JWT signing, validation, and key management.
 //!
 //! This module contains:
-//! - `JwtEngine` — signing key cache with lock-free reads (ArcSwap) and methods
-//!   for signing/validating JWTs.
+//! - `JwtEngine` — signing key cache with lock-free reads (ArcSwap) and methods for
+//!   signing/validating JWTs.
 //! - Refresh token utilities (`generate_refresh_token`, `generate_family_id`).
 //! - Private key envelope encryption (`encrypt_private_key`, `decrypt_private_key`).
 //!
@@ -436,6 +436,7 @@ impl JwtEngine {
     }
 
     /// Returns a reference to the engine's configuration.
+    #[cfg(test)]
     #[must_use]
     pub fn config(&self) -> &JwtConfig {
         &self.config
