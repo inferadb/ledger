@@ -674,7 +674,7 @@ pub enum SigningKeyStatus {
 /// region's RMK via AES-KWP. The plaintext private key never appears in state.
 ///
 /// Key pattern: `_sys:signing_key:{id}` → postcard-serialized entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SigningKey {
     /// Internal sequential identifier.
     pub id: SigningKeyId,
@@ -704,6 +704,25 @@ pub struct SigningKey {
     /// When this key was permanently revoked.
     #[serde(default)]
     pub revoked_at: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for SigningKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SigningKey")
+            .field("id", &self.id)
+            .field("kid", &self.kid)
+            .field("public_key_bytes", &format!("[{} bytes]", self.public_key_bytes.len()))
+            .field("encrypted_private_key", &"[REDACTED]")
+            .field("rmk_version", &self.rmk_version)
+            .field("scope", &self.scope)
+            .field("status", &self.status)
+            .field("valid_from", &self.valid_from)
+            .field("valid_until", &self.valid_until)
+            .field("created_at", &self.created_at)
+            .field("rotated_at", &self.rotated_at)
+            .field("revoked_at", &self.revoked_at)
+            .finish()
+    }
 }
 
 // ============================================================================

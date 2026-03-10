@@ -393,6 +393,12 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
                 .map_err(|e| Status::internal(format!("Failed to read user: {e}")))?
                 .ok_or_else(|| Status::unauthenticated("User not found"))?;
 
+            // Defense-in-depth: reject suspended/deactivated users even if
+            // TokenVersion hasn't been bumped yet.
+            if user.status != inferadb_ledger_types::UserStatus::Active {
+                return Err(Status::unauthenticated("User is not active"));
+            }
+
             if user.version != claims.version {
                 return Err(Status::unauthenticated("Session invalidated"));
             }

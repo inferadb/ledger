@@ -1737,6 +1737,29 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         None,
                                     );
                                 }
+                                // Cascade: revoke all refresh tokens for this app
+                                {
+                                    let sys = SystemOrganizationService::new(state_layer.clone());
+                                    let subject = TokenSubject::App(app_record.slug);
+                                    match sys.revoke_all_subject_tokens(&subject, block_timestamp) {
+                                        Ok(result) => {
+                                            tracing::info!(
+                                                app_id = app.value(),
+                                                app_slug = app_record.slug.value(),
+                                                revoked_count = result.revoked_count,
+                                                "Cascade-revoked refresh tokens on app delete"
+                                            );
+                                        },
+                                        Err(e) => {
+                                            tracing::error!(
+                                                app_id = app.value(),
+                                                error = %e,
+                                                "Failed to cascade-revoke tokens on app delete"
+                                            );
+                                        },
+                                    }
+                                }
+
                                 state.app_slug_index.remove(&app_record.slug);
                                 state.app_id_to_slug.remove(app);
                                 state.app_name_index.remove(&(*organization, app_record.name));

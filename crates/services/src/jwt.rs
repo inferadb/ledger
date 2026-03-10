@@ -207,10 +207,14 @@ impl JwtEngine {
         let cached =
             Arc::new(CachedSigningKey { metadata: key.clone(), decoding_key, private_key_bytes });
 
-        // Copy-on-write: clone HashMap, insert, swap.
-        let mut map = HashMap::clone(&self.signing_keys.load());
-        map.insert(key.kid.clone(), cached);
-        self.signing_keys.store(Arc::new(map));
+        // RCU (read-copy-update): retries if a concurrent update changed the map,
+        // preventing lost evictions or insertions.
+        let kid_owned = key.kid.clone();
+        self.signing_keys.rcu(move |current| {
+            let mut map = HashMap::clone(current);
+            map.insert(kid_owned.clone(), Arc::clone(&cached));
+            map
+        });
 
         Ok(())
     }
@@ -218,11 +222,14 @@ impl JwtEngine {
     /// Evict a key from cache (on revocation).
     ///
     /// Triggers `Zeroize` on drop when the last Arc reference is released.
-    /// Copy-on-write: clones the HashMap, removes the entry, swaps.
+    /// Uses RCU to prevent concurrent load_key from resurrecting the evicted key.
     pub fn evict_key(&self, kid: &str) {
-        let mut map = HashMap::clone(&self.signing_keys.load());
-        map.remove(kid);
-        self.signing_keys.store(Arc::new(map));
+        let kid_owned = kid.to_owned();
+        self.signing_keys.rcu(move |current| {
+            let mut map = HashMap::clone(current);
+            map.remove(&kid_owned);
+            map
+        });
     }
 
     /// Look up a cached key by kid (lock-free read via `ArcSwap::load`).
@@ -378,10 +385,11 @@ impl JwtEngine {
             SigningKeyStatus::Active => {},
             SigningKeyStatus::Rotated => {
                 // Check if grace period has expired.
-                if let Some(valid_until) = cached.metadata.valid_until
-                    && Utc::now() > valid_until
-                {
-                    return Err(TokenError::SigningKeyExpired { kid }).context(TokenSnafu);
+                // Treat missing valid_until on a Rotated key as immediately expired
+                // (defense-in-depth against state machine bugs).
+                match cached.metadata.valid_until {
+                    Some(valid_until) if Utc::now() <= valid_until => {},
+                    _ => return Err(TokenError::SigningKeyExpired { kid }).context(TokenSnafu),
                 }
             },
             SigningKeyStatus::Revoked => {
