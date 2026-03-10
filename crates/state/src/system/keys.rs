@@ -4,11 +4,9 @@ use std::fmt::Write;
 
 use inferadb_ledger_types::{
     AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, NodeId, OrganizationId,
-    OrganizationSlug, RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug, TokenSubject,
-    UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
+    OrganizationSlug, RefreshTokenId, Region, SigningKeyId, SigningKeyScope, TeamId, TeamSlug,
+    TokenSubject, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
-
-use super::types::SigningKeyScope;
 
 /// Encodes a byte slice as lowercase hexadecimal.
 fn encode_hex(bytes: &[u8]) -> String {

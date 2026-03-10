@@ -55,6 +55,7 @@ pub use types::{
     // Constants
     ALL_REGIONS,
     // App identifiers
+    AppCredentialType,
     AppId,
     AppSlug,
     // Structs
@@ -73,6 +74,7 @@ pub use types::{
     // Enums
     Operation,
     OrganizationId,
+    OrganizationMemberRole,
     // External organization identifier
     OrganizationSlug,
     // Resource accounting
@@ -85,8 +87,10 @@ pub use types::{
     RegionParseError,
     Relationship,
     SetCondition,
-    // Signing key identifier
+    // Signing key types
     SigningKeyId,
+    SigningKeyScope,
+    SigningKeyStatus,
     // Team identifiers
     TeamId,
     TeamSlug,

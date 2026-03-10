@@ -8,7 +8,7 @@
 use std::{sync::Arc, time::Duration};
 
 use inferadb_ledger_raft::{
-    error::{ServiceError, classify_raft_error},
+    error::classify_raft_error,
     log_storage::AppliedStateAccessor,
     logging::{OperationType, RequestContext, Sampler},
     trace_context,
@@ -91,8 +91,8 @@ impl ServiceContext {
 
     /// Proposes a `LedgerRequest` through Raft with deadline handling.
     ///
-    /// Maps Raft errors via `ServiceError::raft()` for uniform gRPC status
-    /// conversion. Used by `OrganizationService`, `VaultService`, and `AppService`.
+    /// Maps Raft errors via `classify_raft_error`: leadership errors become
+    /// `UNAVAILABLE` (retryable), other Raft errors become `INTERNAL`.
     pub(crate) async fn propose_request(
         &self,
         request: LedgerRequest,
@@ -101,42 +101,6 @@ impl ServiceContext {
     ) -> Result<LedgerResponse, Status> {
         let timeout = self.effective_timeout(grpc_metadata);
         let payload = RaftPayload::new(request);
-
-        ctx.start_raft_timer();
-        let result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
-        ctx.end_raft_timer();
-
-        match result {
-            Ok(Ok(resp)) => Ok(resp.data),
-            Ok(Err(e)) => {
-                ctx.set_error("RaftError", &e.to_string());
-                Err(ServiceError::raft(e).into())
-            },
-            Err(_elapsed) => {
-                inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
-                ctx.set_error("Timeout", "Raft proposal timed out");
-                Err(Status::deadline_exceeded(format!(
-                    "Raft proposal timed out after {}ms",
-                    timeout.as_millis()
-                )))
-            },
-        }
-    }
-
-    /// Proposes a system request through Raft with deadline handling.
-    ///
-    /// Wraps the `SystemRequest` as `LedgerRequest::System` and uses
-    /// `classify_raft_error` for error mapping (more granular than
-    /// `ServiceError::raft()`). Used by `UserService`.
-    pub(crate) async fn propose_system_request(
-        &self,
-        system_request: inferadb_ledger_raft::types::SystemRequest,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        ctx: &mut RequestContext,
-    ) -> Result<LedgerResponse, Status> {
-        let timeout = self.effective_timeout(grpc_metadata);
-        let ledger_request = LedgerRequest::System(system_request);
-        let payload = RaftPayload::new(ledger_request);
 
         ctx.start_raft_timer();
         let result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
@@ -157,6 +121,19 @@ impl ServiceContext {
                 )))
             },
         }
+    }
+
+    /// Proposes a system request through Raft with deadline handling.
+    ///
+    /// Wraps the `SystemRequest` as `LedgerRequest::System` and delegates
+    /// to `propose_request`.
+    pub(crate) async fn propose_system_request(
+        &self,
+        system_request: inferadb_ledger_raft::types::SystemRequest,
+        grpc_metadata: &tonic::metadata::MetadataMap,
+        ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, Status> {
+        self.propose_request(LedgerRequest::System(system_request), grpc_metadata, ctx).await
     }
 
     /// Records a handler-phase audit event if the event handle is configured.

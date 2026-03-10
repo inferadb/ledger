@@ -578,15 +578,18 @@ pub fn vault_entry_to_proto_block(
 // =============================================================================
 
 /// Converts a chrono [`DateTime<Utc>`] to a [`prost_types::Timestamp`].
-fn datetime_to_proto_timestamp(dt: &DateTime<Utc>) -> prost_types::Timestamp {
-    prost_types::Timestamp { seconds: dt.timestamp(), nanos: dt.timestamp_subsec_nanos() as i32 }
+pub fn datetime_to_proto_timestamp(dt: &DateTime<Utc>) -> prost_types::Timestamp {
+    prost_types::Timestamp {
+        seconds: dt.timestamp(),
+        nanos: i32::try_from(dt.timestamp_subsec_nanos()).unwrap_or(0),
+    }
 }
 
 /// Converts a [`prost_types::Timestamp`] to a chrono [`DateTime<Utc>`].
 ///
-/// Falls back to Unix epoch if the timestamp is invalid.
-fn proto_timestamp_to_datetime(ts: &prost_types::Timestamp) -> DateTime<Utc> {
-    DateTime::from_timestamp(ts.seconds, ts.nanos as u32).unwrap_or(DateTime::UNIX_EPOCH)
+/// Returns [`DateTime::UNIX_EPOCH`] if the timestamp cannot be represented.
+pub fn proto_timestamp_to_datetime(ts: &prost_types::Timestamp) -> DateTime<Utc> {
+    DateTime::from_timestamp(ts.seconds, ts.nanos.max(0) as u32).unwrap_or(DateTime::UNIX_EPOCH)
 }
 
 // =============================================================================

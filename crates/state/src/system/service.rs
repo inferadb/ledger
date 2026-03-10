@@ -13,8 +13,8 @@ use chrono::Utc;
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
     EmailVerifyTokenId, NodeId, Operation, OrganizationId, OrganizationSlug, Region, SetCondition,
-    TokenVersion, UserEmailId, UserId, UserRole, UserSlug, UserStatus, VaultId, VaultSlug, decode,
-    encode,
+    SigningKeyScope, TokenVersion, UserEmailId, UserId, UserRole, UserSlug, UserStatus, VaultId,
+    VaultSlug, decode, encode,
 };
 use snafu::{ResultExt, Snafu};
 use tracing::warn;
@@ -23,8 +23,8 @@ use super::{
     keys::SystemKeys,
     types::{
         EmailVerificationToken, ErasureAuditRecord, MigrationSummary, NodeInfo,
-        OrganizationRegistry, OrganizationStatus, SigningKeyScope, SubjectKey, User,
-        UserDirectoryEntry, UserDirectoryStatus, UserEmail, UserMigrationEntry,
+        OrganizationRegistry, OrganizationStatus, SubjectKey, User, UserDirectoryEntry,
+        UserDirectoryStatus, UserEmail, UserMigrationEntry,
     },
 };
 use crate::state::{StateError, StateLayer};

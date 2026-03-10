@@ -6,8 +6,8 @@
 use chrono::{DateTime, Utc};
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
-    AppSlug, Operation, OrganizationId, RefreshTokenId, SigningKeyId, TokenSubject, TokenVersion,
-    UserId, UserSlug, VaultId, decode, encode,
+    AppSlug, Operation, OrganizationId, RefreshTokenId, SigningKeyId, SigningKeyScope,
+    SigningKeyStatus, TokenSubject, TokenVersion, UserId, UserSlug, VaultId, decode, encode,
 };
 use snafu::ResultExt;
 use tracing::warn;
@@ -15,7 +15,7 @@ use tracing::warn;
 use super::{
     keys::SystemKeys,
     service::{CodecSnafu, Result, SYSTEM_VAULT_ID, StateSnafu, SystemOrganizationService},
-    types::{RefreshToken, SigningKey, SigningKeyScope, SigningKeyStatus, User},
+    types::{RefreshToken, SigningKey, User},
 };
 
 /// Maximum number of entries scanned in a prefix iteration.

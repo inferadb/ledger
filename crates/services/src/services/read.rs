@@ -44,6 +44,7 @@ use tracing::{debug, warn};
 use super::{
     ForwardClient,
     forward_client::LeaderChannelCache,
+    helpers::storage_err,
     region_resolver::{RegionContext, RegionResolver, RemoteRegionInfo, ResolveResult},
     slug_resolver::SlugResolver,
 };
@@ -1416,9 +1417,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         let height = req.height;
 
         // Find the region height containing this vault block
-        let region_height = archive
-            .find_region_height(organization_id, vault_id, height)
-            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+        let region_height =
+            archive.find_region_height(organization_id, vault_id, height).map_err(storage_err)?;
 
         let region_height = match region_height {
             Some(h) => h,
@@ -1426,9 +1426,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         };
 
         // Read the region block
-        let region_block = archive
-            .read_block(region_height)
-            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+        let region_block = archive.read_block(region_height).map_err(storage_err)?;
 
         // Find the vault entry in the region block
         let vault_entry = region_block.vault_entries.iter().find(|e| {
@@ -1506,16 +1504,14 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             // Find the region height for this vault block
             let region_height = match archive
                 .find_region_height(organization_id, vault_id, height)
-                .map_err(|e| Status::internal(format!("Storage error: {}", e)))?
+                .map_err(storage_err)?
             {
                 Some(h) => h,
                 None => continue, // Block not found, skip
             };
 
             // Read the region block
-            let region_block = archive
-                .read_block(region_height)
-                .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+            let region_block = archive.read_block(region_height).map_err(storage_err)?;
 
             // Find the vault entry
             if let Some(entry) = region_block.vault_entries.iter().find(|e| {
@@ -1758,9 +1754,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         let relationships: Vec<inferadb_ledger_proto::proto::Relationship> =
             if let (Some(resource), Some(relation)) = (&req.resource, &req.relation) {
                 // Optimized path: use index lookup for resource+relation
-                let subjects = state
-                    .list_subjects(vault_id, resource, relation)
-                    .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+                let subjects =
+                    state.list_subjects(vault_id, resource, relation).map_err(storage_err)?;
 
                 subjects
                     .into_iter()
@@ -1773,9 +1768,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                     .collect()
             } else if let Some(subject) = &req.subject {
                 // Use reverse index for subject lookup
-                let resources = state
-                    .list_resources_for_subject(vault_id, subject)
-                    .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+                let resources =
+                    state.list_resources_for_subject(vault_id, subject).map_err(storage_err)?;
 
                 resources
                     .into_iter()
@@ -1790,7 +1784,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 // Full scan with optional resource filter
                 let raw_rels = state
                     .list_relationships(vault_id, resume_key.as_deref(), limit)
-                    .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+                    .map_err(storage_err)?;
 
                 raw_rels
                     .into_iter()
@@ -1908,7 +1902,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         let state = &*region.state;
         let relationships = state
             .list_relationships(vault_id, resume_key.as_deref(), limit * 10) // Over-fetch to filter
-            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+            .map_err(storage_err)?;
 
         // Extract unique resource IDs matching the type prefix
         let mut resources: Vec<String> = relationships
@@ -2044,7 +2038,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         let state = &*region.state;
         let raw_entities = state
             .list_entities(vault_id, prefix, resume_key.as_deref(), limit + 1)
-            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+            .map_err(storage_err)?;
 
         // Filter expired entities if not requested
         let now = std::time::SystemTime::now()

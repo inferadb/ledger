@@ -103,7 +103,7 @@ pub use error::{Result, SdkError};
 // Re-export commonly used types from inferadb-ledger-types
 pub use inferadb_ledger_types::{
     AppId, AppSlug, ClientAssertionId, OrganizationId, OrganizationSlug, Region, TeamId, TeamSlug,
-    UserRole, UserSlug, UserStatus, VaultId, VaultSlug,
+    UserEmailId, UserRole, UserSlug, UserStatus, VaultId, VaultSlug,
 };
 pub use metrics::{ConnectionEvent, MetricsSdkMetrics, NoopSdkMetrics, SdkMetrics};
 pub use retry::{with_retry, with_retry_cancellable};

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{
     AppSlug, ClientAssertionId as DomainClientAssertionId, OrganizationSlug, Region, TeamSlug,
-    UserRole, UserSlug, UserStatus, VaultSlug,
+    UserEmailId, UserRole, UserSlug, UserStatus, VaultSlug,
 };
 use tonic::service::interceptor::InterceptedService;
 
@@ -263,12 +263,12 @@ pub(crate) fn user_info_from_proto(user: &proto::User) -> UserInfo {
     UserInfo {
         slug: UserSlug::new(user.slug.as_ref().map_or(0, |s| s.slug)),
         name: user.name.clone(),
-        primary_email_id: user.email.as_ref().map_or(0, |e| e.id),
+        primary_email_id: UserEmailId::new(user.email.as_ref().map_or(0, |e| e.id)),
         status: user_status_from_proto_i32(user.status),
         role: user_role_from_proto_i32(user.role),
-        created_at: user.created_at,
-        updated_at: user.updated_at,
-        deleted_at: user.deleted_at,
+        created_at: user.created_at.as_ref().and_then(proto_timestamp_to_system_time),
+        updated_at: user.updated_at.as_ref().and_then(proto_timestamp_to_system_time),
+        deleted_at: user.deleted_at.as_ref().and_then(proto_timestamp_to_system_time),
         retention_days: None,
     }
 }
@@ -276,12 +276,11 @@ pub(crate) fn user_info_from_proto(user: &proto::User) -> UserInfo {
 /// Converts a proto `UserEmail` message to a [`UserEmailInfo`].
 pub(crate) fn user_email_info_from_proto(email: &proto::UserEmail) -> UserEmailInfo {
     UserEmailInfo {
-        id: email.id.as_ref().map_or(0, |e| e.id),
-        user_id: email.user.as_ref().map(|u| u.id),
+        id: UserEmailId::new(email.id.as_ref().map_or(0, |e| e.id)),
         email: email.email.clone(),
         verified: email.verified_at.is_some(),
-        created_at: email.created_at,
-        verified_at: email.verified_at,
+        created_at: email.created_at.as_ref().and_then(proto_timestamp_to_system_time),
+        verified_at: email.verified_at.as_ref().and_then(proto_timestamp_to_system_time),
     }
 }
 
@@ -306,17 +305,17 @@ pub struct UserInfo {
     /// Display name.
     pub name: String,
     /// Primary email ID.
-    pub primary_email_id: i64,
+    pub primary_email_id: UserEmailId,
     /// Current status.
     pub status: UserStatus,
     /// Authorization role.
     pub role: UserRole,
     /// When the user was created.
-    pub created_at: Option<prost_types::Timestamp>,
+    pub created_at: Option<std::time::SystemTime>,
     /// When the user was last updated.
-    pub updated_at: Option<prost_types::Timestamp>,
+    pub updated_at: Option<std::time::SystemTime>,
     /// When the user was soft-deleted (if deleted).
-    pub deleted_at: Option<prost_types::Timestamp>,
+    pub deleted_at: Option<std::time::SystemTime>,
     /// Retention period in days (populated on delete responses).
     pub retention_days: Option<u32>,
 }
@@ -325,17 +324,15 @@ pub struct UserInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserEmailInfo {
     /// Email record ID.
-    pub id: i64,
-    /// User this email belongs to (internal ID).
-    pub user_id: Option<i64>,
+    pub id: UserEmailId,
     /// Email address.
     pub email: String,
     /// Whether this email is verified.
     pub verified: bool,
     /// When the email was created.
-    pub created_at: Option<prost_types::Timestamp>,
+    pub created_at: Option<std::time::SystemTime>,
     /// When the email was verified (if verified).
-    pub verified_at: Option<prost_types::Timestamp>,
+    pub verified_at: Option<std::time::SystemTime>,
 }
 
 /// Information about a user region migration.
@@ -4704,7 +4701,7 @@ impl LedgerClient {
         user: UserSlug,
         name: Option<String>,
         role: Option<UserRole>,
-        primary_email_id: Option<i64>,
+        primary_email_id: Option<UserEmailId>,
     ) -> Result<UserInfo> {
         self.check_shutdown(None)?;
 
@@ -4730,7 +4727,8 @@ impl LedgerClient {
                         slug: Some(proto::UserSlug { slug: user.value() }),
                         name: name.clone(),
                         role: proto_role,
-                        primary_email: primary_email_id.map(|id| proto::UserEmailId { id }),
+                        primary_email: primary_email_id
+                            .map(|id| proto::UserEmailId { id: id.value() }),
                     };
 
                     let response =
@@ -4780,12 +4778,15 @@ impl LedgerClient {
                     Ok(UserInfo {
                         slug: UserSlug::new(slug_val),
                         name: String::new(),
-                        primary_email_id: 0,
+                        primary_email_id: UserEmailId::new(0),
                         status: UserStatus::Deleted,
                         role: UserRole::User,
                         created_at: None,
                         updated_at: None,
-                        deleted_at: response.deleted_at,
+                        deleted_at: response
+                            .deleted_at
+                            .as_ref()
+                            .and_then(proto_timestamp_to_system_time),
                         retention_days: Some(response.retention_days),
                     })
                 },
@@ -4913,7 +4914,7 @@ impl LedgerClient {
     }
 
     /// Deletes an email record from a user.
-    pub async fn delete_user_email(&self, user: UserSlug, email_id: i64) -> Result<()> {
+    pub async fn delete_user_email(&self, user: UserSlug, email_id: UserEmailId) -> Result<()> {
         self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
@@ -4931,7 +4932,7 @@ impl LedgerClient {
 
                     let request = proto::DeleteUserEmailRequest {
                         user: Some(proto::UserSlug { slug: user.value() }),
-                        email_id: Some(proto::UserEmailId { id: email_id }),
+                        email_id: Some(proto::UserEmailId { id: email_id.value() }),
                     };
 
                     client.delete_user_email(tonic::Request::new(request)).await?;
@@ -5540,8 +5541,7 @@ impl LedgerClient {
         self.set_app_enabled(organization, user, app, false).await
     }
 
-    /// Sets whether an app is enabled or disabled.
-    pub async fn set_app_enabled(
+    async fn set_app_enabled(
         &self,
         organization: OrganizationSlug,
         user: UserSlug,

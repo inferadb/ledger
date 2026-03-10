@@ -88,9 +88,8 @@ impl PositionTracker for HeightTracker {
 ///
 /// # Example
 ///
-/// ```no_run
-/// # use inferadb_ledger_sdk::{ReconnectingStream, HeightTracker};
-/// # use inferadb_ledger_sdk::RetryPolicy;
+/// ```ignore
+/// # use inferadb_ledger_sdk::{HeightTracker, RetryPolicy};
 /// # async fn example(
 /// #     initial_stream: tonic::Streaming<inferadb_ledger_proto::proto::BlockAnnouncement>,
 /// #     start_height: u64,

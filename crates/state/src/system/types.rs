@@ -5,9 +5,9 @@ use std::net::SocketAddr;
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
     AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, NodeId, OrganizationId,
-    OrganizationSlug, RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug, TokenSubject,
-    TokenType, TokenVersion, UserEmailId, UserId, UserRole, UserSlug, UserStatus, VaultId,
-    VaultSlug,
+    OrganizationMemberRole, OrganizationSlug, RefreshTokenId, Region, SigningKeyId,
+    SigningKeyScope, SigningKeyStatus, TeamId, TeamSlug, TokenSubject, TokenType, TokenVersion,
+    UserEmailId, UserId, UserRole, UserSlug, UserStatus, VaultId, VaultSlug,
 };
 use serde::{Deserialize, Serialize};
 
@@ -340,17 +340,6 @@ pub struct PendingOrganizationProfile {
     pub name: String,
 }
 
-/// Role within an organization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OrganizationMemberRole {
-    /// Organization administrator — can manage members and settings.
-    Admin,
-    /// Regular organization member.
-    #[default]
-    Member,
-}
-
 /// A member of an organization with their role and join timestamp.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrganizationMember {
@@ -579,20 +568,6 @@ pub struct AppVaultConnection {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Credential type discriminator for the unified enable/disable RPC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AppCredentialType {
-    /// Client secret credential.
-    ClientSecret,
-    /// CA-signed mTLS credential.
-    MtlsCa,
-    /// Self-signed mTLS credential.
-    MtlsSelfSigned,
-    /// Client assertion (private key JWT) credential type-level toggle.
-    ClientAssertion,
-}
-
 // ============================================================================
 // Cluster Membership
 // ============================================================================
@@ -644,29 +619,6 @@ pub enum NodeRole {
 // ============================================================================
 // Signing Key Types
 // ============================================================================
-
-/// Scope of a signing key. Sum type with data to eliminate invalid states
-/// (e.g., `Global` with an org ID, or `Organization` without one).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SigningKeyScope {
-    /// Global signing key used for user session tokens.
-    Global,
-    /// Per-organization signing key used for vault access tokens.
-    Organization(OrganizationId),
-}
-
-/// Lifecycle status of a signing key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SigningKeyStatus {
-    /// Current signing key for its scope. Used for both signing and verification.
-    Active,
-    /// Previous key after rotation. Valid for verification only during grace period.
-    Rotated,
-    /// Permanently invalidated. Cannot be used for signing or verification.
-    Revoked,
-}
 
 /// Ed25519 signing key record stored in the `_system` organization.
 ///

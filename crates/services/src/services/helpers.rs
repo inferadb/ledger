@@ -3,7 +3,7 @@
 //! These functions consolidate logic that was previously duplicated across
 //! `WriteService` and `AdminService`.
 
-use std::sync::Arc;
+use std::{fmt::Display, sync::Arc};
 
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_raft::{graceful_shutdown::HealthState, metrics, rate_limit::RateLimiter};
@@ -285,4 +285,12 @@ pub(crate) fn create_replay_context() -> Result<(TempDir, StateLayer<FileBackend
     );
     let temp_state = StateLayer::new(temp_db);
     Ok((temp_dir, temp_state))
+}
+
+/// Maps a storage error to `Status::internal`.
+///
+/// Consolidates the repeated `.map_err(|e| Status::internal(format!("Storage error: {e}")))`
+/// pattern used across read service methods.
+pub(crate) fn storage_err(e: impl Display) -> Status {
+    Status::internal(format!("Storage error: {e}"))
 }

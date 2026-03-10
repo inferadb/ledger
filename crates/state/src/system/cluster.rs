@@ -25,35 +25,14 @@
 //!    `GetSystemState` RPC to refresh their cached system state (organization registry, routing
 //!    info). This provides an additional layer of freshness beyond Raft replication.
 //!
-//! The `LearnerCacheConfig` below provides configuration for cache TTL and refresh
-//! intervals. Staleness checks can be integrated into read paths if needed.
+//! Staleness checks can be integrated into read paths if needed.
 
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{NodeId, Region};
 
 use super::types::{NodeInfo, NodeRole};
-
-/// Configuration for learner cache staleness handling.
-///
-/// Currently not actively used - included for future implementation.
-#[derive(Debug, Clone)]
-pub struct LearnerCacheConfig {
-    /// Maximum age before learner considers its cache stale and falls back to voter query.
-    /// Default: 5 seconds.
-    pub cache_ttl: Duration,
-
-    /// Interval at which learners poll voters for freshness checks.
-    /// Default: 1 second.
-    pub refresh_interval: Duration,
-}
-
-impl Default for LearnerCacheConfig {
-    fn default() -> Self {
-        Self { cache_ttl: Duration::from_secs(5), refresh_interval: Duration::from_secs(1) }
-    }
-}
 
 /// Maximum number of voters per Raft group.
 ///
@@ -529,13 +508,6 @@ mod tests {
         let stale = cluster.find_stale_nodes(chrono::Duration::seconds(30), now);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0], NodeId::new("node-stale"));
-    }
-
-    #[test]
-    fn test_learner_cache_config_defaults() {
-        let config = LearnerCacheConfig::default();
-        assert_eq!(config.cache_ttl, std::time::Duration::from_secs(5));
-        assert_eq!(config.refresh_interval, std::time::Duration::from_secs(1));
     }
 
     // =========================================================================

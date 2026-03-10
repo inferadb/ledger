@@ -20,10 +20,12 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use inferadb_ledger_types::{OrganizationId, OrganizationSlug, Region, UserId, UserSlug};
+use inferadb_ledger_types::{
+    OrganizationId, OrganizationSlug, Region, SigningKeyScope, UserId, UserSlug,
+};
 use serde::{Deserialize, Serialize};
 
-use super::types::{OrganizationTier, SigningKeyScope};
+use super::types::OrganizationTier;
 
 /// Unique identifier for a saga.
 ///

@@ -701,6 +701,54 @@ pub enum UserRole {
     Admin,
 }
 
+/// Role within an organization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationMemberRole {
+    /// Organization administrator — can manage members and settings.
+    Admin,
+    /// Regular organization member.
+    #[default]
+    Member,
+}
+
+/// Credential type discriminator for the unified enable/disable RPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppCredentialType {
+    /// Client secret credential.
+    ClientSecret,
+    /// CA-signed mTLS credential.
+    MtlsCa,
+    /// Self-signed mTLS credential.
+    MtlsSelfSigned,
+    /// Client assertion (private key JWT) credential type-level toggle.
+    ClientAssertion,
+}
+
+/// Scope of a signing key. Sum type with data to eliminate invalid states
+/// (e.g., `Global` with an org ID, or `Organization` without one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SigningKeyScope {
+    /// Global signing key used for user session tokens.
+    Global,
+    /// Per-organization signing key used for vault access tokens.
+    Organization(OrganizationId),
+}
+
+/// Lifecycle status of a signing key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SigningKeyStatus {
+    /// Current signing key for its scope. Used for both signing and verification.
+    Active,
+    /// Previous key after rotation. Valid for verification only during grace period.
+    Rotated,
+    /// Permanently invalidated. Cannot be used for signing or verification.
+    Revoked,
+}
+
 /// Generates a newtype wrapper around `String` for domain identifiers.
 ///
 /// Each generated type provides:

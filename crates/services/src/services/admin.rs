@@ -212,6 +212,41 @@ impl AdminService {
             handle.record_handler_event(entry);
         }
     }
+
+    /// Proposes a `LedgerRequest` through Raft with deadline handling.
+    ///
+    /// Handles timeout computation, Raft proposal submission, and error
+    /// classification (leadership errors → UNAVAILABLE, others → INTERNAL).
+    async fn propose_raft_request(
+        &self,
+        request: LedgerRequest,
+        grpc_metadata: &tonic::metadata::MetadataMap,
+        ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, Status> {
+        let grpc_deadline =
+            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(grpc_metadata);
+        let timeout =
+            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
+        let payload = RaftPayload::new(request);
+
+        let result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
+
+        match result {
+            Ok(Ok(resp)) => Ok(resp.data),
+            Ok(Err(e)) => {
+                ctx.set_error("RaftError", &e.to_string());
+                Err(classify_raft_error(&e.to_string()))
+            },
+            Err(_) => {
+                inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
+                ctx.set_error("Timeout", "Raft proposal timed out");
+                Err(Status::deadline_exceeded(format!(
+                    "Raft proposal timed out after {}ms",
+                    timeout.as_millis()
+                )))
+            },
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -2000,26 +2035,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let ledger_request = LedgerRequest::System(SystemRequest::SetBlindingKeyVersion {
             version: req.new_key_version,
         });
-        let payload = RaftPayload::new(ledger_request);
-
-        // Compute effective timeout: min(proposal_timeout, grpc_deadline)
-        let grpc_deadline =
-            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout =
-            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
-        let result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
-
-        let response = match result {
-            Ok(Ok(resp)) => resp.data,
-            Ok(Err(e)) => {
-                ctx.set_error("RaftError", &e.to_string());
-                return Err(classify_raft_error(&e.to_string()));
-            },
-            Err(_) => {
-                ctx.set_error("Timeout", "Raft proposal timed out");
-                return Err(Status::deadline_exceeded("Raft proposal timed out"));
-            },
-        };
+        let response = self.propose_raft_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
             LedgerResponse::Empty => {
@@ -2332,27 +2348,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         }
 
         // Propose migration through Raft.
-        let grpc_deadline =
-            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout =
-            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
-
         let ledger_request = LedgerRequest::System(SystemRequest::MigrateExistingUsers { entries });
-        let payload = RaftPayload::new(ledger_request);
-
-        let migration_result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
-
-        let response = match migration_result {
-            Ok(Ok(resp)) => resp.data,
-            Ok(Err(e)) => {
-                ctx.set_error("RaftError", &e.to_string());
-                return Err(classify_raft_error(&e.to_string()));
-            },
-            Err(_) => {
-                ctx.set_error("Timeout", "Raft proposal timed out");
-                return Err(Status::deadline_exceeded("Raft proposal timed out"));
-            },
-        };
+        let response = self.propose_raft_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
             LedgerResponse::UsersMigrated { users, migrated, skipped, errors } => {

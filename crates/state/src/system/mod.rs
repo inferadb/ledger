@@ -15,10 +15,12 @@ pub mod token;
 mod types;
 
 pub use cluster::{
-    ClusterMembership, GroupMembership, LearnerCacheConfig, MAX_VOTERS,
-    MIN_NODES_PER_PROTECTED_REGION, SystemRole,
+    ClusterMembership, GroupMembership, MAX_VOTERS, MIN_NODES_PER_PROTECTED_REGION, SystemRole,
 };
-pub use inferadb_ledger_types::{UserRole, UserStatus};
+pub use inferadb_ledger_types::{
+    AppCredentialType, OrganizationMemberRole, SigningKeyScope, SigningKeyStatus, UserRole,
+    UserStatus,
+};
 pub use keys::SystemKeys;
 pub use saga::{
     CreateOrganizationInput, CreateOrganizationSaga, CreateOrganizationSagaState,
@@ -33,12 +35,11 @@ pub use service::{
 };
 pub use token::{AllUserSessionsRevocationResult, ExpiredTokenCleanupResult, RevocationResult};
 pub use types::{
-    App, AppCredentialType, AppCredentials, AppVaultConnection, ClientAssertionCredentialConfig,
-    ClientAssertionEntry, ClientSecretCredential, EmailVerificationToken, ErasureAuditRecord,
-    MigrationSummary, MtlsCredential, NodeInfo, NodeRole, OrganizationDirectoryEntry,
-    OrganizationDirectoryStatus, OrganizationMember, OrganizationMemberRole, OrganizationProfile,
-    OrganizationRegistry, OrganizationStatus, OrganizationTier, PendingOrganizationProfile,
-    RefreshToken, SigningKey, SigningKeyScope, SigningKeyStatus, SubjectKey, TeamMember,
+    App, AppCredentials, AppVaultConnection, ClientAssertionCredentialConfig, ClientAssertionEntry,
+    ClientSecretCredential, EmailVerificationToken, ErasureAuditRecord, MigrationSummary,
+    MtlsCredential, NodeInfo, NodeRole, OrganizationDirectoryEntry, OrganizationDirectoryStatus,
+    OrganizationMember, OrganizationProfile, OrganizationRegistry, OrganizationStatus,
+    OrganizationTier, PendingOrganizationProfile, RefreshToken, SigningKey, SubjectKey, TeamMember,
     TeamMemberRole, TeamProfile, User, UserDirectoryEntry, UserDirectoryStatus, UserEmail,
     UserMigrationEntry,
 };

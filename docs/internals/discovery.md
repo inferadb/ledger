@@ -56,14 +56,8 @@ Raft quorum size limits voter count. Large clusters use a fixed voter set with l
 
 ### Learner Staleness
 
-Learners receive updates via Raft replication but may lag:
-
-```rust
-struct LearnerCacheConfig {
-    cache_ttl: Duration,        // Default: 5s
-    refresh_interval: Duration, // Default: 1s
-}
-```
+Learners receive updates via Raft replication but may lag. Staleness thresholds
+(cache TTL of ~5s, refresh interval of ~1s) are enforced at the application level.
 
 | Role                  | Local Query       | Consistency        | Latency    |
 | --------------------- | ----------------- | ------------------ | ---------- |

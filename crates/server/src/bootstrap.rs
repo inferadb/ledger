@@ -385,9 +385,8 @@ pub async fn bootstrap_node(
         .health_check_config(config.health_check.clone())
         .max_read_forward_lag(config.max_read_forward_lag)
         .build();
-    // Wire backup support into server if configured.
-    // Done post-construction because bon type-state builders don't support
-    // conditional field setting (each setter changes the builder type).
+    // Wire backup support post-construction because bon's type-state builders
+    // don't support conditional field setting (each setter changes the builder type).
     let server = if let Some(ref mgr) = backup_manager {
         server.with_backup(mgr.clone(), snapshot_manager_for_backup.clone())
     } else {

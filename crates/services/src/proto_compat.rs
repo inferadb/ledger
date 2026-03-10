@@ -8,7 +8,10 @@
 //! prevents implementing foreign traits between two external types.
 
 use chrono::{DateTime, Utc};
-use inferadb_ledger_proto::proto;
+use inferadb_ledger_proto::{
+    convert::{datetime_to_proto_timestamp, proto_timestamp_to_datetime},
+    proto,
+};
 use inferadb_ledger_state::system::{
     OrganizationMemberRole, OrganizationStatus, OrganizationTier, TeamMemberRole,
 };
@@ -140,16 +143,16 @@ pub(crate) fn paginate_by_slug<T>(
 }
 
 /// Converts a chrono `DateTime<Utc>` to a proto `Timestamp`.
+///
+/// Delegates to [`inferadb_ledger_proto::convert::datetime_to_proto_timestamp`].
 pub(crate) fn datetime_to_proto(dt: &DateTime<Utc>) -> prost_types::Timestamp {
-    prost_types::Timestamp {
-        seconds: dt.timestamp(),
-        nanos: i32::try_from(dt.timestamp_subsec_nanos()).unwrap_or(0),
-    }
+    datetime_to_proto_timestamp(dt)
 }
 
 /// Converts a proto `Timestamp` to a chrono `DateTime<Utc>`.
 ///
 /// Returns `DateTime::UNIX_EPOCH` if the timestamp cannot be represented.
+/// Delegates to [`inferadb_ledger_proto::convert::proto_timestamp_to_datetime`].
 pub(crate) fn proto_to_datetime(ts: &prost_types::Timestamp) -> DateTime<Utc> {
-    DateTime::from_timestamp(ts.seconds, ts.nanos.max(0) as u32).unwrap_or(DateTime::UNIX_EPOCH)
+    proto_timestamp_to_datetime(ts)
 }

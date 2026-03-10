@@ -43,8 +43,6 @@ pub use events::{
 };
 pub use events_keys::encode_event_key;
 pub use indexes::IndexManager;
-// Re-export inferadb-ledger-store's tables for convenience
-pub use inferadb_ledger_store::tables;
 pub use keys::{StorageKey, decode_storage_key, encode_storage_key};
 pub use relationship::RelationshipStore;
 pub use shard::ShardManager;
