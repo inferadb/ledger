@@ -47,7 +47,7 @@ use openraft::Raft;
 use snafu::{GenerateImplicitData, ResultExt};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::{
     error::{DeserializationSnafu, SagaError, SerializationSnafu, StateReadSnafu},
@@ -1195,14 +1195,15 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         // Generate Ed25519 keypair from 32 random bytes.
         // Using from_bytes() with CSPRNG output avoids rand_core version
         // conflicts between rand 0.10 (workspace) and rand_core 0.6 (ed25519-dalek).
-        let mut secret_bytes = [0u8; 32];
-        rand::RngExt::fill(&mut rand::rng(), &mut secret_bytes);
+        //
+        // Use Zeroizing wrappers to ensure secret material is wiped on all exit
+        // paths (including early returns via `?`).
+        let mut secret_bytes = Zeroizing::new([0u8; 32]);
+        rand::RngExt::fill(&mut rand::rng(), &mut *secret_bytes);
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_bytes);
         let public_key_bytes = signing_key.verifying_key().to_bytes().to_vec();
-        let mut private_key_bytes = signing_key.to_bytes();
-
-        // Zeroize seed material — no longer needed after keypair derivation
-        secret_bytes.zeroize();
+        let private_key_bytes = Zeroizing::new(signing_key.to_bytes());
+        drop(signing_key); // Triggers Zeroize on Drop (ed25519-dalek "zeroize" feature)
 
         // Envelope encryption: generate DEK, wrap with RMK, encrypt private key with DEK
         let dek = generate_dek();
@@ -1212,17 +1213,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
         // Encrypt private key with DEK using AES-256-GCM, kid as AAD
         let (ciphertext, nonce, auth_tag) = inferadb_ledger_store::crypto::encrypt_page_body(
-            &private_key_bytes,
+            &*private_key_bytes,
             kid.as_bytes(),
             &dek,
         )
-        .map_err(|e| {
-            private_key_bytes.zeroize();
-            SagaError::KeyEncryption { message: format!("Private key encryption failed: {e}") }
+        .map_err(|e| SagaError::KeyEncryption {
+            message: format!("Private key encryption failed: {e}"),
         })?;
-
-        // Zeroize plaintext private key — now encrypted in ciphertext
-        private_key_bytes.zeroize();
 
         // Build envelope
         let ct_array: [u8; 32] = ciphertext.try_into().map_err(|_| SagaError::KeyEncryption {

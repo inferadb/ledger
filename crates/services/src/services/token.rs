@@ -111,8 +111,10 @@ impl TokenServiceImpl {
         &self,
         scope: &SigningKeyScope,
     ) -> Result<(String, Vec<u8>, Vec<u8>, u32), Status> {
-        let mut secret_bytes = [0u8; 32];
-        rand::RngExt::fill(&mut rand::rng(), &mut secret_bytes);
+        // Use Zeroizing wrapper to ensure secret material is wiped on all exit
+        // paths (including early returns via `?`).
+        let mut secret_bytes = zeroize::Zeroizing::new([0u8; 32]);
+        rand::RngExt::fill(&mut rand::rng(), &mut *secret_bytes);
         let signing_key_dalek = ed25519_dalek::SigningKey::from_bytes(&secret_bytes);
         let public_key_bytes = signing_key_dalek.verifying_key().to_bytes().to_vec();
         drop(signing_key_dalek); // Triggers Zeroize on Drop (ed25519-dalek "zeroize" feature)
@@ -126,8 +128,6 @@ impl TokenServiceImpl {
             .map_err(|e| Status::internal(format!("Failed to load RMK: {e}")))?;
         let (envelope, rmk_version) = encrypt_private_key(secret_bytes.as_ref(), &kid, &rmk)
             .map_err(Self::jwt_error_to_status)?;
-
-        zeroize::Zeroize::zeroize(&mut secret_bytes);
 
         let encrypted_private_key = envelope.to_bytes().to_vec();
         Ok((kid, public_key_bytes, encrypted_private_key, rmk_version))

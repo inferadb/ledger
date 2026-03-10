@@ -3770,6 +3770,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 }
 
                 // Create new key as Active.
+                // ORDERING: old key status MUST be updated before new key is stored.
+                // `store_signing_key` overwrites the scope index to point at the new kid.
+                // If reversed, `update_signing_key_status` (Revoked + previously Active)
+                // would delete the scope index, leaving no active key for this scope.
                 let new_id = state.sequences.next_signing_key();
                 let new_key = SigningKey {
                     id: new_id,
