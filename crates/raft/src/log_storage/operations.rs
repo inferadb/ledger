@@ -11,13 +11,14 @@ use inferadb_ledger_state::{
         App, AppCredentialType, AppCredentials, AppVaultConnection, ClientAssertionEntry,
         CreateSigningKeyInput, CreateSigningKeySaga, OrganizationMember, OrganizationMemberRole,
         OrganizationProfile, OrganizationRegistry, OrganizationStatus, PendingOrganizationProfile,
-        RefreshToken, SYSTEM_VAULT_ID, Saga, SigningKey, SigningKeyScope, SigningKeyStatus,
-        SystemKeys, SystemOrganizationService, TeamMember, TeamProfile, User,
+        RefreshToken, RevocationResult, SYSTEM_VAULT_ID, Saga, SagaId, SigningKey, SigningKeyScope,
+        SigningKeyStatus, SystemError, SystemKeys, SystemOrganizationService, TeamMember,
+        TeamProfile, User,
     },
 };
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
-    AppId, AppSlug, Hash, LedgerErrorCode, Operation, OrganizationId, SetCondition, TeamId,
+    AppId, AppSlug, ErrorCode, Hash, NodeId, Operation, OrganizationId, SetCondition, TeamId,
     TeamSlug, TokenSubject, TokenType, VaultEntry, VaultId, compute_tx_merkle_root, decode, encode,
     events::{EventAction, EventEntry, EventOutcome},
 };
@@ -33,6 +34,28 @@ use crate::{
     event_writer::ApplyPhaseEmitter,
     types::{LedgerRequest, LedgerResponse, SystemRequest},
 };
+
+/// Executes a cascade revocation and logs the outcome.
+///
+/// Cascade revocations are best-effort — failures are logged but do not
+/// abort the parent operation. Callers should enter a tracing span with
+/// relevant context fields (org_id, app_id, etc.) before calling.
+fn cascade_revoke<B: StorageBackend>(
+    state_layer: &Arc<StateLayer<B>>,
+    op: impl FnOnce(&SystemOrganizationService<B>) -> Result<RevocationResult, SystemError>,
+    success_msg: &str,
+    error_msg: &str,
+) {
+    let sys = SystemOrganizationService::new(state_layer.clone());
+    match op(&sys) {
+        Ok(result) => {
+            tracing::info!(revoked_count = result.revoked_count, "{success_msg}");
+        },
+        Err(e) => {
+            tracing::error!(error = %e, "{error_msg}");
+        },
+    }
+}
 
 /// Encodes a value for state persistence, logging an error if serialization fails.
 ///
@@ -66,9 +89,9 @@ fn write_signing_key_saga_record<B: StorageBackend>(
     scope: SigningKeyScope,
 ) {
     let saga_id = match &scope {
-        SigningKeyScope::Global => "create-signing-key-global".to_owned(),
+        SigningKeyScope::Global => SagaId::new("create-signing-key-global"),
         SigningKeyScope::Organization(org_id) => {
-            format!("create-signing-key-org-{}", org_id.value())
+            SagaId::new(format!("create-signing-key-org-{}", org_id.value()))
         },
     };
     let saga = CreateSigningKeySaga::new(saga_id.clone(), CreateSigningKeyInput { scope });
@@ -120,13 +143,13 @@ fn write_signing_key_saga_record<B: StorageBackend>(
 }
 
 /// Constructs a `LedgerResponse::Error` with the given code and message.
-fn ledger_error(code: LedgerErrorCode, message: impl Into<String>) -> LedgerResponse {
+fn ledger_error(code: ErrorCode, message: impl Into<String>) -> LedgerResponse {
     LedgerResponse::Error { code, message: message.into() }
 }
 
 /// Constructs an early-return error tuple for the apply handler.
 fn error_result(
-    code: LedgerErrorCode,
+    code: ErrorCode,
     message: impl Into<String>,
 ) -> (LedgerResponse, Option<VaultEntry>) {
     (ledger_error(code, message), None)
@@ -141,22 +164,16 @@ fn load_org_profile<B: StorageBackend>(
     let entity = state_layer
         .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
         .map_err(|e| {
-            ledger_error(
-                LedgerErrorCode::Internal,
-                format!("Failed to read organization profile: {e}"),
-            )
+            ledger_error(ErrorCode::Internal, format!("Failed to read organization profile: {e}"))
         })?
         .ok_or_else(|| {
             ledger_error(
-                LedgerErrorCode::NotFound,
+                ErrorCode::NotFound,
                 format!("Organization profile not found for {organization}"),
             )
         })?;
     decode::<OrganizationProfile>(&entity.value).map_err(|e| {
-        ledger_error(
-            LedgerErrorCode::Internal,
-            format!("Failed to decode organization profile: {e}"),
-        )
+        ledger_error(ErrorCode::Internal, format!("Failed to decode organization profile: {e}"))
     })
 }
 
@@ -168,17 +185,11 @@ fn save_org_profile<B: StorageBackend>(
 ) -> Result<(), LedgerResponse> {
     let key = SystemKeys::organization_profile_key(organization);
     let bytes = encode(profile).map_err(|e| {
-        ledger_error(
-            LedgerErrorCode::Internal,
-            format!("Failed to encode organization profile: {e}"),
-        )
+        ledger_error(ErrorCode::Internal, format!("Failed to encode organization profile: {e}"))
     })?;
     let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
     state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0).map(|_| ()).map_err(|e| {
-        ledger_error(
-            LedgerErrorCode::Internal,
-            format!("Failed to write organization profile: {e}"),
-        )
+        ledger_error(ErrorCode::Internal, format!("Failed to write organization profile: {e}"))
     })
 }
 
@@ -207,7 +218,7 @@ fn bump_org_config_version<B: StorageBackend>(
                 }];
                 if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
                     return Err(ledger_error(
-                        LedgerErrorCode::Internal,
+                        ErrorCode::Internal,
                         format!("Failed to bump org config_version: {e}"),
                     ));
                 }
@@ -246,15 +257,15 @@ fn load_app<B: StorageBackend>(
     let key = SystemKeys::app_key(organization, app);
     let entity = state_layer
         .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
-        .map_err(|e| ledger_error(LedgerErrorCode::Internal, format!("Failed to read app: {e}")))?
+        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to read app: {e}")))?
         .ok_or_else(|| {
             ledger_error(
-                LedgerErrorCode::NotFound,
+                ErrorCode::NotFound,
                 format!("App {} not found in organization {}", app, organization),
             )
         })?;
     decode::<App>(&entity.value)
-        .map_err(|e| ledger_error(LedgerErrorCode::Internal, format!("Failed to decode app: {e}")))
+        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to decode app: {e}")))
 }
 
 /// Saves an `App` to the state layer.
@@ -264,14 +275,13 @@ fn save_app<B: StorageBackend>(
     app: &App,
 ) -> Result<(), LedgerResponse> {
     let key = SystemKeys::app_key(organization, app.id);
-    let bytes = encode(app).map_err(|e| {
-        ledger_error(LedgerErrorCode::Internal, format!("Failed to encode app: {e}"))
-    })?;
+    let bytes = encode(app)
+        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to encode app: {e}")))?;
     let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
     state_layer
         .apply_operations(SYSTEM_VAULT_ID, &ops, 0)
         .map(|_| ())
-        .map_err(|e| ledger_error(LedgerErrorCode::Internal, format!("Failed to write app: {e}")))
+        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to write app: {e}")))
 }
 
 /// Collects all entities matching a prefix and appends `DeleteEntity` operations for each.
@@ -338,15 +348,15 @@ fn load_team_profile<B: StorageBackend>(
     let entity = state_layer
         .get_entity(SYSTEM_VAULT_ID, profile_key.as_bytes())
         .map_err(|e| LedgerResponse::Error {
-            code: LedgerErrorCode::Internal,
+            code: ErrorCode::Internal,
             message: format!("Failed to read team profile: {e}"),
         })?
         .ok_or_else(|| LedgerResponse::Error {
-            code: LedgerErrorCode::NotFound,
+            code: ErrorCode::NotFound,
             message: format!("Team {} not found", team),
         })?;
     decode::<TeamProfile>(&entity.value).map_err(|e| LedgerResponse::Error {
-        code: LedgerErrorCode::Internal,
+        code: ErrorCode::Internal,
         message: format!("Failed to decode team profile: {e}"),
     })
 }
@@ -365,17 +375,17 @@ fn require_active_org_with_state<'a, B: StorageBackend>(
     action: &str,
 ) -> Result<&'a Arc<inferadb_ledger_state::StateLayer<B>>, LedgerResponse> {
     let org = state.organizations.get(organization).ok_or_else(|| LedgerResponse::Error {
-        code: LedgerErrorCode::NotFound,
+        code: ErrorCode::NotFound,
         message: format!("Organization {} not found", organization),
     })?;
     if org.status == OrganizationStatus::Deleted {
         return Err(LedgerResponse::Error {
-            code: LedgerErrorCode::FailedPrecondition,
+            code: ErrorCode::FailedPrecondition,
             message: format!("Cannot {} deleted organization {}", action, organization),
         });
     }
     state_layer.as_ref().ok_or_else(|| LedgerResponse::Error {
-        code: LedgerErrorCode::Internal,
+        code: ErrorCode::Internal,
         message: "State layer not configured".to_string(),
     })
 }
@@ -392,7 +402,7 @@ fn require_fully_active_org(
         match org_meta.status {
             OrganizationStatus::Active => Ok(()),
             other => Err(LedgerResponse::Error {
-                code: LedgerErrorCode::FailedPrecondition,
+                code: ErrorCode::FailedPrecondition,
                 message: format!(
                     "Organization {} is {} and not accepting this operation",
                     organization,
@@ -408,7 +418,7 @@ fn require_fully_active_org(
         }
     } else {
         Err(LedgerResponse::Error {
-            code: LedgerErrorCode::NotFound,
+            code: ErrorCode::NotFound,
             message: format!("Organization {} not found", organization),
         })
     }
@@ -436,7 +446,7 @@ fn migrate_team_members<B: StorageBackend>(
     }
     target_profile.updated_at = block_timestamp;
     let target_bytes = encode(&target_profile).map_err(|e| LedgerResponse::Error {
-        code: LedgerErrorCode::Internal,
+        code: ErrorCode::Internal,
         message: format!("Failed to encode target team profile: {e}"),
     })?;
     let target_key = SystemKeys::team_profile_key(organization, target_team);
@@ -449,7 +459,7 @@ fn migrate_team_members<B: StorageBackend>(
     state_layer
         .apply_operations(SYSTEM_VAULT_ID, &ops, 0)
         .map_err(|e| LedgerResponse::Error {
-            code: LedgerErrorCode::Internal,
+            code: ErrorCode::Internal,
             message: format!("Failed to migrate members to target team: {e}"),
         })
         .map(|_| ())
@@ -467,13 +477,10 @@ fn require_signing_key<B: StorageBackend>(
 ) -> Result<SigningKey, (LedgerResponse, Option<VaultEntry>)> {
     match sys.get_signing_key_by_kid(kid) {
         Ok(Some(k)) => Ok(k),
-        Ok(None) => {
-            Err(error_result(LedgerErrorCode::NotFound, format!("Signing key not found: {kid}")))
+        Ok(None) => Err(error_result(ErrorCode::NotFound, format!("Signing key not found: {kid}"))),
+        Err(e) => {
+            Err(error_result(ErrorCode::Internal, format!("Failed to look up signing key: {e}")))
         },
-        Err(e) => Err(error_result(
-            LedgerErrorCode::Internal,
-            format!("Failed to look up signing key: {e}"),
-        )),
     }
 }
 
@@ -544,7 +551,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 if let Some(VaultHealthStatus::Diverged { .. }) = state.vault_health.get(&key) {
                     return (
                         LedgerResponse::Error {
-                            code: LedgerErrorCode::FailedPrecondition,
+                            code: ErrorCode::FailedPrecondition,
                             message: format!(
                                 "Vault {}:{} is diverged and not accepting writes",
                                 organization, vault
@@ -573,7 +580,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         Err(e) => {
                             return (
                                 LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to begin write txn: {e}"),
                                 },
                                 None,
@@ -611,7 +618,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     ),
                                     other => (
                                         LedgerResponse::Error {
-                                            code: LedgerErrorCode::Internal,
+                                            code: ErrorCode::Internal,
                                             message: format!("Failed to apply operations: {other}"),
                                         },
                                         None,
@@ -623,7 +630,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     if let Err(e) = write_txn.commit() {
                         return (
                             LedgerResponse::Error {
-                                code: LedgerErrorCode::Internal,
+                                code: ErrorCode::Internal,
                                 message: format!("Failed to commit write txn: {e}"),
                             },
                             None,
@@ -637,7 +644,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         Err(e) => {
                             return (
                                 LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to compute state root: {}", e),
                                 },
                                 None,
@@ -667,11 +674,33 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 }
 
+                // Compute read-only aggregates before mutating transactions.
+                let storage_delta = estimate_write_storage_delta(transactions);
+                let ops_count: u32 = transactions.iter().map(|tx| tx.operations.len() as u32).sum();
+
+                // Update organization storage accounting.
+                let storage_entry =
+                    state.organization_storage_bytes.entry(*organization).or_insert(0);
+                if storage_delta >= 0 {
+                    *storage_entry = storage_entry.saturating_add(storage_delta as u64);
+                } else {
+                    *storage_entry = storage_entry.saturating_sub(storage_delta.unsigned_abs());
+                }
+                crate::metrics::set_organization_storage_bytes(*organization, *storage_entry);
+                crate::metrics::record_organization_operation(*organization, "write");
+
+                // Mirror updated OrganizationMeta (with new storage_bytes) to pending
+                if let Some(org_meta) = state.organizations.get_mut(organization) {
+                    org_meta.storage_bytes = *storage_entry;
+                    if let Some(blob) = try_encode(org_meta, "org_meta") {
+                        pending.organizations.push((*organization, blob));
+                    }
+                }
+
                 // Server-assigned sequences: assign monotonic sequence to each transaction.
-                // Each write request typically contains a single transaction from a single client.
-                // The assigned_sequence returned is the sequence assigned to the first transaction.
+                // Clones each transaction because `request` is borrowed (&LedgerRequest).
                 let mut assigned_sequence = 0u64;
-                let transactions_with_sequences: Vec<_> = transactions
+                let sequenced_transactions: Vec<_> = transactions
                     .iter()
                     .map(|tx| {
                         let client_key = (*organization, *vault, tx.client_id.clone());
@@ -702,7 +731,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             pending.client_sequences.push((cs_key, value));
                         }
 
-                        // Record the first transaction's assigned sequence for the response
                         if assigned_sequence == 0 {
                             assigned_sequence = new_sequence;
                         }
@@ -719,39 +747,17 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     vault: *vault,
                     vault_height: new_height,
                     previous_vault_hash,
-                    transactions: transactions_with_sequences,
+                    transactions: sequenced_transactions,
                     tx_merkle_root,
                     state_root,
                 };
 
-                // Update organization storage accounting.
-                // Increment for sets/creates, decrement for deletes.
-                let storage_delta = estimate_write_storage_delta(transactions);
-                let entry = state.organization_storage_bytes.entry(*organization).or_insert(0);
-                if storage_delta >= 0 {
-                    *entry = entry.saturating_add(storage_delta as u64);
-                } else {
-                    *entry = entry.saturating_sub(storage_delta.unsigned_abs());
-                }
-                crate::metrics::set_organization_storage_bytes(*organization, *entry);
-                crate::metrics::record_organization_operation(*organization, "write");
-
-                // Mirror updated OrganizationMeta (with new storage_bytes) to pending
-                if let Some(org_meta) = state.organizations.get_mut(organization) {
-                    org_meta.storage_bytes = *entry;
-                    if let Some(blob) = try_encode(org_meta, "org_meta") {
-                        pending.organizations.push((*organization, blob));
-                    }
-                }
-
                 // Compute block hash from vault entry (for response)
-                // We temporarily build a BlockHeader to compute the hash
                 let block_hash = self.compute_vault_block_hash(&vault_entry);
 
                 // Emit WriteCommitted event
                 let org_slug = state.id_to_slug.get(organization).copied();
                 let vault_slug = state.vault_id_to_slug.get(vault).copied();
-                let ops_count: u32 = transactions.iter().map(|tx| tx.operations.len() as u32).sum();
                 let mut emitter = ApplyPhaseEmitter::for_organization(
                     EventAction::WriteCommitted,
                     *organization,
@@ -766,7 +772,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 *op_index += 1;
 
                 // Emit individual EntityExpired events for each ExpireEntity operation
-                for tx in transactions {
+                for tx in &vault_entry.transactions {
                     for op in &tx.operations {
                         if let Operation::ExpireEntity { key, .. } = op {
                             let mut exp_emitter = ApplyPhaseEmitter::for_organization(
@@ -855,7 +861,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let response = if let Some(org) = state.organizations.get_mut(organization) {
                     if org.status == OrganizationStatus::Deleted {
                         LedgerResponse::Error {
-                            code: LedgerErrorCode::FailedPrecondition,
+                            code: ErrorCode::FailedPrecondition,
                             message: format!("Organization {} is already deleted", organization),
                         }
                     } else {
@@ -905,24 +911,22 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             // Cascade: revoke refresh tokens on soft-delete.
                             // Signing keys are retained until PurgeOrganization for
                             // in-flight token validation during the retention window.
-                            let sys = SystemOrganizationService::new(state_layer.clone());
-                            match sys.revoke_all_org_refresh_tokens(*organization, block_timestamp)
-                            {
-                                Ok(result) => {
-                                    tracing::info!(
-                                        organization_id = organization.value(),
-                                        revoked_count = result.revoked_count,
-                                        "Cascade-revoked refresh tokens on org soft-delete"
-                                    );
+                            let _span = tracing::info_span!(
+                                "cascade_revoke",
+                                organization_id = organization.value()
+                            )
+                            .entered();
+                            cascade_revoke(
+                                state_layer,
+                                |sys| {
+                                    sys.revoke_all_org_refresh_tokens(
+                                        *organization,
+                                        block_timestamp,
+                                    )
                                 },
-                                Err(e) => {
-                                    tracing::error!(
-                                        organization_id = organization.value(),
-                                        error = %e,
-                                        "Failed to cascade-revoke tokens on org soft-delete"
-                                    );
-                                },
-                            }
+                                "Cascade-revoked refresh tokens on org soft-delete",
+                                "Failed to cascade-revoke tokens on org soft-delete",
+                            );
                         }
 
                         LedgerResponse::OrganizationDeleted {
@@ -933,7 +937,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 } else {
                     LedgerResponse::Error {
-                        code: LedgerErrorCode::NotFound,
+                        code: ErrorCode::NotFound,
                         message: format!("Organization {} not found", organization),
                     }
                 };
@@ -980,7 +984,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     LedgerResponse::VaultDeleted { success: true }
                 } else {
                     LedgerResponse::Error {
-                        code: LedgerErrorCode::NotFound,
+                        code: ErrorCode::NotFound,
                         message: format!("Vault {}:{} not found", organization, vault),
                     }
                 };
@@ -1068,7 +1072,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 profile.members.iter().position(|m| m.user_id == *target)
                             else {
                                 return error_result(
-                                    LedgerErrorCode::FailedPrecondition,
+                                    ErrorCode::FailedPrecondition,
                                     format!(
                                         "User {} is not a member of organization {}",
                                         target, organization
@@ -1086,7 +1090,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     <= 1;
                             if is_last_admin {
                                 return error_result(
-                                    LedgerErrorCode::FailedPrecondition,
+                                    ErrorCode::FailedPrecondition,
                                     format!(
                                         "Cannot remove the last administrator from organization {}",
                                         organization
@@ -1147,7 +1151,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 profile.members.iter().position(|m| m.user_id == *target)
                             else {
                                 return error_result(
-                                    LedgerErrorCode::FailedPrecondition,
+                                    ErrorCode::FailedPrecondition,
                                     format!(
                                         "User {} is not a member of organization {}",
                                         target, organization
@@ -1165,7 +1169,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     <= 1
                             {
                                 return error_result(
-                                    LedgerErrorCode::FailedPrecondition,
+                                    ErrorCode::FailedPrecondition,
                                     format!(
                                         "Cannot demote the last administrator of organization {}",
                                         organization
@@ -1218,7 +1222,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         // Check name uniqueness via in-memory index
                         if has_team_name_conflict(state, *organization, name, None) {
                             LedgerResponse::Error {
-                                code: LedgerErrorCode::AlreadyExists,
+                                code: ErrorCode::AlreadyExists,
                                 message: format!(
                                     "Team name '{}' already exists in organization {}",
                                     name, organization
@@ -1229,7 +1233,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             if state.team_slug_index.contains_key(slug) {
                                 return (
                                     LedgerResponse::Error {
-                                        code: LedgerErrorCode::AlreadyExists,
+                                        code: ErrorCode::AlreadyExists,
                                         message: format!("Team slug '{}' already exists", slug),
                                     },
                                     None,
@@ -1250,7 +1254,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 Err(e) => {
                                     return (
                                         LedgerResponse::Error {
-                                            code: LedgerErrorCode::Internal,
+                                            code: ErrorCode::Internal,
                                             message: format!("Failed to encode team profile: {e}"),
                                         },
                                         None,
@@ -1278,7 +1282,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
                                 return (
                                     LedgerResponse::Error {
-                                        code: LedgerErrorCode::Internal,
+                                        code: ErrorCode::Internal,
                                         message: format!("Failed to write team profile: {e}"),
                                     },
                                     None,
@@ -1328,7 +1332,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     if *target_team == *team {
                                         return (
                                             LedgerResponse::Error {
-                                                code: LedgerErrorCode::FailedPrecondition,
+                                                code: ErrorCode::FailedPrecondition,
                                                 message: "Cannot move members to the same team being deleted".to_string(),
                                             },
                                             None,
@@ -1358,7 +1362,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 {
                                     return (
                                         LedgerResponse::Error {
-                                            code: LedgerErrorCode::Internal,
+                                            code: ErrorCode::Internal,
                                             message: format!("Failed to delete team profile: {e}"),
                                         },
                                         None,
@@ -1419,7 +1423,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     ) {
                                         return (
                                             LedgerResponse::Error {
-                                                code: LedgerErrorCode::AlreadyExists,
+                                                code: ErrorCode::AlreadyExists,
                                                 message: format!(
                                                     "Team name '{}' already exists in organization {}",
                                                     new_name, organization
@@ -1442,7 +1446,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     Err(e) => {
                                         return (
                                             LedgerResponse::Error {
-                                                code: LedgerErrorCode::Internal,
+                                                code: ErrorCode::Internal,
                                                 message: format!(
                                                     "Failed to encode team profile: {e}"
                                                 ),
@@ -1462,7 +1466,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 {
                                     return (
                                         LedgerResponse::Error {
-                                            code: LedgerErrorCode::Internal,
+                                            code: ErrorCode::Internal,
                                             message: format!("Failed to update team profile: {e}"),
                                         },
                                         None,
@@ -1510,7 +1514,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     Ok(state_layer) => {
                         if has_app_name_conflict(state, *organization, name, None) {
                             LedgerResponse::Error {
-                                code: LedgerErrorCode::AlreadyExists,
+                                code: ErrorCode::AlreadyExists,
                                 message: format!(
                                     "App name '{}' already exists in organization {}",
                                     name, organization
@@ -1518,7 +1522,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }
                         } else if state.app_slug_index.contains_key(slug) {
                             LedgerResponse::Error {
-                                code: LedgerErrorCode::AlreadyExists,
+                                code: ErrorCode::AlreadyExists,
                                 message: format!("App slug '{}' already exists", slug),
                             }
                         } else {
@@ -1539,7 +1543,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 Err(e) => {
                                     return (
                                         LedgerResponse::Error {
-                                            code: LedgerErrorCode::Internal,
+                                            code: ErrorCode::Internal,
                                             message: format!("Failed to encode app: {e}"),
                                         },
                                         None,
@@ -1574,7 +1578,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
                                 return (
                                     LedgerResponse::Error {
-                                        code: LedgerErrorCode::Internal,
+                                        code: ErrorCode::Internal,
                                         message: format!("Failed to write app: {e}"),
                                     },
                                     None,
@@ -1612,7 +1616,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     ) {
                                         return (
                                             LedgerResponse::Error {
-                                                code: LedgerErrorCode::AlreadyExists,
+                                                code: ErrorCode::AlreadyExists,
                                                 message: format!(
                                                     "App name '{}' already exists in organization {}",
                                                     new_name, organization
@@ -1661,7 +1665,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                             ) {
                                                 return (
                                                     LedgerResponse::Error {
-                                                        code: LedgerErrorCode::Internal,
+                                                        code: ErrorCode::Internal,
                                                         message: format!(
                                                             "Failed to update app name index: {e}"
                                                         ),
@@ -1730,7 +1734,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 {
                                     return (
                                         LedgerResponse::Error {
-                                            code: LedgerErrorCode::Internal,
+                                            code: ErrorCode::Internal,
                                             message: format!("Failed to delete app: {e}"),
                                         },
                                         None,
@@ -1738,25 +1742,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 }
                                 // Cascade: revoke all refresh tokens for this app
                                 {
-                                    let sys = SystemOrganizationService::new(state_layer.clone());
-                                    let subject = TokenSubject::App(app_record.slug);
-                                    match sys.revoke_all_subject_tokens(&subject, block_timestamp) {
-                                        Ok(result) => {
-                                            tracing::info!(
-                                                app_id = app.value(),
-                                                app_slug = app_record.slug.value(),
-                                                revoked_count = result.revoked_count,
-                                                "Cascade-revoked refresh tokens on app delete"
-                                            );
+                                    let slug = app_record.slug;
+                                    let _span = tracing::info_span!(
+                                        "cascade_revoke",
+                                        app_id = app.value(),
+                                        app_slug = slug.value()
+                                    )
+                                    .entered();
+                                    cascade_revoke(
+                                        state_layer,
+                                        |sys| {
+                                            sys.revoke_all_subject_tokens(
+                                                &TokenSubject::App(slug),
+                                                block_timestamp,
+                                            )
                                         },
-                                        Err(e) => {
-                                            tracing::error!(
-                                                app_id = app.value(),
-                                                error = %e,
-                                                "Failed to cascade-revoke tokens on app delete"
-                                            );
-                                        },
-                                    }
+                                        "Cascade-revoked refresh tokens on app delete",
+                                        "Failed to cascade-revoke tokens on app delete",
+                                    );
                                 }
 
                                 state.app_slug_index.remove(&app_record.slug);
@@ -1791,29 +1794,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     // Cascade: revoke all refresh tokens when disabling an app
                                     if was_enabled && !*enabled {
                                         if let Some(app_slug) = state.app_id_to_slug.get(app) {
-                                            let sys =
-                                                SystemOrganizationService::new(state_layer.clone());
-                                            let subject = TokenSubject::App(*app_slug);
-                                            match sys.revoke_all_subject_tokens(
-                                                &subject,
-                                                block_timestamp,
-                                            ) {
-                                                Ok(result) => {
-                                                    tracing::info!(
-                                                        app_id = app.value(),
-                                                        app_slug = app_slug.value(),
-                                                        revoked_count = result.revoked_count,
-                                                        "Cascade-revoked refresh tokens on app disable"
-                                                    );
+                                            let slug = *app_slug;
+                                            let _span = tracing::info_span!(
+                                                "cascade_revoke",
+                                                app_id = app.value(),
+                                                app_slug = slug.value()
+                                            )
+                                            .entered();
+                                            cascade_revoke(
+                                                state_layer,
+                                                |sys| {
+                                                    sys.revoke_all_subject_tokens(
+                                                        &TokenSubject::App(slug),
+                                                        block_timestamp,
+                                                    )
                                                 },
-                                                Err(e) => {
-                                                    tracing::error!(
-                                                        app_id = app.value(),
-                                                        error = %e,
-                                                        "Failed to cascade-revoke tokens on app disable"
-                                                    );
-                                                },
-                                            }
+                                                "Cascade-revoked refresh tokens on app disable",
+                                                "Failed to cascade-revoke tokens on app disable",
+                                            );
                                         } else {
                                             tracing::warn!(
                                                 app_id = app.value(),
@@ -1934,7 +1932,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     Err(e) => {
                                         return (
                                             LedgerResponse::Error {
-                                                code: LedgerErrorCode::Internal,
+                                                code: ErrorCode::Internal,
                                                 message: format!(
                                                     "Failed to encode assertion entry: {e}"
                                                 ),
@@ -1959,7 +1957,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 {
                                     return (
                                         LedgerResponse::Error {
-                                            code: LedgerErrorCode::Internal,
+                                            code: ErrorCode::Internal,
                                             message: format!(
                                                 "Failed to write assertion entry: {e}"
                                             ),
@@ -1995,7 +1993,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 {
                                     return (
                                         LedgerResponse::Error {
-                                            code: LedgerErrorCode::Internal,
+                                            code: ErrorCode::Internal,
                                             message: format!(
                                                 "Failed to delete assertion entry: {e}"
                                             ),
@@ -2008,14 +2006,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 }
                             },
                             Ok(None) => LedgerResponse::Error {
-                                code: LedgerErrorCode::NotFound,
+                                code: ErrorCode::NotFound,
                                 message: format!(
                                     "Assertion {} not found for app {} in organization {}",
                                     assertion, app, organization
                                 ),
                             },
                             Err(e) => LedgerResponse::Error {
-                                code: LedgerErrorCode::Internal,
+                                code: ErrorCode::Internal,
                                 message: format!("Failed to read assertion entry: {e}"),
                             },
                         }
@@ -2059,7 +2057,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                                 ) {
                                                     return (
                                                         LedgerResponse::Error {
-                                                            code: LedgerErrorCode::Internal,
+                                                            code: ErrorCode::Internal,
                                                             message: format!(
                                                                 "Failed to update assertion: {e}"
                                                             ),
@@ -2072,26 +2070,26 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                                 }
                                             },
                                             Err(e) => LedgerResponse::Error {
-                                                code: LedgerErrorCode::Internal,
+                                                code: ErrorCode::Internal,
                                                 message: format!("Failed to encode assertion: {e}"),
                                             },
                                         }
                                     },
                                     Err(e) => LedgerResponse::Error {
-                                        code: LedgerErrorCode::Internal,
+                                        code: ErrorCode::Internal,
                                         message: format!("Failed to decode assertion: {e}"),
                                     },
                                 }
                             },
                             Ok(None) => LedgerResponse::Error {
-                                code: LedgerErrorCode::NotFound,
+                                code: ErrorCode::NotFound,
                                 message: format!(
                                     "Assertion {} not found for app {} in organization {}",
                                     assertion, app, organization
                                 ),
                             },
                             Err(e) => LedgerResponse::Error {
-                                code: LedgerErrorCode::Internal,
+                                code: ErrorCode::Internal,
                                 message: format!("Failed to read assertion: {e}"),
                             },
                         }
@@ -2116,7 +2114,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 // Check if connection already exists
                                 match state_layer.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
                                     Ok(Some(_)) => LedgerResponse::Error {
-                                        code: LedgerErrorCode::AlreadyExists,
+                                        code: ErrorCode::AlreadyExists,
                                         message: format!(
                                             "Vault connection already exists for vault {} on app {}",
                                             vault, app
@@ -2135,7 +2133,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                             Err(e) => {
                                                 return (
                                                     LedgerResponse::Error {
-                                                        code: LedgerErrorCode::Internal,
+                                                        code: ErrorCode::Internal,
                                                         message: format!(
                                                             "Failed to encode vault connection: {e}"
                                                         ),
@@ -2155,7 +2153,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         {
                                             return (
                                                 LedgerResponse::Error {
-                                                    code: LedgerErrorCode::Internal,
+                                                    code: ErrorCode::Internal,
                                                     message: format!(
                                                         "Failed to write vault connection: {e}"
                                                     ),
@@ -2168,7 +2166,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         }
                                     },
                                     Err(e) => LedgerResponse::Error {
-                                        code: LedgerErrorCode::Internal,
+                                        code: ErrorCode::Internal,
                                         message: format!("Failed to check vault connection: {e}"),
                                     },
                                 }
@@ -2210,7 +2208,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                             ) {
                                                 return (
                                                     LedgerResponse::Error {
-                                                        code: LedgerErrorCode::Internal,
+                                                        code: ErrorCode::Internal,
                                                         message: format!(
                                                             "Failed to update vault connection: {e}"
                                                         ),
@@ -2223,7 +2221,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                             }
                                         },
                                         Err(e) => LedgerResponse::Error {
-                                            code: LedgerErrorCode::Internal,
+                                            code: ErrorCode::Internal,
                                             message: format!(
                                                 "Failed to encode vault connection: {e}"
                                             ),
@@ -2231,19 +2229,19 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     }
                                 },
                                 Err(e) => LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to decode vault connection: {e}"),
                                 },
                             },
                             Ok(None) => LedgerResponse::Error {
-                                code: LedgerErrorCode::NotFound,
+                                code: ErrorCode::NotFound,
                                 message: format!(
                                     "Vault connection not found for vault {} on app {}",
                                     vault, app
                                 ),
                             },
                             Err(e) => LedgerResponse::Error {
-                                code: LedgerErrorCode::Internal,
+                                code: ErrorCode::Internal,
                                 message: format!("Failed to read vault connection: {e}"),
                             },
                         }
@@ -2270,7 +2268,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 {
                                     return (
                                         LedgerResponse::Error {
-                                            code: LedgerErrorCode::Internal,
+                                            code: ErrorCode::Internal,
                                             message: format!(
                                                 "Failed to remove vault connection: {e}"
                                             ),
@@ -2280,29 +2278,25 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 }
                                 // Cascade: revoke all refresh tokens for this app+vault
                                 if let Some(app_slug) = state.app_id_to_slug.get(app) {
-                                    let sys = SystemOrganizationService::new(state_layer.clone());
-                                    match sys.revoke_app_vault_tokens(
-                                        *app_slug,
-                                        *vault,
-                                        block_timestamp,
-                                    ) {
-                                        Ok(result) => {
-                                            tracing::info!(
-                                                app_id = app.value(),
-                                                vault_id = vault.value(),
-                                                revoked_count = result.revoked_count,
-                                                "Cascade-revoked refresh tokens on vault disconnect"
-                                            );
+                                    let slug = *app_slug;
+                                    let _span = tracing::info_span!(
+                                        "cascade_revoke",
+                                        app_id = app.value(),
+                                        vault_id = vault.value()
+                                    )
+                                    .entered();
+                                    cascade_revoke(
+                                        state_layer,
+                                        |sys| {
+                                            sys.revoke_app_vault_tokens(
+                                                slug,
+                                                *vault,
+                                                block_timestamp,
+                                            )
                                         },
-                                        Err(e) => {
-                                            tracing::error!(
-                                                app_id = app.value(),
-                                                vault_id = vault.value(),
-                                                error = %e,
-                                                "Failed to cascade-revoke tokens on vault disconnect"
-                                            );
-                                        },
-                                    }
+                                        "Cascade-revoked refresh tokens on vault disconnect",
+                                        "Failed to cascade-revoke tokens on vault disconnect",
+                                    );
                                 } else {
                                     tracing::warn!(
                                         app_id = app.value(),
@@ -2313,14 +2307,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 LedgerResponse::AppVaultRemoved { organization_id: *organization }
                             },
                             Ok(None) => LedgerResponse::Error {
-                                code: LedgerErrorCode::NotFound,
+                                code: ErrorCode::NotFound,
                                 message: format!(
                                     "Vault connection not found for vault {} on app {}",
                                     vault, app
                                 ),
                             },
                             Err(e) => LedgerResponse::Error {
-                                code: LedgerErrorCode::Internal,
+                                code: ErrorCode::Internal,
                                 message: format!("Failed to read vault connection: {e}"),
                             },
                         }
@@ -2336,7 +2330,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let response = if let Some(org) = state.organizations.get(organization) {
                     if org.status != OrganizationStatus::Deleted {
                         LedgerResponse::Error {
-                            code: LedgerErrorCode::FailedPrecondition,
+                            code: ErrorCode::FailedPrecondition,
                             message: format!(
                                 "Cannot purge organization {} — status must be Deleted, got {:?}",
                                 organization, org.status
@@ -2506,22 +2500,25 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     );
                                 },
                             }
-                            match sys.revoke_all_org_refresh_tokens(*organization, block_timestamp)
                             {
-                                Ok(result) => {
-                                    tracing::info!(
-                                        organization_id = organization.value(),
-                                        revoked_count = result.revoked_count,
-                                        "Revoked org refresh tokens during purge"
-                                    );
-                                },
-                                Err(e) => {
-                                    tracing::error!(
-                                        organization_id = organization.value(),
-                                        error = %e,
-                                        "Failed to revoke org refresh tokens during purge"
-                                    );
-                                },
+                                let _span = tracing::info_span!(
+                                    "cascade_revoke",
+                                    organization_id = organization.value()
+                                )
+                                .entered();
+                                match sys
+                                    .revoke_all_org_refresh_tokens(*organization, block_timestamp)
+                                {
+                                    Ok(result) => {
+                                        tracing::info!(
+                                            revoked_count = result.revoked_count,
+                                            "Revoked org refresh tokens during purge"
+                                        );
+                                    },
+                                    Err(e) => {
+                                        tracing::error!(error = %e, "Failed to revoke org refresh tokens during purge");
+                                    },
+                                }
                             }
                         }
 
@@ -2529,7 +2526,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 } else {
                     LedgerResponse::Error {
-                        code: LedgerErrorCode::NotFound,
+                        code: ErrorCode::NotFound,
                         message: format!("Organization {} not found", organization),
                     }
                 };
@@ -2555,14 +2552,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let response = if let Some(org) = state.organizations.get_mut(organization) {
                     match org.status {
                         OrganizationStatus::Deleted => LedgerResponse::Error {
-                            code: LedgerErrorCode::FailedPrecondition,
+                            code: ErrorCode::FailedPrecondition,
                             message: format!(
                                 "Cannot suspend deleted organization {}",
                                 organization
                             ),
                         },
                         OrganizationStatus::Suspended => LedgerResponse::Error {
-                            code: LedgerErrorCode::FailedPrecondition,
+                            code: ErrorCode::FailedPrecondition,
                             message: format!("Organization {} is already suspended", organization),
                         },
                         _ => {
@@ -2575,7 +2572,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 } else {
                     LedgerResponse::Error {
-                        code: LedgerErrorCode::NotFound,
+                        code: ErrorCode::NotFound,
                         message: format!("Organization {} not found", organization),
                     }
                 };
@@ -2611,15 +2608,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             LedgerResponse::OrganizationResumed { organization: *organization }
                         },
                         OrganizationStatus::Active => LedgerResponse::Error {
-                            code: LedgerErrorCode::FailedPrecondition,
+                            code: ErrorCode::FailedPrecondition,
                             message: format!("Organization {} is not suspended", organization),
                         },
                         OrganizationStatus::Deleted => LedgerResponse::Error {
-                            code: LedgerErrorCode::FailedPrecondition,
+                            code: ErrorCode::FailedPrecondition,
                             message: format!("Cannot resume deleted organization {}", organization),
                         },
                         other => LedgerResponse::Error {
-                            code: LedgerErrorCode::FailedPrecondition,
+                            code: ErrorCode::FailedPrecondition,
                             message: format!(
                                 "Cannot resume organization {} in state {:?}",
                                 organization, other
@@ -2628,7 +2625,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 } else {
                     LedgerResponse::Error {
-                        code: LedgerErrorCode::NotFound,
+                        code: ErrorCode::NotFound,
                         message: format!("Organization {} not found", organization),
                     }
                 };
@@ -2656,7 +2653,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             // Validate target region is different
                             if *target_region_group == org.region {
                                 LedgerResponse::Error {
-                                    code: LedgerErrorCode::FailedPrecondition,
+                                    code: ErrorCode::FailedPrecondition,
                                     message: format!(
                                         "Organization {} is already on region {}",
                                         organization, target_region_group
@@ -2675,25 +2672,25 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }
                         },
                         OrganizationStatus::Migrating => LedgerResponse::Error {
-                            code: LedgerErrorCode::FailedPrecondition,
+                            code: ErrorCode::FailedPrecondition,
                             message: format!("Organization {} is already migrating", organization),
                         },
                         OrganizationStatus::Suspended => LedgerResponse::Error {
-                            code: LedgerErrorCode::FailedPrecondition,
+                            code: ErrorCode::FailedPrecondition,
                             message: format!(
                                 "Cannot start migration on suspended organization {}",
                                 organization
                             ),
                         },
                         OrganizationStatus::Provisioning => LedgerResponse::Error {
-                            code: LedgerErrorCode::FailedPrecondition,
+                            code: ErrorCode::FailedPrecondition,
                             message: format!(
                                 "Cannot start migration on provisioning organization {}",
                                 organization
                             ),
                         },
                         OrganizationStatus::Deleted => LedgerResponse::Error {
-                            code: LedgerErrorCode::FailedPrecondition,
+                            code: ErrorCode::FailedPrecondition,
                             message: format!(
                                 "Cannot start migration on deleted organization {}",
                                 organization
@@ -2702,7 +2699,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 } else {
                     LedgerResponse::Error {
-                        code: LedgerErrorCode::NotFound,
+                        code: ErrorCode::NotFound,
                         message: format!("Organization {} not found", organization),
                     }
                 };
@@ -2742,7 +2739,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             } else {
                                 // Should not happen, but handle gracefully
                                 LedgerResponse::Error {
-                                    code: LedgerErrorCode::FailedPrecondition,
+                                    code: ErrorCode::FailedPrecondition,
                                     message: format!(
                                         "Organization {} is migrating but has no target region",
                                         organization
@@ -2751,11 +2748,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }
                         },
                         OrganizationStatus::Active => LedgerResponse::Error {
-                            code: LedgerErrorCode::FailedPrecondition,
+                            code: ErrorCode::FailedPrecondition,
                             message: format!("Organization {} is not migrating", organization),
                         },
                         other => LedgerResponse::Error {
-                            code: LedgerErrorCode::FailedPrecondition,
+                            code: ErrorCode::FailedPrecondition,
                             message: format!(
                                 "Cannot complete migration for organization {} in state {:?}",
                                 organization, other
@@ -2764,7 +2761,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 } else {
                     LedgerResponse::Error {
-                        code: LedgerErrorCode::NotFound,
+                        code: ErrorCode::NotFound,
                         message: format!("Organization {} not found", organization),
                     }
                 };
@@ -2880,7 +2877,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             {
                                 Ok(_user) => LedgerResponse::UserUpdated { user_id: *user_id },
                                 Err(e) => LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to update user: {e}"),
                                 },
                             }
@@ -2899,7 +2896,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     }
                                 },
                                 Err(e) => LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to soft-delete user: {e}"),
                                 },
                             }
@@ -2912,7 +2909,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             match sys.create_user_email_record(*user_id, email) {
                                 Ok(email_id) => LedgerResponse::UserEmailCreated { email_id },
                                 Err(e) => LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to create user email: {e}"),
                                 },
                             }
@@ -2925,7 +2922,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             match sys.delete_user_email_record(*user_id, *email_id) {
                                 Ok(()) => LedgerResponse::UserEmailDeleted { email_id: *email_id },
                                 Err(e) => LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to delete user email: {e}"),
                                 },
                             }
@@ -2940,7 +2937,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     LedgerResponse::UserEmailVerified { email_id: *email_id }
                                 },
                                 Err(e) => LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to verify user email: {e}"),
                                 },
                             }
@@ -2955,7 +2952,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         if let Some(org) = state.organizations.get_mut(organization) {
                             if org.status == OrganizationStatus::Deleted {
                                 LedgerResponse::Error {
-                                    code: LedgerErrorCode::FailedPrecondition,
+                                    code: ErrorCode::FailedPrecondition,
                                     message: format!(
                                         "Cannot migrate deleted organization {}",
                                         organization
@@ -2975,7 +2972,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }
                         } else {
                             LedgerResponse::Error {
-                                code: LedgerErrorCode::NotFound,
+                                code: ErrorCode::NotFound,
                                 message: format!("Organization {} not found", organization),
                             }
                         }
@@ -2993,11 +2990,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         ..
                                     },
                                 ) => LedgerResponse::Error {
-                                    code: LedgerErrorCode::AlreadyExists,
+                                    code: ErrorCode::AlreadyExists,
                                     message: format!("Email hash already registered: {hmac_hex}"),
                                 },
                                 Err(e) => LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to register email hash: {e}"),
                                 },
                             }
@@ -3009,7 +3006,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         if let Some(sys) = &sys_service {
                             if let Err(e) = sys.remove_email_hash(hmac_hex) {
                                 LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to remove email hash: {e}"),
                                 }
                             } else {
@@ -3023,7 +3020,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         if let Some(sys) = &sys_service {
                             if let Err(e) = sys.set_blinding_key_version(*version) {
                                 LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to set blinding key version: {e}"),
                                 }
                             } else {
@@ -3037,7 +3034,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         if let Some(sys) = &sys_service {
                             if let Err(e) = sys.set_rehash_progress(*region, *entries_rehashed) {
                                 LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to update rehash progress: {e}"),
                                 }
                             } else {
@@ -3051,7 +3048,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         if let Some(sys) = &sys_service {
                             if let Err(e) = sys.clear_rehash_progress(*region) {
                                 LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to clear rehash progress: {e}"),
                                 }
                             } else {
@@ -3066,7 +3063,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             // Update status first
                             if let Err(e) = sys.update_user_directory_status(*user_id, *status) {
                                 LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to update user directory status: {e}"),
                                 }
                             } else if let Some(new_region) = region {
@@ -3075,7 +3072,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     sys.update_user_directory_region(*user_id, *new_region)
                                 {
                                     LedgerResponse::Error {
-                                        code: LedgerErrorCode::Internal,
+                                        code: ErrorCode::Internal,
                                         message: format!(
                                             "Failed to update user directory region: {e}"
                                         ),
@@ -3097,7 +3094,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             // removal, subject key deletion, and audit record creation.
                             if let Err(e) = sys.erase_user(*user_id, erased_by, *region) {
                                 LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("Failed to erase user: {e}"),
                                 }
                             } else {
@@ -3117,7 +3114,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     errors: summary.errors,
                                 },
                                 Err(e) => LedgerResponse::Error {
-                                    code: LedgerErrorCode::Internal,
+                                    code: ErrorCode::Internal,
                                     message: format!("User migration failed: {e}"),
                                 },
                             }
@@ -3152,7 +3149,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     .membership
                                     .membership()
                                     .nodes()
-                                    .map(|(id, _)| id.to_string())
+                                    .map(|(id, _)| NodeId::new(id.to_string()))
                                     .collect(),
                                 status: OrganizationStatus::Provisioning,
                                 config_version: 1,
@@ -3216,7 +3213,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                             );
                                             return (
                                                 LedgerResponse::Error {
-                                                    code: LedgerErrorCode::FailedPrecondition,
+                                                    code: ErrorCode::FailedPrecondition,
                                                     message: format!(
                                                         "Failed to decode pending profile for org {}: {e}",
                                                         organization
@@ -3235,7 +3232,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     );
                                     return (
                                         LedgerResponse::Error {
-                                            code: LedgerErrorCode::NotFound,
+                                            code: ErrorCode::NotFound,
                                             message: format!(
                                                 "Pending profile not found at key {} for org {}",
                                                 profile_key, organization
@@ -3253,7 +3250,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     );
                                     return (
                                         LedgerResponse::Error {
-                                            code: LedgerErrorCode::FailedPrecondition,
+                                            code: ErrorCode::FailedPrecondition,
                                             message: format!(
                                                 "Failed to read pending profile for org {}: {e}",
                                                 organization
@@ -3276,7 +3273,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 );
                                 return (
                                     LedgerResponse::Error {
-                                        code: LedgerErrorCode::NotFound,
+                                        code: ErrorCode::NotFound,
                                         message: format!("Organization {} not found", organization),
                                     },
                                     None,
@@ -3362,7 +3359,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 "Organization not found for status update"
                             );
                             LedgerResponse::Error {
-                                code: LedgerErrorCode::NotFound,
+                                code: ErrorCode::NotFound,
                                 message: format!("Organization {} not found", organization),
                             }
                         }
@@ -3400,7 +3397,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     .membership
                                     .membership()
                                     .nodes()
-                                    .map(|(id, _)| id.to_string())
+                                    .map(|(id, _)| NodeId::new(id.to_string()))
                                     .collect(),
                                 status: OrganizationStatus::Active,
                                 config_version: 1,
@@ -3664,7 +3661,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 rmk_version,
             } => {
                 let Some(state_layer) = &self.state_layer else {
-                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                    return error_result(ErrorCode::Internal, "State layer not available");
                 };
                 let sys = SystemOrganizationService::new(state_layer.clone());
 
@@ -3679,7 +3676,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     Ok(_) => {},
                     Err(e) => {
                         return error_result(
-                            LedgerErrorCode::Internal,
+                            ErrorCode::Internal,
                             format!("Failed to check existing signing key: {e}"),
                         );
                     },
@@ -3689,7 +3686,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 match sys.get_active_signing_key(scope) {
                     Ok(Some(active)) => {
                         return error_result(
-                            LedgerErrorCode::FailedPrecondition,
+                            ErrorCode::FailedPrecondition,
                             format!(
                                 "Active signing key already exists for scope: kid={}. Use RotateSigningKey.",
                                 active.kid
@@ -3699,7 +3696,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     Ok(None) => {},
                     Err(e) => {
                         return error_result(
-                            LedgerErrorCode::Internal,
+                            ErrorCode::Internal,
                             format!("Failed to check active signing key: {e}"),
                         );
                     },
@@ -3723,7 +3720,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 if let Err(e) = sys.store_signing_key(&key) {
                     return error_result(
-                        LedgerErrorCode::Internal,
+                        ErrorCode::Internal,
                         format!("Failed to store signing key: {e}"),
                     );
                 }
@@ -3740,7 +3737,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 grace_period_secs,
             } => {
                 let Some(state_layer) = &self.state_layer else {
-                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                    return error_result(ErrorCode::Internal, "State layer not available");
                 };
                 let sys = SystemOrganizationService::new(state_layer.clone());
 
@@ -3752,7 +3749,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 if old_key.status != SigningKeyStatus::Active {
                     return error_result(
-                        LedgerErrorCode::FailedPrecondition,
+                        ErrorCode::FailedPrecondition,
                         format!(
                             "Signing key {old_kid} is not Active (status: {:?})",
                             old_key.status
@@ -3770,7 +3767,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         block_timestamp,
                     ) {
                         return error_result(
-                            LedgerErrorCode::Internal,
+                            ErrorCode::Internal,
                             format!("Failed to revoke old signing key: {e}"),
                         );
                     }
@@ -3785,7 +3782,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         block_timestamp,
                     ) {
                         return error_result(
-                            LedgerErrorCode::Internal,
+                            ErrorCode::Internal,
                             format!("Failed to rotate old signing key: {e}"),
                         );
                     }
@@ -3814,7 +3811,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 if let Err(e) = sys.store_signing_key(&new_key) {
                     return error_result(
-                        LedgerErrorCode::Internal,
+                        ErrorCode::Internal,
                         format!("Failed to store new signing key: {e}"),
                     );
                 }
@@ -3830,7 +3827,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             LedgerRequest::RevokeSigningKey { kid } => {
                 let Some(state_layer) = &self.state_layer else {
-                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                    return error_result(ErrorCode::Internal, "State layer not available");
                 };
                 let sys = SystemOrganizationService::new(state_layer.clone());
 
@@ -3851,7 +3848,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     block_timestamp,
                 ) {
                     return error_result(
-                        LedgerErrorCode::Internal,
+                        ErrorCode::Internal,
                         format!("Failed to revoke signing key: {e}"),
                     );
                 }
@@ -3861,7 +3858,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             LedgerRequest::TransitionSigningKeyRevoked { kid } => {
                 let Some(state_layer) = &self.state_layer else {
-                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                    return error_result(ErrorCode::Internal, "State layer not available");
                 };
                 let sys = SystemOrganizationService::new(state_layer.clone());
 
@@ -3873,7 +3870,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     },
                     Err(e) => {
                         return error_result(
-                            LedgerErrorCode::Internal,
+                            ErrorCode::Internal,
                             format!("Failed to look up signing key '{kid}': {e}"),
                         );
                     },
@@ -3899,7 +3896,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     block_timestamp,
                 ) {
                     return error_result(
-                        LedgerErrorCode::Internal,
+                        ErrorCode::Internal,
                         format!("Failed to transition signing key: {e}"),
                     );
                 }
@@ -3919,7 +3916,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 ttl_secs,
             } => {
                 let Some(state_layer) = &self.state_layer else {
-                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                    return error_result(ErrorCode::Internal, "State layer not available");
                 };
                 let sys = SystemOrganizationService::new(state_layer.clone());
 
@@ -3944,7 +3941,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 if let Err(e) = sys.store_refresh_token(&token) {
                     return error_result(
-                        LedgerErrorCode::Internal,
+                        ErrorCode::Internal,
                         format!("Failed to store refresh token: {e}"),
                     );
                 }
@@ -3960,7 +3957,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 expected_version,
             } => {
                 let Some(state_layer) = &self.state_layer else {
-                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                    return error_result(ErrorCode::Internal, "State layer not available");
                 };
                 let sys = SystemOrganizationService::new(state_layer.clone());
 
@@ -3968,14 +3965,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let old_token = match sys.get_refresh_token_by_hash(old_token_hash) {
                     Ok(Some(t)) => t,
                     Ok(None) => {
-                        return error_result(
-                            LedgerErrorCode::Unauthenticated,
-                            "Refresh token not found",
-                        );
+                        return error_result(ErrorCode::Unauthenticated, "Refresh token not found");
                     },
                     Err(e) => {
                         return error_result(
-                            LedgerErrorCode::Internal,
+                            ErrorCode::Internal,
                             format!("Failed to look up refresh token: {e}"),
                         );
                     },
@@ -3985,14 +3979,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 match sys.is_family_poisoned(&old_token.family) {
                     Ok(true) => {
                         return error_result(
-                            LedgerErrorCode::Unauthenticated,
+                            ErrorCode::Unauthenticated,
                             "Refresh token reuse detected: family revoked",
                         );
                     },
                     Ok(false) => {},
                     Err(e) => {
                         return error_result(
-                            LedgerErrorCode::Internal,
+                            ErrorCode::Internal,
                             format!("Failed to check family poison status: {e}"),
                         );
                     },
@@ -4004,19 +3998,19 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         tracing::error!(error = %e, "Failed to poison token family on reuse detection");
                     }
                     return error_result(
-                        LedgerErrorCode::Unauthenticated,
+                        ErrorCode::Unauthenticated,
                         "Refresh token reuse detected: family revoked",
                     );
                 }
 
                 // Check expiry.
                 if old_token.expires_at <= block_timestamp {
-                    return error_result(LedgerErrorCode::Unauthenticated, "Refresh token expired");
+                    return error_result(ErrorCode::Unauthenticated, "Refresh token expired");
                 }
 
                 // Check revocation.
                 if old_token.revoked_at.is_some() {
-                    return error_result(LedgerErrorCode::Unauthenticated, "Refresh token revoked");
+                    return error_result(ErrorCode::Unauthenticated, "Refresh token revoked");
                 }
 
                 // For user session refresh: validate TokenVersion.
@@ -4028,7 +4022,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         Some(&id) => id,
                         None => {
                             return error_result(
-                                LedgerErrorCode::NotFound,
+                                ErrorCode::NotFound,
                                 "User slug not found in index",
                             );
                         },
@@ -4041,13 +4035,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         Ok(Some(entity)) => entity,
                         Ok(None) => {
                             return error_result(
-                                LedgerErrorCode::NotFound,
+                                ErrorCode::NotFound,
                                 "User not found for version check",
                             );
                         },
                         Err(e) => {
                             return error_result(
-                                LedgerErrorCode::Internal,
+                                ErrorCode::Internal,
                                 format!("Failed to read user: {e}"),
                             );
                         },
@@ -4056,14 +4050,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         Ok(user) => user,
                         Err(e) => {
                             return error_result(
-                                LedgerErrorCode::Internal,
+                                ErrorCode::Internal,
                                 format!("Failed to decode user: {e}"),
                             );
                         },
                     };
                     if user.version != *expected {
                         return error_result(
-                            LedgerErrorCode::Unauthenticated,
+                            ErrorCode::Unauthenticated,
                             "Token version mismatch: session invalidated",
                         );
                     }
@@ -4079,7 +4073,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     let (org_id, app_id) = match state.app_slug_index.get(app_slug) {
                         Some(ids) => *ids,
                         None => {
-                            return error_result(LedgerErrorCode::NotFound, "App not found");
+                            return error_result(ErrorCode::NotFound, "App not found");
                         },
                     };
 
@@ -4089,10 +4083,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         Err(resp) => return (resp, None),
                     };
                     if !app.enabled {
-                        return error_result(
-                            LedgerErrorCode::FailedPrecondition,
-                            "App is disabled",
-                        );
+                        return error_result(ErrorCode::FailedPrecondition, "App is disabled");
                     }
 
                     // Read current AppVaultConnection for allowed_scopes.
@@ -4104,13 +4095,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             Ok(Some(entity)) => entity,
                             Ok(None) => {
                                 return error_result(
-                                    LedgerErrorCode::FailedPrecondition,
+                                    ErrorCode::FailedPrecondition,
                                     "Vault connection removed since token was issued",
                                 );
                             },
                             Err(e) => {
                                 return error_result(
-                                    LedgerErrorCode::Internal,
+                                    ErrorCode::Internal,
                                     format!("Failed to read vault connection: {e}"),
                                 );
                             },
@@ -4119,7 +4110,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             Ok(c) => c,
                             Err(e) => {
                                 return error_result(
-                                    LedgerErrorCode::Internal,
+                                    ErrorCode::Internal,
                                     format!("Failed to decode vault connection: {e}"),
                                 );
                             },
@@ -4131,7 +4122,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // Mark old token as used.
                 if let Err(e) = sys.mark_refresh_token_used(old_token.id, block_timestamp) {
                     return error_result(
-                        LedgerErrorCode::Internal,
+                        ErrorCode::Internal,
                         format!("Failed to mark refresh token used: {e}"),
                     );
                 }
@@ -4158,7 +4149,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 if let Err(e) = sys.store_refresh_token(&new_token) {
                     return error_result(
-                        LedgerErrorCode::Internal,
+                        ErrorCode::Internal,
                         format!("Failed to store new refresh token: {e}"),
                     );
                 }
@@ -4171,7 +4162,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             LedgerRequest::RevokeTokenFamily { family } => {
                 let Some(state_layer) = &self.state_layer else {
-                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                    return error_result(ErrorCode::Internal, "State layer not available");
                 };
                 let sys = SystemOrganizationService::new(state_layer.clone());
 
@@ -4180,7 +4171,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         (LedgerResponse::TokenFamilyRevoked { count: result.revoked_count }, None)
                     },
                     Err(e) => error_result(
-                        LedgerErrorCode::Internal,
+                        ErrorCode::Internal,
                         format!("Failed to revoke token family: {e}"),
                     ),
                 }
@@ -4188,7 +4179,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             LedgerRequest::RevokeAllUserSessions { user } => {
                 let Some(state_layer) = &self.state_layer else {
-                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                    return error_result(ErrorCode::Internal, "State layer not available");
                 };
                 let sys = SystemOrganizationService::new(state_layer.clone());
 
@@ -4197,7 +4188,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     Some(slug) => *slug,
                     None => {
                         return error_result(
-                            LedgerErrorCode::NotFound,
+                            ErrorCode::NotFound,
                             format!("User slug not found for user {user}"),
                         );
                     },
@@ -4212,7 +4203,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         None,
                     ),
                     Err(e) => error_result(
-                        LedgerErrorCode::Internal,
+                        ErrorCode::Internal,
                         format!("Failed to revoke all user sessions: {e}"),
                     ),
                 }
@@ -4220,7 +4211,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             LedgerRequest::DeleteExpiredRefreshTokens => {
                 let Some(state_layer) = &self.state_layer else {
-                    return error_result(LedgerErrorCode::Internal, "State layer not available");
+                    return error_result(ErrorCode::Internal, "State layer not available");
                 };
                 let sys = SystemOrganizationService::new(state_layer.clone());
 
@@ -4232,7 +4223,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         None,
                     ),
                     Err(e) => error_result(
-                        LedgerErrorCode::Internal,
+                        ErrorCode::Internal,
                         format!("Failed to delete expired refresh tokens: {e}"),
                     ),
                 }

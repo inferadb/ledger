@@ -54,13 +54,20 @@ Target: 90%+ coverage
 2. **Green**: Minimal code to make tests pass
 3. **Refactor**: Clean up while keeping tests green
 
-Run coverage: `cargo tarpaulin` or `cargo llvm-cov`
-
 ## Tooling
 
-### Formatting
-Use nightly toolchain for formatting:
+### Build & Test
+Use `just` for common tasks (see `just` or `Justfile` for full list):
 ```bash
+just check     # pre-commit: fmt + clippy + test
+just ci        # CI validation: fmt + clippy + doc-check + test
+```
+
+Or cargo with pinned toolchain:
+```bash
+cargo +1.92 build --workspace
+cargo +1.92 test --workspace --lib
+cargo +1.92 clippy --workspace --all-targets -- -D warnings
 cargo +nightly fmt
 ```
 

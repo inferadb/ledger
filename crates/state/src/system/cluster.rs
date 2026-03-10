@@ -422,7 +422,7 @@ mod tests {
 
     fn make_node(id: &str, region: Region, joined_at: DateTime<Utc>) -> NodeInfo {
         NodeInfo {
-            node_id: id.to_string(),
+            node_id: NodeId::new(id),
             addresses: vec!["127.0.0.1:5000".parse::<SocketAddr>().unwrap()],
             grpc_port: 5001,
             region,
@@ -449,7 +449,7 @@ mod tests {
     fn test_determine_role_at_max() {
         let mut groups = GroupMembership::new();
         for i in 0..5 {
-            groups.set_role(Region::GLOBAL, format!("node-{i}"), NodeRole::Voter);
+            groups.set_role(Region::GLOBAL, NodeId::new(format!("node-{i}")), NodeRole::Voter);
         }
         assert_eq!(groups.voter_count(Region::GLOBAL), 5);
         assert_eq!(groups.determine_role(Region::GLOBAL), NodeRole::Learner);
@@ -484,8 +484,8 @@ mod tests {
         assert_eq!(cluster.group_roles().learner_count(Region::GLOBAL), 1);
 
         // Remove a voter from the group
-        cluster.group_roles_mut().remove_from_group(Region::GLOBAL, &"node-0".to_string());
-        cluster.nodes.remove("node-0");
+        cluster.group_roles_mut().remove_from_group(Region::GLOBAL, &NodeId::new("node-0"));
+        cluster.nodes.remove(&NodeId::new("node-0"));
         assert_eq!(cluster.group_roles().voter_count(Region::GLOBAL), 4);
         assert_eq!(cluster.group_roles().learner_count(Region::GLOBAL), 1);
 
@@ -528,7 +528,7 @@ mod tests {
 
         let stale = cluster.find_stale_nodes(chrono::Duration::seconds(30), now);
         assert_eq!(stale.len(), 1);
-        assert_eq!(stale[0], "node-stale");
+        assert_eq!(stale[0], NodeId::new("node-stale"));
     }
 
     #[test]
@@ -546,43 +546,43 @@ mod tests {
     fn test_group_membership_independent_per_region() {
         let mut groups = GroupMembership::new();
 
-        groups.set_role(Region::GLOBAL, "node-1".to_string(), NodeRole::Voter);
-        groups.set_role(Region::US_EAST_VA, "node-1".to_string(), NodeRole::Learner);
+        groups.set_role(Region::GLOBAL, NodeId::new("node-1"), NodeRole::Voter);
+        groups.set_role(Region::US_EAST_VA, NodeId::new("node-1"), NodeRole::Learner);
 
-        assert_eq!(groups.role_of(Region::GLOBAL, &"node-1".to_string()), Some(NodeRole::Voter));
+        assert_eq!(groups.role_of(Region::GLOBAL, &NodeId::new("node-1")), Some(NodeRole::Voter));
         assert_eq!(
-            groups.role_of(Region::US_EAST_VA, &"node-1".to_string()),
+            groups.role_of(Region::US_EAST_VA, &NodeId::new("node-1")),
             Some(NodeRole::Learner)
         );
-        assert_eq!(groups.role_of(Region::IE_EAST_DUBLIN, &"node-1".to_string()), None);
+        assert_eq!(groups.role_of(Region::IE_EAST_DUBLIN, &NodeId::new("node-1")), None);
     }
 
     #[test]
     fn test_group_membership_remove_from_group() {
         let mut groups = GroupMembership::new();
 
-        groups.set_role(Region::GLOBAL, "node-1".to_string(), NodeRole::Voter);
-        groups.set_role(Region::US_EAST_VA, "node-1".to_string(), NodeRole::Learner);
+        groups.set_role(Region::GLOBAL, NodeId::new("node-1"), NodeRole::Voter);
+        groups.set_role(Region::US_EAST_VA, NodeId::new("node-1"), NodeRole::Learner);
 
-        let removed = groups.remove_from_group(Region::GLOBAL, &"node-1".to_string());
+        let removed = groups.remove_from_group(Region::GLOBAL, &NodeId::new("node-1"));
         assert_eq!(removed, Some(NodeRole::Voter));
-        assert!(!groups.is_member(Region::GLOBAL, &"node-1".to_string()));
-        assert!(groups.is_member(Region::US_EAST_VA, &"node-1".to_string()));
+        assert!(!groups.is_member(Region::GLOBAL, &NodeId::new("node-1")));
+        assert!(groups.is_member(Region::US_EAST_VA, &NodeId::new("node-1")));
     }
 
     #[test]
     fn test_group_membership_remove_from_all_groups() {
         let mut groups = GroupMembership::new();
 
-        groups.set_role(Region::GLOBAL, "node-1".to_string(), NodeRole::Voter);
-        groups.set_role(Region::US_EAST_VA, "node-1".to_string(), NodeRole::Learner);
-        groups.set_role(Region::IE_EAST_DUBLIN, "node-1".to_string(), NodeRole::Voter);
+        groups.set_role(Region::GLOBAL, NodeId::new("node-1"), NodeRole::Voter);
+        groups.set_role(Region::US_EAST_VA, NodeId::new("node-1"), NodeRole::Learner);
+        groups.set_role(Region::IE_EAST_DUBLIN, NodeId::new("node-1"), NodeRole::Voter);
 
-        let removed_from = groups.remove_from_all_groups(&"node-1".to_string());
+        let removed_from = groups.remove_from_all_groups(&NodeId::new("node-1"));
         assert_eq!(removed_from.len(), 3);
-        assert!(!groups.is_member(Region::GLOBAL, &"node-1".to_string()));
-        assert!(!groups.is_member(Region::US_EAST_VA, &"node-1".to_string()));
-        assert!(!groups.is_member(Region::IE_EAST_DUBLIN, &"node-1".to_string()));
+        assert!(!groups.is_member(Region::GLOBAL, &NodeId::new("node-1")));
+        assert!(!groups.is_member(Region::US_EAST_VA, &NodeId::new("node-1")));
+        assert!(!groups.is_member(Region::IE_EAST_DUBLIN, &NodeId::new("node-1")));
     }
 
     #[test]
@@ -639,7 +639,7 @@ mod tests {
         assert_eq!(cluster.group_roles().voter_count(Region::US_EAST_VA), 3);
 
         // Promoting in US_EAST_VA should not affect GLOBAL
-        cluster.group_roles_mut().remove_from_group(Region::US_EAST_VA, &"node-0".to_string());
+        cluster.group_roles_mut().remove_from_group(Region::US_EAST_VA, &NodeId::new("node-0"));
         assert_eq!(cluster.group_roles().voter_count(Region::GLOBAL), 5);
         assert_eq!(cluster.group_roles().voter_count(Region::US_EAST_VA), 2);
     }
@@ -650,7 +650,7 @@ mod tests {
 
         // Fill GLOBAL to max
         for i in 0..5 {
-            groups.set_role(Region::GLOBAL, format!("node-{i}"), NodeRole::Voter);
+            groups.set_role(Region::GLOBAL, NodeId::new(format!("node-{i}")), NodeRole::Voter);
         }
 
         // US_EAST_VA still has room
@@ -682,9 +682,9 @@ mod tests {
     fn test_group_membership_members() {
         let mut groups = GroupMembership::new();
 
-        groups.set_role(Region::GLOBAL, "node-1".to_string(), NodeRole::Voter);
-        groups.set_role(Region::GLOBAL, "node-2".to_string(), NodeRole::Learner);
-        groups.set_role(Region::GLOBAL, "node-3".to_string(), NodeRole::Voter);
+        groups.set_role(Region::GLOBAL, NodeId::new("node-1"), NodeRole::Voter);
+        groups.set_role(Region::GLOBAL, NodeId::new("node-2"), NodeRole::Learner);
+        groups.set_role(Region::GLOBAL, NodeId::new("node-3"), NodeRole::Voter);
 
         let members = groups.members(Region::GLOBAL);
         assert_eq!(members.len(), 3);
@@ -696,10 +696,10 @@ mod tests {
     fn test_empty_group_cleaned_up_after_last_removal() {
         let mut groups = GroupMembership::new();
 
-        groups.set_role(Region::US_EAST_VA, "node-1".to_string(), NodeRole::Voter);
+        groups.set_role(Region::US_EAST_VA, NodeId::new("node-1"), NodeRole::Voter);
         assert!(groups.group(Region::US_EAST_VA).is_some());
 
-        groups.remove_from_group(Region::US_EAST_VA, &"node-1".to_string());
+        groups.remove_from_group(Region::US_EAST_VA, &NodeId::new("node-1"));
         assert!(groups.group(Region::US_EAST_VA).is_none());
     }
 
@@ -720,12 +720,12 @@ mod tests {
         assert_eq!(cluster.group_roles().learner_count(Region::GLOBAL), 1);
 
         // Force the 6th to voter to simulate an over-limit state
-        cluster.group_roles_mut().set_role(Region::GLOBAL, "node-5".to_string(), NodeRole::Voter);
+        cluster.group_roles_mut().set_role(Region::GLOBAL, NodeId::new("node-5"), NodeRole::Voter);
         assert_eq!(cluster.group_roles().voter_count(Region::GLOBAL), 6);
 
         // Demote should remove the newest voter (node-5, joined last)
         let demoted = cluster.demote_voter_if_needed(Region::GLOBAL);
-        assert_eq!(demoted, Some("node-5".to_string()));
+        assert_eq!(demoted, Some(NodeId::new("node-5")));
         assert_eq!(cluster.group_roles().voter_count(Region::GLOBAL), 5);
     }
 

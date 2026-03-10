@@ -967,7 +967,7 @@ mod tests {
         let registry = OrganizationRegistry {
             organization_id: OrganizationId::new(1),
             region: Region::GLOBAL,
-            member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
+            member_nodes: vec![NodeId::new("node-1"), NodeId::new("node-2")],
             status: OrganizationStatus::Active,
             config_version: 1,
             created_at: Utc::now(),
@@ -983,7 +983,7 @@ mod tests {
     #[test]
     fn test_node_info_serialization_with_region() {
         let node = NodeInfo {
-            node_id: "node-42".to_string(),
+            node_id: NodeId::new("node-42"),
             addresses: vec!["10.0.0.1:5000".parse::<SocketAddr>().unwrap()],
             grpc_port: 5001,
             region: Region::IE_EAST_DUBLIN,
@@ -993,7 +993,7 @@ mod tests {
 
         let bytes = postcard::to_allocvec(&node).unwrap();
         let deserialized: NodeInfo = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(deserialized.node_id, "node-42");
+        assert_eq!(deserialized.node_id, NodeId::new("node-42"));
         assert_eq!(deserialized.region, Region::IE_EAST_DUBLIN);
     }
 
@@ -1084,7 +1084,7 @@ mod tests {
     fn test_node_info_region_round_trip_all_variants() {
         for region in inferadb_ledger_types::ALL_REGIONS {
             let node = NodeInfo {
-                node_id: "node-1".to_string(),
+                node_id: NodeId::new("node-1"),
                 addresses: vec!["10.0.0.1:5000".parse::<SocketAddr>().unwrap()],
                 grpc_port: 5001,
                 region,

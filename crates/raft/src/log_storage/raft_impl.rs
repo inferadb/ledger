@@ -890,7 +890,11 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             // ensures identical deletion order across replicas (HashMap iteration is
             // non-deterministic in Rust).
             let mut expired_keys: Vec<(
-                (inferadb_ledger_types::OrganizationId, inferadb_ledger_types::VaultId, String),
+                (
+                    inferadb_ledger_types::OrganizationId,
+                    inferadb_ledger_types::VaultId,
+                    inferadb_ledger_types::ClientId,
+                ),
                 Vec<u8>,
             )> = state
                 .client_sequences
@@ -1403,7 +1407,13 @@ impl RaftLogStore {
                 let vault_id = inferadb_ledger_types::VaultId::new(i64::from_be_bytes(
                     key_bytes[8..16].try_into().unwrap_or([0; 8]),
                 ));
-                let client_id = String::from_utf8_lossy(&key_bytes[16..]).to_string();
+                let client_id = match String::from_utf8(key_bytes[16..].to_vec()) {
+                    Ok(id) => inferadb_ledger_types::ClientId::new(id),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Skipping ClientSequence with invalid UTF-8 client_id during state rebuild");
+                        continue;
+                    },
+                };
                 match decode::<super::types::ClientSequenceEntry>(&value_bytes) {
                     Ok(entry) => {
                         state.client_sequences.insert((org_id, vault_id, client_id), entry);

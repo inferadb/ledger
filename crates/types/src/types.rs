@@ -701,14 +701,114 @@ pub enum UserRole {
     Admin,
 }
 
+/// Generates a newtype wrapper around `String` for domain identifiers.
+///
+/// Each generated type provides:
+/// - Standard derives: Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord
+/// - Serde with `#[serde(transparent)]` for wire format compatibility
+/// - `new()`, `value()` (&str), `into_inner()` (String), `as_bytes()` (&[u8])
+/// - `From<String>`, `From<&str>`, `Into<String>`, `AsRef<str>`, `Borrow<str>`
+/// - `Display` showing the raw string (no prefix)
+macro_rules! define_string_id {
+    (
+        $(#[$meta:meta])*
+        $name:ident
+    ) => {
+        $(#[$meta])*
+        #[derive(
+            Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord,
+            Serialize, Deserialize,
+        )]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            /// Creates a new identifier from a string value.
+            #[inline]
+            pub fn new(value: impl Into<String>) -> Self {
+                Self(value.into())
+            }
+
+            /// Returns the string value as a slice.
+            #[inline]
+            pub fn value(&self) -> &str {
+                &self.0
+            }
+
+            /// Consumes the wrapper, returning the inner `String`.
+            #[inline]
+            pub fn into_inner(self) -> String {
+                self.0
+            }
+
+            /// Returns the string value as a byte slice.
+            #[inline]
+            pub fn as_bytes(&self) -> &[u8] {
+                self.0.as_bytes()
+            }
+        }
+
+        impl From<String> for $name {
+            #[inline]
+            fn from(value: String) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<&str> for $name {
+            #[inline]
+            fn from(value: &str) -> Self {
+                Self(value.to_owned())
+            }
+        }
+
+        impl From<$name> for String {
+            #[inline]
+            fn from(id: $name) -> Self {
+                id.0
+            }
+        }
+
+        impl AsRef<str> for $name {
+            #[inline]
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::borrow::Borrow<str> for $name {
+            #[inline]
+            fn borrow(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+    };
+}
+
 /// Transaction identifier (16 bytes, typically UUIDv4).
 pub type TxId = [u8; 16];
 
-/// Node identifier in the Raft cluster.
-pub type NodeId = String;
+define_string_id!(
+    /// Node identifier in the Raft cluster.
+    ///
+    /// Wraps a `String` with compile-time type safety to prevent mixing
+    /// with [`ClientId`] or other string identifiers.
+    NodeId
+);
 
-/// Client identifier for idempotency tracking.
-pub type ClientId = String;
+define_string_id!(
+    /// Client identifier for idempotency tracking.
+    ///
+    /// Wraps a `String` with compile-time type safety to prevent mixing
+    /// with [`NodeId`] or other string identifiers.
+    ClientId
+);
 
 // ============================================================================
 // Block Structures
@@ -1328,7 +1428,7 @@ mod tests {
             .expect("valid transaction should build");
 
         assert_eq!(tx.id, [1u8; 16]);
-        assert_eq!(tx.client_id, "client-123");
+        assert_eq!(tx.client_id, ClientId::new("client-123"));
         assert_eq!(tx.sequence, 1);
         assert_eq!(tx.actor, "user:alice");
         assert_eq!(tx.operations.len(), 1);
@@ -1409,7 +1509,7 @@ mod tests {
             .build()
             .expect("valid transaction with &str");
 
-        assert_eq!(tx.client_id, "client-456");
+        assert_eq!(tx.client_id, ClientId::new("client-456"));
         assert_eq!(tx.actor, "user:bob");
     }
 

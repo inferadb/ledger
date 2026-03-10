@@ -540,7 +540,7 @@ pub fn vault_entry_to_proto_block(
         .iter()
         .map(|tx| proto::Transaction {
             id: Some(proto::TxId { id: tx.id.to_vec() }),
-            client_id: Some(proto::ClientId { id: tx.client_id.clone() }),
+            client_id: Some(proto::ClientId { id: tx.client_id.value().to_owned() }),
             sequence: tx.sequence,
             operations: tx.operations.iter().map(|op| op.into()).collect(),
             timestamp: Some(Timestamp {
@@ -564,7 +564,7 @@ pub fn vault_entry_to_proto_block(
             seconds: region_block.timestamp.timestamp(),
             nanos: region_block.timestamp.timestamp_subsec_nanos() as i32,
         }),
-        leader_id: Some(proto::NodeId { id: region_block.leader_id.clone() }),
+        leader_id: Some(proto::NodeId { id: region_block.leader_id.value().to_owned() }),
         term: region_block.term,
         committed_index: region_block.committed_index,
         block_hash: Some(proto::Hash { value: block_hash.to_vec() }),
@@ -1483,7 +1483,7 @@ mod tests {
             previous_region_hash: Hash::default(),
             vault_entries: vec![],
             timestamp: Utc::now(),
-            leader_id: "node-1".to_string(),
+            leader_id: inferadb_ledger_types::NodeId::new("node-1"),
             term: 5,
             committed_index: 99,
         };
@@ -1508,7 +1508,7 @@ mod tests {
 
         let tx = inferadb_ledger_types::Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
-            client_id: "client-123".to_string(),
+            client_id: inferadb_ledger_types::ClientId::new("client-123"),
             sequence: 1,
             operations: vec![inferadb_ledger_types::Operation::CreateRelationship {
                 resource: "doc:1".to_string(),
@@ -1535,7 +1535,7 @@ mod tests {
             previous_region_hash: Hash::default(),
             vault_entries: vec![],
             timestamp: Utc::now(),
-            leader_id: "leader-node".to_string(),
+            leader_id: inferadb_ledger_types::NodeId::new("leader-node"),
             term: 3,
             committed_index: 49,
         };
@@ -1574,7 +1574,7 @@ mod tests {
             previous_region_hash: Hash::default(),
             vault_entries: vec![],
             timestamp: Utc::now(),
-            leader_id: "node-1".to_string(),
+            leader_id: inferadb_ledger_types::NodeId::new("node-1"),
             term: 1,
             committed_index: 0,
         };

@@ -180,7 +180,7 @@ async fn test_saga_orchestrator_leader_only() {
 /// Tests that a DeleteUser saga progresses through its states.
 #[tokio::test]
 async fn test_delete_user_saga_state_transitions() {
-    use inferadb_ledger_state::system::{DeleteUserInput, DeleteUserSaga, Saga};
+    use inferadb_ledger_state::system::{DeleteUserInput, DeleteUserSaga, Saga, SagaId};
 
     let cluster = TestCluster::new(1).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -211,7 +211,7 @@ async fn test_delete_user_saga_state_transitions() {
         user: UserId::new(user_id),
         organization_ids: vec![OrganizationId::new(organization.value() as i64)],
     };
-    let saga = DeleteUserSaga::new(saga_id.clone(), input);
+    let saga = DeleteUserSaga::new(SagaId::new(saga_id.clone()), input);
     let wrapped = Saga::DeleteUser(saga);
 
     // Write saga to storage
@@ -247,7 +247,7 @@ async fn test_delete_user_saga_state_transitions() {
 async fn test_completed_saga_not_reexecuted() {
     use inferadb_ledger_state::system::{
         CreateOrganizationInput, CreateOrganizationSaga, CreateOrganizationSagaState,
-        OrganizationTier, Saga,
+        OrganizationTier, Saga, SagaId,
     };
     use inferadb_ledger_types::Region;
 
@@ -268,7 +268,7 @@ async fn test_completed_saga_not_reexecuted() {
         admin: UserId::new(999),
         pending_profile_key: "_sys:pending_org_profile:test-completed".to_string(),
     };
-    let mut saga = CreateOrganizationSaga::new(saga_id.clone(), input);
+    let mut saga = CreateOrganizationSaga::new(SagaId::new(saga_id.clone()), input);
     saga.state = CreateOrganizationSagaState::Completed {
         organization_id: OrganizationId::new(888),
         organization_slug: inferadb_ledger_types::OrganizationSlug::new(777),
@@ -311,7 +311,7 @@ async fn test_completed_saga_not_reexecuted() {
 #[tokio::test]
 async fn test_saga_serialization_roundtrip() {
     use inferadb_ledger_state::system::{
-        CreateOrganizationInput, CreateOrganizationSaga, OrganizationTier, Saga,
+        CreateOrganizationInput, CreateOrganizationSaga, OrganizationTier, Saga, SagaId,
     };
     use inferadb_ledger_types::Region;
 
@@ -332,7 +332,7 @@ async fn test_saga_serialization_roundtrip() {
         admin: UserId::new(42),
         pending_profile_key: "_sys:pending_org_profile:roundtrip".to_string(),
     };
-    let saga = CreateOrganizationSaga::new(saga_id.clone(), input);
+    let saga = CreateOrganizationSaga::new(SagaId::new(saga_id.clone()), input);
     let wrapped = Saga::CreateOrganization(saga);
 
     // Write to storage

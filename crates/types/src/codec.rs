@@ -340,7 +340,14 @@ mod tests {
                 arb_timestamp(),
             )
                 .prop_map(|(id, client_id, sequence, actor, operations, timestamp)| {
-                    Transaction { id, client_id, sequence, actor, operations, timestamp }
+                    Transaction {
+                        id,
+                        client_id: client_id.into(),
+                        sequence,
+                        actor,
+                        operations,
+                        timestamp,
+                    }
                 })
         }
 
@@ -498,7 +505,7 @@ mod tests {
                     previous_region_hash,
                     vault_entries: vec![],
                     timestamp,
-                    leader_id,
+                    leader_id: leader_id.into(),
                     term,
                     committed_index,
                 };

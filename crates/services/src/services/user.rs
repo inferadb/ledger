@@ -26,7 +26,7 @@ use inferadb_ledger_raft::{
 };
 use inferadb_ledger_state::system::{
     CreateUserInput, CreateUserSaga, MigrateUserInput, MigrateUserSaga, PendingOrganizationProfile,
-    Saga, SystemOrganizationService,
+    Saga, SagaId, SystemOrganizationService,
 };
 use inferadb_ledger_types::{
     UserEmailId as DomainUserEmailId, VaultId as DomainVaultId,
@@ -146,7 +146,7 @@ impl proto::user_service_server::UserService for UserService {
             .unwrap_or(inferadb_ledger_state::system::OrganizationTier::Free);
 
         // Create the saga for the orchestrator to drive
-        let saga_id = uuid::Uuid::new_v4().to_string();
+        let saga_id = SagaId::new(uuid::Uuid::new_v4().to_string());
         let saga = CreateUserSaga::new(
             saga_id.clone(),
             CreateUserInput {
@@ -155,7 +155,7 @@ impl proto::user_service_server::UserService for UserService {
                 admin,
                 pending_org_profile_key:
                     inferadb_ledger_state::system::SystemKeys::pending_organization_profile_key(
-                        &saga_id,
+                        saga_id.value(),
                     ),
                 default_org_tier,
             },
@@ -180,7 +180,7 @@ impl proto::user_service_server::UserService for UserService {
             .map_err(|e| Status::internal(format!("Failed to encode pending profile: {e}")))?;
         let pending_profile_op = inferadb_ledger_types::Operation::SetEntity {
             key: inferadb_ledger_state::system::SystemKeys::pending_organization_profile_key(
-                &saga_id,
+                saga_id.value(),
             ),
             value: pending_profile_bytes,
             expires_at: Some((Utc::now() + chrono::Duration::minutes(5)).timestamp() as u64),
@@ -189,7 +189,7 @@ impl proto::user_service_server::UserService for UserService {
 
         let saga_txn = inferadb_ledger_types::Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
-            client_id: "system:user".to_string(),
+            client_id: inferadb_ledger_types::ClientId::new("system:user"),
             sequence: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
@@ -215,7 +215,7 @@ impl proto::user_service_server::UserService for UserService {
             self.ctx.record_handler_event(
                 HandlerPhaseEmitter::for_system(EventAction::UserCreated, node_id)
                     .principal("system")
-                    .detail("saga_id", &saga_id)
+                    .detail("saga_id", saga_id.value())
                     .detail("region", region.as_str())
                     .detail("admin", &admin.to_string())
                     .trace_id(&trace_ctx.trace_id)
@@ -866,11 +866,11 @@ impl proto::user_service_server::UserService for UserService {
             let mut context = std::collections::HashMap::new();
             context.insert("status".to_string(), format!("{:?}", dir_entry.status));
             let details = super::error_details::build_error_details(
-                inferadb_ledger_types::ErrorCode::AppUserMigrating.as_u16(),
+                inferadb_ledger_types::DiagnosticCode::AppUserMigrating.as_u16(),
                 true,
                 None,
                 context,
-                Some(inferadb_ledger_types::ErrorCode::AppUserMigrating.suggested_action()),
+                Some(inferadb_ledger_types::DiagnosticCode::AppUserMigrating.suggested_action()),
             );
             let encoded = prost::Message::encode_to_vec(&details);
             return Err(Status::with_details(
@@ -895,12 +895,12 @@ impl proto::user_service_server::UserService for UserService {
                 context.insert("available_nodes".to_string(), in_region_count.to_string());
                 context.insert("required_nodes".to_string(), "3".to_string());
                 let details = super::error_details::build_error_details(
-                    inferadb_ledger_types::ErrorCode::AppInsufficientRegionNodes.as_u16(),
+                    inferadb_ledger_types::DiagnosticCode::AppInsufficientRegionNodes.as_u16(),
                     false,
                     None,
                     context,
                     Some(
-                        inferadb_ledger_types::ErrorCode::AppInsufficientRegionNodes
+                        inferadb_ledger_types::DiagnosticCode::AppInsufficientRegionNodes
                             .suggested_action(),
                     ),
                 );
@@ -917,7 +917,7 @@ impl proto::user_service_server::UserService for UserService {
             }
         }
 
-        let saga_id = uuid::Uuid::new_v4().to_string();
+        let saga_id = SagaId::new(uuid::Uuid::new_v4().to_string());
         let saga = MigrateUserSaga::new(
             saga_id,
             MigrateUserInput { user: user_id, source_region, target_region },
@@ -937,7 +937,7 @@ impl proto::user_service_server::UserService for UserService {
         };
         let saga_txn = inferadb_ledger_types::Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
-            client_id: "system:user".to_string(),
+            client_id: inferadb_ledger_types::ClientId::new("system:user"),
             sequence: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)

@@ -68,45 +68,49 @@ pub(crate) fn status_with_correlation(
 
 /// Synthesizes a generic `ErrorDetails` from a gRPC status code.
 ///
-/// Maps each gRPC code to the most appropriate `ErrorCode`, retryability flag,
+/// Maps each gRPC code to the most appropriate `DiagnosticCode`, retryability flag,
 /// and recovery guidance. Used as a fallback when specialized error builders
 /// weren't used at the call site.
 pub(crate) fn error_details_from_code(code: tonic::Code) -> proto::ErrorDetails {
-    use inferadb_ledger_types::ErrorCode;
+    use inferadb_ledger_types::DiagnosticCode;
 
     let (error_code, is_retryable, suggested_action) = match code {
         tonic::Code::InvalidArgument => (
-            ErrorCode::AppInvalidArgument,
+            DiagnosticCode::AppInvalidArgument,
             false,
             "Fix the request parameters to conform to field limits",
         ),
         tonic::Code::NotFound => {
-            (ErrorCode::AppEntityNotFound, false, "Verify the resource exists before retrying")
+            (DiagnosticCode::AppEntityNotFound, false, "Verify the resource exists before retrying")
         },
-        tonic::Code::AlreadyExists => {
-            (ErrorCode::AppAlreadyCommitted, false, "Operation already succeeded; no retry needed")
-        },
+        tonic::Code::AlreadyExists => (
+            DiagnosticCode::AppAlreadyCommitted,
+            false,
+            "Operation already succeeded; no retry needed",
+        ),
         tonic::Code::ResourceExhausted => {
-            (ErrorCode::AppQuotaExceeded, true, "Reduce request rate or wait before retrying")
+            (DiagnosticCode::AppQuotaExceeded, true, "Reduce request rate or wait before retrying")
         },
         tonic::Code::FailedPrecondition => (
-            ErrorCode::AppPreconditionFailed,
+            DiagnosticCode::AppPreconditionFailed,
             false,
             "Check preconditions and retry with updated values",
         ),
         tonic::Code::Unavailable => (
-            ErrorCode::ConsensusNotLeader,
+            DiagnosticCode::ConsensusNotLeader,
             true,
             "Retry against a different node or wait for leader election",
         ),
         tonic::Code::DeadlineExceeded => {
-            (ErrorCode::AppInternal, true, "Increase timeout or reduce request complexity")
+            (DiagnosticCode::AppInternal, true, "Increase timeout or reduce request complexity")
         },
-        tonic::Code::Internal => (ErrorCode::AppInternal, false, "Check server logs for details"),
+        tonic::Code::Internal => {
+            (DiagnosticCode::AppInternal, false, "Check server logs for details")
+        },
         tonic::Code::Aborted => {
-            (ErrorCode::AppInternal, true, "Retry the operation; conflict may have resolved")
+            (DiagnosticCode::AppInternal, true, "Retry the operation; conflict may have resolved")
         },
-        _ => (ErrorCode::AppInternal, false, "Check server logs for details"),
+        _ => (DiagnosticCode::AppInternal, false, "Check server logs for details"),
     };
 
     proto::ErrorDetails {

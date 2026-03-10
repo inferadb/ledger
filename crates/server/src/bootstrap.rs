@@ -215,7 +215,10 @@ pub async fn bootstrap_node(
         .map_err(|e| BootstrapError::Storage { message: format!("failed to open log store: {e}") })?
         .with_state_layer(state.clone())
         .with_block_archive(block_archive.clone())
-        .with_region_config(inferadb_ledger_types::Region::GLOBAL, node_id.to_string())
+        .with_region_config(
+            inferadb_ledger_types::Region::GLOBAL,
+            inferadb_ledger_types::NodeId::new(node_id.to_string()),
+        )
         .with_block_announcements(block_announcements.clone())
         .with_event_writer(event_writer);
 

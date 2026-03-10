@@ -35,7 +35,7 @@ use inferadb_ledger_types::{
 };
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use sha2::{Digest, Sha256};
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::{ResultExt, Snafu};
 use zeroize::{Zeroize, Zeroizing};
 
 // ─── DER Encoding Constants ────────────────────────────────────────
@@ -93,15 +93,8 @@ pub enum JwtError {
         location: snafu::Location,
     },
 
-    /// Organization not found when resolving signing key scope to region.
-    #[snafu(display("Organization not found for signing key scope: {id}"))]
-    OrganizationNotFound {
-        /// The organization ID that was not found.
-        id: i64,
-    },
-
-    /// Region lookup failed due to a state error.
-    #[snafu(display("State error during region lookup: {source}"))]
+    /// Region/scope lookup failed due to a state error (including not-found).
+    #[snafu(display("Scope resolution error: {source}"))]
     StateLookup {
         /// The underlying system state error.
         source: SystemError,
@@ -115,22 +108,13 @@ pub enum JwtError {
 
 /// Maps a signing key scope to the [`Region`] whose RMK protects it.
 ///
-/// - `SigningKeyScope::Global` → `Region::GLOBAL` (always provisioned, validated at startup).
-/// - `SigningKeyScope::Organization(id)` → the organization's assigned region.
+/// Delegates to [`SystemOrganizationService::resolve_scope_region`] and
+/// wraps the error into [`JwtError::StateLookup`].
 pub(crate) fn scope_to_region<B: StorageBackend>(
     scope: &SigningKeyScope,
     system_service: &SystemOrganizationService<B>,
 ) -> Result<Region, JwtError> {
-    match scope {
-        SigningKeyScope::Global => Ok(Region::GLOBAL),
-        SigningKeyScope::Organization(org_id) => {
-            let region = system_service
-                .get_region_for_organization(*org_id)
-                .context(StateLookupSnafu)?
-                .context(OrganizationNotFoundSnafu { id: org_id.value() })?;
-            Ok(region)
-        },
-    }
+    system_service.resolve_scope_region(scope).context(StateLookupSnafu)
 }
 
 // ─── Cached Signing Key ────────────────────────────────────────────
@@ -621,7 +605,7 @@ mod tests {
         },
     };
     use inferadb_ledger_types::{
-        OrganizationId, OrganizationSlug, Region, SigningKeyId,
+        NodeId, OrganizationId, OrganizationSlug, Region, SigningKeyId,
         config::JwtConfig,
         token::{
             SESSION_AUDIENCE, SIGNING_KEY_ENVELOPE_SIZE, TokenError, TokenType, VAULT_AUDIENCE,
@@ -703,10 +687,7 @@ mod tests {
             scope_to_region(&SigningKeyScope::Organization(OrganizationId::new(999)), &svc);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(
-            matches!(err, JwtError::OrganizationNotFound { id: 999 }),
-            "expected OrganizationNotFound, got: {err:?}"
-        );
+        assert!(matches!(err, JwtError::StateLookup { .. }), "expected StateLookup, got: {err:?}");
     }
 
     #[test]
@@ -716,7 +697,7 @@ mod tests {
         let registry = OrganizationRegistry {
             organization_id: OrganizationId::new(1),
             region: Region::US_EAST_VA,
-            member_nodes: vec!["node-1".to_string()],
+            member_nodes: vec![NodeId::new("node-1")],
             status: OrganizationStatus::Active,
             config_version: 1,
             created_at: Utc::now(),
@@ -735,7 +716,7 @@ mod tests {
         let registry = OrganizationRegistry {
             organization_id: OrganizationId::new(42),
             region: Region::JP_EAST_TOKYO,
-            member_nodes: vec!["node-jp".to_string()],
+            member_nodes: vec![NodeId::new("node-jp")],
             status: OrganizationStatus::Active,
             config_version: 1,
             created_at: Utc::now(),
@@ -759,12 +740,6 @@ mod tests {
     fn jwt_error_display_key_encryption() {
         let err = JwtError::KeyEncryption;
         assert_eq!(err.to_string(), "Private key encryption failed");
-    }
-
-    #[test]
-    fn jwt_error_display_org_not_found() {
-        let err = JwtError::OrganizationNotFound { id: 42 };
-        assert_eq!(err.to_string(), "Organization not found for signing key scope: 42");
     }
 
     #[test]

@@ -41,18 +41,16 @@ const DEFAULT_DEK_CACHE_CAPACITY: usize = 8_192;
 /// let config = EncryptionConfig::builder()
 ///     .enabled(true)
 ///     .key_source(inferadb_ledger_types::config::KeySource::Env("LEDGER_RMK".to_string()))
-///     .build();
-/// config.validate().expect("valid encryption config");
+///     .build()
+///     .expect("valid encryption config");
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, bon::Builder)]
-#[builder(on(String, into))]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EncryptionConfig {
     /// Whether encryption at rest is enabled.
     ///
     /// When false, the `EncryptedBackend` passes through to the inner
     /// backend without any crypto overhead.
     #[serde(default)]
-    #[builder(default)]
     pub enabled: bool,
 
     /// Source of the Region Master Key material.
@@ -65,7 +63,6 @@ pub struct EncryptionConfig {
     ///
     /// Currently only AES-256-GCM is supported.
     #[serde(default)]
-    #[builder(default)]
     pub algorithm: EncryptionAlgorithm,
 
     /// Maximum number of unwrapped DEKs cached in memory.
@@ -74,7 +71,6 @@ pub struct EncryptionConfig {
     /// at the cost of memory (32 bytes per cached DEK). Must be in
     /// \[64, 262\_144\]. Default: 8,192 entries (≈ 256 KB).
     #[serde(default = "default_dek_cache_capacity")]
-    #[builder(default = default_dek_cache_capacity())]
     pub dek_cache_capacity: usize,
 
     /// Whether `mlock` failure is fatal at startup.
@@ -82,9 +78,31 @@ pub struct EncryptionConfig {
     /// When true (default), the process exits if `mlock` cannot pin
     /// key material in RAM (prevents swap exposure). Set to false
     /// only for development/testing environments.
-    #[serde(default = "default_strict")]
-    #[builder(default = true)]
+    #[serde(default = "default_true")]
     pub strict_memory_protection: bool,
+}
+
+#[bon::bon]
+impl EncryptionConfig {
+    /// Creates a new encryption configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if enabled without key source,
+    /// or if DEK cache capacity is out of range.
+    #[builder]
+    pub fn new(
+        #[builder(default)] enabled: bool,
+        key_source: Option<KeySource>,
+        #[builder(default)] algorithm: EncryptionAlgorithm,
+        #[builder(default = default_dek_cache_capacity())] dek_cache_capacity: usize,
+        #[builder(default = true)] strict_memory_protection: bool,
+    ) -> Result<Self, ConfigError> {
+        let config =
+            Self { enabled, key_source, algorithm, dek_cache_capacity, strict_memory_protection };
+        config.validate()?;
+        Ok(config)
+    }
 }
 
 impl EncryptionConfig {
@@ -186,23 +204,20 @@ const DEFAULT_REWRAP_INTERVAL_SECS: u64 = 300;
 ///
 /// - `batch_size` must be in \[1, 50\_000\]
 /// - `interval_secs` must be > 0
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, bon::Builder)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RewrapConfig {
     /// Whether the re-wrapping job is enabled.
     #[serde(default = "default_true")]
-    #[builder(default = true)]
     pub enabled: bool,
 
     /// Pages processed per iteration.
     ///
     /// Higher values re-wrap faster but generate more I/O load.
     #[serde(default = "default_rewrap_batch_size")]
-    #[builder(default = DEFAULT_REWRAP_BATCH_SIZE)]
     pub batch_size: usize,
 
     /// Seconds between re-wrapping check cycles.
     #[serde(default = "default_rewrap_interval_secs")]
-    #[builder(default = DEFAULT_REWRAP_INTERVAL_SECS)]
     pub interval_secs: u64,
 
     /// Target RMK version to re-wrap to.
@@ -210,6 +225,26 @@ pub struct RewrapConfig {
     /// If `None`, re-wraps to the current latest version.
     #[serde(default)]
     pub target_rmk_version: Option<u32>,
+}
+
+#[bon::bon]
+impl RewrapConfig {
+    /// Creates a new re-wrapping configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if batch size or interval is invalid.
+    #[builder]
+    pub fn new(
+        #[builder(default = true)] enabled: bool,
+        #[builder(default = DEFAULT_REWRAP_BATCH_SIZE)] batch_size: usize,
+        #[builder(default = DEFAULT_REWRAP_INTERVAL_SECS)] interval_secs: u64,
+        target_rmk_version: Option<u32>,
+    ) -> Result<Self, ConfigError> {
+        let config = Self { enabled, batch_size, interval_secs, target_rmk_version };
+        config.validate()?;
+        Ok(config)
+    }
 }
 
 impl RewrapConfig {
@@ -247,10 +282,6 @@ fn default_dek_cache_capacity() -> usize {
     DEFAULT_DEK_CACHE_CAPACITY
 }
 
-fn default_strict() -> bool {
-    true
-}
-
 fn default_true() -> bool {
     true
 }
@@ -279,8 +310,8 @@ mod tests {
 
     #[test]
     fn test_enabled_without_key_source_fails_validation() {
-        let config = EncryptionConfig::builder().enabled(true).build();
-        assert!(config.validate().is_err());
+        let err = EncryptionConfig::builder().enabled(true).build().unwrap_err();
+        assert!(err.to_string().contains("key_source"));
     }
 
     #[test]
@@ -288,8 +319,9 @@ mod tests {
         let config = EncryptionConfig::builder()
             .enabled(true)
             .key_source(KeySource::Env("RMK".to_string()))
-            .build();
-        assert!(config.validate().is_ok());
+            .build()
+            .unwrap();
+        assert!(config.enabled);
     }
 
     #[test]
@@ -316,7 +348,8 @@ mod tests {
             .enabled(true)
             .key_source(KeySource::File("/tmp/rmk.key".into()))
             .dek_cache_capacity(4096_usize)
-            .build();
+            .build()
+            .unwrap();
         let json = serde_json::to_string(&config).unwrap();
         let restored: EncryptionConfig = serde_json::from_str(&json).unwrap();
         assert!(restored.enabled);
@@ -341,11 +374,11 @@ mod tests {
             .batch_size(500_usize)
             .interval_secs(60_u64)
             .target_rmk_version(2_u32)
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(config.batch_size, 500);
         assert_eq!(config.interval_secs, 60);
         assert_eq!(config.target_rmk_version, Some(2));
-        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -368,7 +401,7 @@ mod tests {
 
     #[test]
     fn test_rewrap_config_serialization() {
-        let config = RewrapConfig::builder().batch_size(2000_usize).build();
+        let config = RewrapConfig::builder().batch_size(2000_usize).build().unwrap();
         let json = serde_json::to_string(&config).unwrap();
         let restored: RewrapConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.batch_size, 2000);

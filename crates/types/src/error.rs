@@ -6,9 +6,9 @@
 //! - Validation errors (hash mismatches, divergence)
 //! - Protocol errors (gRPC, serialization)
 //!
-//! Each error variant maps to an [`ErrorCode`] with a unique numeric identifier,
+//! Each error variant maps to a [`DiagnosticCode`] with a unique numeric identifier,
 //! retryability classification, and suggested recovery action.
-//! See [`ErrorCode`] for the full catalog.
+//! See [`DiagnosticCode`] for the full catalog.
 
 use core::fmt;
 
@@ -40,11 +40,11 @@ pub type Result<T, E = LedgerError> = std::result::Result<T, E>;
 /// # Wire Format
 ///
 /// Error codes are transmitted as the string representation of their numeric
-/// value (e.g., `"1000"`) in gRPC error detail metadata. Use [`ErrorCode::as_u16`]
-/// for serialization and [`ErrorCode::from_u16`] for deserialization.
+/// value (e.g., `"1000"`) in gRPC error detail metadata. Use [`DiagnosticCode::as_u16`]
+/// for serialization and [`DiagnosticCode::from_u16`] for deserialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
-pub enum ErrorCode {
+pub enum DiagnosticCode {
     // --- Storage errors (1000–1199) ---
     /// Database file could not be opened.
     StorageDatabaseOpen = 1000,
@@ -118,14 +118,14 @@ pub enum ErrorCode {
     AppUserMigrating = 3107,
 }
 
-impl ErrorCode {
+impl DiagnosticCode {
     /// Returns the numeric code value.
     #[must_use]
     pub const fn as_u16(self) -> u16 {
         self as u16
     }
 
-    /// Converts a numeric code to an `ErrorCode`, returning `None` for unknown values.
+    /// Converts a numeric code to an `DiagnosticCode`, returning `None` for unknown values.
     #[must_use]
     pub fn from_u16(code: u16) -> Option<Self> {
         match code {
@@ -296,7 +296,7 @@ impl ErrorCode {
     }
 }
 
-impl fmt::Display for ErrorCode {
+impl fmt::Display for DiagnosticCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_u16())
     }
@@ -550,33 +550,33 @@ pub enum LedgerError {
 impl LedgerError {
     /// Returns the machine-readable error code for this error.
     #[must_use]
-    pub const fn code(&self) -> ErrorCode {
+    pub const fn code(&self) -> DiagnosticCode {
         match self {
-            Self::Storage { .. } => ErrorCode::AppStorage,
-            Self::Consensus { .. } => ErrorCode::AppConsensus,
-            Self::HashMismatch { .. } => ErrorCode::AppHashMismatch,
-            Self::VaultDiverged { .. } => ErrorCode::AppVaultDiverged,
-            Self::VaultUnavailable { .. } => ErrorCode::AppVaultUnavailable,
-            Self::OrganizationNotFound { .. } => ErrorCode::AppOrganizationNotFound,
-            Self::OrganizationMigrating { .. } => ErrorCode::AppOrganizationMigrating,
-            Self::UserMigrating { .. } => ErrorCode::AppUserMigrating,
-            Self::VaultNotFound { .. } => ErrorCode::AppVaultNotFound,
-            Self::EntityNotFound { .. } => ErrorCode::AppEntityNotFound,
-            Self::PreconditionFailed { .. } => ErrorCode::AppPreconditionFailed,
-            Self::AlreadyCommitted { .. } => ErrorCode::AppAlreadyCommitted,
-            Self::SequenceViolation { .. } => ErrorCode::AppSequenceViolation,
-            Self::Serialization { .. } => ErrorCode::AppSerialization,
-            Self::Config { .. } => ErrorCode::AppConfig,
-            Self::Io { .. } => ErrorCode::AppIo,
-            Self::InvalidArgument { .. } => ErrorCode::AppInvalidArgument,
-            Self::Internal { .. } => ErrorCode::AppInternal,
+            Self::Storage { .. } => DiagnosticCode::AppStorage,
+            Self::Consensus { .. } => DiagnosticCode::AppConsensus,
+            Self::HashMismatch { .. } => DiagnosticCode::AppHashMismatch,
+            Self::VaultDiverged { .. } => DiagnosticCode::AppVaultDiverged,
+            Self::VaultUnavailable { .. } => DiagnosticCode::AppVaultUnavailable,
+            Self::OrganizationNotFound { .. } => DiagnosticCode::AppOrganizationNotFound,
+            Self::OrganizationMigrating { .. } => DiagnosticCode::AppOrganizationMigrating,
+            Self::UserMigrating { .. } => DiagnosticCode::AppUserMigrating,
+            Self::VaultNotFound { .. } => DiagnosticCode::AppVaultNotFound,
+            Self::EntityNotFound { .. } => DiagnosticCode::AppEntityNotFound,
+            Self::PreconditionFailed { .. } => DiagnosticCode::AppPreconditionFailed,
+            Self::AlreadyCommitted { .. } => DiagnosticCode::AppAlreadyCommitted,
+            Self::SequenceViolation { .. } => DiagnosticCode::AppSequenceViolation,
+            Self::Serialization { .. } => DiagnosticCode::AppSerialization,
+            Self::Config { .. } => DiagnosticCode::AppConfig,
+            Self::Io { .. } => DiagnosticCode::AppIo,
+            Self::InvalidArgument { .. } => DiagnosticCode::AppInvalidArgument,
+            Self::Internal { .. } => DiagnosticCode::AppInternal,
         }
     }
 
     /// Whether this error is retryable.
     ///
     /// Retryable errors may succeed on a subsequent attempt. Delegates to
-    /// [`ErrorCode::is_retryable`] for consistency with the wire format.
+    /// [`DiagnosticCode::is_retryable`] for consistency with the wire format.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
         self.code().is_retryable()
@@ -585,7 +585,7 @@ impl LedgerError {
     /// Suggested recovery action for this error.
     ///
     /// Returns a human-readable string describing corrective action.
-    /// Delegates to [`ErrorCode::suggested_action`].
+    /// Delegates to [`DiagnosticCode::suggested_action`].
     #[must_use]
     pub const fn suggested_action(&self) -> &'static str {
         self.code().suggested_action()
@@ -675,14 +675,14 @@ pub enum StorageError {
 impl StorageError {
     /// Returns the machine-readable error code for this error.
     #[must_use]
-    pub const fn code(&self) -> ErrorCode {
+    pub const fn code(&self) -> DiagnosticCode {
         match self {
-            Self::DatabaseOpen { .. } => ErrorCode::StorageDatabaseOpen,
-            Self::Transaction { .. } => ErrorCode::StorageTransaction,
-            Self::TableOperation { .. } => ErrorCode::StorageTableOperation,
-            Self::KeyEncoding { .. } => ErrorCode::StorageKeyEncoding,
-            Self::Snapshot { .. } => ErrorCode::StorageSnapshot,
-            Self::Corruption { .. } => ErrorCode::StorageCorruption,
+            Self::DatabaseOpen { .. } => DiagnosticCode::StorageDatabaseOpen,
+            Self::Transaction { .. } => DiagnosticCode::StorageTransaction,
+            Self::TableOperation { .. } => DiagnosticCode::StorageTableOperation,
+            Self::KeyEncoding { .. } => DiagnosticCode::StorageKeyEncoding,
+            Self::Snapshot { .. } => DiagnosticCode::StorageSnapshot,
+            Self::Corruption { .. } => DiagnosticCode::StorageCorruption,
         }
     }
 
@@ -766,14 +766,14 @@ pub enum ConsensusError {
 impl ConsensusError {
     /// Returns the machine-readable error code for this error.
     #[must_use]
-    pub const fn code(&self) -> ErrorCode {
+    pub const fn code(&self) -> DiagnosticCode {
         match self {
-            Self::NotLeader { .. } => ErrorCode::ConsensusNotLeader,
-            Self::LeaderUnknown => ErrorCode::ConsensusLeaderUnknown,
-            Self::ProposalFailed { .. } => ErrorCode::ConsensusProposalFailed,
-            Self::LogStorage { .. } => ErrorCode::ConsensusLogStorage,
-            Self::StateMachine { .. } => ErrorCode::ConsensusStateMachine,
-            Self::Network { .. } => ErrorCode::ConsensusNetwork,
+            Self::NotLeader { .. } => DiagnosticCode::ConsensusNotLeader,
+            Self::LeaderUnknown => DiagnosticCode::ConsensusLeaderUnknown,
+            Self::ProposalFailed { .. } => DiagnosticCode::ConsensusProposalFailed,
+            Self::LogStorage { .. } => DiagnosticCode::ConsensusLogStorage,
+            Self::StateMachine { .. } => DiagnosticCode::ConsensusStateMachine,
+            Self::Network { .. } => DiagnosticCode::ConsensusNetwork,
         }
     }
 
@@ -824,44 +824,44 @@ mod tests {
         assert!(matches!(ledger_err, LedgerError::Storage { .. }));
     }
 
-    // --- ErrorCode numeric uniqueness ---
+    // --- DiagnosticCode numeric uniqueness ---
 
-    /// Returns all ErrorCode variants.
-    fn all_error_codes() -> Vec<ErrorCode> {
+    /// Returns all DiagnosticCode variants.
+    fn all_error_codes() -> Vec<DiagnosticCode> {
         vec![
-            ErrorCode::StorageDatabaseOpen,
-            ErrorCode::StorageTransaction,
-            ErrorCode::StorageTableOperation,
-            ErrorCode::StorageKeyEncoding,
-            ErrorCode::StorageSnapshot,
-            ErrorCode::StorageCorruption,
-            ErrorCode::ConsensusNotLeader,
-            ErrorCode::ConsensusLeaderUnknown,
-            ErrorCode::ConsensusProposalFailed,
-            ErrorCode::ConsensusLogStorage,
-            ErrorCode::ConsensusStateMachine,
-            ErrorCode::ConsensusNetwork,
-            ErrorCode::AppStorage,
-            ErrorCode::AppConsensus,
-            ErrorCode::AppHashMismatch,
-            ErrorCode::AppVaultDiverged,
-            ErrorCode::AppVaultUnavailable,
-            ErrorCode::AppOrganizationNotFound,
-            ErrorCode::AppOrganizationMigrating,
-            ErrorCode::AppUserMigrating,
-            ErrorCode::AppVaultNotFound,
-            ErrorCode::AppEntityNotFound,
-            ErrorCode::AppPreconditionFailed,
-            ErrorCode::AppAlreadyCommitted,
-            ErrorCode::AppSequenceViolation,
-            ErrorCode::AppSerialization,
-            ErrorCode::AppConfig,
-            ErrorCode::AppIo,
-            ErrorCode::AppInvalidArgument,
-            ErrorCode::AppInternal,
-            ErrorCode::AppQuotaExceeded,
-            ErrorCode::AppInsufficientRegionNodes,
-            ErrorCode::AppInvalidRegionAssignment,
+            DiagnosticCode::StorageDatabaseOpen,
+            DiagnosticCode::StorageTransaction,
+            DiagnosticCode::StorageTableOperation,
+            DiagnosticCode::StorageKeyEncoding,
+            DiagnosticCode::StorageSnapshot,
+            DiagnosticCode::StorageCorruption,
+            DiagnosticCode::ConsensusNotLeader,
+            DiagnosticCode::ConsensusLeaderUnknown,
+            DiagnosticCode::ConsensusProposalFailed,
+            DiagnosticCode::ConsensusLogStorage,
+            DiagnosticCode::ConsensusStateMachine,
+            DiagnosticCode::ConsensusNetwork,
+            DiagnosticCode::AppStorage,
+            DiagnosticCode::AppConsensus,
+            DiagnosticCode::AppHashMismatch,
+            DiagnosticCode::AppVaultDiverged,
+            DiagnosticCode::AppVaultUnavailable,
+            DiagnosticCode::AppOrganizationNotFound,
+            DiagnosticCode::AppOrganizationMigrating,
+            DiagnosticCode::AppUserMigrating,
+            DiagnosticCode::AppVaultNotFound,
+            DiagnosticCode::AppEntityNotFound,
+            DiagnosticCode::AppPreconditionFailed,
+            DiagnosticCode::AppAlreadyCommitted,
+            DiagnosticCode::AppSequenceViolation,
+            DiagnosticCode::AppSerialization,
+            DiagnosticCode::AppConfig,
+            DiagnosticCode::AppIo,
+            DiagnosticCode::AppInvalidArgument,
+            DiagnosticCode::AppInternal,
+            DiagnosticCode::AppQuotaExceeded,
+            DiagnosticCode::AppInsufficientRegionNodes,
+            DiagnosticCode::AppInvalidRegionAssignment,
         ]
     }
 
@@ -879,7 +879,7 @@ mod tests {
     fn test_error_code_round_trip() {
         for code in all_error_codes() {
             let numeric = code.as_u16();
-            let recovered = ErrorCode::from_u16(numeric);
+            let recovered = DiagnosticCode::from_u16(numeric);
             assert_eq!(
                 recovered,
                 Some(code),
@@ -890,19 +890,19 @@ mod tests {
 
     #[test]
     fn test_error_code_unknown_value_returns_none() {
-        assert_eq!(ErrorCode::from_u16(0), None);
-        assert_eq!(ErrorCode::from_u16(9999), None);
-        assert_eq!(ErrorCode::from_u16(1500), None);
+        assert_eq!(DiagnosticCode::from_u16(0), None);
+        assert_eq!(DiagnosticCode::from_u16(9999), None);
+        assert_eq!(DiagnosticCode::from_u16(1500), None);
     }
 
     #[test]
     fn test_error_code_display() {
-        assert_eq!(ErrorCode::StorageDatabaseOpen.to_string(), "1000");
-        assert_eq!(ErrorCode::ConsensusNotLeader.to_string(), "2000");
-        assert_eq!(ErrorCode::AppStorage.to_string(), "3000");
+        assert_eq!(DiagnosticCode::StorageDatabaseOpen.to_string(), "1000");
+        assert_eq!(DiagnosticCode::ConsensusNotLeader.to_string(), "2000");
+        assert_eq!(DiagnosticCode::AppStorage.to_string(), "3000");
     }
 
-    /// Every ErrorCode falls within its expected numeric range.
+    /// Every DiagnosticCode falls within its expected numeric range.
     #[test]
     fn test_error_code_ranges() {
         for code in all_error_codes() {
@@ -926,54 +926,54 @@ mod tests {
         }
     }
 
-    // --- ErrorCode::is_retryable ---
+    // --- DiagnosticCode::is_retryable ---
 
-    /// Table-driven: every ErrorCode has correct retryability classification.
+    /// Table-driven: every DiagnosticCode has correct retryability classification.
     #[test]
     fn test_error_code_retryability() {
-        let cases: Vec<(ErrorCode, bool)> = vec![
+        let cases: Vec<(DiagnosticCode, bool)> = vec![
             // Retryable
-            (ErrorCode::StorageTransaction, true),
-            (ErrorCode::StorageSnapshot, true),
-            (ErrorCode::ConsensusNotLeader, true),
-            (ErrorCode::ConsensusLeaderUnknown, true),
-            (ErrorCode::ConsensusProposalFailed, true),
-            (ErrorCode::ConsensusNetwork, true),
-            (ErrorCode::AppConsensus, true),
-            (ErrorCode::AppVaultUnavailable, true),
-            (ErrorCode::AppIo, true),
-            (ErrorCode::AppQuotaExceeded, true),
-            (ErrorCode::AppOrganizationMigrating, true),
-            (ErrorCode::AppUserMigrating, true),
+            (DiagnosticCode::StorageTransaction, true),
+            (DiagnosticCode::StorageSnapshot, true),
+            (DiagnosticCode::ConsensusNotLeader, true),
+            (DiagnosticCode::ConsensusLeaderUnknown, true),
+            (DiagnosticCode::ConsensusProposalFailed, true),
+            (DiagnosticCode::ConsensusNetwork, true),
+            (DiagnosticCode::AppConsensus, true),
+            (DiagnosticCode::AppVaultUnavailable, true),
+            (DiagnosticCode::AppIo, true),
+            (DiagnosticCode::AppQuotaExceeded, true),
+            (DiagnosticCode::AppOrganizationMigrating, true),
+            (DiagnosticCode::AppUserMigrating, true),
             // Non-retryable
-            (ErrorCode::StorageDatabaseOpen, false),
-            (ErrorCode::StorageTableOperation, false),
-            (ErrorCode::StorageKeyEncoding, false),
-            (ErrorCode::StorageCorruption, false),
-            (ErrorCode::ConsensusLogStorage, false),
-            (ErrorCode::ConsensusStateMachine, false),
-            (ErrorCode::AppStorage, false),
-            (ErrorCode::AppHashMismatch, false),
-            (ErrorCode::AppVaultDiverged, false),
-            (ErrorCode::AppOrganizationNotFound, false),
-            (ErrorCode::AppVaultNotFound, false),
-            (ErrorCode::AppEntityNotFound, false),
-            (ErrorCode::AppPreconditionFailed, false),
-            (ErrorCode::AppAlreadyCommitted, false),
-            (ErrorCode::AppSequenceViolation, false),
-            (ErrorCode::AppSerialization, false),
-            (ErrorCode::AppConfig, false),
-            (ErrorCode::AppInvalidArgument, false),
-            (ErrorCode::AppInternal, false),
-            (ErrorCode::AppInsufficientRegionNodes, false),
-            (ErrorCode::AppInvalidRegionAssignment, false),
+            (DiagnosticCode::StorageDatabaseOpen, false),
+            (DiagnosticCode::StorageTableOperation, false),
+            (DiagnosticCode::StorageKeyEncoding, false),
+            (DiagnosticCode::StorageCorruption, false),
+            (DiagnosticCode::ConsensusLogStorage, false),
+            (DiagnosticCode::ConsensusStateMachine, false),
+            (DiagnosticCode::AppStorage, false),
+            (DiagnosticCode::AppHashMismatch, false),
+            (DiagnosticCode::AppVaultDiverged, false),
+            (DiagnosticCode::AppOrganizationNotFound, false),
+            (DiagnosticCode::AppVaultNotFound, false),
+            (DiagnosticCode::AppEntityNotFound, false),
+            (DiagnosticCode::AppPreconditionFailed, false),
+            (DiagnosticCode::AppAlreadyCommitted, false),
+            (DiagnosticCode::AppSequenceViolation, false),
+            (DiagnosticCode::AppSerialization, false),
+            (DiagnosticCode::AppConfig, false),
+            (DiagnosticCode::AppInvalidArgument, false),
+            (DiagnosticCode::AppInternal, false),
+            (DiagnosticCode::AppInsufficientRegionNodes, false),
+            (DiagnosticCode::AppInvalidRegionAssignment, false),
         ];
         for (code, expected) in &cases {
             assert_eq!(code.is_retryable(), *expected, "{code:?}");
         }
     }
 
-    // --- ErrorCode::suggested_action ---
+    // --- DiagnosticCode::suggested_action ---
 
     #[test]
     fn test_suggested_action_non_empty() {
@@ -985,17 +985,17 @@ mod tests {
 
     // --- LedgerError code mapping ---
 
-    /// Table-driven: LedgerError variants map to correct ErrorCode and retryability.
-    /// Also verifies that is_retryable() and suggested_action() delegate to ErrorCode.
+    /// Table-driven: LedgerError variants map to correct DiagnosticCode and retryability.
+    /// Also verifies that is_retryable() and suggested_action() delegate to DiagnosticCode.
     #[test]
     fn test_ledger_error_code_and_retryability() {
-        let cases: Vec<(LedgerError, ErrorCode, bool)> = vec![
+        let cases: Vec<(LedgerError, DiagnosticCode, bool)> = vec![
             (
                 LedgerError::Storage {
                     message: "disk full".into(),
                     location: snafu::Location::new("test.rs", 1, 1),
                 },
-                ErrorCode::AppStorage,
+                DiagnosticCode::AppStorage,
                 false,
             ),
             (
@@ -1003,12 +1003,12 @@ mod tests {
                     message: "leader lost".into(),
                     location: snafu::Location::new("test.rs", 1, 1),
                 },
-                ErrorCode::AppConsensus,
+                DiagnosticCode::AppConsensus,
                 true,
             ),
             (
                 LedgerError::HashMismatch { expected: Hash::default(), actual: Hash::default() },
-                ErrorCode::AppHashMismatch,
+                DiagnosticCode::AppHashMismatch,
                 false,
             ),
             (
@@ -1016,20 +1016,20 @@ mod tests {
                     vault: VaultId::new(1),
                     reason: "recovering".into(),
                 },
-                ErrorCode::AppVaultUnavailable,
+                DiagnosticCode::AppVaultUnavailable,
                 true,
             ),
             (
                 LedgerError::OrganizationNotFound { organization: OrganizationId::new(1) },
-                ErrorCode::AppOrganizationNotFound,
+                DiagnosticCode::AppOrganizationNotFound,
                 false,
             ),
             (
                 LedgerError::InvalidArgument { message: "bad param".into() },
-                ErrorCode::AppInvalidArgument,
+                DiagnosticCode::AppInvalidArgument,
                 false,
             ),
-            (LedgerError::Config { message: "bad".into() }, ErrorCode::AppConfig, false),
+            (LedgerError::Config { message: "bad".into() }, DiagnosticCode::AppConfig, false),
         ];
 
         for (err, expected_code, expected_retryable) in &cases {
@@ -1039,7 +1039,7 @@ mod tests {
                 *expected_retryable,
                 "retryability mismatch for {err:?}"
             );
-            // Verify delegation: LedgerError delegates to ErrorCode
+            // Verify delegation: LedgerError delegates to DiagnosticCode
             assert_eq!(
                 err.is_retryable(),
                 err.code().is_retryable(),
@@ -1101,7 +1101,7 @@ mod tests {
         for err in &variants {
             let code = err.code();
             // Every code must have a valid round-trip
-            assert!(ErrorCode::from_u16(code.as_u16()).is_some());
+            assert!(DiagnosticCode::from_u16(code.as_u16()).is_some());
         }
     }
 
@@ -1109,18 +1109,24 @@ mod tests {
 
     #[test]
     fn test_storage_error_codes() {
-        let cases: Vec<(StorageError, ErrorCode)> = vec![
+        let cases: Vec<(StorageError, DiagnosticCode)> = vec![
             (
                 StorageError::DatabaseOpen { path: String::new(), message: String::new() },
-                ErrorCode::StorageDatabaseOpen,
+                DiagnosticCode::StorageDatabaseOpen,
             ),
-            (StorageError::Transaction { message: String::new() }, ErrorCode::StorageTransaction),
+            (
+                StorageError::Transaction { message: String::new() },
+                DiagnosticCode::StorageTransaction,
+            ),
             (
                 StorageError::TableOperation { table: String::new(), message: String::new() },
-                ErrorCode::StorageTableOperation,
+                DiagnosticCode::StorageTableOperation,
             ),
-            (StorageError::KeyEncoding { message: String::new() }, ErrorCode::StorageKeyEncoding),
-            (StorageError::Snapshot { message: String::new() }, ErrorCode::StorageSnapshot),
+            (
+                StorageError::KeyEncoding { message: String::new() },
+                DiagnosticCode::StorageKeyEncoding,
+            ),
+            (StorageError::Snapshot { message: String::new() }, DiagnosticCode::StorageSnapshot),
             (
                 StorageError::Corruption {
                     message: String::new(),
@@ -1129,7 +1135,7 @@ mod tests {
                     expected_checksum: None,
                     actual_checksum: None,
                 },
-                ErrorCode::StorageCorruption,
+                DiagnosticCode::StorageCorruption,
             ),
         ];
         for (err, expected_code) in cases {
@@ -1146,7 +1152,7 @@ mod tests {
             expected_checksum: Some(0xDEAD_BEEF),
             actual_checksum: Some(0xCAFE_BABE),
         };
-        assert_eq!(err.code(), ErrorCode::StorageCorruption);
+        assert_eq!(err.code(), DiagnosticCode::StorageCorruption);
         assert!(!err.is_retryable());
         if let StorageError::Corruption {
             page_id,
@@ -1167,28 +1173,31 @@ mod tests {
 
     #[test]
     fn test_consensus_error_codes() {
-        let cases: Vec<(ConsensusError, ErrorCode)> = vec![
+        let cases: Vec<(ConsensusError, DiagnosticCode)> = vec![
             (
                 ConsensusError::NotLeader { leader: Some("node-1".to_string()) },
-                ErrorCode::ConsensusNotLeader,
+                DiagnosticCode::ConsensusNotLeader,
             ),
-            (ConsensusError::LeaderUnknown, ErrorCode::ConsensusLeaderUnknown),
+            (ConsensusError::LeaderUnknown, DiagnosticCode::ConsensusLeaderUnknown),
             (
                 ConsensusError::ProposalFailed {
                     message: "rejected".to_string(),
                     rejection_reason: None,
                     rejecting_node_id: None,
                 },
-                ErrorCode::ConsensusProposalFailed,
+                DiagnosticCode::ConsensusProposalFailed,
             ),
-            (ConsensusError::LogStorage { message: String::new() }, ErrorCode::ConsensusLogStorage),
+            (
+                ConsensusError::LogStorage { message: String::new() },
+                DiagnosticCode::ConsensusLogStorage,
+            ),
             (
                 ConsensusError::StateMachine { message: String::new() },
-                ErrorCode::ConsensusStateMachine,
+                DiagnosticCode::ConsensusStateMachine,
             ),
             (
                 ConsensusError::Network { node: String::new(), message: String::new() },
-                ErrorCode::ConsensusNetwork,
+                DiagnosticCode::ConsensusNetwork,
             ),
         ];
         for (err, expected_code) in cases {
@@ -1203,7 +1212,7 @@ mod tests {
             rejection_reason: Some("log behind".to_string()),
             rejecting_node_id: Some("node-3".to_string()),
         };
-        assert_eq!(err.code(), ErrorCode::ConsensusProposalFailed);
+        assert_eq!(err.code(), DiagnosticCode::ConsensusProposalFailed);
         assert!(err.is_retryable());
         if let ConsensusError::ProposalFailed { rejection_reason, rejecting_node_id, .. } = &err {
             assert_eq!(rejection_reason.as_deref(), Some("log behind"));

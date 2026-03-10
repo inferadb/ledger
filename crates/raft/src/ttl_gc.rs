@@ -14,7 +14,7 @@ use std::{sync::Arc, time::Duration};
 
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{Operation, OrganizationId, Transaction, VaultId};
+use inferadb_ledger_types::{ClientId, Operation, OrganizationId, Transaction, VaultId};
 use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
@@ -116,7 +116,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
 
         let transaction = Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
-            client_id: GC_ACTOR.to_string(),
+            client_id: ClientId::new(GC_ACTOR),
             sequence: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)

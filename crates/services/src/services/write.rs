@@ -198,11 +198,14 @@ impl WriteService {
                 context.insert("target_region".to_string(), pending.as_str().to_string());
             }
             let details = super::error_details::build_error_details(
-                inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.as_u16(),
+                inferadb_ledger_types::DiagnosticCode::AppOrganizationMigrating.as_u16(),
                 true,
                 Some(30_000),
                 context,
-                Some(inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.suggested_action()),
+                Some(
+                    inferadb_ledger_types::DiagnosticCode::AppOrganizationMigrating
+                        .suggested_action(),
+                ),
             );
             let encoded = prost::Message::encode_to_vec(&details);
             return Err(Status::with_details(
@@ -455,7 +458,7 @@ impl WriteService {
         // is assigned at Raft apply time for deterministic replay.
         let transaction = inferadb_ledger_types::Transaction {
             id: *Uuid::new_v4().as_bytes(),
-            client_id: client_id.to_string(),
+            client_id: inferadb_ledger_types::ClientId::new(client_id),
             sequence: 0, // Server-assigned at apply time
             operations: internal_ops,
             timestamp: chrono::Utc::now(),

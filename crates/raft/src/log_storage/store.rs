@@ -14,9 +14,9 @@ use inferadb_ledger_store::{
     Database, DatabaseConfig, FileBackend, Key, StorageBackend, Value, WriteTransaction, tables,
 };
 use inferadb_ledger_types::{
-    AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, OrganizationId, OrganizationSlug,
-    RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug, UserEmailId, UserId, UserSlug, VaultId,
-    VaultSlug, decode, encode,
+    AppId, AppSlug, ClientAssertionId, ClientId, EmailVerifyTokenId, NodeId, OrganizationId,
+    OrganizationSlug, RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug, UserEmailId, UserId,
+    UserSlug, VaultId, VaultSlug, decode, encode,
 };
 use openraft::{Entry, LogId, StorageError, Vote};
 use parking_lot::RwLock;
@@ -72,7 +72,7 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     /// Region for this Raft group.
     pub(super) region: Region,
     /// Node ID for block metadata.
-    pub(super) node_id: String,
+    pub(super) node_id: NodeId,
     /// Region chain state (height and previous hash).
     ///
     /// Consolidated into single lock to avoid lock ordering issues.
@@ -149,7 +149,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             state_layer: None,
             block_archive: None,
             region: Region::GLOBAL,
-            node_id: String::new(),
+            node_id: NodeId::new(""),
             region_chain: RwLock::new(RegionChainState {
                 height: 0,
                 previous_hash: inferadb_ledger_types::ZERO_HASH,
@@ -185,7 +185,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     }
 
     /// Configures region metadata.
-    pub fn with_region_config(mut self, region: Region, node_id: String) -> Self {
+    pub fn with_region_config(mut self, region: Region, node_id: NodeId) -> Self {
         self.region = region;
         self.node_id = node_id;
         self
@@ -998,7 +998,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             let entry: ClientSequenceEntry =
                 decode(&value_bytes).map_err(|e| to_serde_error(&e))?;
-            state.client_sequences.insert((org_id, vault_id, client_id), entry);
+            state.client_sequences.insert((org_id, vault_id, ClientId::new(client_id)), entry);
         }
 
         Ok(())
@@ -1143,8 +1143,8 @@ mod tests {
     use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
     use inferadb_ledger_store::{FileBackend, tables};
     use inferadb_ledger_types::{
-        AppId, ClientAssertionId, OrganizationId, OrganizationSlug, RefreshTokenId, Region,
-        SigningKeyId, TeamId, UserEmailId, VaultId, VaultSlug, decode, encode,
+        AppId, ClientAssertionId, ClientId, OrganizationId, OrganizationSlug, RefreshTokenId,
+        Region, SigningKeyId, TeamId, UserEmailId, VaultId, VaultSlug, decode, encode,
     };
     use openraft::{CommittedLeaderId, LogId};
     use tempfile::tempdir;
@@ -1239,7 +1239,7 @@ mod tests {
                 let org_id = OrganizationId::new(org_i);
                 let vault_id = VaultId::new(org_i * 10 + vault_i);
                 state.client_sequences.insert(
-                    (org_id, vault_id, format!("client-{org_i}-{vault_i}")),
+                    (org_id, vault_id, ClientId::new(format!("client-{org_i}-{vault_i}"))),
                     ClientSequenceEntry {
                         sequence: 100 + org_i as u64 * 10 + vault_i as u64,
                         ..ClientSequenceEntry::default()
@@ -1726,7 +1726,7 @@ mod tests {
         updated.client_sequences.remove(&(
             OrganizationId::new(1),
             VaultId::new(11),
-            "client-1-1".to_string(),
+            ClientId::new("client-1-1"),
         ));
 
         // Write
@@ -1750,7 +1750,7 @@ mod tests {
         assert!(!loaded.client_sequences.contains_key(&(
             OrganizationId::new(1),
             VaultId::new(11),
-            "client-1-1".to_string()
+            ClientId::new("client-1-1")
         )));
         // Slug indexes updated
         assert!(loaded.slug_index.contains_key(&new_slug));
@@ -1891,7 +1891,7 @@ mod tests {
             let vault_id = VaultId::new((org_i - 1) * 5 + 1);
             for c in 0..100u64 {
                 state.client_sequences.insert(
-                    (org_id, vault_id, format!("c-{c}")),
+                    (org_id, vault_id, ClientId::new(format!("c-{c}"))),
                     ClientSequenceEntry { sequence: c, ..ClientSequenceEntry::default() },
                 );
             }

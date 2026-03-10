@@ -26,7 +26,7 @@ use std::{
 
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{Operation, OrganizationId, Transaction, VaultId};
+use inferadb_ledger_types::{ClientId, Operation, OrganizationId, Transaction, VaultId};
 use openraft::Raft;
 use snafu::GenerateImplicitData;
 use tokio::time::interval;
@@ -241,7 +241,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
 
         let transaction = Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
-            client_id: CLEANUP_ACTOR.to_string(),
+            client_id: ClientId::new(CLEANUP_ACTOR),
             sequence: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)

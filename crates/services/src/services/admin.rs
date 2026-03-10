@@ -179,6 +179,33 @@ impl AdminService {
         self
     }
 
+    /// Creates a `RequestContext` for an admin operation, filling common fields
+    /// from gRPC metadata and trace context.
+    fn make_request_context(
+        &self,
+        method: &'static str,
+        grpc_metadata: &tonic::metadata::MetadataMap,
+        trace_ctx: &trace_context::TraceContext,
+    ) -> RequestContext {
+        let mut ctx = RequestContext::new("AdminService", method);
+        ctx.set_operation_type(OperationType::Admin);
+        ctx.extract_transport_metadata(grpc_metadata);
+        ctx.set_admin_action(method);
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+        ctx.set_trace_context(
+            &trace_ctx.trace_id,
+            &trace_ctx.span_id,
+            trace_ctx.parent_span_id.as_deref(),
+            trace_ctx.trace_flags,
+        );
+        ctx
+    }
+
     /// Records a handler-phase event (best-effort).
     fn record_handler_event(&self, entry: inferadb_ledger_types::events::EventEntry) {
         if let Some(ref handle) = self.event_handle {
@@ -199,25 +226,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let _req = request.into_inner();
 
-        // Create logging context for this admin operation
-        let mut ctx = RequestContext::new("AdminService", "create_snapshot");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("create_snapshot");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-
-        // Set trace context for distributed tracing correlation
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        let mut ctx = self.make_request_context("create_snapshot", &grpc_metadata, &trace_ctx);
 
         // Trigger Raft snapshot
         ctx.start_raft_timer();
@@ -266,25 +275,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let req = request.into_inner();
         let mut issues = Vec::new();
 
-        // Create logging context for this admin operation
-        let mut ctx = RequestContext::new("AdminService", "check_integrity");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("check_integrity");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-
-        // Set trace context for distributed tracing correlation
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        let mut ctx = self.make_request_context("check_integrity", &grpc_metadata, &trace_ctx);
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
         let organization_slug_val =
@@ -557,25 +548,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create logging context for this admin operation
-        let mut ctx = RequestContext::new("AdminService", "join_cluster");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("join_cluster");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-
-        // Set trace context for distributed tracing correlation
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
+        let mut ctx = self.make_request_context("join_cluster", &grpc_metadata, &trace_ctx);
 
         // Get current metrics to check if we're the leader
         let metrics = self.raft.metrics().borrow().clone();
@@ -763,25 +736,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create logging context for this admin operation
-        let mut ctx = RequestContext::new("AdminService", "leave_cluster");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("leave_cluster");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-
-        // Set trace context for distributed tracing correlation
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        let mut ctx = self.make_request_context("leave_cluster", &grpc_metadata, &trace_ctx);
 
         // Get current metrics
         let metrics = self.raft.metrics().borrow().clone();
@@ -836,18 +791,13 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
     /// Returns current cluster membership, leader ID, and Raft term.
     async fn get_cluster_info(
         &self,
-        _request: Request<GetClusterInfoRequest>,
+        request: Request<GetClusterInfoRequest>,
     ) -> Result<Response<GetClusterInfoResponse>, Status> {
-        // Create logging context for this admin operation
-        let mut ctx = RequestContext::new("AdminService", "get_cluster_info");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.set_admin_action("get_cluster_info");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let _req = request.into_inner();
+
+        let mut ctx = self.make_request_context("get_cluster_info", &grpc_metadata, &trace_ctx);
 
         let metrics = self.raft.metrics().borrow().clone();
         let membership = metrics.membership_config.membership();
@@ -919,18 +869,13 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
     /// throttling for legitimate use.
     async fn get_node_info(
         &self,
-        _request: Request<GetNodeInfoRequest>,
+        request: Request<GetNodeInfoRequest>,
     ) -> Result<Response<GetNodeInfoResponse>, Status> {
-        // Create logging context for this admin operation
-        let mut ctx = RequestContext::new("AdminService", "get_node_info");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.set_admin_action("get_node_info");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let _req = request.into_inner();
+
+        let mut ctx = self.make_request_context("get_node_info", &grpc_metadata, &trace_ctx);
 
         let metrics = self.raft.metrics().borrow().clone();
 
@@ -970,26 +915,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create logging context for this admin operation
-        let mut ctx = RequestContext::new("AdminService", "recover_vault");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("recover_vault");
+        let mut ctx = self.make_request_context("recover_vault", &grpc_metadata, &trace_ctx);
         ctx.set_recovery_force(req.force);
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-
-        // Set trace context for distributed tracing correlation
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
         let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
@@ -1332,25 +1259,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create logging context for this admin operation
-        let mut ctx = RequestContext::new("AdminService", "simulate_divergence");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("simulate_divergence");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-
-        // Set trace context for distributed tracing correlation
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        let mut ctx = self.make_request_context("simulate_divergence", &grpc_metadata, &trace_ctx);
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
         let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
@@ -1454,25 +1363,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Create logging context for this admin operation
-        let mut ctx = RequestContext::new("AdminService", "force_gc");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("force_gc");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-
-        // Set trace context for distributed tracing correlation
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        let mut ctx = self.make_request_context("force_gc", &grpc_metadata, &trace_ctx);
 
         // Check if this node is the leader
         let metrics = self.raft.metrics().borrow().clone();
@@ -1551,7 +1442,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
             let transaction = inferadb_ledger_types::Transaction {
                 id: *uuid::Uuid::new_v4().as_bytes(),
-                client_id: "system:gc".to_string(),
+                client_id: inferadb_ledger_types::ClientId::new("system:gc"),
                 sequence: now, // Use timestamp as sequence for GC
                 operations,
                 timestamp: chrono::Utc::now(),
@@ -1692,22 +1583,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = RequestContext::new("AdminService", "create_backup");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("create_backup");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        let mut ctx = self.make_request_context("create_backup", &grpc_metadata, &trace_ctx);
 
         let backup_manager = self
             .backup_manager
@@ -1900,22 +1776,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = RequestContext::new("AdminService", "restore_backup");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("restore_backup");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        let mut ctx = self.make_request_context("restore_backup", &grpc_metadata, &trace_ctx);
 
         // Safety gate: require explicit confirmation
         if !req.confirm {
@@ -2023,22 +1884,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = RequestContext::new("AdminService", "transfer_leadership");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("transfer_leadership");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        let mut ctx = self.make_request_context("transfer_leadership", &grpc_metadata, &trace_ctx);
 
         // Validate and default timeout
         let timeout_ms = if req.timeout_ms == 0 { 10_000u32 } else { req.timeout_ms.min(60_000) };
@@ -2113,22 +1959,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = RequestContext::new("AdminService", "rotate_blinding_key");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("rotate_blinding_key");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        let mut ctx = self.make_request_context("rotate_blinding_key", &grpc_metadata, &trace_ctx);
 
         if req.new_key_version == 0 {
             ctx.set_error("InvalidArgument", "new_key_version must be > 0");
@@ -2239,22 +2070,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let _req = request.into_inner();
 
-        let mut ctx = RequestContext::new("AdminService", "get_blinding_key_rehash_status");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("get_blinding_key_rehash_status");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        let mut ctx =
+            self.make_request_context("get_blinding_key_rehash_status", &grpc_metadata, &trace_ctx);
 
         let system_service = SystemOrganizationService::new(Arc::clone(&self.state));
 
@@ -2310,22 +2127,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = RequestContext::new("AdminService", "rotate_region_key");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("rotate_region_key");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        let mut ctx = self.make_request_context("rotate_region_key", &grpc_metadata, &trace_ctx);
 
         let progress = self.rewrap_progress.as_ref().ok_or_else(|| {
             Status::failed_precondition("DEK re-wrapping not configured for this node")
@@ -2371,22 +2173,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let _req = request.into_inner();
 
-        let mut ctx = RequestContext::new("AdminService", "get_rewrap_status");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("get_rewrap_status");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        let mut ctx = self.make_request_context("get_rewrap_status", &grpc_metadata, &trace_ctx);
 
         let progress = self.rewrap_progress.as_ref().ok_or_else(|| {
             Status::failed_precondition("DEK re-wrapping not configured for this node")
@@ -2429,22 +2216,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = RequestContext::new("AdminService", "migrate_existing_users");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("migrate_existing_users");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        let mut ctx =
+            self.make_request_context("migrate_existing_users", &grpc_metadata, &trace_ctx);
 
         // Pre-validation: parse default region (reject UNSPECIFIED).
         let default_region = inferadb_ledger_proto::convert::region_from_i32(req.default_region)?;
@@ -2642,22 +2415,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = RequestContext::new("AdminService", "provision_region");
-        ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        ctx.set_admin_action("provision_region");
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        let mut ctx = self.make_request_context("provision_region", &grpc_metadata, &trace_ctx);
 
         let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
 

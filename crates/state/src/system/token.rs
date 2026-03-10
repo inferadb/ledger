@@ -366,6 +366,14 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             ),
         ];
 
+        // Add org index entry for org-scoped tokens
+        if let Some(org) = token.organization {
+            ops.push(set_entity(
+                SystemKeys::refresh_token_org_entry(org, token.id),
+                id_value.clone(),
+            ));
+        }
+
         // Add app_vault index entry for vault tokens
         if let (Some(vault), TokenSubject::App(app_slug)) = (token.vault, &token.subject) {
             ops.push(set_entity(
@@ -542,50 +550,15 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
     /// Revokes all refresh tokens for an organization.
     ///
-    /// Scans all refresh tokens and revokes those belonging to the given org.
+    /// Uses the org-scoped index (`_idx:refresh_token:org:{id}:`) for O(k)
+    /// lookup instead of scanning all tokens.
     pub fn revoke_all_org_refresh_tokens(
         &self,
         org: OrganizationId,
         now: DateTime<Utc>,
     ) -> Result<RevocationResult> {
-        let entries = self
-            .state
-            .list_entities(
-                SYSTEM_VAULT_ID,
-                Some(SystemKeys::REFRESH_TOKEN_PREFIX),
-                None,
-                MAX_TOKEN_SCAN,
-            )
-            .context(StateSnafu)?;
-        let mut truncated = entries.len() >= MAX_TOKEN_SCAN;
-
-        let mut total_revoked = 0u64;
-        let mut seen_families = std::collections::HashSet::new();
-
-        for entry in entries {
-            let token: RefreshToken = match decode(&entry.value) {
-                Ok(t) => t,
-                Err(e) => {
-                    warn!(error = %e, "Skipping corrupt refresh token during org revocation");
-                    continue;
-                },
-            };
-
-            if token.organization == Some(org) && seen_families.insert(token.family) {
-                match self.revoke_token_family(&token.family, now) {
-                    Ok(result) => total_revoked += result.revoked_count,
-                    Err(super::service::SystemError::RevocationIncomplete { revoked, .. }) => {
-                        total_revoked += revoked;
-                        truncated = true;
-                    },
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-
-        check_revocation_truncation(truncated, "revoke_all_org_refresh_tokens", total_revoked)?;
-
-        Ok(RevocationResult { revoked_count: total_revoked })
+        let prefix = SystemKeys::refresh_token_org_prefix(org);
+        self.revoke_families_from_index(&prefix, now)
     }
 
     /// Deletes expired refresh tokens and garbage-collects poisoned families.
@@ -635,6 +608,12 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
                 ops.push(Operation::DeleteEntity {
                     key: SystemKeys::refresh_token_subject_entry(&token.subject, token.id),
                 });
+                // Delete org index entry if applicable
+                if let Some(org) = token.organization {
+                    ops.push(Operation::DeleteEntity {
+                        key: SystemKeys::refresh_token_org_entry(org, token.id),
+                    });
+                }
                 // Delete app_vault index entry if applicable
                 if let (Some(vault), TokenSubject::App(app_slug)) = (token.vault, &token.subject) {
                     ops.push(Operation::DeleteEntity {

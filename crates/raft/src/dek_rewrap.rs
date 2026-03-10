@@ -280,7 +280,7 @@ impl<B: StorageBackend + 'static> DekRewrapJob<B> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -350,7 +350,8 @@ mod tests {
 
     #[test]
     fn test_config_to_job_params() {
-        let config = RewrapConfig::builder().batch_size(500_usize).interval_secs(60_u64).build();
+        let config =
+            RewrapConfig::builder().batch_size(500_usize).interval_secs(60_u64).build().unwrap();
         assert_eq!(config.batch_size, 500);
         assert_eq!(config.interval_secs, 60);
     }

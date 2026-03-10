@@ -1,39 +1,30 @@
 # Development Commands
 
-## Build
+## Using `just` (preferred)
 ```bash
-cargo build                              # Build all crates
-cargo build --release                    # Release build
-cargo build -p inferadb-ledger-types     # Build specific crate
+just check        # pre-commit: fmt + clippy + test
+just check-quick  # fast pre-commit: fmt + clippy only
+just ci           # CI validation: fmt + clippy + doc-check + test
+just ready        # pre-PR: proto + fmt + clippy + test
+just test         # unit tests only (--workspace --lib)
+just test-ff      # unit tests, stop on first failure
+just test-integration     # integration tests (spawns clusters)
+just test-integration-ff  # integration tests, stop on first failure
+just fmt          # format code (nightly)
+just clippy       # run linter
+just doc-check    # build rustdoc with -D warnings
+just proto        # regenerate protobuf code
+just run          # run server (dev mode)
 ```
 
-## Testing
+## Using cargo directly
 ```bash
-cargo test                               # Run all tests
-cargo test -p inferadb-ledger-state      # Test specific crate
-cargo test -- --nocapture                # With output
-```
-
-## Linting & Formatting
-```bash
-cargo +nightly fmt             # Format code (nightly required)
-cargo +nightly fmt --check     # Check formatting
-cargo clippy --all-targets     # Run clippy
-cargo clippy -- -D warnings    # Clippy with warnings as errors
-```
-
-## Documentation
-```bash
-cargo doc --open               # Generate and open docs
-```
-
-## Running
-```bash
-cargo run -p inferadb-ledger-server           # Run server (dev)
-cargo run -p inferadb-ledger-server --release # Run server (release)
-```
-
-## Full Check Before Commit
-```bash
-cargo +nightly fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+cargo +1.92 build --workspace              # Build all crates
+cargo +1.92 build -p inferadb-ledger-types # Build specific crate
+cargo +1.92 test --workspace --lib         # Unit tests
+cargo +1.92 test -p inferadb-ledger-state  # Test specific crate
+cargo +1.92 test <name> -- --nocapture     # Single test with output
+cargo +nightly fmt                         # Format (nightly required)
+cargo +1.92 clippy --workspace --all-targets -- -D warnings
+cargo +1.92 doc --workspace --no-deps      # Generate docs
 ```

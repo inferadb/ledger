@@ -22,9 +22,9 @@ use inferadb_ledger_types::{
     ALL_REGIONS, Region,
     events::{EventAction, EventEmission, EventEntry, EventOutcome, EventScope},
     types::{
-        BlockHeader, ChainCommitment, Entity, Operation, OrganizationId, OrganizationSlug,
-        RegionBlock, Relationship, SetCondition, Transaction, VaultBlock, VaultEntry, VaultId,
-        VaultSlug,
+        BlockHeader, ChainCommitment, ClientId, Entity, NodeId, Operation, OrganizationId,
+        OrganizationSlug, RegionBlock, Relationship, SetCondition, Transaction, VaultBlock,
+        VaultEntry, VaultId, VaultSlug,
     },
 };
 use proptest::prelude::*;
@@ -196,7 +196,7 @@ pub fn arb_transaction() -> impl Strategy<Value = Transaction> {
     )
         .prop_map(|(id, client_id, sequence, actor, operations, timestamp)| Transaction {
             id,
-            client_id,
+            client_id: ClientId::new(client_id),
             sequence,
             actor,
             operations,
@@ -313,7 +313,7 @@ pub fn arb_region_block() -> impl Strategy<Value = RegionBlock> {
                     previous_region_hash,
                     vault_entries,
                     timestamp,
-                    leader_id,
+                    leader_id: NodeId::new(leader_id),
                     term,
                     committed_index,
                 }
@@ -465,7 +465,7 @@ mod tests {
 
         #[test]
         fn strategy_produces_valid_transactions(tx in arb_transaction()) {
-            prop_assert!(!tx.client_id.is_empty());
+            prop_assert!(!tx.client_id.value().is_empty());
             prop_assert!(tx.sequence > 0);
             prop_assert!(!tx.actor.is_empty());
             prop_assert!(!tx.operations.is_empty());

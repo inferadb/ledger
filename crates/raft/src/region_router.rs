@@ -36,7 +36,7 @@ use std::{
 
 use inferadb_ledger_state::system::{OrganizationStatus, SystemOrganizationService};
 use inferadb_ledger_store::{FileBackend, StorageBackend};
-use inferadb_ledger_types::{OrganizationId, Region};
+use inferadb_ledger_types::{NodeId, OrganizationId, Region};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 use tonic::transport::Channel;
@@ -101,9 +101,9 @@ struct CacheEntry {
     /// Region hosting this organization.
     region: Region,
     /// Member nodes in the region.
-    member_nodes: Vec<String>,
+    member_nodes: Vec<NodeId>,
     /// Hint for current leader (may be stale).
-    leader_hint: Option<String>,
+    leader_hint: Option<NodeId>,
     /// Configuration version for invalidation (reserved for future use).
     #[allow(dead_code)] // metadata for cache invalidation
     config_version: u64,
@@ -121,8 +121,8 @@ impl CacheEntry {
     fn to_routing_info(&self) -> RoutingInfo {
         RoutingInfo {
             region: self.region,
-            member_nodes: self.member_nodes.clone(),
-            leader_hint: self.leader_hint.clone(),
+            member_nodes: self.member_nodes.iter().map(|n| n.value().to_owned()).collect(),
+            leader_hint: self.leader_hint.as_ref().map(|n| n.value().to_owned()),
         }
     }
 }
@@ -223,9 +223,15 @@ impl<B: StorageBackend + 'static> RegionRouter<B> {
         // 1. Check cache
         let routing = self.get_routing_internal(organization)?;
 
-        // 2. Get or create connection
-        self.get_connection(routing.region, &routing.member_nodes, routing.leader_hint.as_deref())
-            .await
+        // 2. Get or create connection — convert NodeId to String for connection layer
+        let member_strings: Vec<String> =
+            routing.member_nodes.iter().map(|n| n.value().to_owned()).collect();
+        self.get_connection(
+            routing.region,
+            &member_strings,
+            routing.leader_hint.as_ref().map(|n| n.value()),
+        )
+        .await
     }
 
     /// Returns this node's region.
@@ -470,9 +476,9 @@ impl<B: StorageBackend + 'static> RegionRouter<B> {
     pub fn update_leader_hint(&self, organization: OrganizationId, leader_node: &str) {
         let mut cache = self.cache.write();
         if let Some(entry) = cache.get_mut(&organization)
-            && entry.leader_hint.as_deref() != Some(leader_node)
+            && entry.leader_hint.as_ref().map(|n| n.value()) != Some(leader_node)
         {
-            entry.leader_hint = Some(leader_node.to_string());
+            entry.leader_hint = Some(NodeId::new(leader_node));
             debug!(organization = organization.value(), leader_node, "Updated leader hint");
         }
     }
@@ -582,8 +588,8 @@ mod tests {
     fn test_cache_entry_staleness() {
         let entry = CacheEntry {
             region: Region::GLOBAL,
-            member_nodes: vec!["node-1".to_string()],
-            leader_hint: Some("node-1".to_string()),
+            member_nodes: vec![NodeId::new("node-1")],
+            leader_hint: Some(NodeId::new("node-1")),
             config_version: 1,
             cached_at: Instant::now() - Duration::from_secs(30),
         };
@@ -632,7 +638,7 @@ mod tests {
                 OrganizationId::new(1),
                 CacheEntry {
                     region: Region::GLOBAL,
-                    member_nodes: vec!["node-1".to_string()],
+                    member_nodes: vec![NodeId::new("node-1")],
                     leader_hint: None,
                     config_version: 1,
                     cached_at: Instant::now(),
@@ -689,7 +695,7 @@ mod tests {
         let registry = inferadb_ledger_state::system::OrganizationRegistry {
             organization_id: OrganizationId::new(42),
             region: inferadb_ledger_types::Region::GLOBAL,
-            member_nodes: vec!["node-a:50051".to_string(), "node-b:50051".to_string()],
+            member_nodes: vec![NodeId::new("node-a:50051"), NodeId::new("node-b:50051")],
             status: inferadb_ledger_state::system::OrganizationStatus::Active,
             config_version: 1,
             created_at: chrono::Utc::now(),
@@ -726,7 +732,7 @@ mod tests {
             let registry = inferadb_ledger_state::system::OrganizationRegistry {
                 organization_id: OrganizationId::new(ns_id),
                 region: inferadb_ledger_types::Region::GLOBAL,
-                member_nodes: vec![format!("node-{}:50051", region)],
+                member_nodes: vec![NodeId::new(format!("node-{}:50051", region))],
                 status: inferadb_ledger_state::system::OrganizationStatus::Active,
                 config_version: 1,
                 created_at: chrono::Utc::now(),
@@ -762,7 +768,7 @@ mod tests {
         let registry = inferadb_ledger_state::system::OrganizationRegistry {
             organization_id: OrganizationId::new(5),
             region: inferadb_ledger_types::Region::GLOBAL,
-            member_nodes: vec!["node-a:50051".to_string(), "node-b:50051".to_string()],
+            member_nodes: vec![NodeId::new("node-a:50051"), NodeId::new("node-b:50051")],
             status: inferadb_ledger_state::system::OrganizationStatus::Active,
             config_version: 1,
             created_at: chrono::Utc::now(),
@@ -798,7 +804,7 @@ mod tests {
         let registry = inferadb_ledger_state::system::OrganizationRegistry {
             organization_id: OrganizationId::new(77),
             region: inferadb_ledger_types::Region::GLOBAL,
-            member_nodes: vec!["node-1:50051".to_string()],
+            member_nodes: vec![NodeId::new("node-1:50051")],
             status: inferadb_ledger_state::system::OrganizationStatus::Suspended,
             config_version: 1,
             created_at: chrono::Utc::now(),
@@ -893,7 +899,7 @@ mod tests {
         let registry = inferadb_ledger_state::system::OrganizationRegistry {
             organization_id: OrganizationId::new(100),
             region: Region::DE_CENTRAL_FRANKFURT,
-            member_nodes: vec!["node-de:50051".to_string()],
+            member_nodes: vec![NodeId::new("node-de:50051")],
             status: inferadb_ledger_state::system::OrganizationStatus::Active,
             config_version: 1,
             created_at: chrono::Utc::now(),
@@ -927,7 +933,7 @@ mod tests {
             let registry = inferadb_ledger_state::system::OrganizationRegistry {
                 organization_id: OrganizationId::new(*id),
                 region: *region,
-                member_nodes: vec![format!("node-{id}:50051")],
+                member_nodes: vec![NodeId::new(format!("node-{id}:50051"))],
                 status: inferadb_ledger_state::system::OrganizationStatus::Active,
                 config_version: 1,
                 created_at: chrono::Utc::now(),

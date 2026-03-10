@@ -29,7 +29,7 @@ use inferadb_ledger_state::{
         CreateSigningKeyInput, CreateSigningKeySaga, CreateSigningKeySagaState, CreateUserSaga,
         CreateUserSagaState, DeleteUserSaga, DeleteUserSagaState, MigrateOrgSaga,
         MigrateOrgSagaState, MigrateUserSaga, MigrateUserSagaState, SAGA_POLL_INTERVAL, Saga,
-        SagaLockKey, SigningKeyScope,
+        SagaId, SagaLockKey, SigningKeyScope,
     },
 };
 use inferadb_ledger_store::{
@@ -37,8 +37,8 @@ use inferadb_ledger_store::{
     crypto::{RegionKeyManager, generate_dek, wrap_dek},
 };
 use inferadb_ledger_types::{
-    Operation, OrganizationId, Region, SetCondition, SigningKeyEnvelope, Transaction, UserId,
-    VaultId,
+    ClientId, Operation, OrganizationId, Region, SetCondition, SigningKeyEnvelope, Transaction,
+    UserId, VaultId,
     config::MigrationConfig,
     events::{EventAction, EventOutcome},
     snowflake,
@@ -154,7 +154,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     fn build_transaction(operations: Vec<Operation>) -> Transaction {
         Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
-            client_id: SAGA_ACTOR.to_string(),
+            client_id: ClientId::new(SAGA_ACTOR),
             sequence: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
@@ -722,7 +722,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 let user_id = UserId::new(raw_id);
                 let user_slug = snowflake::generate_user_slug().map_err(|e| {
                     SagaError::UnexpectedSagaResponse {
-                        code: inferadb_ledger_types::LedgerErrorCode::Internal,
+                        code: inferadb_ledger_types::ErrorCode::Internal,
                         description: format!("failed to generate user slug: {e}"),
                     }
                 })?;
@@ -807,7 +807,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 );
 
                 // Fire CreateOrganizationSaga for the user's default organization
-                let org_saga_id = uuid::Uuid::new_v4().to_string();
+                let org_saga_id = SagaId::new(uuid::Uuid::new_v4().to_string());
                 let org_saga = CreateOrganizationSaga::new(
                     org_saga_id.clone(),
                     CreateOrganizationInput {
@@ -891,7 +891,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 // Step 0 (GLOBAL): Generate slug, create directory entry
                 let org_slug = snowflake::generate_organization_slug().map_err(|e| {
                     SagaError::UnexpectedSagaResponse {
-                        code: inferadb_ledger_types::LedgerErrorCode::Internal,
+                        code: inferadb_ledger_types::ErrorCode::Internal,
                         description: format!("failed to generate organization slug: {e}"),
                     }
                 })?;
@@ -931,7 +931,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                         Err(SagaError::UnexpectedSagaResponse { code, description: message })
                     },
                     other => Err(SagaError::UnexpectedSagaResponse {
-                        code: inferadb_ledger_types::LedgerErrorCode::Internal,
+                        code: inferadb_ledger_types::ErrorCode::Internal,
                         description: format!("expected OrganizationDirectoryCreated, got {other}"),
                     }),
                 }
@@ -1154,24 +1154,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
     /// Maps a signing key scope to the Region whose RMK protects it.
     ///
-    /// Global keys use `Region::GLOBAL` (always provisioned, validated at startup).
-    /// Org keys use the org's assigned region.
+    /// Delegates to [`SystemOrganizationService::resolve_scope_region`].
     fn scope_to_region(&self, scope: &SigningKeyScope) -> Result<Region, SagaError> {
-        match scope {
-            SigningKeyScope::Global => Ok(Region::GLOBAL),
-            SigningKeyScope::Organization(org_id) => {
-                let sys_service = self.system_service();
-                sys_service
-                    .get_region_for_organization(*org_id)
-                    .map_err(|e| SagaError::KeyGeneration {
-                        message: format!("Failed to resolve region for org {org_id}: {e}"),
-                    })?
-                    .ok_or_else(|| SagaError::EntityNotFound {
-                        entity_type: "Organization".to_string(),
-                        identifier: org_id.to_string(),
-                    })
-            },
-        }
+        self.system_service().resolve_scope_region(scope).map_err(|e| SagaError::KeyGeneration {
+            message: format!("Failed to resolve region for scope {scope:?}: {e}"),
+        })
     }
 
     /// Generates an Ed25519 keypair and encrypts the private key with envelope encryption.
@@ -1343,7 +1330,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                         Err(SagaError::UnexpectedSagaResponse { code, description: message })
                     },
                     other => Err(SagaError::UnexpectedSagaResponse {
-                        code: inferadb_ledger_types::LedgerErrorCode::Internal,
+                        code: inferadb_ledger_types::ErrorCode::Internal,
                         description: format!("expected SigningKeyCreated, got {other}"),
                     }),
                 }
@@ -1364,7 +1351,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     /// Also called during global key bootstrap. The saga orchestrator picks up
     /// pending saga records on its next poll cycle.
     async fn write_signing_key_saga(&self, scope: SigningKeyScope) -> Result<(), SagaError> {
-        let saga_id = uuid::Uuid::new_v4().to_string();
+        let saga_id = SagaId::new(uuid::Uuid::new_v4().to_string());
         let saga = CreateSigningKeySaga::new(saga_id.clone(), CreateSigningKeyInput { scope });
 
         self.save_saga(&Saga::CreateSigningKey(saga)).await?;
@@ -1584,7 +1571,7 @@ mod tests {
             (
                 "DeleteUser",
                 Saga::DeleteUser(DeleteUserSaga::new(
-                    "delete-456".to_string(),
+                    SagaId::new("delete-456"),
                     DeleteUserInput {
                         user: UserId::new(42),
                         organization_ids: vec![
@@ -1598,7 +1585,7 @@ mod tests {
             (
                 "MigrateOrg",
                 Saga::MigrateOrg(MigrateOrgSaga::new(
-                    "migrate-org-789".to_string(),
+                    SagaId::new("migrate-org-789"),
                     MigrateOrgInput {
                         organization_id: OrganizationId::new(10),
                         organization_slug: OrganizationSlug::new(5000),
@@ -1612,7 +1599,7 @@ mod tests {
             (
                 "MigrateUser",
                 Saga::MigrateUser(MigrateUserSaga::new(
-                    "migrate-user-101".to_string(),
+                    SagaId::new("migrate-user-101"),
                     MigrateUserInput {
                         user: UserId::new(77),
                         source_region: Region::US_EAST_VA,
@@ -1623,7 +1610,7 @@ mod tests {
             (
                 "CreateUser",
                 Saga::CreateUser(CreateUserSaga::new(
-                    "create-user-202".to_string(),
+                    SagaId::new("create-user-202"),
                     CreateUserInput {
                         hmac: "abc123".to_string(),
                         region: Region::US_EAST_VA,
@@ -1636,7 +1623,7 @@ mod tests {
             (
                 "CreateOrganization",
                 Saga::CreateOrganization(CreateOrganizationSaga::new(
-                    "create-org-303".to_string(),
+                    SagaId::new("create-org-303"),
                     CreateOrganizationInput {
                         region: Region::IE_EAST_DUBLIN,
                         tier: OrganizationTier::Free,
@@ -1648,7 +1635,7 @@ mod tests {
             (
                 "CreateSigningKey",
                 Saga::CreateSigningKey(CreateSigningKeySaga::new(
-                    "create-key-404".to_string(),
+                    SagaId::new("create-key-404"),
                     CreateSigningKeyInput { scope: SigningKeyScope::Global },
                 )),
             ),
@@ -1665,7 +1652,7 @@ mod tests {
             let deserialized: Saga = serde_json::from_slice(&serialized)
                 .unwrap_or_else(|e| panic!("{label}: deserialize: {e}"));
 
-            assert_eq!(deserialized.id(), expected_id, "failed id check for {label}");
+            assert_eq!(deserialized.id().value(), expected_id, "failed id check for {label}");
         }
     }
 

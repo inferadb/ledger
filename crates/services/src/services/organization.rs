@@ -75,11 +75,14 @@ impl OrganizationService {
         context.insert("available_nodes".to_string(), in_region_count.to_string());
         context.insert("required_nodes".to_string(), "3".to_string());
         let details = super::error_details::build_error_details(
-            inferadb_ledger_types::ErrorCode::AppInsufficientRegionNodes.as_u16(),
+            inferadb_ledger_types::DiagnosticCode::AppInsufficientRegionNodes.as_u16(),
             false,
             None,
             context,
-            Some(inferadb_ledger_types::ErrorCode::AppInsufficientRegionNodes.suggested_action()),
+            Some(
+                inferadb_ledger_types::DiagnosticCode::AppInsufficientRegionNodes
+                    .suggested_action(),
+            ),
         );
         let encoded = prost::Message::encode_to_vec(&details);
         Err(Status::with_details(
@@ -340,7 +343,7 @@ impl OrganizationService {
 
         let name = profile.as_ref().map_or(String::new(), |p| p.name.clone());
         let member_nodes = registry.as_ref().map_or(vec![], |r| {
-            r.member_nodes.iter().map(|id| NodeId { id: id.clone() }).collect()
+            r.member_nodes.iter().map(|id| NodeId { id: id.to_string() }).collect()
         });
         let config_version = registry.as_ref().map_or(0, |r| r.config_version);
         let created_at =
@@ -408,12 +411,13 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             let mut context = std::collections::HashMap::new();
             context.insert("region".to_string(), "GLOBAL".to_string());
             let details = super::error_details::build_error_details(
-                inferadb_ledger_types::ErrorCode::AppInvalidRegionAssignment.as_u16(),
+                inferadb_ledger_types::DiagnosticCode::AppInvalidRegionAssignment.as_u16(),
                 false,
                 None,
                 context,
                 Some(
-                    inferadb_ledger_types::ErrorCode::AppInvalidRegionAssignment.suggested_action(),
+                    inferadb_ledger_types::DiagnosticCode::AppInvalidRegionAssignment
+                        .suggested_action(),
                 ),
             );
             let encoded = prost::Message::encode_to_vec(&details);
@@ -761,11 +765,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             let mut context = std::collections::HashMap::new();
             context.insert("status".to_string(), format!("{:?}", org_meta.status));
             let details = super::error_details::build_error_details(
-                inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.as_u16(),
+                inferadb_ledger_types::DiagnosticCode::AppOrganizationMigrating.as_u16(),
                 true,
                 None,
                 context,
-                Some(inferadb_ledger_types::ErrorCode::AppOrganizationMigrating.suggested_action()),
+                Some(
+                    inferadb_ledger_types::DiagnosticCode::AppOrganizationMigrating
+                        .suggested_action(),
+                ),
             );
             let encoded = prost::Message::encode_to_vec(&details);
             return Err(Status::with_details(
@@ -789,7 +796,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             context.insert("source_region".to_string(), source_region.as_str().to_string());
             context.insert("target_region".to_string(), target_region.as_str().to_string());
             let details = super::error_details::build_error_details(
-                inferadb_ledger_types::ErrorCode::AppInvalidRegionAssignment.as_u16(),
+                inferadb_ledger_types::DiagnosticCode::AppInvalidRegionAssignment.as_u16(),
                 false,
                 None,
                 context,
@@ -816,7 +823,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // The saga starts in MigrationStarted state because StartMigration
         // sets the organization status to Migrating atomically in the same
         // Raft entry (via BatchWrite below).
-        let saga_id = uuid::Uuid::new_v4().to_string();
+        let saga_id = inferadb_ledger_state::system::SagaId::new(uuid::Uuid::new_v4().to_string());
         let saga = inferadb_ledger_state::system::MigrateOrgSaga::new(
             saga_id,
             inferadb_ledger_state::system::MigrateOrgInput {
@@ -845,7 +852,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
 
         let saga_txn = inferadb_ledger_types::Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
-            client_id: "system:organization".to_string(),
+            client_id: inferadb_ledger_types::ClientId::new("system:organization"),
             sequence: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)

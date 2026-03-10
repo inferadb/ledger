@@ -143,7 +143,7 @@ pub fn tx_hash(tx: &Transaction) -> Hash {
     hasher.update(tx.id);
 
     // client_id: length-prefixed
-    hasher.update((tx.client_id.len() as u32).to_le_bytes());
+    hasher.update((tx.client_id.value().len() as u32).to_le_bytes());
     hasher.update(tx.client_id.as_bytes());
 
     // sequence: u64 BE
@@ -551,7 +551,7 @@ mod tests {
     fn test_tx_merkle_root_single() {
         let tx = Transaction {
             id: [0u8; 16],
-            client_id: "client1".to_string(),
+            client_id: "client1".into(),
             sequence: 1,
             actor: "user1".to_string(),
             operations: vec![],
@@ -567,7 +567,7 @@ mod tests {
     fn test_tx_merkle_root_two() {
         let tx1 = Transaction {
             id: [1u8; 16],
-            client_id: "client1".to_string(),
+            client_id: "client1".into(),
             sequence: 1,
             actor: "user1".to_string(),
             operations: vec![],
@@ -575,7 +575,7 @@ mod tests {
         };
         let tx2 = Transaction {
             id: [2u8; 16],
-            client_id: "client1".to_string(),
+            client_id: "client1".into(),
             sequence: 2,
             actor: "user1".to_string(),
             operations: vec![],
@@ -593,7 +593,7 @@ mod tests {
         // Verify tx merkle root uses the same implementation as merkle.rs
         let tx1 = Transaction {
             id: [1u8; 16],
-            client_id: "c".to_string(),
+            client_id: "c".into(),
             sequence: 1,
             actor: "a".to_string(),
             operations: vec![],
@@ -601,7 +601,7 @@ mod tests {
         };
         let tx2 = Transaction {
             id: [2u8; 16],
-            client_id: "c".to_string(),
+            client_id: "c".into(),
             sequence: 2,
             actor: "a".to_string(),
             operations: vec![],
@@ -609,7 +609,7 @@ mod tests {
         };
         let tx3 = Transaction {
             id: [3u8; 16],
-            client_id: "c".to_string(),
+            client_id: "c".into(),
             sequence: 3,
             actor: "a".to_string(),
             operations: vec![],
@@ -631,7 +631,7 @@ mod tests {
     fn test_tx_merkle_root_deterministic() {
         let tx = Transaction {
             id: [42u8; 16],
-            client_id: "test".to_string(),
+            client_id: "test".into(),
             sequence: 100,
             actor: "actor".to_string(),
             operations: vec![],

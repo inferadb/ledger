@@ -157,7 +157,7 @@ pub fn generate_write_proof(
             seconds: block.timestamp.timestamp(),
             nanos: block.timestamp.timestamp_subsec_nanos() as i32,
         }),
-        leader_id: Some(proto::NodeId { id: block.leader_id.clone() }),
+        leader_id: Some(proto::NodeId { id: block.leader_id.to_string() }),
         term: block.term,
         committed_index: block.committed_index,
         block_hash: Some(proto::Hash { value: block_hash.to_vec() }),
@@ -355,13 +355,14 @@ pub fn verify_state_proof(
 mod tests {
     use chrono::Utc;
     use inferadb_ledger_proto::proto::Direction;
+    use inferadb_ledger_types::ClientId;
 
     use super::*;
 
     fn make_tx(id: u8) -> Transaction {
         Transaction {
             id: [id; 16],
-            client_id: format!("client_{}", id),
+            client_id: ClientId::new(format!("client_{}", id)),
             sequence: id as u64,
             actor: "test".to_string(),
             operations: vec![],

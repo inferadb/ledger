@@ -9,8 +9,8 @@ use std::{
 };
 
 use inferadb_ledger_types::{
-    AppId, AppSlug, OrganizationId, OrganizationSlug, OrganizationUsage, TeamId, TeamSlug, UserId,
-    UserSlug, VaultId, VaultSlug,
+    AppId, AppSlug, ClientId, OrganizationId, OrganizationSlug, OrganizationUsage, TeamId,
+    TeamSlug, UserId, UserSlug, VaultId, VaultSlug,
 };
 use parking_lot::RwLock;
 
@@ -130,7 +130,7 @@ impl AppliedStateAccessor {
         self.state
             .read()
             .client_sequences
-            .get(&(organization, vault, client_id.to_string()))
+            .get(&(organization, vault, ClientId::new(client_id)))
             .map_or(0, |entry| entry.sequence)
     }
 
@@ -284,7 +284,7 @@ impl AppliedStateAccessor {
             return IdempotencyCheckResult::Miss;
         }
 
-        let key = (organization, vault, client_id.to_string());
+        let key = (organization, vault, ClientId::new(client_id));
         let state = self.state.read();
 
         match state.client_sequences.get(&key) {
@@ -323,7 +323,7 @@ mod tests {
         entry: ClientSequenceEntry,
     ) -> AppliedStateAccessor {
         let mut state = AppliedState::default();
-        state.client_sequences.insert((org, vault, client_id.to_string()), entry);
+        state.client_sequences.insert((org, vault, ClientId::new(client_id)), entry);
         AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)))
     }
 

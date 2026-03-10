@@ -41,8 +41,8 @@ pub use codec::{CodecError, decode, encode};
 pub use email_hash::{
     EmailBlindingKey, EmailBlindingKeyParseError, compute_email_hmac, normalize_email,
 };
-pub use error::{ErrorCode, LedgerError, Result};
-pub use error_code::LedgerErrorCode;
+pub use error::{DiagnosticCode, LedgerError, Result};
+pub use error_code::ErrorCode;
 pub use hash::{
     BucketHasher, EMPTY_HASH, Hash, ZERO_HASH, bucket_id, compute_chain_commitment,
     compute_tx_merkle_root, hash_eq, sha256, sha256_concat, tx_hash, vault_entry_hash,

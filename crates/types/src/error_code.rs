@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// Service layers match on this code instead of parsing error message strings.
 /// Each variant maps to a specific gRPC status code at the service boundary.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum LedgerErrorCode {
+pub enum ErrorCode {
     /// Entity not found (organization, vault, user, team, etc.).
     /// Maps to `NOT_FOUND`.
     NotFound,
@@ -41,7 +41,7 @@ pub enum LedgerErrorCode {
     Unauthenticated,
 }
 
-impl LedgerErrorCode {
+impl ErrorCode {
     /// Returns the canonical gRPC status code name for this error code.
     pub const fn grpc_code_name(self) -> &'static str {
         match self {
@@ -56,7 +56,7 @@ impl LedgerErrorCode {
     }
 }
 
-impl std::fmt::Display for LedgerErrorCode {
+impl std::fmt::Display for ErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.grpc_code_name())
     }

@@ -126,15 +126,7 @@ impl AppService {
 
     /// Loads an app from the state layer by organization and app ID.
     fn load_app(&self, org_id: DomainOrganizationId, app_id: DomainAppId) -> Result<App, Status> {
-        let key = SystemKeys::app_key(org_id, app_id);
-        let entity = self
-            .ctx
-            .state
-            .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
-            .map_err(|e| Status::internal(format!("Failed to read app: {e}")))?
-            .ok_or_else(|| Status::not_found(format!("App {} not found", app_id)))?;
-        decode::<App>(&entity.value)
-            .map_err(|e| Status::internal(format!("Failed to decode app: {e}")))
+        super::helpers::load_app(&self.ctx.state, org_id, app_id)
     }
 
     /// Converts a domain `App` to a proto `AppInfo` message.

@@ -525,7 +525,7 @@ fn encode_vault_block_index_key(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use chrono::Utc;
-    use inferadb_ledger_types::{Region, VaultEntry};
+    use inferadb_ledger_types::{ClientId, NodeId, Region, VaultEntry};
 
     use super::*;
     use crate::engine::InMemoryStorageEngine;
@@ -545,7 +545,7 @@ mod tests {
                 state_root: [region_height as u8; 32],
             }],
             timestamp: Utc::now(),
-            leader_id: "node-1".to_string(),
+            leader_id: NodeId::new("node-1"),
             term: 1,
             committed_index: region_height,
         }
@@ -675,7 +675,7 @@ mod tests {
         let transactions: Vec<Transaction> = (0..tx_count)
             .map(|i| Transaction {
                 id: [i as u8; 16],
-                client_id: format!("client-{}", i),
+                client_id: ClientId::new(format!("client-{}", i)),
                 sequence: i as u64,
                 actor: "actor".to_string(),
                 operations: vec![Operation::SetEntity {
@@ -702,7 +702,7 @@ mod tests {
                 state_root: [region_height as u8; 32],
             }],
             timestamp: Utc::now(),
-            leader_id: "node-1".to_string(),
+            leader_id: NodeId::new("node-1"),
             term: 1,
             committed_index: region_height,
         }

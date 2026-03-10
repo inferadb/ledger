@@ -23,8 +23,8 @@ use super::{
     keys::SystemKeys,
     types::{
         EmailVerificationToken, ErasureAuditRecord, MigrationSummary, NodeInfo,
-        OrganizationRegistry, OrganizationStatus, SubjectKey, User, UserDirectoryEntry,
-        UserDirectoryStatus, UserEmail, UserMigrationEntry,
+        OrganizationRegistry, OrganizationStatus, SigningKeyScope, SubjectKey, User,
+        UserDirectoryEntry, UserDirectoryStatus, UserEmail, UserMigrationEntry,
     },
 };
 use crate::state::{StateError, StateLayer};
@@ -419,6 +419,23 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         organization: OrganizationId,
     ) -> Result<Option<Region>> {
         self.get_organization(organization).map(|opt| opt.map(|r| r.region))
+    }
+
+    /// Resolves a [`SigningKeyScope`] to the [`Region`] whose RMK protects it.
+    ///
+    /// - `Global` → `Region::GLOBAL`
+    /// - `Organization(id)` → the organization's assigned region.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::NotFound`] if the organization does not exist.
+    pub fn resolve_scope_region(&self, scope: &SigningKeyScope) -> Result<Region> {
+        match scope {
+            SigningKeyScope::Global => Ok(Region::GLOBAL),
+            SigningKeyScope::Organization(org_id) => self
+                .get_region_for_organization(*org_id)?
+                .ok_or_else(|| SystemError::NotFound { entity: format!("Organization {org_id}") }),
+        }
     }
 
     /// Assigns an organization to a region.
@@ -1819,7 +1836,7 @@ mod tests {
         let svc = create_test_service();
 
         let node = NodeInfo {
-            node_id: "node-1".to_string(),
+            node_id: NodeId::new("node-1"),
             addresses: vec!["10.0.0.1:5000".parse::<SocketAddr>().unwrap()],
             grpc_port: 5001,
             region: Region::US_EAST_VA,
@@ -1829,9 +1846,9 @@ mod tests {
 
         svc.register_node(&node).unwrap();
 
-        let retrieved = svc.get_node(&"node-1".to_string()).unwrap();
+        let retrieved = svc.get_node(&NodeId::new("node-1")).unwrap();
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().node_id, "node-1");
+        assert_eq!(retrieved.unwrap().node_id, NodeId::new("node-1"));
     }
 
     #[test]
@@ -1840,7 +1857,7 @@ mod tests {
 
         for i in 1..=3 {
             let node = NodeInfo {
-                node_id: format!("node-{}", i),
+                node_id: NodeId::new(format!("node-{}", i)),
                 addresses: vec![format!("10.0.0.{}:5000", i).parse::<SocketAddr>().unwrap()],
                 grpc_port: 5001,
                 region: Region::US_EAST_VA,
@@ -1859,7 +1876,7 @@ mod tests {
         let svc = create_test_service();
 
         let node = NodeInfo {
-            node_id: "node-eu".to_string(),
+            node_id: NodeId::new("node-eu"),
             addresses: vec!["10.0.0.1:5000".parse::<SocketAddr>().unwrap()],
             grpc_port: 5001,
             region: Region::IE_EAST_DUBLIN,
@@ -1869,7 +1886,7 @@ mod tests {
 
         svc.register_node(&node).unwrap();
 
-        let retrieved = svc.get_node(&"node-eu".to_string()).unwrap().unwrap();
+        let retrieved = svc.get_node(&NodeId::new("node-eu")).unwrap().unwrap();
         assert_eq!(retrieved.region, Region::IE_EAST_DUBLIN);
     }
 
@@ -1881,7 +1898,7 @@ mod tests {
 
         for (i, region) in regions.iter().enumerate() {
             let node = NodeInfo {
-                node_id: format!("node-{}", i),
+                node_id: NodeId::new(format!("node-{}", i)),
                 addresses: vec![format!("10.0.0.{}:5000", i + 1).parse::<SocketAddr>().unwrap()],
                 grpc_port: 5001,
                 region: *region,
@@ -1896,7 +1913,7 @@ mod tests {
 
         // Verify each node has the correct region
         for (i, region) in regions.iter().enumerate() {
-            let node = svc.get_node(&format!("node-{}", i)).unwrap().unwrap();
+            let node = svc.get_node(&NodeId::new(format!("node-{}", i))).unwrap().unwrap();
             assert_eq!(node.region, *region);
         }
     }
@@ -1908,7 +1925,7 @@ mod tests {
         let registry = OrganizationRegistry {
             organization_id: OrganizationId::new(1),
             region: Region::GLOBAL,
-            member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
+            member_nodes: vec![NodeId::new("node-1"), NodeId::new("node-2")],
             status: OrganizationStatus::Active,
             config_version: 1,
             created_at: Utc::now(),

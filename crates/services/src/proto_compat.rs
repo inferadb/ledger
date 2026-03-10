@@ -12,7 +12,7 @@ use inferadb_ledger_proto::proto;
 use inferadb_ledger_state::system::{
     OrganizationMemberRole, OrganizationStatus, OrganizationTier, TeamMemberRole,
 };
-use inferadb_ledger_types::LedgerErrorCode;
+use inferadb_ledger_types::ErrorCode;
 use tonic::Status;
 
 /// Converts a domain `OrganizationStatus` to its proto representation.
@@ -80,19 +80,19 @@ pub(crate) fn team_member_role_to_proto(role: TeamMemberRole) -> proto::Organiza
     }
 }
 
-/// Maps a [`LedgerErrorCode`] to the corresponding gRPC [`Status`].
+/// Maps a [`ErrorCode`] to the corresponding gRPC [`Status`].
 ///
 /// Used by service-layer error handlers to convert structured state-machine
 /// error codes into the correct gRPC status without string matching.
-pub(crate) fn error_code_to_status(code: LedgerErrorCode, message: String) -> Status {
+pub(crate) fn error_code_to_status(code: ErrorCode, message: String) -> Status {
     match code {
-        LedgerErrorCode::NotFound => Status::not_found(message),
-        LedgerErrorCode::AlreadyExists => Status::already_exists(message),
-        LedgerErrorCode::FailedPrecondition => Status::failed_precondition(message),
-        LedgerErrorCode::PermissionDenied => Status::permission_denied(message),
-        LedgerErrorCode::InvalidArgument => Status::invalid_argument(message),
-        LedgerErrorCode::Internal => Status::internal(message),
-        LedgerErrorCode::Unauthenticated => Status::unauthenticated(message),
+        ErrorCode::NotFound => Status::not_found(message),
+        ErrorCode::AlreadyExists => Status::already_exists(message),
+        ErrorCode::FailedPrecondition => Status::failed_precondition(message),
+        ErrorCode::PermissionDenied => Status::permission_denied(message),
+        ErrorCode::InvalidArgument => Status::invalid_argument(message),
+        ErrorCode::Internal => Status::internal(message),
+        ErrorCode::Unauthenticated => Status::unauthenticated(message),
     }
 }
 

@@ -314,7 +314,7 @@ impl SystemKeys {
 
     /// Parses a node ID from a node key.
     pub fn parse_node_key(key: &str) -> Option<NodeId> {
-        key.strip_prefix("node:").map(|id| id.to_string())
+        key.strip_prefix("node:").map(NodeId::new)
     }
 
     // ========================================================================
@@ -670,6 +670,22 @@ impl SystemKeys {
         format!("_idx:refresh_token:family_poisoned:{}", encode_hex(family))
     }
 
+    /// Prefix for iterating all refresh tokens belonging to an organization.
+    ///
+    /// Pattern: `_idx:refresh_token:org:{org_id}:`
+    ///
+    /// Used for org deletion cascade — avoids O(n) scan of all tokens.
+    pub fn refresh_token_org_prefix(org: OrganizationId) -> String {
+        format!("_idx:refresh_token:org:{}:", org.value())
+    }
+
+    /// Index entry for a refresh token within its org index.
+    ///
+    /// Pattern: `_idx:refresh_token:org:{org_id}:{id}` → `RefreshTokenId`
+    pub fn refresh_token_org_entry(org: OrganizationId, id: RefreshTokenId) -> String {
+        format!("_idx:refresh_token:org:{}:{}", org.value(), id.value())
+    }
+
     /// Prefix for all refresh token primary keys.
     pub const REFRESH_TOKEN_PREFIX: &'static str = "_sys:refresh_token:";
 
@@ -685,6 +701,9 @@ impl SystemKeys {
 
     /// Prefix for refresh token app_vault index entries.
     pub const REFRESH_TOKEN_APP_VAULT_PREFIX: &'static str = "_idx:refresh_token:app_vault:";
+
+    /// Prefix for refresh token org index entries.
+    pub const REFRESH_TOKEN_ORG_PREFIX: &'static str = "_idx:refresh_token:org:";
 
     /// Key for the refresh token ID sequence counter.
     ///
@@ -727,7 +746,7 @@ mod tests {
                 SystemKeys::vault_slug_key(VaultSlug::new(67890)),
                 "_idx:vault:slug:67890",
             ),
-            ("node_key", SystemKeys::node_key(&"node-1".to_string()), "node:node-1"),
+            ("node_key", SystemKeys::node_key(&NodeId::new("node-1")), "node:node-1"),
             ("saga_key", SystemKeys::saga_key("create-org-abc123"), "saga:create-org-abc123"),
             ("user_directory_key", SystemKeys::user_directory_key(UserId::new(42)), "_sys:user:42"),
             (
@@ -746,7 +765,7 @@ mod tests {
         assert_eq!(SystemKeys::parse_user_key("user:123"), Some(UserId::new(123)));
         assert_eq!(SystemKeys::parse_user_key("invalid:123"), None);
         assert_eq!(SystemKeys::parse_organization_key("org:42"), Some(OrganizationId::new(42)));
-        assert_eq!(SystemKeys::parse_node_key("node:node-1"), Some("node-1".to_string()));
+        assert_eq!(SystemKeys::parse_node_key("node:node-1"), Some(NodeId::new("node-1")));
         assert_eq!(SystemKeys::parse_user_directory_key("_sys:user:42"), Some(UserId::new(42)));
         assert_eq!(SystemKeys::parse_user_directory_key("user:42"), None);
         assert_eq!(SystemKeys::parse_user_directory_key("_sys:user:abc"), None);
@@ -767,7 +786,7 @@ mod tests {
                 SystemKeys::organization_key(OrganizationId::new(1)),
                 &[SystemKeys::ORG_PREFIX],
             ),
-            ("node_key", SystemKeys::node_key(&"n".to_string()), &[SystemKeys::NODE_PREFIX]),
+            ("node_key", SystemKeys::node_key(&NodeId::new("n")), &[SystemKeys::NODE_PREFIX]),
             (
                 "organization_profile_key",
                 SystemKeys::organization_profile_key(OrganizationId::new(1)),

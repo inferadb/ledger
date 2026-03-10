@@ -7,9 +7,14 @@ use std::sync::Arc;
 
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_raft::{graceful_shutdown::HealthState, metrics, rate_limit::RateLimiter};
-use inferadb_ledger_state::StateLayer;
+use inferadb_ledger_state::{
+    StateLayer,
+    system::{App, SYSTEM_VAULT_ID, SystemKeys},
+};
 use inferadb_ledger_store::{Database, FileBackend};
-use inferadb_ledger_types::{OrganizationId, VaultId, config::ValidationConfig, validation};
+use inferadb_ledger_types::{
+    AppId, OrganizationId, VaultId, config::ValidationConfig, decode, validation,
+};
 use tempfile::TempDir;
 use tonic::Status;
 use tracing::warn;
@@ -57,7 +62,7 @@ pub(crate) fn check_rate_limit(
             context.insert("reason".to_owned(), rejection.reason.as_str().to_owned());
 
             let details = super::error_details::build_error_details(
-                inferadb_ledger_types::ErrorCode::AppInternal.as_u16(),
+                inferadb_ledger_types::DiagnosticCode::AppInternal.as_u16(),
                 true,
                 Some(retry_ms),
                 context,
@@ -178,7 +183,7 @@ pub(crate) fn record_hot_keys(
 fn validation_status(message: impl Into<String>) -> Status {
     let message = message.into();
     let details = super::error_details::build_error_details(
-        inferadb_ledger_types::ErrorCode::AppInvalidArgument.as_u16(),
+        inferadb_ledger_types::DiagnosticCode::AppInvalidArgument.as_u16(),
         false,
         None,
         std::collections::HashMap::new(),
@@ -186,6 +191,24 @@ fn validation_status(message: impl Into<String>) -> Status {
     );
     let encoded = prost::Message::encode_to_vec(&details);
     Status::with_details(tonic::Code::InvalidArgument, message, encoded.into())
+}
+
+/// Loads an app from state by organization and app ID.
+///
+/// Reads the system vault, decodes the [`App`] record, and returns it.
+/// Returns `Status::not_found` if the app doesn't exist, or
+/// `Status::internal` on storage/decoding failures.
+pub(crate) fn load_app(
+    state: &StateLayer<FileBackend>,
+    org_id: OrganizationId,
+    app_id: AppId,
+) -> Result<App, Status> {
+    let key = SystemKeys::app_key(org_id, app_id);
+    let entity = state
+        .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
+        .map_err(|e| Status::internal(format!("Failed to read app: {e}")))?
+        .ok_or_else(|| Status::not_found(format!("App {} not found", app_id)))?;
+    decode::<App>(&entity.value).map_err(|e| Status::internal(format!("Failed to decode app: {e}")))
 }
 
 /// Computes a hash of operations for idempotency payload comparison.

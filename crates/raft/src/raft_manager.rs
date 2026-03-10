@@ -58,7 +58,7 @@ use inferadb_ledger_state::{
     system::{MIN_NODES_PER_PROTECTED_REGION, SystemOrganizationService},
 };
 use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::{OrganizationId, Region};
+use inferadb_ledger_types::{NodeId, OrganizationId, Region};
 use openraft::{BasicNode, Raft, storage::Adaptor};
 use parking_lot::RwLock;
 use snafu::Snafu;
@@ -959,7 +959,7 @@ impl RaftManager {
             })?
             .with_state_layer(state.clone())
             .with_block_archive(block_archive.clone())
-            .with_region_config(region, self.config.node_id.to_string())
+            .with_region_config(region, NodeId::new(self.config.node_id.to_string()))
             .with_block_announcements(block_announcements.clone())
             .with_divergence_sender(divergence_sender);
 

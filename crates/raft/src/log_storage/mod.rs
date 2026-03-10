@@ -72,7 +72,7 @@ mod tests {
     };
     use inferadb_ledger_store::{FileBackend, tables};
     use inferadb_ledger_types::{
-        EmailVerifyTokenId, LedgerErrorCode, Operation, OrganizationId, Region, Transaction,
+        ClientId, EmailVerifyTokenId, ErrorCode, Operation, OrganizationId, Region, Transaction,
         UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
         events::{EventAction, EventConfig, EventEntry, EventScope},
     };
@@ -349,7 +349,7 @@ mod tests {
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("diverged"));
             },
             _ => panic!("expected error response"),
@@ -688,7 +688,7 @@ mod tests {
         let (response, _) = store.apply_request(&delete_ns, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::NotFound, message } => {
+            LedgerResponse::Error { code: ErrorCode::NotFound, message } => {
                 assert!(message.contains("999"));
                 assert!(message.contains("not found"));
             },
@@ -836,7 +836,7 @@ mod tests {
         let (response, _) = store.apply_request(&migrate, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::NotFound, message } => {
+            LedgerResponse::Error { code: ErrorCode::NotFound, message } => {
                 assert!(message.contains("999"), "error should mention organization ID");
                 assert!(message.contains("not found"), "error should indicate not found");
             },
@@ -880,7 +880,7 @@ mod tests {
         let (response, _) = store.apply_request(&migrate, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("deleted"), "error should mention deleted organization");
             },
             _ => panic!("expected Error response, got {:?}", response),
@@ -1135,7 +1135,7 @@ mod tests {
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::NotFound, message } => {
+            LedgerResponse::Error { code: ErrorCode::NotFound, message } => {
                 assert!(message.contains("not found"));
             },
             _ => panic!("expected Error"),
@@ -1174,7 +1174,7 @@ mod tests {
         let (response, _) = store.apply_request(&start_migration2, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("already migrating"));
             },
             _ => panic!("expected Error"),
@@ -1209,7 +1209,7 @@ mod tests {
         let (response, _) = store.apply_request(&start_migration, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("suspended"));
             },
             _ => panic!("expected Error"),
@@ -1280,7 +1280,7 @@ mod tests {
         let (response, _) = store.apply_request(&complete_migration, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("not migrating"));
             },
             _ => panic!("expected Error"),
@@ -1333,7 +1333,7 @@ mod tests {
         let (response, _) = store.apply_request(&write, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("migrating"));
             },
             _ => panic!("expected Error"),
@@ -1373,7 +1373,7 @@ mod tests {
         let (response, _) = store.apply_request(&create_vault, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("migrating"));
             },
             _ => panic!("expected Error"),
@@ -1498,7 +1498,7 @@ mod tests {
         let (response, _) = store.apply_request(&write, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("deleted") || message.contains("deleting"));
             },
             _ => panic!("expected Error"),
@@ -1543,7 +1543,7 @@ mod tests {
         let (response, _) = store.apply_request(&create_vault2, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("deleted") || message.contains("deleting"));
             },
             _ => panic!("expected Error"),
@@ -1599,7 +1599,7 @@ mod tests {
         let (response, _) = store.apply_request(&write, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("suspended"), "error should mention suspended");
             },
             _ => panic!("expected Error for write to suspended organization, got {:?}", response),
@@ -1640,7 +1640,7 @@ mod tests {
         let (response, _) = store.apply_request(&create_vault, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("suspended"), "error should mention suspended");
             },
             _ => {
@@ -1682,7 +1682,7 @@ mod tests {
         let (response, _) = store.apply_request(&suspend2, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
                 assert!(
                     message.contains("already suspended"),
                     "error should mention already suspended"
@@ -1716,7 +1716,7 @@ mod tests {
         let (response, _) = store.apply_request(&resume, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("not suspended"), "error should mention not suspended");
             },
             _ => panic!("expected Error for resuming active organization, got {:?}", response),
@@ -1752,7 +1752,7 @@ mod tests {
         let (response, _) = store.apply_request(&suspend, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::FailedPrecondition, message } => {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
                 assert!(message.contains("deleted"), "error should mention deleted organization");
             },
             _ => panic!("expected Error for suspending deleted organization, got {:?}", response),
@@ -1775,7 +1775,7 @@ mod tests {
         let (response, _) = store.apply_request(&suspend, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::NotFound, message } => {
+            LedgerResponse::Error { code: ErrorCode::NotFound, message } => {
                 assert!(message.contains("999"), "error should mention organization ID");
                 assert!(message.contains("not found"), "error should mention not found");
             },
@@ -1799,7 +1799,7 @@ mod tests {
         let (response, _) = store.apply_request(&resume, &mut state);
 
         match response {
-            LedgerResponse::Error { code: LedgerErrorCode::NotFound, message } => {
+            LedgerResponse::Error { code: ErrorCode::NotFound, message } => {
                 assert!(message.contains("999"), "error should mention organization ID");
                 assert!(message.contains("not found"), "error should mention not found");
             },
@@ -2294,7 +2294,7 @@ mod tests {
         // Apply a write with transactions
         let tx = inferadb_ledger_types::Transaction {
             id: [1u8; 16],
-            client_id: "test-client".to_string(),
+            client_id: ClientId::new("test-client"),
             sequence: 1,
             operations: vec![inferadb_ledger_types::Operation::SetEntity {
                 key: "key1".to_string(),
@@ -2759,7 +2759,7 @@ mod tests {
             vault: VaultId::new(1),
             transactions: vec![Transaction {
                 id: [42u8; 16],
-                client_id: "test".to_string(),
+                client_id: ClientId::new("test"),
                 sequence: 0,
                 actor: "test-actor".to_string(),
                 operations: vec![Operation::SetEntity {
@@ -2884,7 +2884,7 @@ mod tests {
             vault: VaultId::new(1),
             transactions: vec![Transaction {
                 id: [7u8; 16],
-                client_id: "client".to_string(),
+                client_id: ClientId::new("client"),
                 sequence: 0,
                 actor: "actor".to_string(),
                 operations: vec![Operation::SetEntity {
@@ -3214,7 +3214,7 @@ mod tests {
     fn test_estimate_delta_set_entity() {
         let tx = inferadb_ledger_types::Transaction {
             id: [0u8; 16],
-            client_id: "c".to_string(),
+            client_id: ClientId::new("c"),
             sequence: 1,
             actor: "a".to_string(),
             operations: vec![inferadb_ledger_types::Operation::SetEntity {
@@ -3232,7 +3232,7 @@ mod tests {
     fn test_estimate_delta_delete_entity() {
         let tx = inferadb_ledger_types::Transaction {
             id: [0u8; 16],
-            client_id: "c".to_string(),
+            client_id: ClientId::new("c"),
             sequence: 1,
             actor: "a".to_string(),
             operations: vec![inferadb_ledger_types::Operation::DeleteEntity {
@@ -3247,7 +3247,7 @@ mod tests {
     fn test_estimate_delta_create_relationship() {
         let tx = inferadb_ledger_types::Transaction {
             id: [0u8; 16],
-            client_id: "c".to_string(),
+            client_id: ClientId::new("c"),
             sequence: 1,
             actor: "a".to_string(),
             operations: vec![inferadb_ledger_types::Operation::CreateRelationship {
@@ -3264,7 +3264,7 @@ mod tests {
     fn test_estimate_delta_delete_relationship() {
         let tx = inferadb_ledger_types::Transaction {
             id: [0u8; 16],
-            client_id: "c".to_string(),
+            client_id: ClientId::new("c"),
             sequence: 1,
             actor: "a".to_string(),
             operations: vec![inferadb_ledger_types::Operation::DeleteRelationship {
@@ -3281,7 +3281,7 @@ mod tests {
     fn test_estimate_delta_expire_entity() {
         let tx = inferadb_ledger_types::Transaction {
             id: [0u8; 16],
-            client_id: "c".to_string(),
+            client_id: ClientId::new("c"),
             sequence: 1,
             actor: "a".to_string(),
             operations: vec![inferadb_ledger_types::Operation::ExpireEntity {
@@ -3297,7 +3297,7 @@ mod tests {
     fn test_estimate_delta_mixed_operations() {
         let tx = inferadb_ledger_types::Transaction {
             id: [0u8; 16],
-            client_id: "c".to_string(),
+            client_id: ClientId::new("c"),
             sequence: 1,
             actor: "a".to_string(),
             operations: vec![
@@ -3321,7 +3321,7 @@ mod tests {
     fn test_estimate_delta_multiple_transactions() {
         let tx1 = inferadb_ledger_types::Transaction {
             id: [1u8; 16],
-            client_id: "c".to_string(),
+            client_id: ClientId::new("c"),
             sequence: 1,
             actor: "a".to_string(),
             operations: vec![inferadb_ledger_types::Operation::SetEntity {
@@ -3334,7 +3334,7 @@ mod tests {
         };
         let tx2 = inferadb_ledger_types::Transaction {
             id: [2u8; 16],
-            client_id: "c".to_string(),
+            client_id: ClientId::new("c"),
             sequence: 2,
             actor: "a".to_string(),
             operations: vec![inferadb_ledger_types::Operation::SetEntity {
@@ -3388,7 +3388,7 @@ mod tests {
         // Write 1: key=4 bytes, value=6 bytes → +10
         let tx1 = inferadb_ledger_types::Transaction {
             id: [1u8; 16],
-            client_id: "client1".to_string(),
+            client_id: ClientId::new("client1"),
             sequence: 1,
             actor: "test".to_string(),
             operations: vec![inferadb_ledger_types::Operation::SetEntity {
@@ -3418,7 +3418,7 @@ mod tests {
         // Write 2: key=4 bytes, value=10 bytes → +14
         let tx2 = inferadb_ledger_types::Transaction {
             id: [2u8; 16],
-            client_id: "client1".to_string(),
+            client_id: ClientId::new("client1"),
             sequence: 2,
             actor: "test".to_string(),
             operations: vec![inferadb_ledger_types::Operation::SetEntity {
@@ -3474,7 +3474,7 @@ mod tests {
         // Write: key="abcde" (5), value="fghij" (5) → +10
         let tx_set = inferadb_ledger_types::Transaction {
             id: [1u8; 16],
-            client_id: "c".to_string(),
+            client_id: ClientId::new("c"),
             sequence: 1,
             actor: "a".to_string(),
             operations: vec![inferadb_ledger_types::Operation::SetEntity {
@@ -3500,7 +3500,7 @@ mod tests {
         // Delete: key="abcde" (5) → -5 (conservative: doesn't know value size)
         let tx_del = inferadb_ledger_types::Transaction {
             id: [2u8; 16],
-            client_id: "c".to_string(),
+            client_id: ClientId::new("c"),
             sequence: 2,
             actor: "a".to_string(),
             operations: vec![inferadb_ledger_types::Operation::DeleteEntity {
@@ -3552,7 +3552,7 @@ mod tests {
         // Delete without prior write — should floor at 0 via saturating_sub
         let tx = inferadb_ledger_types::Transaction {
             id: [1u8; 16],
-            client_id: "c".to_string(),
+            client_id: ClientId::new("c"),
             sequence: 1,
             actor: "a".to_string(),
             operations: vec![inferadb_ledger_types::Operation::DeleteEntity {
@@ -3620,7 +3620,7 @@ mod tests {
         // Write to organization 1: "aa" + "bb" = 4 bytes
         let tx1 = inferadb_ledger_types::Transaction {
             id: [1u8; 16],
-            client_id: "c".to_string(),
+            client_id: ClientId::new("c"),
             sequence: 1,
             actor: "a".to_string(),
             operations: vec![inferadb_ledger_types::Operation::SetEntity {
@@ -3645,7 +3645,7 @@ mod tests {
         // Write to organization 2: "cccccc" + "dddddddd" = 14 bytes
         let tx2 = inferadb_ledger_types::Transaction {
             id: [2u8; 16],
-            client_id: "c".to_string(),
+            client_id: ClientId::new("c"),
             sequence: 2,
             actor: "a".to_string(),
             operations: vec![inferadb_ledger_types::Operation::SetEntity {
@@ -3731,7 +3731,7 @@ mod tests {
         // Write some data
         let tx = inferadb_ledger_types::Transaction {
             id: [1u8; 16],
-            client_id: "c".to_string(),
+            client_id: ClientId::new("c"),
             sequence: 1,
             actor: "a".to_string(),
             operations: vec![inferadb_ledger_types::Operation::SetEntity {
@@ -3848,7 +3848,7 @@ mod tests {
             // Write data: "hello" (5) + "world!" (6) = 11 bytes
             let tx = inferadb_ledger_types::Transaction {
                 id: [1u8; 16],
-                client_id: "c".to_string(),
+                client_id: ClientId::new("c"),
                 sequence: 1,
                 actor: "a".to_string(),
                 operations: vec![inferadb_ledger_types::Operation::SetEntity {
@@ -3915,7 +3915,7 @@ mod tests {
             vault,
             transactions: vec![Transaction {
                 id: [1u8; 16],
-                client_id: "test-client".to_string(),
+                client_id: ClientId::new("test-client"),
                 sequence: 0,
                 actor: "test-actor".to_string(),
                 operations: vec![Operation::SetEntity {
@@ -4096,7 +4096,7 @@ mod tests {
             vault: vault_id,
             transactions: vec![Transaction {
                 id: [2u8; 16],
-                client_id: "gc-client".to_string(),
+                client_id: ClientId::new("gc-client"),
                 sequence: 0,
                 actor: "gc-actor".to_string(),
                 operations: vec![
@@ -4680,7 +4680,7 @@ mod tests {
                     vault: vault_id,
                     transactions: vec![Transaction {
                         id: [2u8; 16],
-                        client_id: "test-client".to_string(),
+                        client_id: ClientId::new("test-client"),
                         sequence: 0,
                         actor: "test-actor".to_string(),
                         operations: vec![Operation::SetEntity {
@@ -4838,7 +4838,7 @@ mod tests {
                 vault: vault_b,
                 transactions: vec![Transaction {
                     id: [9u8; 16],
-                    client_id: "client-b".to_string(),
+                    client_id: ClientId::new("client-b"),
                     sequence: 0,
                     actor: "actor-b".to_string(),
                     operations: vec![Operation::SetEntity {
@@ -4975,7 +4975,7 @@ mod tests {
                 vault: vault_id,
                 transactions: vec![Transaction {
                     id: [3u8; 16],
-                    client_id: "test-client".to_string(),
+                    client_id: ClientId::new("test-client"),
                     sequence: 0,
                     actor: "test-actor".to_string(),
                     operations: vec![Operation::SetEntity {
@@ -5279,7 +5279,11 @@ mod tests {
         ttl_seconds: i64,
     ) {
         let mut expired_keys: Vec<(
-            (inferadb_ledger_types::OrganizationId, inferadb_ledger_types::VaultId, String),
+            (
+                inferadb_ledger_types::OrganizationId,
+                inferadb_ledger_types::VaultId,
+                inferadb_ledger_types::ClientId,
+            ),
             Vec<u8>,
         )> = state
             .client_sequences
@@ -5308,7 +5312,7 @@ mod tests {
 
         // Insert entry that is 2 days old
         state.client_sequences.insert(
-            (org, vault, "old-client".to_string()),
+            (org, vault, ClientId::new("old-client")),
             ClientSequenceEntry {
                 sequence: 1,
                 last_seen: 1_000_000,
@@ -5333,7 +5337,7 @@ mod tests {
 
         // Insert entry that is 1 hour old (well within 24h TTL)
         state.client_sequences.insert(
-            (org, vault, "fresh-client".to_string()),
+            (org, vault, ClientId::new("fresh-client")),
             ClientSequenceEntry {
                 sequence: 5,
                 last_seen: 1_000_000,
@@ -5358,7 +5362,7 @@ mod tests {
         // All entries are recent
         for i in 0..5 {
             state.client_sequences.insert(
-                (org, vault, format!("client-{i}")),
+                (org, vault, ClientId::new(format!("client-{i}"))),
                 ClientSequenceEntry {
                     sequence: i + 1,
                     last_seen: 1_000_000,
@@ -5383,7 +5387,7 @@ mod tests {
         // Insert 3 entries, all very old
         for i in 0..3u64 {
             state.client_sequences.insert(
-                (org, VaultId::new(i as i64 + 1), format!("client-{i}")),
+                (org, VaultId::new(i as i64 + 1), ClientId::new(format!("client-{i}"))),
                 ClientSequenceEntry {
                     sequence: i + 1,
                     last_seen: 100,
@@ -5407,15 +5411,15 @@ mod tests {
         // Insert entries with IDs that sort in a specific order when encoded
         // as big-endian bytes. Org 2 > Org 1 in byte ordering.
         state.client_sequences.insert(
-            (OrganizationId::new(2), VaultId::new(1), "b-client".to_string()),
+            (OrganizationId::new(2), VaultId::new(1), ClientId::new("b-client")),
             ClientSequenceEntry { sequence: 1, last_seen: 100, ..ClientSequenceEntry::default() },
         );
         state.client_sequences.insert(
-            (OrganizationId::new(1), VaultId::new(1), "a-client".to_string()),
+            (OrganizationId::new(1), VaultId::new(1), ClientId::new("a-client")),
             ClientSequenceEntry { sequence: 2, last_seen: 100, ..ClientSequenceEntry::default() },
         );
         state.client_sequences.insert(
-            (OrganizationId::new(1), VaultId::new(2), "c-client".to_string()),
+            (OrganizationId::new(1), VaultId::new(2), ClientId::new("c-client")),
             ClientSequenceEntry { sequence: 3, last_seen: 100, ..ClientSequenceEntry::default() },
         );
 
@@ -5461,7 +5465,8 @@ mod tests {
                 last_idempotency_key: [0u8; 16],
                 last_request_hash: 0,
             };
-            let key = (OrganizationId::new(1), VaultId::new(1), format!("client-{i}"));
+            let key =
+                (OrganizationId::new(1), VaultId::new(1), ClientId::new(format!("client-{i}")));
             state_a.client_sequences.insert(key.clone(), entry.clone());
             state_b.client_sequences.insert(key, entry);
         }
@@ -5489,7 +5494,7 @@ mod tests {
         // With i64 saturating_sub, negative deltas become 0 — no eviction.
         let mut state = AppliedState::default();
         state.client_sequences.insert(
-            (OrganizationId::new(1), VaultId::new(1), "client".to_string()),
+            (OrganizationId::new(1), VaultId::new(1), ClientId::new("client")),
             ClientSequenceEntry {
                 sequence: 1,
                 last_seen: 1_000_000,
@@ -5511,7 +5516,7 @@ mod tests {
         // proposed_at backward by more than TTL — verify no signed subtraction overflow
         let mut state = AppliedState::default();
         state.client_sequences.insert(
-            (OrganizationId::new(1), VaultId::new(1), "client".to_string()),
+            (OrganizationId::new(1), VaultId::new(1), ClientId::new("client")),
             ClientSequenceEntry {
                 sequence: 1,
                 last_seen: i64::MAX - 100,
@@ -5536,7 +5541,7 @@ mod tests {
 
         // Old entry (expired)
         state.client_sequences.insert(
-            (org, vault, "old-client".to_string()),
+            (org, vault, ClientId::new("old-client")),
             ClientSequenceEntry {
                 sequence: 1,
                 last_seen: 100,
@@ -5547,7 +5552,7 @@ mod tests {
 
         // Fresh entry (within TTL)
         state.client_sequences.insert(
-            (org, vault, "new-client".to_string()),
+            (org, vault, ClientId::new("new-client")),
             ClientSequenceEntry {
                 sequence: 2,
                 last_seen: 100_000,
@@ -5561,7 +5566,7 @@ mod tests {
 
         assert_eq!(state.client_sequences.len(), 1, "only fresh entry retained");
         assert!(
-            state.client_sequences.contains_key(&(org, vault, "new-client".to_string())),
+            state.client_sequences.contains_key(&(org, vault, ClientId::new("new-client"))),
             "new-client should survive eviction"
         );
         assert_eq!(pending.client_sequences_deleted.len(), 1, "one delete for old-client");
@@ -5975,7 +5980,7 @@ mod tests {
                     vault: VaultId::new(2),
                     transactions: vec![Transaction {
                         id: [2u8; 16],
-                        client_id: "test-client".to_string(),
+                        client_id: ClientId::new("test-client"),
                         sequence: 0,
                         actor: "test-actor".to_string(),
                         operations: vec![Operation::SetEntity {

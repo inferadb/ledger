@@ -513,7 +513,7 @@ impl<B: StorageBackend> ShardManager<B> {
 mod tests {
     use chrono::Utc;
     use inferadb_ledger_test_utils::TestDir;
-    use inferadb_ledger_types::{Operation, Transaction, VaultEntry};
+    use inferadb_ledger_types::{ClientId, NodeId, Operation, Transaction, VaultEntry};
 
     use super::*;
     use crate::engine::InMemoryStorageEngine;
@@ -548,7 +548,7 @@ mod tests {
         // Create a block with a SetEntity operation
         let tx = Transaction {
             id: [0u8; 16],
-            client_id: "client-1".to_string(),
+            client_id: ClientId::new("client-1"),
             sequence: 1,
             actor: "user:admin".to_string(),
             operations: vec![Operation::SetEntity {
@@ -585,7 +585,7 @@ mod tests {
                 state_root: expected_root,
             }],
             timestamp: Utc::now(),
-            leader_id: "node-1".to_string(),
+            leader_id: NodeId::new("node-1"),
             term: 1,
             committed_index: 1,
         };
@@ -605,7 +605,7 @@ mod tests {
 
         let tx = Transaction {
             id: [0u8; 16],
-            client_id: "client-1".to_string(),
+            client_id: ClientId::new("client-1"),
             sequence: 1,
             actor: "user:admin".to_string(),
             operations: vec![Operation::SetEntity {
@@ -632,7 +632,7 @@ mod tests {
                 state_root: [42u8; 32], // Wrong!
             }],
             timestamp: Utc::now(),
-            leader_id: "node-1".to_string(),
+            leader_id: NodeId::new("node-1"),
             term: 1,
             committed_index: 1,
         };

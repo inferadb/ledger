@@ -61,12 +61,10 @@ const fn default_trace_raft_rpcs() -> bool {
 /// INFERADB__LEDGER__LOGGING__OTEL__ENDPOINT=http://localhost:4317
 /// INFERADB__LEDGER__LOGGING__OTEL__TRANSPORT=grpc
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, bon::Builder)]
-#[builder(derive(Debug))]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 pub struct OtelConfig {
     /// Whether OTLP export is enabled. Default: false.
     #[serde(default)]
-    #[builder(default)]
     pub enabled: bool,
 
     /// OTLP endpoint URL (e.g., "http://localhost:4317" for gRPC).
@@ -75,27 +73,22 @@ pub struct OtelConfig {
 
     /// Transport protocol. Default: gRPC.
     #[serde(default)]
-    #[builder(default)]
     pub transport: OtelTransport,
 
     /// Batch size (flush when reached). Default: 512 spans.
     #[serde(default = "default_otel_batch_size")]
-    #[builder(default = default_otel_batch_size())]
     pub batch_size: usize,
 
     /// Batch interval in milliseconds (flush when elapsed). Default: 5000ms.
     #[serde(default = "default_otel_batch_interval_ms")]
-    #[builder(default = default_otel_batch_interval_ms())]
     pub batch_interval_ms: u64,
 
     /// Export timeout in milliseconds. Default: 10000ms.
     #[serde(default = "default_otel_timeout_ms")]
-    #[builder(default = default_otel_timeout_ms())]
     pub timeout_ms: u64,
 
     /// Graceful shutdown timeout in milliseconds. Default: 15000ms.
     #[serde(default = "default_otel_shutdown_timeout_ms")]
-    #[builder(default = default_otel_shutdown_timeout_ms())]
     pub shutdown_timeout_ms: u64,
 
     /// Whether to propagate trace context in Raft RPCs. Default: true.
@@ -105,7 +98,6 @@ pub struct OtelConfig {
     /// the Raft cluster. Disable for performance-critical deployments where
     /// the ~100 bytes overhead per RPC is unacceptable.
     #[serde(default = "default_trace_raft_rpcs")]
-    #[builder(default = default_trace_raft_rpcs())]
     pub trace_raft_rpcs: bool,
 }
 
@@ -121,6 +113,40 @@ impl Default for OtelConfig {
             shutdown_timeout_ms: default_otel_shutdown_timeout_ms(),
             trace_raft_rpcs: default_trace_raft_rpcs(),
         }
+    }
+}
+
+#[bon::bon]
+impl OtelConfig {
+    /// Creates a new OTEL configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if enabled without endpoint,
+    /// or if batch/timeout values are zero.
+    #[builder]
+    pub fn new(
+        #[builder(default)] enabled: bool,
+        #[builder(into)] endpoint: Option<String>,
+        #[builder(default)] transport: OtelTransport,
+        #[builder(default = default_otel_batch_size())] batch_size: usize,
+        #[builder(default = default_otel_batch_interval_ms())] batch_interval_ms: u64,
+        #[builder(default = default_otel_timeout_ms())] timeout_ms: u64,
+        #[builder(default = default_otel_shutdown_timeout_ms())] shutdown_timeout_ms: u64,
+        #[builder(default = default_trace_raft_rpcs())] trace_raft_rpcs: bool,
+    ) -> Result<Self, ConfigError> {
+        let config = Self {
+            enabled,
+            endpoint,
+            transport,
+            batch_size,
+            batch_interval_ms,
+            timeout_ms,
+            shutdown_timeout_ms,
+            trace_raft_rpcs,
+        };
+        config.validate()?;
+        Ok(config)
     }
 }
 

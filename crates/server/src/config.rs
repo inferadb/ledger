@@ -1003,52 +1003,40 @@ mod tests {
 
     #[test]
     fn test_otel_config_validate_enabled_requires_endpoint() {
-        // Enabled without endpoint should fail
-        let config = OtelConfig::builder().enabled(true).build();
-        let err = config.validate().unwrap_err();
+        let err = OtelConfig::builder().enabled(true).build().unwrap_err();
         assert!(err.to_string().contains("endpoint"));
         assert!(err.to_string().contains("required"));
     }
 
     #[test]
     fn test_otel_config_validate_enabled_with_endpoint() {
-        let config = OtelConfig::builder()
-            .enabled(true)
-            .endpoint("http://localhost:4317".to_string())
-            .build();
-        assert!(config.validate().is_ok());
+        let config =
+            OtelConfig::builder().enabled(true).endpoint("http://localhost:4317").build().unwrap();
+        assert!(config.enabled);
     }
 
     #[test]
     fn test_otel_config_validate_batch_size() {
-        // Zero batch size is invalid
-        let config = OtelConfig::builder().batch_size(0).build();
-        let err = config.validate().unwrap_err();
+        let err = OtelConfig::builder().batch_size(0).build().unwrap_err();
         assert!(err.to_string().contains("batch_size"));
         assert!(err.to_string().contains("positive"));
     }
 
     #[test]
     fn test_otel_config_validate_batch_interval() {
-        // Zero interval is invalid
-        let config = OtelConfig::builder().batch_interval_ms(0).build();
-        let err = config.validate().unwrap_err();
+        let err = OtelConfig::builder().batch_interval_ms(0).build().unwrap_err();
         assert!(err.to_string().contains("batch_interval_ms"));
     }
 
     #[test]
     fn test_otel_config_validate_timeout() {
-        // Zero timeout is invalid
-        let config = OtelConfig::builder().timeout_ms(0).build();
-        let err = config.validate().unwrap_err();
+        let err = OtelConfig::builder().timeout_ms(0).build().unwrap_err();
         assert!(err.to_string().contains("timeout_ms"));
     }
 
     #[test]
     fn test_otel_config_validate_shutdown_timeout() {
-        // Zero shutdown timeout is invalid
-        let config = OtelConfig::builder().shutdown_timeout_ms(0).build();
-        let err = config.validate().unwrap_err();
+        let err = OtelConfig::builder().shutdown_timeout_ms(0).build().unwrap_err();
         assert!(err.to_string().contains("shutdown_timeout_ms"));
     }
 
@@ -1056,14 +1044,15 @@ mod tests {
     fn test_otel_config_builder() {
         let config = OtelConfig::builder()
             .enabled(true)
-            .endpoint("http://localhost:4317".to_string())
+            .endpoint("http://localhost:4317")
             .transport(OtelTransport::Http)
             .batch_size(256)
             .batch_interval_ms(2500)
             .timeout_ms(5000)
             .shutdown_timeout_ms(7500)
             .trace_raft_rpcs(false)
-            .build();
+            .build()
+            .unwrap();
 
         assert!(config.enabled);
         assert_eq!(config.endpoint, Some("http://localhost:4317".to_string()));
@@ -1089,10 +1078,8 @@ mod tests {
 
     #[test]
     fn test_logging_config_validate_includes_otel() {
-        // Invalid OTEL config should fail validation
-        let config = LoggingConfig {
-            otel: OtelConfig::builder().enabled(true).build(), // Missing endpoint
-        };
+        // Invalid OTEL config (enabled without endpoint) should fail validation
+        let config = LoggingConfig { otel: OtelConfig { enabled: true, ..OtelConfig::default() } };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("endpoint"));
     }

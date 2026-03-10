@@ -250,7 +250,7 @@ impl ReadService {
                 nanos: region_block.timestamp.timestamp_subsec_nanos() as i32,
             }),
             leader_id: Some(inferadb_ledger_proto::proto::NodeId {
-                id: region_block.leader_id.clone(),
+                id: region_block.leader_id.to_string(),
             }),
             term: region_block.term,
             committed_index: region_block.committed_index,

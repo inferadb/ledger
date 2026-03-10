@@ -7,9 +7,9 @@ use std::collections::{HashMap, HashSet};
 
 use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
 use inferadb_ledger_types::{
-    AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, Hash, Operation, OrganizationId,
-    OrganizationSlug, RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug, Transaction,
-    UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
+    AppId, AppSlug, ClientAssertionId, ClientId, EmailVerifyTokenId, Hash, Operation,
+    OrganizationId, OrganizationSlug, RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug,
+    Transaction, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
 use openraft::{LogId, StoredMembership};
 use serde::{Deserialize, Serialize};
@@ -48,7 +48,7 @@ pub struct AppliedState {
     /// Per-client sequence tracking with cross-failover idempotency metadata.
     /// Key: (organization, vault, client_id), Value: sequence + dedup fields.
     #[serde(default)]
-    pub client_sequences: HashMap<(OrganizationId, VaultId, String), ClientSequenceEntry>,
+    pub client_sequences: HashMap<(OrganizationId, VaultId, ClientId), ClientSequenceEntry>,
     /// Cumulative estimated storage bytes per organization.
     ///
     /// Updated on every write (increment by key+value sizes) and delete

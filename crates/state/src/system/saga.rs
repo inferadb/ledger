@@ -26,7 +26,57 @@ use serde::{Deserialize, Serialize};
 use super::types::{OrganizationTier, SigningKeyScope};
 
 /// Unique identifier for a saga.
-pub type SagaId = String;
+///
+/// Wraps a `String` with compile-time type safety to prevent mixing
+/// with other string identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SagaId(String);
+
+impl SagaId {
+    /// Creates a new saga identifier.
+    #[inline]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Returns the string value as a slice.
+    #[inline]
+    pub fn value(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SagaId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for SagaId {
+    #[inline]
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl PartialEq<str> for SagaId {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<String> for SagaId {
+    fn eq(&self, other: &String) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<&str> for SagaId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
 
 /// Maximum number of retry attempts before marking a saga as failed.
 pub const MAX_RETRIES: u8 = 10;
@@ -1172,7 +1222,7 @@ pub enum Saga {
 
 impl Saga {
     /// Returns the saga ID.
-    pub fn id(&self) -> &str {
+    pub fn id(&self) -> &SagaId {
         match self {
             Saga::DeleteUser(s) => &s.id,
             Saga::MigrateOrg(s) => &s.id,
@@ -1331,7 +1381,7 @@ mod tests {
             user: UserId::new(1),
             organization_ids: vec![OrganizationId::new(100)],
         };
-        let mut saga = DeleteUserSaga::new("saga-123".to_string(), input);
+        let mut saga = DeleteUserSaga::new(SagaId::new("saga-123"), input);
 
         // First backoff: 1s
         assert_eq!(saga.next_backoff(), Duration::from_secs(1));
@@ -1351,7 +1401,7 @@ mod tests {
             user: UserId::new(1),
             organization_ids: vec![OrganizationId::new(100)],
         };
-        let mut saga = DeleteUserSaga::new("saga-123".to_string(), input);
+        let mut saga = DeleteUserSaga::new(SagaId::new("saga-123"), input);
 
         // Simulate many retries
         for _ in 0..20 {
@@ -1368,7 +1418,7 @@ mod tests {
             user: UserId::new(1),
             organization_ids: vec![OrganizationId::new(100)],
         };
-        let mut saga = DeleteUserSaga::new("saga-123".to_string(), input);
+        let mut saga = DeleteUserSaga::new(SagaId::new("saga-123"), input);
 
         // Fail MAX_RETRIES times
         for _ in 0..MAX_RETRIES {
@@ -1386,7 +1436,7 @@ mod tests {
             user: UserId::new(1),
             organization_ids: vec![OrganizationId::new(100), OrganizationId::new(101)],
         };
-        let mut saga = DeleteUserSaga::new("delete-123".to_string(), input);
+        let mut saga = DeleteUserSaga::new(SagaId::new("delete-123"), input);
 
         assert!(!saga.is_terminal());
 
@@ -1409,7 +1459,7 @@ mod tests {
             user: UserId::new(42),
             organization_ids: vec![OrganizationId::new(1)],
         };
-        let saga = Saga::DeleteUser(DeleteUserSaga::new("saga-123".to_string(), input));
+        let saga = Saga::DeleteUser(DeleteUserSaga::new(SagaId::new("saga-123"), input));
 
         let bytes = saga.to_bytes().unwrap();
         let restored = Saga::from_bytes(&bytes).unwrap();
@@ -1424,7 +1474,7 @@ mod tests {
             user: UserId::new(42),
             organization_ids: vec![OrganizationId::new(1)],
         };
-        let saga = Saga::DeleteUser(DeleteUserSaga::new("saga-123".to_string(), input));
+        let saga = Saga::DeleteUser(DeleteUserSaga::new(SagaId::new("saga-123"), input));
 
         assert_eq!(saga.id(), "saga-123");
         assert_eq!(saga.saga_type(), SagaType::DeleteUser);
@@ -1446,7 +1496,7 @@ mod tests {
 
     #[test]
     fn test_migrate_org_saga_new() {
-        let saga = MigrateOrgSaga::new("migrate-1".to_string(), make_migrate_org_input());
+        let saga = MigrateOrgSaga::new(SagaId::new("migrate-1"), make_migrate_org_input());
 
         assert_eq!(saga.id, "migrate-1");
         assert_eq!(saga.state, MigrateOrgSagaState::Pending);
@@ -1458,7 +1508,7 @@ mod tests {
 
     #[test]
     fn test_migrate_org_saga_transitions() {
-        let mut saga = MigrateOrgSaga::new("migrate-2".to_string(), make_migrate_org_input());
+        let mut saga = MigrateOrgSaga::new(SagaId::new("migrate-2"), make_migrate_org_input());
 
         // Pending → MigrationStarted
         saga.transition(MigrateOrgSagaState::MigrationStarted);
@@ -1505,7 +1555,7 @@ mod tests {
 
     #[test]
     fn test_migrate_org_saga_is_terminal() {
-        let base = MigrateOrgSaga::new("migrate-3".to_string(), make_migrate_org_input());
+        let base = MigrateOrgSaga::new(SagaId::new("migrate-3"), make_migrate_org_input());
 
         let completed = {
             let mut s = base.clone();
@@ -1543,7 +1593,7 @@ mod tests {
 
     #[test]
     fn test_migrate_org_saga_fail() {
-        let mut saga = MigrateOrgSaga::new("migrate-4".to_string(), make_migrate_org_input());
+        let mut saga = MigrateOrgSaga::new(SagaId::new("migrate-4"), make_migrate_org_input());
 
         // First MAX_RETRIES - 1 failures schedule retries, not terminal.
         for _ in 0..(MAX_RETRIES - 1) {
@@ -1565,7 +1615,7 @@ mod tests {
 
     #[test]
     fn test_migrate_org_saga_is_timed_out() {
-        let mut saga = MigrateOrgSaga::new("migrate-5".to_string(), make_migrate_org_input());
+        let mut saga = MigrateOrgSaga::new(SagaId::new("migrate-5"), make_migrate_org_input());
 
         // Back-date creation so the saga appears old.
         saga.created_at = Utc::now() - chrono::Duration::hours(2);
@@ -1576,7 +1626,7 @@ mod tests {
 
     #[test]
     fn test_migrate_org_saga_current_step() {
-        let mut saga = MigrateOrgSaga::new("migrate-6".to_string(), make_migrate_org_input());
+        let mut saga = MigrateOrgSaga::new(SagaId::new("migrate-6"), make_migrate_org_input());
 
         assert_eq!(saga.current_step(), 0); // Pending
 
@@ -1614,7 +1664,7 @@ mod tests {
 
     #[test]
     fn test_migrate_org_saga_serialization() {
-        let inner = MigrateOrgSaga::new("migrate-7".to_string(), make_migrate_org_input());
+        let inner = MigrateOrgSaga::new(SagaId::new("migrate-7"), make_migrate_org_input());
         let saga = Saga::MigrateOrg(inner);
 
         let bytes = saga.to_bytes().unwrap();
@@ -1655,7 +1705,7 @@ mod tests {
 
     #[test]
     fn test_migrate_user_saga_new() {
-        let saga = MigrateUserSaga::new("user-migrate-1".to_string(), make_migrate_user_input());
+        let saga = MigrateUserSaga::new(SagaId::new("user-migrate-1"), make_migrate_user_input());
 
         assert_eq!(saga.id, "user-migrate-1");
         assert_eq!(saga.state, MigrateUserSagaState::Pending);
@@ -1668,7 +1718,7 @@ mod tests {
     #[test]
     fn test_migrate_user_saga_transitions() {
         let mut saga =
-            MigrateUserSaga::new("user-migrate-2".to_string(), make_migrate_user_input());
+            MigrateUserSaga::new(SagaId::new("user-migrate-2"), make_migrate_user_input());
 
         // Step 1: Mark directory as migrating
         saga.transition(MigrateUserSagaState::DirectoryMarkedMigrating);
@@ -1703,7 +1753,7 @@ mod tests {
 
     #[test]
     fn test_migrate_user_saga_is_terminal() {
-        let base = MigrateUserSaga::new("user-migrate-3".to_string(), make_migrate_user_input());
+        let base = MigrateUserSaga::new(SagaId::new("user-migrate-3"), make_migrate_user_input());
 
         // Completed is terminal
         let mut s = base.clone();
@@ -1734,7 +1784,7 @@ mod tests {
     #[test]
     fn test_migrate_user_saga_fail() {
         let mut saga =
-            MigrateUserSaga::new("user-migrate-4".to_string(), make_migrate_user_input());
+            MigrateUserSaga::new(SagaId::new("user-migrate-4"), make_migrate_user_input());
 
         // Fail multiple times with retries
         for i in 0..MAX_RETRIES.saturating_sub(1) {
@@ -1755,7 +1805,7 @@ mod tests {
     #[test]
     fn test_migrate_user_saga_is_timed_out() {
         let mut saga =
-            MigrateUserSaga::new("user-migrate-5".to_string(), make_migrate_user_input());
+            MigrateUserSaga::new(SagaId::new("user-migrate-5"), make_migrate_user_input());
         saga.created_at = Utc::now() - chrono::Duration::minutes(10);
 
         assert!(saga.is_timed_out(Duration::from_secs(300))); // 5 min timeout
@@ -1765,7 +1815,7 @@ mod tests {
     #[test]
     fn test_migrate_user_saga_current_step() {
         let mut saga =
-            MigrateUserSaga::new("user-migrate-6".to_string(), make_migrate_user_input());
+            MigrateUserSaga::new(SagaId::new("user-migrate-6"), make_migrate_user_input());
 
         assert_eq!(saga.current_step(), 0); // Pending
 
@@ -1800,7 +1850,7 @@ mod tests {
 
     #[test]
     fn test_migrate_user_saga_serialization() {
-        let inner = MigrateUserSaga::new("user-migrate-7".to_string(), make_migrate_user_input());
+        let inner = MigrateUserSaga::new(SagaId::new("user-migrate-7"), make_migrate_user_input());
         let saga = Saga::MigrateUser(inner);
 
         let bytes = saga.to_bytes().unwrap();
@@ -1823,7 +1873,7 @@ mod tests {
 
     #[test]
     fn test_migrate_user_saga_wrapper_integration() {
-        let inner = MigrateUserSaga::new("user-migrate-8".to_string(), make_migrate_user_input());
+        let inner = MigrateUserSaga::new(SagaId::new("user-migrate-8"), make_migrate_user_input());
         let saga = Saga::MigrateUser(inner);
 
         assert_eq!(saga.id(), "user-migrate-8");
@@ -1933,7 +1983,7 @@ mod tests {
 
     #[test]
     fn test_create_user_saga_new() {
-        let saga = CreateUserSaga::new("cu-1".to_string(), make_create_user_input());
+        let saga = CreateUserSaga::new(SagaId::new("cu-1"), make_create_user_input());
 
         assert_eq!(saga.id, "cu-1");
         assert_eq!(saga.state, CreateUserSagaState::Pending);
@@ -1945,7 +1995,7 @@ mod tests {
 
     #[test]
     fn test_create_user_saga_transitions() {
-        let mut saga = CreateUserSaga::new("cu-2".to_string(), make_create_user_input());
+        let mut saga = CreateUserSaga::new(SagaId::new("cu-2"), make_create_user_input());
 
         // Step 0 → EmailReserved
         saga.transition(CreateUserSagaState::EmailReserved {
@@ -1976,7 +2026,7 @@ mod tests {
 
     #[test]
     fn test_create_user_saga_is_terminal() {
-        let base = CreateUserSaga::new("cu-3".to_string(), make_create_user_input());
+        let base = CreateUserSaga::new(SagaId::new("cu-3"), make_create_user_input());
 
         let mut s = base.clone();
         s.state =
@@ -2008,7 +2058,7 @@ mod tests {
 
     #[test]
     fn test_create_user_saga_fail_and_retry() {
-        let mut saga = CreateUserSaga::new("cu-4".to_string(), make_create_user_input());
+        let mut saga = CreateUserSaga::new(SagaId::new("cu-4"), make_create_user_input());
 
         for _ in 0..MAX_RETRIES.saturating_sub(1) {
             saga.fail(0, "transient".to_string());
@@ -2026,7 +2076,7 @@ mod tests {
 
     #[test]
     fn test_create_user_saga_is_timed_out() {
-        let mut saga = CreateUserSaga::new("cu-5".to_string(), make_create_user_input());
+        let mut saga = CreateUserSaga::new(SagaId::new("cu-5"), make_create_user_input());
         saga.created_at = Utc::now() - chrono::Duration::minutes(5);
 
         assert!(saga.is_timed_out(Duration::from_secs(60))); // 1 min timeout
@@ -2035,7 +2085,7 @@ mod tests {
 
     #[test]
     fn test_create_user_saga_current_step() {
-        let mut saga = CreateUserSaga::new("cu-6".to_string(), make_create_user_input());
+        let mut saga = CreateUserSaga::new(SagaId::new("cu-6"), make_create_user_input());
 
         assert_eq!(saga.current_step(), 0); // Pending
 
@@ -2061,7 +2111,7 @@ mod tests {
 
     #[test]
     fn test_create_user_saga_target_region() {
-        let mut saga = CreateUserSaga::new("cu-7".to_string(), make_create_user_input());
+        let mut saga = CreateUserSaga::new(SagaId::new("cu-7"), make_create_user_input());
         assert_eq!(saga.input.region, Region::IE_EAST_DUBLIN);
 
         // Pending → GLOBAL (step 0 targets GLOBAL for ID allocation + email CAS)
@@ -2086,7 +2136,7 @@ mod tests {
 
     #[test]
     fn test_create_user_saga_serialization() {
-        let inner = CreateUserSaga::new("cu-8".to_string(), make_create_user_input());
+        let inner = CreateUserSaga::new(SagaId::new("cu-8"), make_create_user_input());
         let saga = Saga::CreateUser(inner);
 
         let bytes = saga.to_bytes().unwrap();
@@ -2108,7 +2158,7 @@ mod tests {
 
     #[test]
     fn test_create_user_saga_wrapper_integration() {
-        let inner = CreateUserSaga::new("cu-9".to_string(), make_create_user_input());
+        let inner = CreateUserSaga::new(SagaId::new("cu-9"), make_create_user_input());
         let saga = Saga::CreateUser(inner);
 
         assert_eq!(saga.id(), "cu-9");
@@ -2124,7 +2174,7 @@ mod tests {
 
     #[test]
     fn test_saga_lock_keys_create_user() {
-        let inner = CreateUserSaga::new("cu-lock".to_string(), make_create_user_input());
+        let inner = CreateUserSaga::new(SagaId::new("cu-lock"), make_create_user_input());
         let saga = Saga::CreateUser(inner);
 
         let keys = saga.lock_keys();
@@ -2134,7 +2184,7 @@ mod tests {
 
     #[test]
     fn test_saga_lock_keys_migrate_org() {
-        let inner = MigrateOrgSaga::new("mo-lock".to_string(), make_migrate_org_input());
+        let inner = MigrateOrgSaga::new(SagaId::new("mo-lock"), make_migrate_org_input());
         let saga = Saga::MigrateOrg(inner);
 
         let keys = saga.lock_keys();
@@ -2144,7 +2194,7 @@ mod tests {
 
     #[test]
     fn test_saga_lock_keys_migrate_user() {
-        let inner = MigrateUserSaga::new("mu-lock".to_string(), make_migrate_user_input());
+        let inner = MigrateUserSaga::new(SagaId::new("mu-lock"), make_migrate_user_input());
         let saga = Saga::MigrateUser(inner);
 
         let keys = saga.lock_keys();
@@ -2167,8 +2217,10 @@ mod tests {
 
     #[test]
     fn test_create_organization_saga_new() {
-        let saga =
-            CreateOrganizationSaga::new("org-saga-1".to_string(), make_create_organization_input());
+        let saga = CreateOrganizationSaga::new(
+            SagaId::new("org-saga-1"),
+            make_create_organization_input(),
+        );
         assert_eq!(saga.id, "org-saga-1");
         assert_eq!(saga.state, CreateOrganizationSagaState::Pending);
         assert_eq!(saga.retries, 0);
@@ -2185,7 +2237,7 @@ mod tests {
             admin: UserId::new(1),
             pending_profile_key: "_sys:pending_org_profile:test".to_string(),
         };
-        let mut saga = CreateOrganizationSaga::new("org-saga-2".to_string(), input);
+        let mut saga = CreateOrganizationSaga::new(SagaId::new("org-saga-2"), input);
 
         let org_id = OrganizationId::new(42);
         let org_slug = OrganizationSlug::new(9999);
@@ -2222,7 +2274,7 @@ mod tests {
             admin: UserId::new(1),
             pending_profile_key: "_sys:pending_org_profile:test".to_string(),
         };
-        let mut saga = CreateOrganizationSaga::new("org-saga-3".to_string(), input);
+        let mut saga = CreateOrganizationSaga::new(SagaId::new("org-saga-3"), input);
 
         // Step 0 targets GLOBAL
         assert_eq!(saga.target_region(), Region::GLOBAL);
@@ -2244,8 +2296,10 @@ mod tests {
 
     #[test]
     fn test_create_organization_saga_is_terminal() {
-        let base =
-            CreateOrganizationSaga::new("org-saga-4".to_string(), make_create_organization_input());
+        let base = CreateOrganizationSaga::new(
+            SagaId::new("org-saga-4"),
+            make_create_organization_input(),
+        );
 
         let mut s = base.clone();
         s.state = CreateOrganizationSagaState::Completed {
@@ -2280,8 +2334,10 @@ mod tests {
 
     #[test]
     fn test_create_organization_saga_fail_and_retry() {
-        let mut saga =
-            CreateOrganizationSaga::new("org-saga-5".to_string(), make_create_organization_input());
+        let mut saga = CreateOrganizationSaga::new(
+            SagaId::new("org-saga-5"),
+            make_create_organization_input(),
+        );
 
         for _ in 0..MAX_RETRIES.saturating_sub(1) {
             saga.fail(0, "transient".to_string());
@@ -2299,8 +2355,10 @@ mod tests {
 
     #[test]
     fn test_create_organization_saga_is_timed_out() {
-        let mut saga =
-            CreateOrganizationSaga::new("org-saga-6".to_string(), make_create_organization_input());
+        let mut saga = CreateOrganizationSaga::new(
+            SagaId::new("org-saga-6"),
+            make_create_organization_input(),
+        );
         saga.created_at = Utc::now() - chrono::Duration::minutes(5);
 
         assert!(saga.is_timed_out(Duration::from_secs(60))); // 1 min timeout
@@ -2309,8 +2367,10 @@ mod tests {
 
     #[test]
     fn test_create_organization_saga_current_step() {
-        let mut saga =
-            CreateOrganizationSaga::new("org-saga-7".to_string(), make_create_organization_input());
+        let mut saga = CreateOrganizationSaga::new(
+            SagaId::new("org-saga-7"),
+            make_create_organization_input(),
+        );
 
         assert_eq!(saga.current_step(), 0); // Pending
 
@@ -2348,7 +2408,7 @@ mod tests {
             admin: UserId::new(7),
             pending_profile_key: "_sys:pending_org_profile:abc".to_string(),
         };
-        let saga = CreateOrganizationSaga::new("org-saga-ser".to_string(), input);
+        let saga = CreateOrganizationSaga::new(SagaId::new("org-saga-ser"), input);
         let wrapped = Saga::CreateOrganization(saga);
 
         let json = serde_json::to_string(&wrapped).unwrap();
@@ -2369,7 +2429,7 @@ mod tests {
     #[test]
     fn test_create_organization_saga_wrapper() {
         let saga = CreateOrganizationSaga::new(
-            "org-saga-wrap".to_string(),
+            SagaId::new("org-saga-wrap"),
             make_create_organization_input(),
         );
         let wrapped = Saga::CreateOrganization(saga);
@@ -2386,7 +2446,7 @@ mod tests {
     fn test_create_organization_saga_lock_keys() {
         // Pending state has no lock keys (no org ID allocated yet)
         let saga = CreateOrganizationSaga::new(
-            "org-saga-lock-1".to_string(),
+            SagaId::new("org-saga-lock-1"),
             make_create_organization_input(),
         );
         let wrapped = Saga::CreateOrganization(saga);
@@ -2394,7 +2454,7 @@ mod tests {
 
         // DirectoryCreated state locks the organization
         let mut saga = CreateOrganizationSaga::new(
-            "org-saga-lock-2".to_string(),
+            SagaId::new("org-saga-lock-2"),
             make_create_organization_input(),
         );
         saga.transition(CreateOrganizationSagaState::DirectoryCreated {
@@ -2408,7 +2468,7 @@ mod tests {
 
         // ProfileWritten state also locks the organization
         let mut saga = CreateOrganizationSaga::new(
-            "org-saga-lock-3".to_string(),
+            SagaId::new("org-saga-lock-3"),
             make_create_organization_input(),
         );
         saga.state = CreateOrganizationSagaState::ProfileWritten {
@@ -2422,7 +2482,7 @@ mod tests {
 
         // Completed state also locks the organization
         let mut saga = CreateOrganizationSaga::new(
-            "org-saga-lock-4".to_string(),
+            SagaId::new("org-saga-lock-4"),
             make_create_organization_input(),
         );
         saga.state = CreateOrganizationSagaState::Completed {
@@ -2436,7 +2496,7 @@ mod tests {
 
         // Failed state has no lock keys
         let mut saga = CreateOrganizationSaga::new(
-            "org-saga-lock-5".to_string(),
+            SagaId::new("org-saga-lock-5"),
             make_create_organization_input(),
         );
         saga.state = CreateOrganizationSagaState::Failed { step: 0, error: "err".to_string() };
@@ -2454,7 +2514,7 @@ mod tests {
 
     #[test]
     fn test_create_signing_key_saga_new() {
-        let saga = CreateSigningKeySaga::new("sk-1".to_string(), make_create_signing_key_input());
+        let saga = CreateSigningKeySaga::new(SagaId::new("sk-1"), make_create_signing_key_input());
         assert_eq!(saga.id, "sk-1");
         assert_eq!(saga.state, CreateSigningKeySagaState::Pending);
         assert_eq!(saga.retries, 0);
@@ -2465,7 +2525,7 @@ mod tests {
     #[test]
     fn test_create_signing_key_saga_full_lifecycle() {
         let mut saga =
-            CreateSigningKeySaga::new("sk-2".to_string(), make_create_signing_key_input());
+            CreateSigningKeySaga::new(SagaId::new("sk-2"), make_create_signing_key_input());
 
         // Step 1: key generated
         saga.transition(CreateSigningKeySagaState::KeyGenerated {
@@ -2487,7 +2547,7 @@ mod tests {
 
     #[test]
     fn test_create_signing_key_saga_terminal_states() {
-        let base = CreateSigningKeySaga::new("sk-3".to_string(), make_create_signing_key_input());
+        let base = CreateSigningKeySaga::new(SagaId::new("sk-3"), make_create_signing_key_input());
 
         let mut s = base.clone();
         s.state = CreateSigningKeySagaState::Completed { kid: "k1".to_string() };
@@ -2519,7 +2579,7 @@ mod tests {
     #[test]
     fn test_create_signing_key_saga_fail_and_retry() {
         let mut saga =
-            CreateSigningKeySaga::new("sk-4".to_string(), make_create_signing_key_input());
+            CreateSigningKeySaga::new(SagaId::new("sk-4"), make_create_signing_key_input());
 
         // First failure: stays in Pending, gets retry backoff
         saga.fail(0, "transient error".to_string());
@@ -2541,7 +2601,7 @@ mod tests {
     #[test]
     fn test_create_signing_key_saga_retry_readiness() {
         let mut saga =
-            CreateSigningKeySaga::new("sk-5".to_string(), make_create_signing_key_input());
+            CreateSigningKeySaga::new(SagaId::new("sk-5"), make_create_signing_key_input());
         assert!(saga.is_ready_for_retry());
 
         // After failure, has a future retry_at
@@ -2552,7 +2612,7 @@ mod tests {
     #[test]
     fn test_create_signing_key_saga_is_timed_out() {
         let mut saga =
-            CreateSigningKeySaga::new("sk-timeout".to_string(), make_create_signing_key_input());
+            CreateSigningKeySaga::new(SagaId::new("sk-timeout"), make_create_signing_key_input());
         saga.created_at = Utc::now() - chrono::Duration::minutes(5);
 
         assert!(saga.is_timed_out(Duration::from_secs(60))); // 1 min timeout
@@ -2562,7 +2622,7 @@ mod tests {
     #[test]
     fn test_create_signing_key_saga_current_step() {
         let mut saga =
-            CreateSigningKeySaga::new("sk-6".to_string(), make_create_signing_key_input());
+            CreateSigningKeySaga::new(SagaId::new("sk-6"), make_create_signing_key_input());
         assert_eq!(saga.current_step(), 0);
 
         saga.state = CreateSigningKeySagaState::KeyGenerated {
@@ -2586,7 +2646,7 @@ mod tests {
     #[test]
     fn test_create_signing_key_saga_serialization() {
         let inner =
-            CreateSigningKeySaga::new("sk-ser-1".to_string(), make_create_signing_key_input());
+            CreateSigningKeySaga::new(SagaId::new("sk-ser-1"), make_create_signing_key_input());
         let saga = Saga::CreateSigningKey(inner);
         let bytes = saga.to_bytes().unwrap();
         let restored = Saga::from_bytes(&bytes).unwrap();
@@ -2607,7 +2667,7 @@ mod tests {
     #[test]
     fn test_create_signing_key_saga_wrapper_delegation() {
         let inner =
-            CreateSigningKeySaga::new("sk-wrap-1".to_string(), make_create_signing_key_input());
+            CreateSigningKeySaga::new(SagaId::new("sk-wrap-1"), make_create_signing_key_input());
         let saga = Saga::CreateSigningKey(inner);
 
         assert_eq!(saga.id(), "sk-wrap-1");
@@ -2621,7 +2681,7 @@ mod tests {
     fn test_create_signing_key_saga_lock_keys() {
         // Global scope
         let inner = CreateSigningKeySaga::new(
-            "sk-lock-1".to_string(),
+            SagaId::new("sk-lock-1"),
             CreateSigningKeyInput { scope: SigningKeyScope::Global },
         );
         let saga = Saga::CreateSigningKey(inner);
@@ -2631,7 +2691,7 @@ mod tests {
 
         // Organization scope
         let inner = CreateSigningKeySaga::new(
-            "sk-lock-2".to_string(),
+            SagaId::new("sk-lock-2"),
             CreateSigningKeyInput { scope: SigningKeyScope::Organization(OrganizationId::new(42)) },
         );
         let saga = Saga::CreateSigningKey(inner);
@@ -2672,7 +2732,7 @@ mod tests {
     #[test]
     fn test_create_signing_key_saga_org_scope() {
         let saga = CreateSigningKeySaga::new(
-            "sk-org-1".to_string(),
+            SagaId::new("sk-org-1"),
             CreateSigningKeyInput { scope: SigningKeyScope::Organization(OrganizationId::new(99)) },
         );
         assert_eq!(saga.input.scope, SigningKeyScope::Organization(OrganizationId::new(99)));

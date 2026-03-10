@@ -87,26 +87,32 @@ initial_prompt: |
   It exposes a gRPC API (HTTP/2 over TCP) and uses TCP for inter-node Raft consensus.
 
   ## Core Terminology
-  - **Namespace**: Storage unit per organization, containing entities and vaults. Isolated with separate Raft consensus per shard.
-  - **Vault**: Relationship store within a namespace. Each vault maintains its own cryptographic chain (state_root, previous_hash, block height).
-  - **Entity**: Key-value data stored in a namespace (users, teams, clients, sessions). Supports TTL, versioning, conditional writes.
-  - **Relationship**: Authorization tuple in a vault: (resource, relation, subject). Used by Engine for permission checks.
-  - **_system namespace**: Global data (user accounts, namespace routing), replicated to all nodes.
-  - **Shard**: Multiple namespaces share a Raft group for efficiency. Vaults within a shard have independent cryptographic chains.
+  - **Organization**: Top-level tenant isolation boundary. Sequential `OrganizationId(i64)` for storage, Snowflake `OrganizationSlug(u64)` for external APIs.
+  - **Vault**: Relationship store within an organization. Each vault maintains its own cryptographic chain (state_root, previous_hash, block height).
+  - **Entity**: Key-value data stored in an organization. Supports TTL, versioning, conditional writes.
+  - **Relationship**: Authorization tuple in a vault: (resource, relation, subject).
+  - **User**: Identity with email, role, status, and token version. Stored in `_system` organization.
+  - **App**: Organization-scoped client application with vault connections.
+  - **SigningKey**: Ed25519 JWT signing key with scope (Global/Organization) and lifecycle (Active/Rotated/Revoked).
+  - **RefreshToken**: Session token family with rotate-on-use and poison detection.
+  - **Team**: Organization-scoped user group.
+  - **Shard**: Multiple organizations sharing a Raft group. Vaults within a shard have independent cryptographic chains.
 
   ## Architecture Highlights
   - Hybrid storage: State commitment (merkleized) is separate from state storage (fast K/V) to avoid write amplification.
   - Bucket-based state roots: 256 buckets with incremental hashing, O(k) complexity where k = dirty keys.
   - Per-vault failure isolation: Divergence in one vault doesn't cascade to other vaults in the same shard.
-  - Leader-assigned sequential IDs: Deterministic for Raft replay (NamespaceId, VaultId, UserId are all int64).
+  - Dual-ID architecture: Internal sequential IDs (`i64`) for storage, Snowflake slugs (`u64`) for APIs. `SlugResolver` translates at gRPC boundaries.
+  - JWT token infrastructure: Ed25519 signing with envelope encryption (AES-256-GCM + AES-KWP), ArcSwap lock-free key cache.
 
   ## Key Design Decisions
   - All operations are idempotent, resolved by Raft total ordering.
   - SHA-256 for all cryptographic commitments; seahash for bucket assignment.
   - Embedded storage backend (single-file, ACID, COW B-trees).
   - Pagination tokens are opaque, HMAC-signed, and include height for consistent reads.
+  - Server crates use snafu for error handling; SDK uses thiserror.
 
-  See DESIGN.md for full specifications.
+  See DESIGN.md for full specifications. See AGENTS.md for development conventions.
 # the name by which the project can be referenced within Serena
 project_name: "InferaDB Ledger"
 
@@ -146,3 +152,8 @@ language_backend:
 # list of regex patterns which, when matched, mark a memory entry as read‑only.
 # Extends the list from the global configuration, merging the two lists.
 read_only_memory_patterns: []
+
+# line ending convention to use when writing source files.
+# Possible values: unset (use global setting), "lf", "crlf", or "native" (platform default)
+# This does not affect Serena's own files (e.g. memories and configuration files), which always use native line endings.
+line_ending:

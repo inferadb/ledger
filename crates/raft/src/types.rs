@@ -985,7 +985,7 @@ pub enum LedgerResponse {
         /// Defaults to `Internal` when deserializing log entries written before
         /// this field was added.
         #[serde(default)]
-        code: inferadb_ledger_types::LedgerErrorCode,
+        code: inferadb_ledger_types::ErrorCode,
         /// Human-readable error message.
         message: String,
     },

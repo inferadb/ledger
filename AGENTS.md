@@ -71,6 +71,10 @@ Activate at session start: `mcp__plugin_serena_serena__activate_project`
 
 **Doc comments:** Use ` ```no_run ` (never ignore or text) — `cargo test` skips, `cargo doc` validates. To avoid documentation compiling problems, instead use hidden setup lines.
 
+**Linting:** `cargo +1.92 clippy --workspace --all-targets -- -D warnings`
+
+**Formatting:** `cargo +nightly fmt` (nightly required)
+
 **Writing:** No filler (very, really, basically), no wordiness (in order to → to), active voice, specific language.
 
 **Markdown:** Concise, kebab-case filenames, specify language in code blocks.
@@ -83,7 +87,7 @@ Use `just` for common tasks (see `Justfile` for all commands):
 just              # list available commands
 just check        # pre-commit: fmt + clippy + test
 just check-quick  # fast pre-commit: fmt + clippy only
-just ci           # CI validation: fmt + clippy + doc + test
+just ci           # CI validation: fmt + clippy + doc-check + test
 just ready        # pre-PR: proto + fmt + clippy + test
 just test         # unit tests only
 just test-ff      # unit tests, stop on first failure
@@ -115,31 +119,34 @@ cargo +1.92 clippy --workspace --all-targets -- -D warnings
 ```
 gRPC Services (12): Read, Write, Admin, Organization, Vault, User, App, Token, Events, Health, Discovery, Raft
        ↓
-inferadb-ledger-services — gRPC service implementations, server assembly
+inferadb-ledger-services — gRPC service implementations, JWT engine, server assembly
        ↓
-inferadb-ledger-raft     — Raft consensus, log storage, batching, idempotency
+inferadb-ledger-raft     — Raft consensus, log storage, batching, saga orchestrator, background jobs
        ↓
-inferadb-ledger-state    — Entity/Relationship stores, state roots, indexes
+inferadb-ledger-state    — Entity/Relationship stores, state roots, system services (users, keys, tokens)
        ↓
-inferadb-ledger-store    — B+ tree engine, pages, transactions, backends
+inferadb-ledger-store    — B+ tree engine, pages, transactions, backends, crypto (key management)
        ↓
-inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors
+inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors, token types, newtype IDs
 ```
 
-**Crates:**
+**Crates (9):**
 
-- `types` — SHA-256/seahash, merkle tree, snafu errors
-- `store` — B+ tree engine, page management, memory/file backends
-- `state` — Domain state, entity/relationship CRUD, state root computation
-- `raft` — openraft integration, transaction batching, background jobs
-- `services` — gRPC service implementations, server assembly
-- `server` — Binary, bootstrap, config, node ID generation
+- `types` — SHA-256/seahash, merkle tree, snafu errors, config types, token claims, newtype identifiers
+- `store` — B+ tree engine, page management, memory/file backends, envelope encryption (RegionMasterKey/DEK)
+- `proto` — Protobuf code generation and From/TryFrom conversions
+- `state` — Domain state, entity/relationship CRUD, state root computation, system services (users, signing keys, refresh tokens)
+- `raft` — openraft 0.9 integration, transaction batching, rate limiting, saga orchestrator, background jobs
+- `services` — gRPC service implementations, JwtEngine, LedgerServer assembly
+- `server` — Binary, bootstrap, CLI configuration, node ID generation
+- `sdk` — Client library, retry/circuit-breaker, cancellation, metrics
+- `test-utils` — Test fixtures, mock backends, crash injection, proptest strategies
 
 **Key types:**
 
 - `StorageEngine` (state/engine.rs) — store wrapper with transaction helpers
 - `StateLayer` (state/state.rs) — applies blocks, computes state roots
-- `LedgerServer` (raft/server.rs) — gRPC server combining services with Raft
+- `LedgerServer` (services/server.rs) — gRPC server combining all 12 services with Raft
 
 **Data model:**
 
@@ -147,21 +154,28 @@ inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors
 - Vault → relationship store within organization, owns its blockchain
 - Entity → key-value with TTL and versioning
 - Relationship → authorization tuple (resource, relation, subject)
+- User → identity with email, role, status, token version
+- App → organization-scoped client application
+- Team → organization-scoped user group
+- SigningKey → Ed25519 JWT signing key with scope (Global/Organization) and status (Active/Rotated/Revoked)
+- RefreshToken → session token family with poison detection and TTL
 - Shard → organizations sharing a Raft group
 
-**Dual-ID architecture:** Organizations and vaults use sequential internal IDs (`OrganizationId`/`VaultId`, `i64`) for storage and Snowflake slugs (`OrganizationSlug`/`VaultSlug`, `u64`) for external APIs. The `SlugResolver` translates at gRPC service boundaries.
+**Dual-ID architecture:** Internal sequential IDs (`i64`) for storage, Snowflake slugs (`u64`) for external APIs. The `SlugResolver` translates at gRPC service boundaries.
+
+| Internal ID (storage) | External Slug (API)     |
+| --------------------- | ----------------------- |
+| `OrganizationId(i64)` | `OrganizationSlug(u64)` |
+| `VaultId(i64)`        | `VaultSlug(u64)`        |
+| `UserId(i64)`         | `UserSlug(u64)`         |
+| `AppId(i64)`          | `AppSlug(u64)`          |
+| `TeamId(i64)`         | `TeamSlug(u64)`         |
+
+Other newtypes: `SigningKeyId(i64)`, `RefreshTokenId(i64)`, `UserEmailId(i64)`, `EmailVerifyTokenId(i64)`, `ClientAssertionId(i64)`, `TokenVersion(u64)`. All defined in `types/src/types.rs` via `define_id!`/`define_slug!` macros.
 
 ## Error Handling
 
-Use `snafu` with implicit location tracking. Never use `thiserror` or `anyhow`.
-
-**Why snafu over alternatives:**
-
-- `thiserror` — No context selectors, requires manual error construction
-- `anyhow` — No structured types, unsuitable for libraries
-- `snafu` — Context selectors + implicit locations + structured types
-
-**Pattern for error types with source fields:**
+**Server crates** (`types`, `store`, `proto`, `state`, `raft`, `services`, `server`): Use `snafu` with implicit location tracking. Never use `thiserror` or `anyhow`.
 
 ```rust
 #[derive(Debug, Snafu)]
@@ -173,24 +187,18 @@ pub enum MyError {
         location: snafu::Location,
     },
 }
-```
 
-**Propagate with context selectors:**
-
-```rust
-// Good: captures location automatically
+// Propagate with context selectors:
 some_operation().context(StorageSnafu)?;
-
-// Bad: loses location information
-some_operation().map_err(|e| MyError::Storage { source: e, location: ??? })?;
 ```
-
-**Conventions:**
 
 - Add `#[snafu(implicit)] location: snafu::Location` to all variants with `source` fields
 - Use `.context(XxxSnafu)?` for propagation, never manual error construction
 - Leaf variants (no source) don't need location fields
 - API-facing errors use `message: String` for gRPC serialization
+- Structured `ErrorCode` enum in `types/src/error_code.rs` for SDK/gRPC error classification
+
+**SDK crate**: Uses `thiserror` for consumer-facing error types (`SdkError`, `ResolverError`). Errors are constructed at point of failure — snafu's context selectors add no value here.
 
 ## Builder Pattern (bon)
 
@@ -206,11 +214,6 @@ struct Config {
     #[builder(into)]  // accepts &str, String, etc.
     name: String,
 }
-
-let config = Config::builder()
-    .max_connections(50)
-    .name("test")
-    .build();
 ```
 
 **Fallible constructors** — `#[bon]` on impl block:
@@ -227,29 +230,3 @@ impl TlsConfig {
     }
 }
 ```
-
-**Conventions:**
-
-- Use `#[builder(into)]` for `String` fields to accept `&str`
-- Match `#[builder(default)]` with `#[serde(default)]` for config structs
-- Use fallible builders (`#[bon]` impl block) when validation is needed
-- Prefer compile-time required field enforcement over runtime checks
-
-**Performance:**
-
-- bon is a proc-macro generating code at compile-time with zero runtime overhead
-- Full workspace clean build: ~74 seconds (20 structs with builders)
-- Estimated compile-time impact: ~2 seconds per 10 structs based on bon benchmarks
-- Builder construction optimizes to direct struct initialization in release builds
-
-## Code Quality
-
-**Linting:** `cargo +1.92 clippy --workspace --all-targets -- -D warnings`
-
-**Formatting:** `cargo +nightly fmt` (nightly required)
-
-**Doc comments:** Use ` ```no_run ` for code examples — `cargo test` skips execution; `cargo doc` validates syntax.
-
-**Markdown:** Be concise, no filler words, kebab-case filenames, specify language in code blocks. Prefer showing to telling.
-
-**Writing:** No filler (very, really, basically), no wordiness (in order to → to, due to the fact → because), active voice, specific language.
