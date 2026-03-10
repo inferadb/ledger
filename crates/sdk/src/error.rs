@@ -264,7 +264,7 @@ pub enum SdkError {
 
     /// Streaming connection lost (server restart, network partition).
     ///
-    /// **Recovery**: Retryable. Use [`ReconnectingStream`](crate::ReconnectingStream)
+    /// **Recovery**: Retryable. Use [`ReconnectingStream`](crate::streaming::ReconnectingStream)
     /// for automatic reconnection with position tracking.
     #[error("Stream disconnected: {message}")]
     StreamDisconnected {
