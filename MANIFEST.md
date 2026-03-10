@@ -78,7 +78,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Structured error taxonomy with numeric codes, retryability, and guidance
 - **Key Types/Functions**:
-- `ErrorCode`: 34 numeric codes spanning 1000-1101 (storage), 2000-2102 (consensus), 3000-3207 (application) for classification. Includes `Unauthenticated` for token validation failures. Includes region-aware codes: `AppInsufficientRegionNodes` (3206), `AppInvalidRegionAssignment` (3207), `AppOrganizationMigrating` (3106), `AppUserMigrating` (3107)
+- `DiagnosticCode`: 34 numeric codes spanning 1000-1101 (storage), 2000-2102 (consensus), 3000-3207 (application) for classification. Includes `Unauthenticated` for token validation failures. Includes region-aware codes: `AppInsufficientRegionNodes` (3206), `AppInvalidRegionAssignment` (3207), `AppOrganizationMigrating` (3106), `AppUserMigrating` (3107). Note: `ErrorCode` is a separate enum in `error_code.rs` for structured error responses.
 - `LedgerError`: Domain-level errors with `#[snafu]` for context propagation
 - `StorageError`: Storage layer errors (IO, corruption, capacity)
 - `ConsensusError`: Raft consensus errors (leadership, quorum, log gaps)
@@ -109,11 +109,13 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Core domain types (blocks, transactions, operations, entities, relationships)
 - **Key Types/Functions**:
-- `define_id!` macro: Generates newtypes with derives, Display (prefixed), FromStr, serde
+- `define_id!` macro: Generates `i64`-based newtypes with derives, Display (prefixed), FromStr, serde
+- `define_string_id!` macro: Generates `String`-based newtypes (`NodeId`, `ClientId`) with derives, Display, FromStr, serde
 - `OrganizationId(i64)`: Internal storage key (display `"org:42"`), generated via `define_id!`
 - `OrganizationSlug(u64)`: External Snowflake identifier (display raw number), hand-implemented (not `define_id!` — `u64` not `i64`, no prefix)
 - `VaultSlug(u64)`: External Snowflake identifier for vaults (same hand-implemented pattern as `OrganizationSlug`)
-- `VaultId`, `UserId`, `ShardId`, `SigningKeyId`, `RefreshTokenId`: Newtype IDs (replaced type aliases)
+- `VaultId`, `UserId`, `ShardId`, `SigningKeyId`, `RefreshTokenId`: Newtype IDs via `define_id!` (replaced type aliases)
+- `TeamSlug(u64)`, `AppSlug(u64)`: External Snowflake identifiers for teams and apps (hand-implemented, same pattern as `OrganizationSlug`)
 - `TokenVersion(u64)`: Monotonic counter for forced session invalidation (manual impl, not `define_id!` — needs `Default` and `increment()`)
 - `BlockHeader`: height, organization, vault, previous_hash, tx_merkle_root, state_root, timestamp, term, committed_index
 - `Transaction`: id, client_id, sequence, actor, operations, timestamp (fallible builder with validation)
@@ -379,8 +381,10 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `VaultHashes` (16): Composite-key vault hashes (`[org_id ++ vault_id]` → `Hash`)
 - `VaultHealth` (17): Composite-key vault health status (`[org_id ++ vault_id]` → `VaultHealthStatus`)
 - `UserSlugIndex` (18): User slug→internal ID mapping (`u64` → `i64`)
+- `TeamSlugIndex` (19): Team slug→internal ID mapping (`u64` → `i64`)
+- `AppSlugIndex` (20): App slug→internal ID mapping (`u64` → `i64`)
 - `TableEntry`: Encoded (table_id, key, value) triple for snapshot streaming
-- **Insights**: Phantom types prevent mixing keys/values from different tables. Compile-time table ID assignment. 19 tables total. Tables 15-17 use composite byte keys for externalized `AppliedState` persistence.
+- **Insights**: Phantom types prevent mixing keys/values from different tables. Compile-time table ID assignment. 21 tables total. Tables 15-17 use composite byte keys for externalized `AppliedState` persistence.
 
 #### `types.rs`
 
@@ -737,7 +741,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Public API surface (2 stable modules: `metrics`, `trace_context`; remaining modules including `snapshot` are `#[doc(hidden)]`)
 - **Key Types/Functions**:
-- Re-exports: `LedgerTypeConfig`, `LedgerNodeId`, `RaftLogStore`, `RateLimiter`, `HotKeyDetector`, `GracefulShutdown`, `EventsGarbageCollector`, `SagaOrchestrator`, `OrphanCleanupJob`, `IntegrityScrubberJob`, `TokenMaintenanceJob`, etc. (`LedgerServer` moved to `inferadb-ledger-services`)
+- Re-exports: `LedgerTypeConfig`, `LedgerNodeId`, `RaftLogStore`, `RateLimiter`, `HotKeyDetector`, `GracefulShutdown`, `HealthState`, `BackgroundJobWatchdog`, `EventsGarbageCollector`, `SagaOrchestrator`, `OrphanCleanupJob`, `IntegrityScrubberJob`, `TokenMaintenanceJob`, `OrganizationPurgeJob`, `UserRetentionReaper`, `AutoRecoveryJob`, `BackupJob`, `BackupManager`, `BlockCompactor`, `LearnerRefreshJob`, `ResourceMetricsCollector`, `RuntimeConfigHandle`, `TtlGarbageCollector`, `RaftManager`, `RaftManagerConfig`, `RegionConfig`, `RegionGroup`, `GrpcRaftNetworkFactory`, `RegionStorage`, `RegionStorageManager`. (`LedgerServer` moved to `inferadb-ledger-services`)
 - Note: `LedgerRequest` is NOT re-exported (access via `types::LedgerRequest`). `RaftPayload` is NOT re-exported either (access via `log_storage` internals). `RaftPayload` wraps `LedgerRequest` with `proposed_at` for deterministic timestamps.
 - 30+ `#[doc(hidden)] pub mod` declarations for server-internal infrastructure (includes `event_writer`, `events_gc`, `snapshot`, `leader_transfer`)
 - **Insights**: Phase 2 Task 2 cleaned up public API. 2 stable modules + many doc-hidden modules. `leader_transfer` module added for graceful leadership handoff. Excellent encapsulation.
@@ -965,6 +969,9 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `learner_refresh.rs`: Read replica refresh
 - `orphan_cleanup.rs`: Orphaned membership cleanup — leader-only, correct organization-scoped vault listing, paginated user iteration, `tokio::task::yield_now()` between orgs for I/O throttling, watchdog/metrics integration, configurable via `CleanupConfig`
 - `peer_maintenance.rs`: Peer health checks (in `inferadb-ledger-services`)
+- `organization_purge.rs`: `OrganizationPurgeJob` — background purge of soft-deleted organizations (leader-only, watchdog integration)
+- `user_retention.rs`: `UserRetentionReaper` — background cleanup of expired/deleted user data
+- `state_root_verifier.rs`: Background state root integrity verification
 
 #### Advanced Features
 

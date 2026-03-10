@@ -112,7 +112,8 @@ Ledger consists of four primary layers:
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      gRPC Services                          │
-│   Read | Write | Admin | Health | Discovery | Events        │
+│  Read | Write | Admin | Organization | Vault | User          │
+│  App | Token | Events | Health | Discovery | Raft            │
 ├─────────────────────────────────────────────────────────────┤
 │                    Consensus Layer                          │
 │         Raft (OpenRaft) + Batching + RaftService            │
@@ -125,7 +126,7 @@ Ledger consists of four primary layers:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**gRPC Services** expose the public API. ReadService handles queries; WriteService processes mutations; AdminService manages organizations and vaults; HealthService provides liveness and readiness checks; SystemDiscoveryService enables peer discovery. EventsService provides event query and ingestion capabilities. An internal RaftService handles inter-node consensus transport (vote, append entries, snapshot installation).
+**gRPC Services** expose the public API. Twelve services cover authorization operations (ReadService, WriteService), entity management (OrganizationService, VaultService, UserService, AppService), authentication token issuance (TokenService), administration (AdminService), observability (EventsService, HealthService), and cluster coordination (SystemDiscoveryService, RaftService).
 
 **Consensus Layer** implements Raft using the OpenRaft library (v0.9+) [9]. All writes are proposed to the leader, replicated to followers, and committed only after majority acknowledgment. A batching layer aggregates multiple client requests into single Raft proposals, amortizing consensus overhead.
 
@@ -344,6 +345,8 @@ Ledger operates within a trusted network boundary. Access control relies on netw
 
 There is no application-layer authentication. Ledger **is** the authorization store—authenticating callers against itself creates a circular dependency. The sub-microsecond latency budget (2.8µs p99 reads) leaves no room for per-request credential verification. Optional mutual TLS via service mesh provides defense-in-depth without adding application overhead.
 
+Ledger does provide a TokenService that issues JWTs for upstream services (Control and Engine) to authenticate their end users. This is token issuance, not authentication of Ledger's own API—requests to Ledger itself remain unauthenticated at the application layer.
+
 ### Envelope Encryption
 
 Each page is encrypted with a unique random 256-bit Data Encryption Key (DEK). The DEK encrypts the page body using AES-256-GCM [15] with a random 12-byte nonce and the 16-byte page header as additional authenticated data (AAD). Authenticating the header prevents an attacker from swapping headers between pages without detection.
@@ -512,13 +515,13 @@ Eventually consistent reads may return stale data during the Raft replication wi
 
 ### No Application-Layer Authentication
 
-Ledger trusts all inbound connections within the network boundary. Callers are responsible for authenticating end users before querying Ledger. The `actor` field in transactions is a claim provided by the caller, not a cryptographically verified identity. This design avoids the circular dependency of Ledger authenticating against itself, but means network-level access control is the sole enforcement boundary.
+Ledger trusts all inbound connections within the network boundary. Callers are responsible for authenticating end users before querying Ledger. The `actor` field in transactions is a claim provided by the caller, not a cryptographically verified identity. This design avoids the circular dependency of Ledger authenticating against itself, but means network-level access control is the sole enforcement boundary. Note that while Ledger issues JWTs via TokenService for upstream consumption, it does not authenticate its own inbound API calls.
 
-### Idempotency Cache Does Not Survive Failover
+### Idempotency Tiered Architecture
 
-The in-memory idempotency cache (used to deduplicate client retries) is lost during leader failover. After a failover, a retried request may be executed twice if the client's idempotency key was previously processed by the old leader.
+Idempotency deduplication uses a two-tier design. Tier 1 is a Moka TinyLFU in-memory cache providing fast-path deduplication on the current leader; this cache is lost during leader failover. Tier 2 is the ClientSequences B+ tree table, which stores persistent `ClientSequenceEntry` records replicated through Raft. Because Tier 2 survives failover, a retried request after leader election is still deduplicated as long as it falls within the 24-hour TTL window.
 
-For critical operations where exactly-once semantics are required, clients should use application-level idempotency keys stored in the vault itself rather than relying solely on the built-in cache.
+The practical limitation is that deduplication keys older than 24 hours are evicted from the persistent table. Clients retrying operations beyond this window should use application-level idempotency keys stored in the vault itself.
 
 ---
 
