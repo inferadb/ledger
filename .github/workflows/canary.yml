@@ -479,17 +479,22 @@ jobs:
           # Strip build metadata for crates.io (e.g., 0.1.0-dev.20260201.123+abc1234 → 0.1.0-dev.20260201.123)
           CRATE_VERSION="${VERSION%+*}"
 
-          # Wait for a crate version to appear in the crates.io index.
-          # Polls every 10s for up to 5 minutes before failing.
+          # Wait for a crate version to appear in the crates.io sparse index.
+          # Checks the sparse index directly (faster than cargo search).
+          # Polls every 10s for up to 10 minutes before failing.
           wait_for_crate() {
             local crate="$1"
             local version="$2"
-            local max_attempts=30
+            local max_attempts=60
             local attempt=0
+
+            # Sparse index prefix: 4+ char names use first-two/next-two
+            local prefix="${crate:0:2}/${crate:2:2}"
+            local index_url="https://index.crates.io/${prefix}/${crate}"
 
             echo "Waiting for ${crate}@${version} to be indexed on crates.io..."
             while [ $attempt -lt $max_attempts ]; do
-              if cargo search "${crate}" --limit 1 2>/dev/null | grep -q "^${crate} = \"${version}\""; then
+              if curl -sf "${index_url}" 2>/dev/null | grep -q "\"vers\":\"${version}\""; then
                 echo "${crate}@${version} is now available"
                 return 0
               fi
