@@ -3698,25 +3698,16 @@ impl LedgerClient {
                         .await?
                         .into_inner();
 
-                    // The proto response only carries slug + region. We
-                    // construct the remaining fields from request inputs
-                    // because the server's state machine guarantees:
-                    //   - status starts as Active
-                    //   - the requesting user becomes the sole Admin member
-                    Ok(OrganizationInfo {
-                        slug: OrganizationSlug::new(response.slug.map_or(0, |n| n.slug)),
-                        name: name.clone(),
-                        region: region_from_proto_i32(response.region).unwrap_or(region),
-                        member_nodes: Vec::new(),
-                        config_version: 0,
-                        status: OrganizationStatus::Active,
-                        tier,
-                        members: vec![OrganizationMemberInfo {
-                            user: admin,
-                            role: OrganizationMemberRole::Admin,
-                            joined_at: None,
-                        }],
-                    })
+                    Ok(OrganizationInfo::from_fields(
+                        response.slug,
+                        response.name,
+                        response.region,
+                        response.member_nodes,
+                        response.config_version,
+                        response.status,
+                        response.tier,
+                        &response.members,
+                    ))
                 },
             ),
         )
@@ -5167,15 +5158,14 @@ impl LedgerClient {
                     let response =
                         client.create_vault(tonic::Request::new(request)).await?.into_inner();
 
-                    // Build VaultInfo from CreateVaultResponse
-                    // Note: CreateVaultResponse has limited fields compared to GetVaultResponse
+                    let genesis = response.genesis.unwrap_or_default();
                     Ok(VaultInfo {
                         organization,
                         vault: VaultSlug::new(response.vault.map_or(0, |v| v.slug)),
-                        height: 0,          // Genesis block
-                        state_root: vec![], // Empty at genesis
-                        nodes: vec![],      // Not returned in create response
-                        leader: None,       // Not returned in create response
+                        height: genesis.height,
+                        state_root: genesis.state_root.map(|h| h.value).unwrap_or_default(),
+                        nodes: vec![],
+                        leader: None,
                         status: VaultStatus::Active,
                     })
                 },

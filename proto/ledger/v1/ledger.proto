@@ -994,7 +994,15 @@ message CreateOrganizationRequest {
 
 message CreateOrganizationResponse {
   OrganizationSlug slug = 1;
-  Region region = 2; // Assigned region
+  string name = 2;
+  Region region = 3;                // Data residency region
+  repeated NodeId member_nodes = 4; // Nodes in the region's Raft group
+  OrganizationStatus status = 5;    // Lifecycle state
+  uint64 config_version = 6;        // For cache invalidation
+  google.protobuf.Timestamp created_at = 7;
+  OrganizationTier tier = 8;        // Billing tier
+  repeated OrganizationMember members = 9; // Organization members with roles
+  google.protobuf.Timestamp updated_at = 10;
 }
 
 message DeleteOrganizationRequest {

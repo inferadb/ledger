@@ -1202,19 +1202,21 @@ impl OrganizationServiceTrait for MockOrganizationService {
 
         let region = crate::client::region_from_proto_i32(req.region).unwrap_or(Region::GLOBAL);
         let admin_slug = req.admin.map_or(0, |u| u.slug);
+        let members = vec![MockMember {
+            slug: admin_slug,
+            role: proto::OrganizationMemberRole::Admin as i32,
+        }];
+        let proto_members: Vec<_> = members.iter().map(MockMember::to_proto).collect();
 
         {
             let mut organizations = self.state.organizations.write();
             organizations.insert(
                 organization,
                 OrganizationData {
-                    name: req.name,
+                    name: req.name.clone(),
                     region,
                     status: proto::OrganizationStatus::Active as i32,
-                    members: vec![MockMember {
-                        slug: admin_slug,
-                        role: proto::OrganizationMemberRole::Admin as i32,
-                    }],
+                    members,
                     deleted_at: None,
                 },
             );
@@ -1222,7 +1224,15 @@ impl OrganizationServiceTrait for MockOrganizationService {
 
         Ok(Response::new(proto::CreateOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: organization.value() }),
-            region: req.region,
+            name: req.name,
+            region: crate::client::region_to_proto_i32(region),
+            member_nodes: vec![],
+            status: proto::OrganizationStatus::Active as i32,
+            config_version: 1,
+            created_at: None,
+            tier: req.tier.unwrap_or(0),
+            members: proto_members,
+            updated_at: None,
         }))
     }
 
@@ -1715,7 +1725,7 @@ impl VaultServiceTrait for MockVaultService {
             vaults.insert(
                 (organization, vault),
                 VaultData {
-                    height: 1,
+                    height: 0,
                     state_root: vec![0u8; 32],
                     status: proto::VaultStatus::Active as i32,
                 },

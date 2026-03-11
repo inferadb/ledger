@@ -1012,13 +1012,34 @@ pub struct CreateOrganizationRequest {
     #[prost(message, optional, tag = "4")]
     pub admin: ::core::option::Option<UserSlug>,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateOrganizationResponse {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<OrganizationSlug>,
-    /// Assigned region
-    #[prost(enumeration = "Region", tag = "2")]
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    /// Data residency region
+    #[prost(enumeration = "Region", tag = "3")]
     pub region: i32,
+    /// Nodes in the region's Raft group
+    #[prost(message, repeated, tag = "4")]
+    pub member_nodes: ::prost::alloc::vec::Vec<NodeId>,
+    /// Lifecycle state
+    #[prost(enumeration = "OrganizationStatus", tag = "5")]
+    pub status: i32,
+    /// For cache invalidation
+    #[prost(uint64, tag = "6")]
+    pub config_version: u64,
+    #[prost(message, optional, tag = "7")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Billing tier
+    #[prost(enumeration = "OrganizationTier", tag = "8")]
+    pub tier: i32,
+    /// Organization members with roles
+    #[prost(message, repeated, tag = "9")]
+    pub members: ::prost::alloc::vec::Vec<OrganizationMember>,
+    #[prost(message, optional, tag = "10")]
+    pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteOrganizationRequest {

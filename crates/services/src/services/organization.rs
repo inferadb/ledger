@@ -492,10 +492,24 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                     );
                 }
 
-                let proto_region: ProtoRegion = region.into();
+                let org_meta = self
+                    .ctx
+                    .applied_state
+                    .get_organization(organization_id)
+                    .ok_or_else(|| Status::internal("Organization not found after creation"))?;
+                let get_resp = self.build_org_response(org_meta, created_slug, None);
+
                 Ok(Response::new(CreateOrganizationResponse {
-                    slug: Some(OrganizationSlug { slug: created_slug.value() }),
-                    region: proto_region.into(),
+                    slug: get_resp.slug,
+                    name: get_resp.name,
+                    region: get_resp.region,
+                    member_nodes: get_resp.member_nodes,
+                    status: get_resp.status,
+                    config_version: get_resp.config_version,
+                    created_at: get_resp.created_at,
+                    tier: get_resp.tier,
+                    members: get_resp.members,
+                    updated_at: get_resp.updated_at,
                 }))
             },
             LedgerResponse::Error { code, message } => {
