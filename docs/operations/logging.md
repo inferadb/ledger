@@ -81,7 +81,6 @@ Fields are categorized by requirement level:
 | Field                      | Level       | Type   | Condition        | Description                              | Example                 |
 | -------------------------- | ----------- | ------ | ---------------- | ---------------------------------------- | ----------------------- |
 | `admin_action`             | Conditional | String | Admin ops        | Administrative action name               | `"create_organization"` |
-| `target_organization_name` | Conditional | String | Organization ops | Target organization name (max 128 chars) | `"acme_production"`     |
 | `retention_mode`           | Conditional | String | Vault creation   | Vault retention mode                     | `"compliance"`          |
 | `recovery_force`           | Conditional | bool   | Recovery ops     | Whether force mode was used              | `false`                 |
 

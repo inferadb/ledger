@@ -129,7 +129,8 @@ pub struct BootstrappedNode {
     #[allow(dead_code)] // retained to keep background task alive
     pub saga_handle: tokio::task::JoinHandle<()>,
     /// Saga orchestrator submission handle for service handlers.
-    #[allow(dead_code)] // retained: will be wired into LedgerServer in Task 4
+    #[allow(dead_code)]
+    // retained: cloned into LedgerServer via saga_cell OnceCell during bootstrap
     pub saga_orchestrator_handle: inferadb_ledger_raft::SagaOrchestratorHandle,
     /// Orphan cleanup background task handle.
     #[allow(dead_code)] // retained to keep background task alive
@@ -386,7 +387,7 @@ pub async fn bootstrap_node(
         .transpose()?;
 
     let server = LedgerServer::builder()
-        .manager(manager)
+        .manager(manager.clone())
         .addr(config.listen_addr)
         .max_concurrent(config.max_concurrent)
         .timeout_secs(config.timeout_secs)
@@ -639,6 +640,7 @@ pub async fn bootstrap_node(
         .event_handle(event_handle_for_saga)
         .interval(Duration::from_secs(config.saga.poll_interval_secs))
         .watchdog_handle(watchdog.map(|w| w.register("saga_orchestrator", 60)))
+        .manager(Some(manager.clone()))
         .key_manager(key_manager)
         .build()
         .start();

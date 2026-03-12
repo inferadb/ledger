@@ -894,10 +894,8 @@ pub enum CreateOrganizationSagaState {
 ///
 /// PII (organization name) is intentionally excluded — the saga is stored in
 /// the global control plane, and only pseudonymous identifiers are permitted.
-/// The organization name is passed in-memory via [`OrgPii`] through the
+/// The organization name is passed in-memory via `OrgPii` through the
 /// saga orchestrator handle, never persisted in the GLOBAL Raft log.
-///
-/// [`OrgPii`]: inferadb_ledger_raft::OrgPii
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateOrganizationInput {
     /// Pre-generated external Snowflake slug for the organization.

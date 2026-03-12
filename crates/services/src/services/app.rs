@@ -316,35 +316,52 @@ impl proto::app_service_server::AppService for AppService {
             return Err(Status::invalid_argument("App name must not be empty"));
         }
 
+        // Step 1 (GLOBAL): Create app directory entry (ID + slug only, no PII).
         let response = self
             .ctx
             .propose_request(
-                LedgerRequest::CreateApp {
-                    organization: org_id,
-                    slug,
-                    name,
-                    description: inner.description,
-                },
+                LedgerRequest::CreateApp { organization: org_id, slug },
                 &grpc_metadata,
                 &mut ctx,
             )
             .await?;
 
-        match response {
-            LedgerResponse::AppCreated { app_id, .. } => {
-                self.emit_event(EventAction::AppCreated, org_id, org_slug_val, &trace_ctx.trace_id);
-                let app = self.load_app(org_id, app_id)?;
-                let info = self.app_to_proto(&app, true)?;
-                Ok(Response::new(CreateAppResponse { app: Some(info) }))
-            },
+        let app_id = match response {
+            LedgerResponse::AppCreated { app_id, .. } => app_id,
             LedgerResponse::Error { code, message } => {
-                Err(super::helpers::error_code_to_status(code, message))
+                return Err(super::helpers::error_code_to_status(code, message));
             },
             other => {
                 tracing::error!(?other, "Unexpected response from state machine");
-                Err(Status::internal("Unexpected response from state machine"))
+                return Err(Status::internal("Unexpected response from state machine"));
             },
+        };
+
+        // Step 2 (REGIONAL): Write app name and description to the org's regional store.
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .ok_or_else(|| tonic::Status::not_found("Organization not found"))?;
+        let system_request = inferadb_ledger_raft::types::SystemRequest::WriteAppProfile {
+            organization: org_id,
+            app: app_id,
+            name,
+            description: inner.description,
+        };
+        let profile_response = self
+            .ctx
+            .propose_regional(org_meta.region, system_request, &grpc_metadata, &mut ctx)
+            .await?;
+
+        if let LedgerResponse::Error { code, message } = profile_response {
+            return Err(super::helpers::error_code_to_status(code, message));
         }
+
+        self.emit_event(EventAction::AppCreated, org_id, org_slug_val, &trace_ctx.trace_id);
+        let app = self.load_app(org_id, app_id)?;
+        let info = self.app_to_proto(&app, true)?;
+        Ok(Response::new(CreateAppResponse { app: Some(info) }))
     }
 
     async fn get_app(
@@ -414,31 +431,47 @@ impl proto::app_service_server::AppService for AppService {
             })
             .transpose()?;
 
-        // `Option<Option<String>>`: `None` = leave unchanged, `Some(x)` = set to `x`
-        let description = inner.description.map(Some);
+        let description = inner.description;
 
+        // Require at least one field to update
+        if name.is_none() && description.is_none() {
+            return Err(Status::invalid_argument("At least one field must be provided for update"));
+        }
+
+        // Load current app to merge unchanged fields
+        let current_app = self.load_app(org_id, app_id)?;
+        let effective_name = name.unwrap_or_else(|| current_app.name.clone());
+        let effective_description = match description {
+            Some(d) => Some(d),
+            None => current_app.description.clone(),
+        };
+
+        // Route to the org's regional Raft group (name/description are PII).
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .ok_or_else(|| tonic::Status::not_found("Organization not found"))?;
+        let system_request = inferadb_ledger_raft::types::SystemRequest::WriteAppProfile {
+            organization: org_id,
+            app: app_id,
+            name: effective_name,
+            description: effective_description,
+        };
         let response = self
             .ctx
-            .propose_request(
-                LedgerRequest::UpdateApp { organization: org_id, app: app_id, name, description },
-                &grpc_metadata,
-                &mut ctx,
-            )
+            .propose_regional(org_meta.region, system_request, &grpc_metadata, &mut ctx)
             .await?;
 
         match response {
-            LedgerResponse::AppUpdated { organization_id } => {
-                self.emit_event(EventAction::AppUpdated, org_id, org_slug_val, &trace_ctx.trace_id);
-                let app = self.load_app(organization_id, app_id)?;
-                let info = self.app_to_proto(&app, true)?;
-                Ok(Response::new(UpdateAppResponse { app: Some(info) }))
-            },
             LedgerResponse::Error { code, message } => {
                 Err(super::helpers::error_code_to_status(code, message))
             },
-            other => {
-                tracing::error!(?other, "Unexpected response from state machine");
-                Err(Status::internal("Unexpected response from state machine"))
+            _ => {
+                self.emit_event(EventAction::AppUpdated, org_id, org_slug_val, &trace_ctx.trace_id);
+                let app = self.load_app(org_id, app_id)?;
+                let info = self.app_to_proto(&app, true)?;
+                Ok(Response::new(UpdateAppResponse { app: Some(info) }))
             },
         }
     }

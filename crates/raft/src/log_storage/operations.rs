@@ -128,44 +128,6 @@ fn save_org_profile<B: StorageBackend>(
     })
 }
 
-/// Bumps the config_version in an organization's registry and re-serializes org meta.
-fn bump_org_config_version<B: StorageBackend>(
-    state_layer: &inferadb_ledger_state::StateLayer<B>,
-    organization: OrganizationId,
-    state: &mut AppliedState,
-    pending: &mut PendingExternalWrites,
-) -> Result<(), LedgerResponse> {
-    if let Some(org_mut) = state.organizations.get_mut(&organization) {
-        let reg_key = SystemKeys::organization_key(organization);
-        if let Ok(Some(reg_entity)) = state_layer
-            .get_entity(SYSTEM_VAULT_ID, reg_key.as_bytes())
-            .inspect_err(|e| tracing::error!(error = %e, "Failed to read org registry"))
-            && let Ok(mut registry) = decode::<OrganizationRegistry>(&reg_entity.value)
-                .inspect_err(|e| tracing::error!(error = %e, "Failed to decode org registry"))
-        {
-            registry.config_version += 1;
-            if let Some(reg_bytes) = try_encode(&registry, "org_registry") {
-                let ops = vec![Operation::SetEntity {
-                    key: reg_key,
-                    value: reg_bytes,
-                    condition: None,
-                    expires_at: None,
-                }];
-                if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
-                    return Err(ledger_error(
-                        ErrorCode::Internal,
-                        format!("Failed to bump org config_version: {e}"),
-                    ));
-                }
-            }
-        }
-        if let Some(blob) = try_encode(org_mut, "organization") {
-            pending.organizations.push((organization, blob));
-        }
-    }
-    Ok(())
-}
-
 /// Checks whether an app name already exists within an organization.
 ///
 /// Uses the in-memory `app_name_index` for O(1) lookups.
@@ -282,17 +244,29 @@ fn load_team_profile<B: StorageBackend>(
     let profile_key = SystemKeys::team_profile_key(organization, team);
     let entity = state_layer
         .get_entity(SYSTEM_VAULT_ID, profile_key.as_bytes())
-        .map_err(|e| LedgerResponse::Error {
-            code: ErrorCode::Internal,
-            message: format!("Failed to read team profile: {e}"),
+        .map_err(|e| {
+            ledger_error(ErrorCode::Internal, format!("Failed to read team profile: {e}"))
         })?
-        .ok_or_else(|| LedgerResponse::Error {
-            code: ErrorCode::NotFound,
-            message: format!("Team {} not found", team),
-        })?;
-    decode::<TeamProfile>(&entity.value).map_err(|e| LedgerResponse::Error {
-        code: ErrorCode::Internal,
-        message: format!("Failed to decode team profile: {e}"),
+        .ok_or_else(|| ledger_error(ErrorCode::NotFound, format!("Team {} not found", team)))?;
+    decode::<TeamProfile>(&entity.value).map_err(|e| {
+        ledger_error(ErrorCode::Internal, format!("Failed to decode team profile: {e}"))
+    })
+}
+
+/// Saves a team profile to the state layer.
+fn save_team_profile<B: StorageBackend>(
+    state_layer: &inferadb_ledger_state::StateLayer<B>,
+    organization: OrganizationId,
+    team: TeamId,
+    profile: &TeamProfile,
+) -> Result<(), LedgerResponse> {
+    let key = SystemKeys::team_profile_key(organization, team);
+    let bytes = encode(profile).map_err(|e| {
+        ledger_error(ErrorCode::Internal, format!("Failed to encode team profile: {e}"))
+    })?;
+    let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
+    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0).map(|_| ()).map_err(|e| {
+        ledger_error(ErrorCode::Internal, format!("Failed to write team profile: {e}"))
     })
 }
 
@@ -948,52 +922,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (response, None)
             },
 
-            LedgerRequest::UpdateOrganization { organization, name } => {
-                let org_slug = state.id_to_slug.get(organization).copied();
-
-                let response = match require_active_org_with_state(
-                    organization,
-                    state,
-                    &self.state_layer,
-                    "update",
-                ) {
-                    Ok(state_layer) => match load_org_profile(state_layer, *organization) {
-                        Ok(mut profile) => {
-                            if let Some(new_name) = name {
-                                profile.name = new_name.clone();
-                            }
-                            profile.updated_at = block_timestamp;
-                            if let Err(e) = save_org_profile(state_layer, *organization, &profile) {
-                                return (e, None);
-                            }
-                            if let Err(e) =
-                                bump_org_config_version(state_layer, *organization, state, pending)
-                            {
-                                return (e, None);
-                            }
-                            LedgerResponse::OrganizationUpdated { organization_id: *organization }
-                        },
-                        Err(e) => e,
-                    },
-                    Err(err_response) => err_response,
-                };
-
-                // Emit OrganizationUpdated event on success
-                if matches!(response, LedgerResponse::OrganizationUpdated { .. }) {
-                    let mut emitter =
-                        ApplyPhaseEmitter::for_system(EventAction::OrganizationUpdated)
-                            .detail("organization_id", &organization.to_string())
-                            .outcome(EventOutcome::Success);
-                    if let Some(slug) = org_slug {
-                        emitter = emitter.detail("organization_slug", &slug.to_string());
-                    }
-                    events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
-                    *op_index += 1;
-                }
-
-                (response, None)
-            },
-
             LedgerRequest::RemoveOrganizationMember { organization, target } => {
                 let response = match require_active_org_with_state(
                     organization,
@@ -1146,7 +1074,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (response, None)
             },
 
-            LedgerRequest::CreateOrganizationTeam { organization, slug, name } => {
+            LedgerRequest::CreateOrganizationTeam { organization, slug } => {
                 let response = match require_active_org_with_state(
                     organization,
                     state,
@@ -1154,85 +1082,72 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     "modify",
                 ) {
                     Ok(state_layer) => {
-                        // Check name uniqueness via in-memory index
-                        if has_team_name_conflict(state, *organization, name, None) {
-                            LedgerResponse::Error {
-                                code: ErrorCode::AlreadyExists,
-                                message: format!(
-                                    "Team name '{}' already exists in organization {}",
-                                    name, organization
-                                ),
-                            }
-                        } else {
-                            // Check slug uniqueness
-                            if state.team_slug_index.contains_key(slug) {
-                                return (
-                                    LedgerResponse::Error {
-                                        code: ErrorCode::AlreadyExists,
-                                        message: format!("Team slug '{}' already exists", slug),
-                                    },
-                                    None,
-                                );
-                            }
-                            let team_id = state.sequences.next_team();
-                            let profile = TeamProfile {
-                                team: team_id,
-                                organization: *organization,
-                                slug: *slug,
-                                name: name.clone(),
-                                members: Vec::new(),
-                                created_at: block_timestamp,
-                                updated_at: block_timestamp,
-                            };
-                            let profile_bytes = match encode(&profile) {
-                                Ok(bytes) => bytes,
-                                Err(e) => {
-                                    return (
-                                        LedgerResponse::Error {
-                                            code: ErrorCode::Internal,
-                                            message: format!("Failed to encode team profile: {e}"),
-                                        },
-                                        None,
-                                    );
+                        // Check slug uniqueness
+                        if state.team_slug_index.contains_key(slug) {
+                            return (
+                                LedgerResponse::Error {
+                                    code: ErrorCode::AlreadyExists,
+                                    message: format!("Team slug '{}' already exists", slug),
                                 },
-                            };
-                            let profile_key = SystemKeys::team_profile_key(*organization, team_id);
-                            let slug_key = SystemKeys::team_slug_key(*slug);
-                            let slug_value =
-                                format!("{}:{}", organization.value(), team_id.value());
-                            let ops = vec![
-                                Operation::SetEntity {
-                                    key: profile_key,
-                                    value: profile_bytes,
-                                    condition: None,
-                                    expires_at: None,
-                                },
-                                Operation::SetEntity {
-                                    key: slug_key,
-                                    value: slug_value.into_bytes(),
-                                    condition: None,
-                                    expires_at: None,
-                                },
-                            ];
-                            if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                                None,
+                            );
+                        }
+                        let team_id = state.sequences.next_team();
+                        // Create profile without name — the name is PII and will be
+                        // written separately via regional WriteTeamProfile.
+                        let profile = TeamProfile {
+                            team: team_id,
+                            organization: *organization,
+                            slug: *slug,
+                            name: String::new(),
+                            members: Vec::new(),
+                            created_at: block_timestamp,
+                            updated_at: block_timestamp,
+                        };
+                        let profile_bytes = match encode(&profile) {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
                                 return (
                                     LedgerResponse::Error {
                                         code: ErrorCode::Internal,
-                                        message: format!("Failed to write team profile: {e}"),
+                                        message: format!("Failed to encode team profile: {e}"),
                                     },
                                     None,
                                 );
-                            }
-                            // Update slug indices only after successful storage write
-                            state.team_slug_index.insert(*slug, (*organization, team_id));
-                            state.team_id_to_slug.insert(team_id, *slug);
-                            pending.team_slug_index.push((*slug, (*organization, team_id)));
-
-                            // Update team name index
-                            state.team_name_index.insert((*organization, name.clone()), team_id);
-
-                            LedgerResponse::OrganizationTeamCreated { team_id, team_slug: *slug }
+                            },
+                        };
+                        let profile_key = SystemKeys::team_profile_key(*organization, team_id);
+                        let slug_key = SystemKeys::team_slug_key(*slug);
+                        let slug_value = format!("{}:{}", organization.value(), team_id.value());
+                        let ops = vec![
+                            Operation::SetEntity {
+                                key: profile_key,
+                                value: profile_bytes,
+                                condition: None,
+                                expires_at: None,
+                            },
+                            Operation::SetEntity {
+                                key: slug_key,
+                                value: slug_value.into_bytes(),
+                                condition: None,
+                                expires_at: None,
+                            },
+                        ];
+                        if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                            return (
+                                LedgerResponse::Error {
+                                    code: ErrorCode::Internal,
+                                    message: format!("Failed to write team profile: {e}"),
+                                },
+                                None,
+                            );
                         }
+                        // Update slug indices only after successful storage write
+                        state.team_slug_index.insert(*slug, (*organization, team_id));
+                        state.team_id_to_slug.insert(team_id, *slug);
+                        pending.team_slug_index.push((*slug, (*organization, team_id)));
+
+                        LedgerResponse::OrganizationTeamCreated { team_id, team_slug: *slug }
                     },
                     Err(err_response) => err_response,
                 };
@@ -1242,7 +1157,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         ApplyPhaseEmitter::for_system(EventAction::TeamCreated)
                             .detail("organization_id", &organization.to_string())
                             .detail("team_slug", &slug.to_string())
-                            .detail("team_name", name)
                             .outcome(EventOutcome::Success)
                             .build(block_height, *op_index, block_timestamp, ttl_days),
                     );
@@ -1337,109 +1251,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (response, None)
             },
 
-            LedgerRequest::UpdateOrganizationTeam { organization, team, name } => {
-                let response = match require_active_org_with_state(
-                    organization,
-                    state,
-                    &self.state_layer,
-                    "modify",
-                ) {
-                    Ok(state_layer) => {
-                        match load_team_profile(state_layer, *organization, *team) {
-                            Ok(mut profile) => {
-                                // Track old name for index maintenance after write
-                                let renamed = if let Some(new_name) = name {
-                                    // Check uniqueness of new name via index
-                                    if has_team_name_conflict(
-                                        state,
-                                        *organization,
-                                        new_name,
-                                        Some(*team),
-                                    ) {
-                                        return (
-                                            LedgerResponse::Error {
-                                                code: ErrorCode::AlreadyExists,
-                                                message: format!(
-                                                    "Team name '{}' already exists in organization {}",
-                                                    new_name, organization
-                                                ),
-                                            },
-                                            None,
-                                        );
-                                    }
-                                    let old_name = profile.name.clone();
-                                    profile.name.clone_from(new_name);
-                                    Some((old_name, new_name.clone()))
-                                } else {
-                                    None
-                                };
-                                profile.updated_at = block_timestamp;
-                                let profile_key =
-                                    SystemKeys::team_profile_key(*organization, *team);
-                                let profile_bytes = match encode(&profile) {
-                                    Ok(bytes) => bytes,
-                                    Err(e) => {
-                                        return (
-                                            LedgerResponse::Error {
-                                                code: ErrorCode::Internal,
-                                                message: format!(
-                                                    "Failed to encode team profile: {e}"
-                                                ),
-                                            },
-                                            None,
-                                        );
-                                    },
-                                };
-                                let ops = vec![Operation::SetEntity {
-                                    key: profile_key,
-                                    value: profile_bytes,
-                                    condition: None,
-                                    expires_at: None,
-                                }];
-                                if let Err(e) =
-                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
-                                {
-                                    return (
-                                        LedgerResponse::Error {
-                                            code: ErrorCode::Internal,
-                                            message: format!("Failed to update team profile: {e}"),
-                                        },
-                                        None,
-                                    );
-                                }
-                                // Update name index after successful write
-                                if let Some((old_name, new_name)) = renamed {
-                                    state.team_name_index.remove(&(*organization, old_name));
-                                    state.team_name_index.insert((*organization, new_name), *team);
-                                }
-                                LedgerResponse::OrganizationTeamUpdated {
-                                    organization_id: *organization,
-                                }
-                            },
-                            Err(err_response) => err_response,
-                        }
-                    },
-                    Err(err_response) => err_response,
-                };
-
-                if matches!(response, LedgerResponse::OrganizationTeamUpdated { .. }) {
-                    events.push(
-                        ApplyPhaseEmitter::for_system(EventAction::TeamUpdated)
-                            .detail("organization_id", &organization.to_string())
-                            .detail("team_id", &team.to_string())
-                            .outcome(EventOutcome::Success)
-                            .build(block_height, *op_index, block_timestamp, ttl_days),
-                    );
-                    *op_index += 1;
-                }
-
-                (response, None)
-            },
-
             // ================================================================
             // App operations
             // ================================================================
-            LedgerRequest::CreateApp { organization, slug, name, description } => {
+            LedgerRequest::CreateApp { organization, slug } => {
                 let response = match require_active_org_with_state(
                     organization,
                     state,
@@ -1447,27 +1262,21 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     "modify",
                 ) {
                     Ok(state_layer) => {
-                        if has_app_name_conflict(state, *organization, name, None) {
-                            LedgerResponse::Error {
-                                code: ErrorCode::AlreadyExists,
-                                message: format!(
-                                    "App name '{}' already exists in organization {}",
-                                    name, organization
-                                ),
-                            }
-                        } else if state.app_slug_index.contains_key(slug) {
+                        if state.app_slug_index.contains_key(slug) {
                             LedgerResponse::Error {
                                 code: ErrorCode::AlreadyExists,
                                 message: format!("App slug '{}' already exists", slug),
                             }
                         } else {
                             let app_id = state.sequences.next_app();
+                            // Create app without name/description — these are PII and
+                            // will be written separately via regional WriteAppProfile.
                             let app = App {
                                 id: app_id,
                                 slug: *slug,
                                 organization: *organization,
-                                name: name.clone(),
-                                description: description.clone(),
+                                name: String::new(),
+                                description: None,
                                 enabled: false,
                                 credentials: AppCredentials::default(),
                                 created_at: block_timestamp,
@@ -1488,8 +1297,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             let app_key = SystemKeys::app_key(*organization, app_id);
                             let slug_key = SystemKeys::app_slug_key(*slug);
                             let slug_value = format!("{}:{}", organization.value(), app_id.value());
-                            let name_key = SystemKeys::app_name_index_key(*organization, name);
-                            let name_value = app_id.value().to_string();
                             let ops = vec![
                                 Operation::SetEntity {
                                     key: app_key,
@@ -1500,12 +1307,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 Operation::SetEntity {
                                     key: slug_key,
                                     value: slug_value.into_bytes(),
-                                    condition: None,
-                                    expires_at: None,
-                                },
-                                Operation::SetEntity {
-                                    key: name_key,
-                                    value: name_value.into_bytes(),
                                     condition: None,
                                     expires_at: None,
                                 },
@@ -1521,106 +1322,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }
                             state.app_slug_index.insert(*slug, (*organization, app_id));
                             state.app_id_to_slug.insert(app_id, *slug);
-                            state.app_name_index.insert((*organization, name.clone()), app_id);
                             pending.app_slug_index.push((*slug, (*organization, app_id)));
 
                             LedgerResponse::AppCreated { app_id, app_slug: *slug }
-                        }
-                    },
-                    Err(err_response) => err_response,
-                };
-                (response, None)
-            },
-
-            LedgerRequest::UpdateApp { organization, app, name, description } => {
-                let response = match require_active_org_with_state(
-                    organization,
-                    state,
-                    &self.state_layer,
-                    "modify",
-                ) {
-                    Ok(state_layer) => {
-                        match load_app(state_layer, *organization, *app) {
-                            Ok(mut app_record) => {
-                                let renamed = if let Some(new_name) = name {
-                                    if has_app_name_conflict(
-                                        state,
-                                        *organization,
-                                        new_name,
-                                        Some(*app),
-                                    ) {
-                                        return (
-                                            LedgerResponse::Error {
-                                                code: ErrorCode::AlreadyExists,
-                                                message: format!(
-                                                    "App name '{}' already exists in organization {}",
-                                                    new_name, organization
-                                                ),
-                                            },
-                                            None,
-                                        );
-                                    }
-                                    let old_name = app_record.name.clone();
-                                    app_record.name.clone_from(new_name);
-                                    Some((old_name, new_name.clone()))
-                                } else {
-                                    None
-                                };
-                                if let Some(new_desc) = description {
-                                    app_record.description.clone_from(new_desc);
-                                }
-                                app_record.updated_at = block_timestamp;
-                                match save_app(state_layer, *organization, &app_record) {
-                                    Ok(()) => {
-                                        // Update name index after successful write
-                                        if let Some((old_name, new_name)) = renamed {
-                                            // Update state layer name index keys
-                                            let old_key = SystemKeys::app_name_index_key(
-                                                *organization,
-                                                &old_name,
-                                            );
-                                            let new_key = SystemKeys::app_name_index_key(
-                                                *organization,
-                                                &new_name,
-                                            );
-                                            let value = app.value().to_string();
-                                            let ops = vec![
-                                                Operation::DeleteEntity { key: old_key },
-                                                Operation::SetEntity {
-                                                    key: new_key,
-                                                    value: value.into_bytes(),
-                                                    condition: None,
-                                                    expires_at: None,
-                                                },
-                                            ];
-                                            if let Err(e) = state_layer.apply_operations(
-                                                SYSTEM_VAULT_ID,
-                                                &ops,
-                                                0,
-                                            ) {
-                                                return (
-                                                    LedgerResponse::Error {
-                                                        code: ErrorCode::Internal,
-                                                        message: format!(
-                                                            "Failed to update app name index: {e}"
-                                                        ),
-                                                    },
-                                                    None,
-                                                );
-                                            }
-                                            state.app_name_index.remove(&(*organization, old_name));
-                                            state
-                                                .app_name_index
-                                                .insert((*organization, new_name), *app);
-                                        }
-                                        LedgerResponse::AppUpdated {
-                                            organization_id: *organization,
-                                        }
-                                    },
-                                    Err(e) => e,
-                                }
-                            },
-                            Err(e) => e,
                         }
                     },
                     Err(err_response) => err_response,
@@ -3212,6 +2916,30 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             organization_id: *organization,
                         }
                     },
+                    SystemRequest::UpdateOrganizationProfile { organization, name } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            match load_org_profile(state_layer, *organization) {
+                                Ok(mut profile) => {
+                                    profile.name = name.clone();
+                                    profile.updated_at = block_timestamp;
+                                    if let Err(e) =
+                                        save_org_profile(state_layer, *organization, &profile)
+                                    {
+                                        return (e, None);
+                                    }
+                                    LedgerResponse::OrganizationUpdated {
+                                        organization_id: *organization,
+                                    }
+                                },
+                                Err(e) => e,
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for profile update".to_string(),
+                            )
+                        }
+                    },
                     SystemRequest::UpdateOrganizationDirectoryStatus { organization, status } => {
                         if let Some(org_meta) = state.organizations.get_mut(organization) {
                             let new_status = match status {
@@ -3995,6 +3723,130 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }
                         }
                     },
+
+                    // ── WriteTeamProfile (REGIONAL) ──
+                    SystemRequest::WriteTeamProfile { organization, team, name } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            match load_team_profile(state_layer, *organization, *team) {
+                                Ok(mut profile) => {
+                                    if has_team_name_conflict(
+                                        state,
+                                        *organization,
+                                        name,
+                                        Some(*team),
+                                    ) {
+                                        return error_result(
+                                            ErrorCode::AlreadyExists,
+                                            format!(
+                                                "Team name '{}' already exists in organization {}",
+                                                name, organization
+                                            ),
+                                        );
+                                    }
+                                    let old_name = profile.name.clone();
+                                    profile.name.clone_from(name);
+                                    profile.updated_at = block_timestamp;
+                                    match save_team_profile(
+                                        state_layer,
+                                        *organization,
+                                        *team,
+                                        &profile,
+                                    ) {
+                                        Ok(()) => {
+                                            if !old_name.is_empty() {
+                                                state
+                                                    .team_name_index
+                                                    .remove(&(*organization, old_name));
+                                            }
+                                            state
+                                                .team_name_index
+                                                .insert((*organization, name.clone()), *team);
+
+                                            LedgerResponse::OrganizationUpdated {
+                                                organization_id: *organization,
+                                            }
+                                        },
+                                        Err(e) => e,
+                                    }
+                                },
+                                Err(e) => e,
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for team profile write",
+                            )
+                        }
+                    },
+
+                    // ── WriteAppProfile (REGIONAL) ──
+                    SystemRequest::WriteAppProfile { organization, app, name, description } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            match load_app(state_layer, *organization, *app) {
+                                Ok(mut app_record) => {
+                                    if has_app_name_conflict(state, *organization, name, Some(*app))
+                                    {
+                                        return error_result(
+                                            ErrorCode::AlreadyExists,
+                                            format!(
+                                                "App name '{}' already exists in organization {}",
+                                                name, organization
+                                            ),
+                                        );
+                                    }
+                                    let old_name = app_record.name.clone();
+                                    app_record.name.clone_from(name);
+                                    app_record.description.clone_from(description);
+                                    app_record.updated_at = block_timestamp;
+                                    match save_app(state_layer, *organization, &app_record) {
+                                        Ok(()) => {
+                                            // Update name index: batch delete + insert
+                                            let mut index_ops = Vec::new();
+                                            if !old_name.is_empty() {
+                                                index_ops.push(Operation::DeleteEntity {
+                                                    key: SystemKeys::app_name_index_key(
+                                                        *organization,
+                                                        &old_name,
+                                                    ),
+                                                });
+                                                state
+                                                    .app_name_index
+                                                    .remove(&(*organization, old_name));
+                                            }
+                                            index_ops.push(Operation::SetEntity {
+                                                key: SystemKeys::app_name_index_key(
+                                                    *organization,
+                                                    name,
+                                                ),
+                                                value: app.value().to_string().into_bytes(),
+                                                condition: None,
+                                                expires_at: None,
+                                            });
+                                            let _ = state_layer.apply_operations(
+                                                SYSTEM_VAULT_ID,
+                                                &index_ops,
+                                                0,
+                                            );
+                                            state
+                                                .app_name_index
+                                                .insert((*organization, name.clone()), *app);
+
+                                            LedgerResponse::OrganizationUpdated {
+                                                organization_id: *organization,
+                                            }
+                                        },
+                                        Err(e) => e,
+                                    }
+                                },
+                                Err(e) => e,
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for app profile write",
+                            )
+                        }
+                    },
                 };
 
                 // Emit events for system request variants
@@ -4756,6 +4608,104 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         format!("Failed to delete expired refresh tokens: {e}"),
                     ),
                 }
+            },
+
+            LedgerRequest::EncryptedSystem(encrypted) => {
+                // Decrypt the SystemRequest using the user's SubjectKey.
+                // If the key has been destroyed (user erased), skip the entry —
+                // the state machine already reflects the erasure.
+                let state_layer = match &self.state_layer {
+                    Some(sl) => sl,
+                    None => {
+                        tracing::warn!(
+                            user_id = encrypted.user_id.value(),
+                            "EncryptedSystem: no state layer available, skipping"
+                        );
+                        return (LedgerResponse::Empty, None);
+                    },
+                };
+
+                let key_str = SystemKeys::subject_key(encrypted.user_id);
+                let subject_key_entity = match state_layer
+                    .get_entity(SYSTEM_VAULT_ID, key_str.as_bytes())
+                {
+                    Ok(Some(entity)) => entity,
+                    Ok(None) => {
+                        // SubjectKey destroyed — user has been erased.
+                        // Crypto-shredding: this entry is permanently unrecoverable.
+                        tracing::info!(
+                            user_id = encrypted.user_id.value(),
+                            "EncryptedSystem: SubjectKey destroyed (user erased), skipping entry"
+                        );
+                        return (LedgerResponse::Empty, None);
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            user_id = encrypted.user_id.value(),
+                            error = %e,
+                            "EncryptedSystem: failed to read SubjectKey"
+                        );
+                        return (
+                            LedgerResponse::Error {
+                                code: ErrorCode::Internal,
+                                message: format!("Failed to read SubjectKey: {e}"),
+                            },
+                            None,
+                        );
+                    },
+                };
+
+                let subject_key: inferadb_ledger_state::system::SubjectKey =
+                    match decode(&subject_key_entity.value) {
+                        Ok(sk) => sk,
+                        Err(e) => {
+                            tracing::error!(
+                                user_id = encrypted.user_id.value(),
+                                error = %e,
+                                "EncryptedSystem: failed to decode SubjectKey"
+                            );
+                            return (
+                                LedgerResponse::Error {
+                                    code: ErrorCode::Internal,
+                                    message: format!("Failed to decode SubjectKey: {e}"),
+                                },
+                                None,
+                            );
+                        },
+                    };
+
+                let sys_request = match crate::entry_crypto::decrypt_system_request(
+                    encrypted,
+                    &subject_key.key,
+                ) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        tracing::error!(
+                            user_id = encrypted.user_id.value(),
+                            error = %e,
+                            "EncryptedSystem: decryption failed"
+                        );
+                        return (
+                            LedgerResponse::Error {
+                                code: ErrorCode::Internal,
+                                message: format!("Raft entry decryption failed: {e}"),
+                            },
+                            None,
+                        );
+                    },
+                };
+
+                // Apply the decrypted SystemRequest through the normal path
+                let decrypted_request = LedgerRequest::System(sys_request);
+                self.apply_request_with_events(
+                    &decrypted_request,
+                    state,
+                    block_timestamp,
+                    op_index,
+                    events,
+                    ttl_days,
+                    pending,
+                )
             },
 
             LedgerRequest::BatchWrite { requests } => {

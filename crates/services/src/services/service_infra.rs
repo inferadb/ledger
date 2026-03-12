@@ -197,7 +197,6 @@ impl ServiceContext {
     /// - `UNAVAILABLE` if the region's Raft group is not active on this node.
     /// - `DEADLINE_EXCEEDED` if the proposal times out.
     /// - `INTERNAL` / `UNAVAILABLE` for Raft errors (via `classify_raft_error`).
-    #[allow(dead_code)]
     pub(crate) async fn propose_regional(
         &self,
         region: Region,
@@ -308,6 +307,51 @@ impl ServiceContext {
                 )))
             },
         }
+    }
+
+    /// Proposes a user-scoped `SystemRequest` to a region with PII encryption.
+    ///
+    /// Encrypts the `SystemRequest` with the user's `SubjectKey` before entering
+    /// the Raft log. At apply time, the state machine decrypts using the key from
+    /// state. When the user is erased and their `SubjectKey` is destroyed, all
+    /// historical log entries become cryptographically unrecoverable (crypto-shredding).
+    ///
+    /// Falls back to plaintext proposal if the `SubjectKey` is not found
+    /// (e.g., during initial onboarding before the key is created).
+    pub(crate) async fn propose_regional_encrypted(
+        &self,
+        region: Region,
+        system_request: SystemRequest,
+        user_id: inferadb_ledger_types::UserId,
+        grpc_metadata: &tonic::metadata::MetadataMap,
+        ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, Status> {
+        let sys_svc =
+            inferadb_ledger_state::system::SystemOrganizationService::new(self.state.clone());
+        let subject_key = sys_svc.get_subject_key(user_id).map_err(|e| {
+            Status::internal(format!("Failed to read SubjectKey for user {user_id}: {e}"))
+        })?;
+
+        let request = match subject_key {
+            Some(sk) => {
+                let encrypted = inferadb_ledger_raft::entry_crypto::encrypt_system_request(
+                    &system_request,
+                    &sk.key,
+                    user_id,
+                )
+                .map_err(|e| Status::internal(format!("Failed to encrypt Raft entry: {e}")))?;
+                LedgerRequest::EncryptedSystem(encrypted)
+            },
+            None => {
+                tracing::warn!(
+                    user_id = user_id.value(),
+                    "SubjectKey not found, falling back to plaintext regional proposal"
+                );
+                LedgerRequest::System(system_request)
+            },
+        };
+
+        self.propose_regional_ledger_request(region, request, grpc_metadata, ctx).await
     }
 
     /// Records a handler-phase audit event if the event handle is configured.

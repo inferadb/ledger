@@ -466,7 +466,6 @@ impl SystemKeys {
     /// Stored in a REGIONAL Raft group. The `email_hmac` suffix is the
     /// HMAC-SHA256 hex string of the email address (same value used in
     /// the GLOBAL `_idx:email_hash:` index).
-    #[allow(dead_code)] // Used by InitiateEmailVerification handler in subsequent task
     pub fn onboard_verify_key(email_hmac: &str) -> String {
         format!("_tmp:onboard_verify:{email_hmac}")
     }
@@ -474,7 +473,6 @@ impl SystemKeys {
     /// Parses an email HMAC hex string from an onboard verify key.
     ///
     /// Returns `None` if the key doesn't match `_tmp:onboard_verify:{hmac}`.
-    #[allow(dead_code)] // Used by onboarding GC job in subsequent task
     pub fn parse_onboard_verify_key(key: &str) -> Option<&str> {
         key.strip_prefix(Self::ONBOARD_VERIFY_PREFIX)
     }
@@ -486,7 +484,6 @@ impl SystemKeys {
     ///
     /// Stored in a REGIONAL Raft group. Contains no PII — the email HMAC
     /// in the key suffix is the only link to the user's identity.
-    #[allow(dead_code)] // Used by VerifyEmailCode handler in subsequent task
     pub fn onboard_account_key(email_hmac: &str) -> String {
         format!("_tmp:onboard_account:{email_hmac}")
     }
@@ -494,7 +491,6 @@ impl SystemKeys {
     /// Parses an email HMAC hex string from an onboard account key.
     ///
     /// Returns `None` if the key doesn't match `_tmp:onboard_account:{hmac}`.
-    #[allow(dead_code)] // Used by CompleteRegistration handler in subsequent task
     pub fn parse_onboard_account_key(key: &str) -> Option<&str> {
         key.strip_prefix(Self::ONBOARD_ACCOUNT_PREFIX)
     }

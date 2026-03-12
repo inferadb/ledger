@@ -1697,6 +1697,7 @@ dependencies = [
 name = "inferadb-ledger-raft"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "arc-swap",
  "async-compression",
  "base64",

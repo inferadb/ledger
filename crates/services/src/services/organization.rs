@@ -398,7 +398,6 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
-        ctx.set_target_organization_name(&req.name);
 
         // Validate organization name
         validation::validate_organization_name(&req.name, &self.ctx.validation_config)
@@ -977,21 +976,37 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Validate initiator is an organization administrator
         self.validate_org_admin(&slug_resolver, organization_id, &req.initiator, &mut ctx)?;
 
-        // At least one field must be set
-        if req.name.is_none() {
-            return Err(Status::invalid_argument("At least one field must be provided for update"));
-        }
+        let name = match req.name {
+            Some(ref n) => {
+                validation::validate_organization_name(n, &self.ctx.validation_config)
+                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                n.clone()
+            },
+            None => {
+                return Err(Status::invalid_argument(
+                    "At least one field must be provided for update",
+                ));
+            },
+        };
 
-        // Validate name if provided
-        if let Some(ref name) = req.name {
-            validation::validate_organization_name(name, &self.ctx.validation_config)
-                .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        }
+        // Resolve the organization's data residency region
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
 
-        let ledger_request =
-            LedgerRequest::UpdateOrganization { organization: organization_id, name: req.name };
-
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        // Route the name update to the REGIONAL Raft group — name is PII
+        // and must not appear in the GLOBAL Raft log.
+        let system_request =
+            inferadb_ledger_raft::types::SystemRequest::UpdateOrganizationProfile {
+                organization: organization_id,
+                name,
+            };
+        let response = self
+            .ctx
+            .propose_regional(org_meta.region, system_request, &grpc_metadata, &mut ctx)
+            .await?;
 
         match response {
             LedgerResponse::OrganizationUpdated { organization_id: updated_org_id } => {
@@ -1432,31 +1447,52 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             Status::internal(format!("Failed to generate team slug: {e}"))
         })?;
 
+        // Step 1 (GLOBAL): Create team directory entry (ID + slug only, no PII).
         let ledger_request = LedgerRequest::CreateOrganizationTeam {
             organization: organization_id,
             slug: team_slug,
-            name,
         };
         let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
-        match response {
-            LedgerResponse::OrganizationTeamCreated { team_id, .. } => {
-                ctx.set_success();
-                let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
-                let team = self
-                    .read_team_profile(organization_id, team_id)
-                    .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));
-                Ok(Response::new(CreateOrganizationTeamResponse { team }))
-            },
+        let team_id = match response {
+            LedgerResponse::OrganizationTeamCreated { team_id, .. } => team_id,
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                Err(super::helpers::error_code_to_status(code, message))
+                return Err(super::helpers::error_code_to_status(code, message));
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
-                Err(Status::internal("Unexpected response type"))
+                return Err(Status::internal("Unexpected response type"));
             },
+        };
+
+        // Step 2 (REGIONAL): Write team name to the org's regional store.
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+        let system_request = inferadb_ledger_raft::types::SystemRequest::WriteTeamProfile {
+            organization: organization_id,
+            team: team_id,
+            name,
+        };
+        let profile_response = self
+            .ctx
+            .propose_regional(org_meta.region, system_request, &grpc_metadata, &mut ctx)
+            .await?;
+
+        if let LedgerResponse::Error { code, message } = profile_response {
+            ctx.set_error(code.grpc_code_name(), &message);
+            return Err(super::helpers::error_code_to_status(code, message));
         }
+
+        ctx.set_success();
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let team = self
+            .read_team_profile(organization_id, team_id)
+            .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));
+        Ok(Response::new(CreateOrganizationTeamResponse { team }))
     }
 
     async fn delete_organization_team(
@@ -1568,40 +1604,53 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &mut ctx,
         )?;
 
-        // Validate new name if provided
-        if let Some(ref name) = inner.name {
-            let trimmed = name.trim();
-            if let Err(e) =
-                validation::validate_organization_name(trimmed, &self.ctx.validation_config)
-            {
-                ctx.set_error("InvalidArgument", &e.to_string());
-                return Err(Status::invalid_argument(e.to_string()));
-            }
-        }
+        // Validate new name
+        let name = match inner.name {
+            Some(ref n) => {
+                let trimmed = n.trim().to_string();
+                if let Err(e) =
+                    validation::validate_organization_name(&trimmed, &self.ctx.validation_config)
+                {
+                    ctx.set_error("InvalidArgument", &e.to_string());
+                    return Err(Status::invalid_argument(e.to_string()));
+                }
+                trimmed
+            },
+            None => {
+                return Err(Status::invalid_argument(
+                    "At least one field must be provided for update",
+                ));
+            },
+        };
 
-        let ledger_request = LedgerRequest::UpdateOrganizationTeam {
+        // Route name update to the org's regional Raft group (PII).
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+        let system_request = inferadb_ledger_raft::types::SystemRequest::WriteTeamProfile {
             organization: organization_id,
             team: team_id,
-            name: inner.name.map(|n| n.trim().to_string()),
+            name,
         };
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self
+            .ctx
+            .propose_regional(org_meta.region, system_request, &grpc_metadata, &mut ctx)
+            .await?;
 
         match response {
-            LedgerResponse::OrganizationTeamUpdated { .. } => {
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
+                Err(super::helpers::error_code_to_status(code, message))
+            },
+            _ => {
                 ctx.set_success();
                 let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
                 let team = self
                     .read_team_profile(organization_id, team_id)
                     .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));
                 Ok(Response::new(UpdateOrganizationTeamResponse { team }))
-            },
-            LedgerResponse::Error { code, message } => {
-                ctx.set_error(code.grpc_code_name(), &message);
-                Err(super::helpers::error_code_to_status(code, message))
-            },
-            _ => {
-                ctx.set_error("UnexpectedResponse", "Unexpected response type");
-                Err(Status::internal("Unexpected response type"))
             },
         }
     }

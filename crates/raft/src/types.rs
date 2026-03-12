@@ -206,14 +206,6 @@ pub enum LedgerRequest {
         organization: OrganizationId,
     },
 
-    /// Updates organization metadata (currently: name only).
-    UpdateOrganization {
-        /// Organization to update.
-        organization: OrganizationId,
-        /// New name (if changing).
-        name: Option<String>,
-    },
-
     /// Removes a member from an organization.
     RemoveOrganizationMember {
         /// Organization to modify.
@@ -294,14 +286,17 @@ pub enum LedgerRequest {
         requests: Vec<LedgerRequest>,
     },
 
-    /// Creates a new team within an organization.
+    /// Creates a new team within an organization (GLOBAL directory entry).
+    ///
+    /// Allocates the team ID and slug mapping. Does NOT include the team name —
+    /// plaintext names are PII and must be written via the regional
+    /// [`SystemRequest::WriteTeamProfile`] to avoid leaking into the GLOBAL
+    /// Raft log.
     CreateOrganizationTeam {
         /// Organization to create the team in.
         organization: OrganizationId,
         /// External slug for API lookups (generated before Raft proposal).
         slug: TeamSlug,
-        /// Team name (unique within organization).
-        name: String,
     },
 
     /// Deletes a team from an organization.
@@ -314,38 +309,17 @@ pub enum LedgerRequest {
         move_members_to: Option<TeamId>,
     },
 
-    /// Updates team metadata.
-    UpdateOrganizationTeam {
-        /// Organization containing the team.
-        organization: OrganizationId,
-        /// Team to update.
-        team: TeamId,
-        /// New name (if changing).
-        name: Option<String>,
-    },
-
-    /// Creates a new application within an organization.
+    /// Creates a new application within an organization (GLOBAL directory entry).
+    ///
+    /// Allocates the app ID and slug mapping. Does NOT include the app name or
+    /// description — plaintext names are PII and must be written via the
+    /// regional [`SystemRequest::WriteAppProfile`] to avoid leaking into the
+    /// GLOBAL Raft log.
     CreateApp {
         /// Organization to create the app in.
         organization: OrganizationId,
         /// External slug for API lookups (generated before Raft proposal).
         slug: AppSlug,
-        /// App name (unique within organization).
-        name: String,
-        /// Optional description.
-        description: Option<String>,
-    },
-
-    /// Updates app metadata (name and/or description).
-    UpdateApp {
-        /// Organization containing the app.
-        organization: OrganizationId,
-        /// App to update.
-        app: AppId,
-        /// New name (if changing).
-        name: Option<String>,
-        /// New description (if changing; `Some(None)` clears it).
-        description: Option<Option<String>>,
     },
 
     /// Deletes an application and all its sub-resources.
@@ -568,6 +542,18 @@ pub enum LedgerRequest {
     /// Deletes expired refresh tokens and garbage-collects poisoned families.
     /// Used by `TokenMaintenanceJob`. Apply handler uses `proposed_at` as cutoff.
     DeleteExpiredRefreshTokens,
+
+    /// Encrypted form of a [`SystemRequest`] for PII crypto-shredding.
+    ///
+    /// User-scoped REGIONAL requests (profile writes, email operations) are
+    /// encrypted with the user's `SubjectKey` before entering the Raft log.
+    /// When the user is erased and their `SubjectKey` is destroyed, all
+    /// historical log entries become cryptographically unrecoverable.
+    ///
+    /// The apply handler decrypts using the `SubjectKey` from state. If the
+    /// key has been destroyed (user erased), the entry is skipped — the state
+    /// machine already reflects the erasure.
+    EncryptedSystem(crate::entry_crypto::EncryptedSystemRequest),
 }
 
 /// System-level requests that modify the `_system` organization.
@@ -593,6 +579,8 @@ pub enum LedgerRequest {
 /// - [`WriteOnboardingUserProfile`](SystemRequest::WriteOnboardingUserProfile) — plaintext email,
 ///   name
 /// - [`WriteOrganizationProfile`](SystemRequest::WriteOrganizationProfile) — organization name
+/// - [`WriteTeamProfile`](SystemRequest::WriteTeamProfile) — team name
+/// - [`WriteAppProfile`](SystemRequest::WriteAppProfile) — app name, description
 /// - [`CleanupExpiredOnboarding`](SystemRequest::CleanupExpiredOnboarding) — regional GC
 ///
 /// All other variants are proposed to GLOBAL and contain no PII.
@@ -785,6 +773,17 @@ pub enum SystemRequest {
         admin: UserId,
     },
 
+    /// Updates the organization profile name in the REGIONAL Raft log.
+    ///
+    /// Name is PII and must not appear in the GLOBAL Raft log.
+    /// Proposed to the organization's home region via `propose_regional`.
+    UpdateOrganizationProfile {
+        /// Organization whose profile to update.
+        organization: OrganizationId,
+        /// New display name.
+        name: String,
+    },
+
     /// Updates the organization directory status in the GLOBAL control plane.
     UpdateOrganizationDirectoryStatus {
         /// Organization to update.
@@ -924,6 +923,38 @@ pub enum SystemRequest {
         organization_slug: OrganizationSlug,
         /// HMAC of the email (for HMAC index update).
         email_hmac: String,
+    },
+
+    /// Writes a team's display name to the regional store (PII).
+    ///
+    /// Proposed to the REGIONAL Raft group via `propose_regional()`.
+    /// The team directory entry (ID, slug) is created separately via the
+    /// GLOBAL `LedgerRequest::CreateOrganizationTeam`. This separation
+    /// ensures plaintext team names never enter the GLOBAL Raft log.
+    WriteTeamProfile {
+        /// Organization containing the team.
+        organization: OrganizationId,
+        /// Team to write the profile for.
+        team: TeamId,
+        /// Team display name (PII — regional only).
+        name: String,
+    },
+
+    /// Writes an app's display name and description to the regional store (PII).
+    ///
+    /// Proposed to the REGIONAL Raft group via `propose_regional()`.
+    /// The app directory entry (ID, slug) is created separately via the
+    /// GLOBAL `LedgerRequest::CreateApp`. This separation ensures plaintext
+    /// app names and descriptions never enter the GLOBAL Raft log.
+    WriteAppProfile {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App to write the profile for.
+        app: AppId,
+        /// App display name (PII — regional only).
+        name: String,
+        /// Optional description (PII — regional only).
+        description: Option<String>,
     },
 }
 
@@ -1166,24 +1197,12 @@ pub enum LedgerResponse {
         organization_id: OrganizationId,
     },
 
-    /// Team metadata updated.
-    OrganizationTeamUpdated {
-        /// Organization the team belongs to.
-        organization_id: OrganizationId,
-    },
-
     /// App created.
     AppCreated {
         /// Assigned internal app ID.
         app_id: AppId,
         /// External Snowflake slug.
         app_slug: AppSlug,
-    },
-
-    /// App metadata updated.
-    AppUpdated {
-        /// Organization the app belongs to.
-        organization_id: OrganizationId,
     },
 
     /// App deleted.
@@ -1418,9 +1437,6 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::OrganizationTeamDeleted { organization_id } => {
                 write!(f, "OrganizationTeamDeleted(org={})", organization_id)
             },
-            LedgerResponse::OrganizationTeamUpdated { organization_id } => {
-                write!(f, "OrganizationTeamUpdated(org={})", organization_id)
-            },
             LedgerResponse::OrganizationPurged { organization_id } => {
                 write!(f, "OrganizationPurged(id={})", organization_id)
             },
@@ -1485,9 +1501,6 @@ impl fmt::Display for LedgerResponse {
             },
             LedgerResponse::AppCreated { app_id, app_slug } => {
                 write!(f, "AppCreated(id={}, slug={})", app_id, app_slug)
-            },
-            LedgerResponse::AppUpdated { organization_id } => {
-                write!(f, "AppUpdated(org={})", organization_id)
             },
             LedgerResponse::AppDeleted { organization_id } => {
                 write!(f, "AppDeleted(org={})", organization_id)
@@ -2542,6 +2555,7 @@ mod tests {
             SystemRequest::MigrateExistingUsers { .. } => "global",
             SystemRequest::CreateOrganizationDirectory { .. } => "global",
             SystemRequest::WriteOrganizationProfile { .. } => "regional",
+            SystemRequest::UpdateOrganizationProfile { .. } => "regional",
             SystemRequest::UpdateOrganizationDirectoryStatus { .. } => "global",
 
             SystemRequest::CreateOnboardingUser { .. } => "global",
@@ -2554,6 +2568,8 @@ mod tests {
             SystemRequest::VerifyEmailCode { .. } => "regional",
             SystemRequest::CleanupExpiredOnboarding => "regional",
             SystemRequest::WriteOnboardingUserProfile { .. } => "regional",
+            SystemRequest::WriteTeamProfile { .. } => "regional",
+            SystemRequest::WriteAppProfile { .. } => "regional",
         }
     }
 
@@ -2621,5 +2637,116 @@ mod tests {
             admin: UserId::new(1),
         };
         assert_eq!(classify_system_request(&write_profile), "regional");
+
+        // UpdateOrganizationProfile — carries org name (PII), classified as regional
+        let update_profile = SystemRequest::UpdateOrganizationProfile {
+            organization: OrganizationId::new(1),
+            name: "Updated Org".to_string(),
+        };
+        assert_eq!(classify_system_request(&update_profile), "regional");
+
+        // WriteTeamProfile — carries team name (PII), classified as regional
+        let write_team = SystemRequest::WriteTeamProfile {
+            organization: OrganizationId::new(1),
+            team: TeamId::new(1),
+            name: "Engineering".to_string(),
+        };
+        assert_eq!(classify_system_request(&write_team), "regional");
+
+        // WriteAppProfile — carries app name + description (PII), classified as regional
+        let write_app = SystemRequest::WriteAppProfile {
+            organization: OrganizationId::new(1),
+            app: AppId::new(1),
+            name: "My App".to_string(),
+            description: Some("App description".to_string()),
+        };
+        assert_eq!(classify_system_request(&write_app), "regional");
+    }
+
+    /// Classifies whether a `LedgerRequest` contains plaintext PII.
+    ///
+    /// All `LedgerRequest` variants are "global" — they contain only numeric
+    /// IDs, slugs, hashes, and enums. Plaintext PII (names, descriptions)
+    /// has been moved to [`SystemRequest`] regional variants:
+    /// - Team names → [`SystemRequest::WriteTeamProfile`]
+    /// - App names/descriptions → [`SystemRequest::WriteAppProfile`]
+    ///
+    /// This exhaustive match ensures new variants are reviewed for PII before
+    /// they can be added without a compile error.
+    fn classify_ledger_request(req: &LedgerRequest) -> &'static str {
+        match req {
+            LedgerRequest::Write { .. } => "global",
+            LedgerRequest::CreateVault { .. } => "global",
+            LedgerRequest::DeleteOrganization { .. } => "global",
+            LedgerRequest::DeleteVault { .. } => "global",
+            LedgerRequest::SuspendOrganization { .. } => "global",
+            LedgerRequest::ResumeOrganization { .. } => "global",
+            LedgerRequest::RemoveOrganizationMember { .. } => "global",
+            LedgerRequest::UpdateOrganizationMemberRole { .. } => "global",
+            LedgerRequest::PurgeOrganization { .. } => "global",
+            LedgerRequest::StartMigration { .. } => "global",
+            LedgerRequest::CompleteMigration { .. } => "global",
+            LedgerRequest::UpdateVaultHealth { .. } => "global",
+            LedgerRequest::BatchWrite { .. } => "global",
+            LedgerRequest::CreateOrganizationTeam { .. } => "global",
+            LedgerRequest::DeleteOrganizationTeam { .. } => "global",
+            LedgerRequest::CreateApp { .. } => "global",
+            LedgerRequest::DeleteApp { .. } => "global",
+            LedgerRequest::SetAppEnabled { .. } => "global",
+            LedgerRequest::SetAppCredentialEnabled { .. } => "global",
+            LedgerRequest::RotateAppClientSecret { .. } => "global",
+            LedgerRequest::CreateAppClientAssertion { .. } => "global",
+            LedgerRequest::DeleteAppClientAssertion { .. } => "global",
+            LedgerRequest::SetAppClientAssertionEnabled { .. } => "global",
+            LedgerRequest::AddAppVault { .. } => "global",
+            LedgerRequest::UpdateAppVault { .. } => "global",
+            LedgerRequest::RemoveAppVault { .. } => "global",
+            LedgerRequest::CreateSigningKey { .. } => "global",
+            LedgerRequest::RotateSigningKey { .. } => "global",
+            LedgerRequest::RevokeSigningKey { .. } => "global",
+            LedgerRequest::TransitionSigningKeyRevoked { .. } => "global",
+            LedgerRequest::CreateRefreshToken { .. } => "global",
+            LedgerRequest::UseRefreshToken { .. } => "global",
+            LedgerRequest::RevokeTokenFamily { .. } => "global",
+            LedgerRequest::RevokeAllUserSessions { .. } => "global",
+            LedgerRequest::DeleteExpiredRefreshTokens => "global",
+            LedgerRequest::System { .. } => "global",
+            LedgerRequest::EncryptedSystem(_) => "regional",
+        }
+    }
+
+    /// Verifies that `classify_ledger_request` is exhaustive — adding a new
+    /// `LedgerRequest` variant will cause a compile error until classified.
+    #[test]
+    fn test_ledger_request_pii_classification_exhaustive() {
+        let write = LedgerRequest::Write {
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
+            transactions: vec![],
+            idempotency_key: [0; 16],
+            request_hash: 0,
+        };
+        assert_eq!(classify_ledger_request(&write), "global");
+
+        let create_team = LedgerRequest::CreateOrganizationTeam {
+            organization: OrganizationId::new(1),
+            slug: TeamSlug::new(100),
+        };
+        assert_eq!(classify_ledger_request(&create_team), "global");
+
+        let create_app = LedgerRequest::CreateApp {
+            organization: OrganizationId::new(1),
+            slug: AppSlug::new(200),
+        };
+        assert_eq!(classify_ledger_request(&create_app), "global");
+
+        // EncryptedSystem — REGIONAL (contains encrypted PII)
+        let encrypted =
+            LedgerRequest::EncryptedSystem(crate::entry_crypto::EncryptedSystemRequest {
+                sealed: vec![0; 48],
+                nonce: [0; 12],
+                user_id: UserId::new(1),
+            });
+        assert_eq!(classify_ledger_request(&encrypted), "regional");
     }
 }

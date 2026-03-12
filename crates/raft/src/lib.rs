@@ -57,6 +57,8 @@ pub mod dek_rewrap;
 #[doc(hidden)]
 pub mod dependency_health;
 #[doc(hidden)]
+pub mod entry_crypto;
+#[doc(hidden)]
 pub mod error;
 #[doc(hidden)]
 pub mod event_writer;

@@ -452,9 +452,10 @@ impl proto::user_service_server::UserService for UserService {
 
             let response = self
                 .ctx
-                .propose_regional(
+                .propose_regional_encrypted(
                     region,
                     SystemRequest::UpdateUserProfile { user_id, name },
+                    user_id,
                     &grpc_metadata,
                     &mut ctx,
                 )
@@ -788,9 +789,10 @@ impl proto::user_service_server::UserService for UserService {
         // Step 2 (Regional): Store the email record — plaintext stays in-region.
         let response = self
             .ctx
-            .propose_regional(
+            .propose_regional_encrypted(
                 region,
                 SystemRequest::CreateUserEmail { user_id, email: req.email },
+                user_id,
                 &grpc_metadata,
                 &mut ctx,
             )

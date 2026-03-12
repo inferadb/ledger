@@ -535,7 +535,6 @@ pub struct RequestContext {
 
     // Operation-specific (admin)
     admin_action: Option<&'static str>,
-    target_organization_name: Option<String>,
     retention_mode: Option<String>,
     recovery_force: Option<bool>,
 
@@ -611,7 +610,6 @@ impl RequestContext {
             found: None,
             value_size_bytes: None,
             admin_action: None,
-            target_organization_name: None,
             retention_mode: None,
             recovery_force: None,
             outcome: None,
@@ -848,11 +846,6 @@ impl RequestContext {
     /// Example values: "create_organization", "delete_vault", "recover_vault"
     pub fn set_admin_action(&mut self, action: &'static str) {
         self.admin_action = Some(action);
-    }
-
-    /// Sets the target organization name for organization operations.
-    pub fn set_target_organization_name(&mut self, name: &str) {
-        self.target_organization_name = Some(truncate_string(name, 128));
     }
 
     /// Sets the retention mode for vault creation.
@@ -1174,7 +1167,6 @@ impl RequestContext {
             found = self.found,
             value_size_bytes = self.value_size_bytes,
             admin_action = self.admin_action,
-            target_organization_name = self.target_organization_name.as_deref(),
             retention_mode = self.retention_mode.as_deref(),
             recovery_force = self.recovery_force,
             outcome = outcome_str,
@@ -2339,30 +2331,6 @@ mod tests {
     }
 
     #[test]
-    fn test_set_target_organization_name() {
-        let mut ctx = RequestContext::new("AdminService", "create_organization");
-        assert!(ctx.target_organization_name.is_none());
-
-        ctx.set_target_organization_name("my-organization");
-        assert!(matches!(ctx.target_organization_name, Some(ref n) if n == "my-organization"));
-
-        ctx.suppress_emission();
-    }
-
-    #[test]
-    fn test_target_organization_name_truncation() {
-        let mut ctx = RequestContext::new("AdminService", "create_organization");
-        let long_name = "x".repeat(200);
-
-        ctx.set_target_organization_name(&long_name);
-        // Should truncate to 125 chars + "..." = 128 chars total (max_len - 3 + 3)
-        assert!(matches!(ctx.target_organization_name, Some(ref n) if n.len() == 128));
-        assert!(matches!(ctx.target_organization_name, Some(ref n) if n.ends_with("...")));
-
-        ctx.suppress_emission();
-    }
-
-    #[test]
     fn test_set_retention_mode() {
         let mut ctx = RequestContext::new("AdminService", "create_vault");
         assert!(ctx.retention_mode.is_none());
@@ -2395,13 +2363,11 @@ mod tests {
         let mut ctx = RequestContext::new("AdminService", "create_organization");
         ctx.set_operation_type(OperationType::Admin);
         ctx.set_admin_action("create_organization");
-        ctx.set_target_organization_name("test-organization");
         ctx.set_node_id(12345);
         ctx.set_is_leader(true);
         ctx.set_raft_term(42);
 
         assert!(matches!(ctx.admin_action, Some("create_organization")));
-        assert!(matches!(ctx.target_organization_name, Some(ref n) if n == "test-organization"));
         assert!(matches!(ctx.node_id, Some(12345)));
         assert!(matches!(ctx.is_leader, Some(true)));
         assert!(matches!(ctx.raft_term, Some(42)));

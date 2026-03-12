@@ -56,6 +56,7 @@ use crate::{
     metrics::{
         record_background_job_duration, record_background_job_items, record_background_job_run,
     },
+    raft_manager::RaftManager,
     trace_context::TraceContext,
     types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig, RaftPayload, SystemRequest},
 };
@@ -220,6 +221,12 @@ pub struct SagaOrchestrator<B: StorageBackend + 'static> {
     /// Migration timeout configuration.
     #[builder(default)]
     migration_config: MigrationConfig,
+    /// Multi-Raft manager for routing PII-bearing requests to regional groups.
+    /// When present, REGIONAL `SystemRequest` variants are proposed to the
+    /// organization's or user's home region instead of GLOBAL Raft.
+    /// `None` in single-node test setups where all data shares one Raft group.
+    #[builder(default)]
+    manager: Option<Arc<RaftManager>>,
     /// Region key manager for signing key envelope encryption.
     /// Required for `CreateSigningKeySaga` execution (keypair generation
     /// needs RMK to encrypt the private key material).
@@ -251,6 +258,36 @@ pub struct SagaOrchestrator<B: StorageBackend + 'static> {
 }
 
 impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
+    /// Proposes a request to the appropriate Raft group for a given region.
+    ///
+    /// When `self.manager` is configured (multi-Raft), routes the request to
+    /// the region's Raft group. Falls back to `self.raft` (GLOBAL) when no
+    /// manager is present (single-node test setups).
+    async fn propose_to_region(
+        &self,
+        region: Region,
+        request: LedgerRequest,
+    ) -> std::result::Result<crate::types::LedgerResponse, SagaError> {
+        let payload = RaftPayload::new(request);
+        let result = match &self.manager {
+            Some(manager) => {
+                let region_group =
+                    manager.get_region_group(region).map_err(|e| SagaError::SagaRaftWrite {
+                        message: format!("Region {region} not active: {e}"),
+                        backtrace: snafu::Backtrace::generate(),
+                    })?;
+                region_group.raft().client_write(payload).await
+            },
+            None => self.raft.client_write(payload).await,
+        };
+        Ok(result
+            .map_err(|e| SagaError::SagaRaftWrite {
+                message: format!("{e:?}"),
+                backtrace: snafu::Backtrace::generate(),
+            })?
+            .data)
+    }
+
     /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
@@ -886,10 +923,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             },
 
             CreateUserSagaState::EmailReserved { user_id, user_slug, ref hmac_hex } => {
-                // Step 1 (Regional): Create User + UserEmail + SubjectKey
-                // This step targets the user's declared region.
-                // In the current single-Raft setup, all writes go through the same
-                // Raft group. With multi-Raft, this would route to the regional group.
+                // Step 1 (GLOBAL): Create User directory entry (no PII — IDs, slug, region).
                 let request = LedgerRequest::System(SystemRequest::CreateUser {
                     user: user_id,
                     admin: saga.input.admin,
@@ -1087,12 +1121,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     name,
                     admin: saga.input.admin,
                 });
-                self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
-                    SagaError::SagaRaftWrite {
-                        message: format!("{e:?}"),
-                        backtrace: snafu::Backtrace::generate(),
-                    }
-                })?;
+                self.propose_to_region(saga.input.region, request).await?;
 
                 saga.transition(CreateOrganizationSagaState::ProfileWritten {
                     organization_id,
@@ -1650,15 +1679,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     kid: kid.clone(),
                     region: saga.input.region,
                 });
-                let result =
-                    self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
-                        SagaError::SagaRaftWrite {
-                            message: format!("{e:?}"),
-                            backtrace: snafu::Backtrace::generate(),
-                        }
-                    })?;
-
-                let response = result.data;
+                let response = self.propose_to_region(saga.input.region, request).await?;
                 match response {
                     crate::types::LedgerResponse::OnboardingUserProfileWritten {
                         refresh_token_id,
@@ -2099,6 +2120,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         record_background_job_duration("saga_orchestrator", duration);
         record_background_job_run("saga_orchestrator", "success");
         record_background_job_items("saga_orchestrator", saga_count);
+
+        // Emit PII cache sizes for operational visibility
+        crate::metrics::record_saga_pii_cache_sizes(
+            self.pii_cache.lock().len(),
+            self.org_pii_cache.lock().len(),
+            self.crypto_cache.lock().len(),
+        );
 
         // Update watchdog heartbeat
         if let Some(ref handle) = self.watchdog_handle {

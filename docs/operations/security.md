@@ -270,6 +270,38 @@ Private key material is zeroized on drop (`Zeroizing<Vec<u8>>`). `EncodingKey` i
 
 See [INTEGRATION.md](../INTEGRATION.md) for key rotation runbook and [ADR: Network Trust Model](../adr/network-trust-model.md) for the trust boundary design.
 
+### Email Blinding Key
+
+Ledger uses HMAC-SHA256 with a 32-byte `EmailBlindingKey` to create privacy-preserving email uniqueness indices. The HMAC output (hex-encoded) is stored in the GLOBAL Raft log; the plaintext email stays in REGIONAL storage only.
+
+**Threat model:**
+
+- HMAC is a one-way function — the email cannot be recovered from the hash alone
+- Rainbow table attack requires both key compromise AND domain enumeration (same approach as Okta, Auth0, Cognito)
+- Domain-separated with `"email:"` prefix to prevent cross-context hash collisions
+- Key material uses `ZeroizeOnDrop` for memory safety
+
+**Deployment requirements:**
+
+- All nodes in a cluster must use the same blinding key (same bytes, same version)
+- Provision via secrets manager (Infisical, Vault, AWS Secrets Manager)
+- Set via environment variable: `INFERADB__LEDGER__EMAIL_BLINDING_KEY` (hex-encoded 32 bytes)
+- The key is never persisted in the Raft log — it is a runtime secret only
+
+**Key rotation procedure:**
+
+1. Generate a new 32-byte key and assign it the next version number
+2. Deploy the new key to all nodes via your secrets manager
+3. Call `RotateBlindingKey` RPC on any node — this proposes `SetBlindingKeyVersion` to Raft, updating the active version cluster-wide
+4. New email registrations use the new key version; existing HMACs remain valid under their original version
+5. Optionally run a background rehash to migrate existing entries to the new key (tracked via `UpdateRehashProgress` / `ClearRehashProgress` system requests)
+
+**Monitoring:**
+
+- Verify all nodes report the same key version via the health check endpoint
+- Monitor `SetBlindingKeyVersion` events in the audit log after rotation
+- Alert if any node starts with a different key version (email uniqueness enforcement will produce inconsistent results)
+
 ### Audit Trail
 
 Every write operation is recorded in the cryptographic chain:

@@ -992,6 +992,27 @@ pub fn record_background_job_items(job: &str, count: u64) {
     .increment(count);
 }
 
+// ─── Saga PII Cache Metrics ───────────────────────────────────
+
+/// In-memory user PII entries held by the saga orchestrator (gauge).
+const SAGA_PII_CACHE_SIZE: &str = "ledger_saga_pii_cache_size";
+
+/// In-memory organization PII entries held by the saga orchestrator (gauge).
+const SAGA_ORG_PII_CACHE_SIZE: &str = "ledger_saga_org_pii_cache_size";
+
+/// In-memory crypto material entries held by the saga orchestrator (gauge).
+const SAGA_CRYPTO_CACHE_SIZE: &str = "ledger_saga_crypto_cache_size";
+
+/// Records the current size of each in-memory PII cache in the saga
+/// orchestrator. Called at the end of each `run_cycle()` for operational
+/// visibility into memory-resident PII.
+#[inline]
+pub fn record_saga_pii_cache_sizes(pii: usize, org_pii: usize, crypto: usize) {
+    gauge!(SAGA_PII_CACHE_SIZE).set(pii as f64);
+    gauge!(SAGA_ORG_PII_CACHE_SIZE).set(org_pii as f64);
+    gauge!(SAGA_CRYPTO_CACHE_SIZE).set(crypto as f64);
+}
+
 // ─── DEK Re-Wrapping Metrics ──────────────────────────────────
 
 /// Total pages re-wrapped during RMK rotation (counter).

@@ -736,7 +736,6 @@ pub struct RefreshToken {
 /// by variant index — inserting or reordering variants breaks deserialization of
 /// existing data. Snapshot compaction is required before removing a variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(dead_code)] // Wired into register/get_email_hash in subsequent task
 pub enum EmailHashEntry {
     /// Email is owned by a fully registered user.
     Active(UserId),
@@ -750,7 +749,6 @@ pub enum EmailHashEntry {
 /// pre-allocated user and organization IDs, enabling O(1) idempotency checks
 /// in saga step 0 without additional lookups.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(dead_code)] // Constructed by CreateOnboardingUserSaga in subsequent task
 pub struct ProvisioningReservation {
     /// Pre-allocated user ID for the onboarding user.
     pub user_id: UserId,
@@ -772,7 +770,6 @@ pub struct ProvisioningReservation {
 /// exceeds `rate_limit_window_start` by 1 hour, the window resets and the
 /// count restarts at 1. This is O(1) in both space and time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(dead_code)] // Used by InitiateEmailVerification handler in subsequent task
 pub struct PendingEmailVerification {
     /// Plaintext email address (PII — stored regionally only).
     pub email: String,
@@ -802,7 +799,6 @@ pub struct PendingEmailVerification {
 /// PII is lost and the saga compensates. The client retries
 /// `complete_registration` with the same PII.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(dead_code)] // Used by VerifyEmailCode handler in subsequent task
 pub struct OnboardingAccount {
     /// `SHA-256(raw_token_bytes)` — lookup key for `complete_registration`.
     pub token_hash: [u8; 32],
