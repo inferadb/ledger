@@ -165,6 +165,10 @@ impl TestCluster {
             token_maintenance_interval_secs: 3, // Fast maintenance for integration tests
             // Low rate limits for fast integration testing of rate limit behavior
             rate_limit: Some(test_rate_limit_config()),
+            // Enable onboarding RPCs with a fixed test blinding key (32 bytes hex-encoded)
+            email_blinding_key: Some(
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+            ),
             ..inferadb_ledger_server::config::Config::default()
         };
 
@@ -254,15 +258,9 @@ impl TestCluster {
                 raft: Some(test_raft_config()),
                 saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
                 token_maintenance_interval_secs: 3, // Fast maintenance for integration tests
-                rate_limit: Some(
-                    inferadb_ledger_types::config::RateLimitConfig::builder()
-                        .client_burst(5_u64)
-                        .client_rate(2.0)
-                        .organization_burst(1000_u64)
-                        .organization_rate(500.0)
-                        .backpressure_threshold(100_u64)
-                        .build()
-                        .expect("valid rate limit config"),
+                rate_limit: Some(test_rate_limit_config()),
+                email_blinding_key: Some(
+                    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
                 ),
                 ..inferadb_ledger_server::config::Config::default()
             };
@@ -1057,4 +1055,16 @@ pub async fn create_token_client(
 > {
     let endpoint = format!("http://{}", addr);
     inferadb_ledger_proto::proto::token_service_client::TokenServiceClient::connect(endpoint).await
+}
+
+/// Helper to create a user service client for a node.
+#[allow(dead_code)]
+pub async fn create_user_client(
+    addr: SocketAddr,
+) -> Result<
+    inferadb_ledger_proto::proto::user_service_client::UserServiceClient<tonic::transport::Channel>,
+    tonic::transport::Error,
+> {
+    let endpoint = format!("http://{}", addr);
+    inferadb_ledger_proto::proto::user_service_client::UserServiceClient::connect(endpoint).await
 }

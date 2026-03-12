@@ -110,7 +110,6 @@ impl<B: StorageBackend + 'static> UserRetentionReaper<B> {
             // Retention period has elapsed — submit erasure proposal
             let request = LedgerRequest::System(SystemRequest::EraseUser {
                 user_id: user.id,
-                erased_by: "retention_reaper".to_string(),
                 region: user.region,
             });
 

@@ -288,6 +288,17 @@ pub struct Config {
     #[builder(default)]
     pub jwt: inferadb_ledger_types::config::JwtConfig,
 
+    // === Email Blinding Key ===
+    /// Hex-encoded 32-byte key for HMAC-based email hashing.
+    ///
+    /// Enables the onboarding flow (email verification, registration).
+    /// When absent, onboarding RPCs return FAILED_PRECONDITION.
+    ///
+    /// Generate with: `openssl rand -hex 32`
+    #[arg(long = "email-blinding-key", env = "INFERADB__LEDGER__EMAIL_BLINDING_KEY")]
+    #[serde(default)]
+    pub email_blinding_key: Option<String>,
+
     // === Saga Orchestrator ===
     /// Saga orchestrator configuration for cross-organization operations.
     ///
@@ -432,6 +443,7 @@ impl Default for Config {
             health_check: None,
             rate_limit: None,
             token_maintenance_interval_secs: default_token_maintenance_interval_secs(),
+            email_blinding_key: None,
         }
     }
 }

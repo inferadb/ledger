@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
     EmailVerifyTokenId, NodeId, Operation, OrganizationId, OrganizationSlug, Region, SetCondition,
@@ -22,9 +22,10 @@ use tracing::warn;
 use super::{
     keys::SystemKeys,
     types::{
-        EmailVerificationToken, ErasureAuditRecord, MigrationSummary, NodeInfo,
-        OrganizationRegistry, OrganizationStatus, SubjectKey, User, UserDirectoryEntry,
-        UserDirectoryStatus, UserEmail, UserMigrationEntry,
+        EmailHashEntry, EmailVerificationToken, ErasureAuditRecord, MigrationSummary, NodeInfo,
+        OnboardingAccount, OrganizationDirectoryEntry, OrganizationDirectoryStatus,
+        OrganizationRegistry, OrganizationStatus, PendingEmailVerification, SubjectKey, User,
+        UserDirectoryEntry, UserDirectoryStatus, UserEmail, UserMigrationEntry,
     },
 };
 use crate::state::{StateError, StateLayer};
@@ -284,6 +285,92 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             },
         ];
 
+        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+
+        Ok(())
+    }
+
+    /// Writes an organization directory entry to the GLOBAL control plane.
+    ///
+    /// Directory entries contain no PII — only opaque identifiers, region,
+    /// status, tier, and timestamp. Used for cross-region organization resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::Codec`] if serialization fails, or
+    /// [`SystemError::State`] if the write fails.
+    pub fn register_organization_directory(
+        &self,
+        entry: &OrganizationDirectoryEntry,
+    ) -> Result<()> {
+        let key = SystemKeys::organization_directory_key(entry.organization);
+        let value = encode(entry).context(CodecSnafu)?;
+
+        let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
+
+        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+
+        Ok(())
+    }
+
+    /// Returns an organization directory entry from the GLOBAL control plane.
+    ///
+    /// Returns `None` if no directory entry exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the read fails, or
+    /// [`SystemError::Codec`] if deserialization fails.
+    pub fn get_organization_directory(
+        &self,
+        organization: OrganizationId,
+    ) -> Result<Option<OrganizationDirectoryEntry>> {
+        let key = SystemKeys::organization_directory_key(organization);
+
+        let entity_opt =
+            self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
+        match entity_opt {
+            Some(entity) => {
+                let entry: OrganizationDirectoryEntry =
+                    decode(&entity.value).context(CodecSnafu)?;
+                Ok(Some(entry))
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Updates the status of an organization directory entry.
+    ///
+    /// Rejected if the current status is `Deleted` (permanent tombstone).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::NotFound`] if the entry doesn't exist,
+    /// [`SystemError::AlreadyExists`] if the entry is already deleted,
+    /// or [`SystemError::State`]/[`SystemError::Codec`] on I/O failure.
+    pub fn update_organization_directory_status(
+        &self,
+        organization: OrganizationId,
+        status: OrganizationDirectoryStatus,
+        block_timestamp: DateTime<Utc>,
+    ) -> Result<()> {
+        let mut entry = self.get_organization_directory(organization)?.ok_or_else(|| {
+            SystemError::NotFound { entity: format!("org_directory:{organization}") }
+        })?;
+
+        if entry.status == OrganizationDirectoryStatus::Deleted {
+            return Err(SystemError::AlreadyExists {
+                entity: format!("org_directory:{organization} is deleted (permanent tombstone)"),
+            });
+        }
+
+        entry.status = status;
+        entry.updated_at = Some(block_timestamp);
+
+        let key = SystemKeys::organization_directory_key(organization);
+        let value = encode(&entry).context(CodecSnafu)?;
+
+        let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
         self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(())
@@ -630,6 +717,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         &self,
         user_id: UserId,
         status: UserDirectoryStatus,
+        block_timestamp: DateTime<Utc>,
     ) -> Result<()> {
         let mut entry = self
             .get_user_directory(user_id)?
@@ -651,7 +739,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             entry.region = None;
             entry.updated_at = None;
         } else {
-            entry.updated_at = Some(Utc::now());
+            entry.updated_at = Some(block_timestamp);
         }
 
         let key = SystemKeys::user_directory_key(user_id);
@@ -750,7 +838,8 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     /// or [`SystemError::State`] for other storage failures.
     pub fn register_email_hash(&self, hmac_hex: &str, user_id: UserId) -> Result<()> {
         let key = SystemKeys::email_hash_index_key(hmac_hex);
-        let value = user_id.value().to_string().into_bytes();
+        let entry = EmailHashEntry::Active(user_id);
+        let value = encode(&entry).context(CodecSnafu)?;
 
         let ops = vec![Operation::SetEntity {
             key: key.clone(),
@@ -770,25 +859,25 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         Ok(())
     }
 
-    /// Looks up a user ID by email HMAC hash.
+    /// Looks up an email hash entry by HMAC hex string.
     ///
-    /// Returns `None` if no user is registered with the given HMAC.
+    /// Returns `None` if no entry exists for the given HMAC. The caller must
+    /// inspect the returned [`EmailHashEntry`] to distinguish between an
+    /// `Active` user and a `Provisioning` reservation.
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the read fails.
-    pub fn get_email_hash(&self, hmac_hex: &str) -> Result<Option<UserId>> {
+    /// Returns [`SystemError::Codec`] if the stored value cannot be
+    /// deserialized, or [`SystemError::State`] if the read fails.
+    pub fn get_email_hash(&self, hmac_hex: &str) -> Result<Option<EmailHashEntry>> {
         let key = SystemKeys::email_hash_index_key(hmac_hex);
 
         let entity_opt =
             self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
         match entity_opt {
             Some(entity) => {
-                let id_str = String::from_utf8_lossy(&entity.value);
-                let id: i64 = id_str.parse().map_err(|_| SystemError::NotFound {
-                    entity: format!("email_hash:{hmac_hex}"),
-                })?;
-                Ok(Some(UserId::new(id)))
+                let entry: EmailHashEntry = decode(&entity.value).context(CodecSnafu)?;
+                Ok(Some(entry))
             },
             None => Ok(None),
         }
@@ -935,6 +1024,140 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     }
 
     // ========================================================================
+    // Onboarding CRUD (REGIONAL store, ephemeral)
+    // ========================================================================
+
+    /// Stores or overwrites a pending email verification record.
+    ///
+    /// Overwrites any existing record for the same `email_hmac`, which is the
+    /// correct behavior when a user re-initiates verification (the old code
+    /// is replaced by a new one).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::Codec`] if serialization fails, or
+    /// [`SystemError::State`] if the write fails.
+    #[allow(dead_code)] // Used by InitiateEmailVerification handler
+    pub fn store_email_verification(
+        &self,
+        email_hmac: &str,
+        record: &PendingEmailVerification,
+    ) -> Result<()> {
+        let key = SystemKeys::onboard_verify_key(email_hmac);
+        let value = encode(record).context(CodecSnafu)?;
+
+        let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
+
+        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        Ok(())
+    }
+
+    /// Reads a pending email verification record by email HMAC.
+    ///
+    /// Returns `None` if no verification is pending for the given HMAC.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::Codec`] if deserialization fails, or
+    /// [`SystemError::State`] if the read fails.
+    #[allow(dead_code)] // Used by VerifyEmailCode handler
+    pub fn get_email_verification(
+        &self,
+        email_hmac: &str,
+    ) -> Result<Option<PendingEmailVerification>> {
+        let key = SystemKeys::onboard_verify_key(email_hmac);
+        let entity_opt =
+            self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
+        match entity_opt {
+            Some(entity) => {
+                let record: PendingEmailVerification = decode(&entity.value).context(CodecSnafu)?;
+                Ok(Some(record))
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Deletes a pending email verification record.
+    ///
+    /// No-op if the record doesn't exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the delete fails.
+    #[allow(dead_code)] // Used by onboarding GC job
+    pub fn delete_email_verification(&self, email_hmac: &str) -> Result<()> {
+        let key = SystemKeys::onboard_verify_key(email_hmac);
+        let ops = vec![Operation::DeleteEntity { key }];
+        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        Ok(())
+    }
+
+    /// Stores or overwrites an onboarding account record.
+    ///
+    /// Overwrites any existing record for the same `email_hmac`, which is the
+    /// correct behavior when a user re-verifies (the old token is invalidated
+    /// and a new one is issued).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::Codec`] if serialization fails, or
+    /// [`SystemError::State`] if the write fails.
+    #[allow(dead_code)] // Used by VerifyEmailCode handler
+    pub fn store_onboarding_account(
+        &self,
+        email_hmac: &str,
+        account: &OnboardingAccount,
+    ) -> Result<()> {
+        let key = SystemKeys::onboard_account_key(email_hmac);
+        let value = encode(account).context(CodecSnafu)?;
+
+        let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
+
+        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        Ok(())
+    }
+
+    /// Reads an onboarding account record by email HMAC.
+    ///
+    /// Returns `None` if no onboarding account exists for the given HMAC.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::Codec`] if deserialization fails, or
+    /// [`SystemError::State`] if the read fails.
+    #[allow(dead_code)] // Used by CompleteRegistration handler
+    pub fn get_onboarding_account_by_hmac(
+        &self,
+        email_hmac: &str,
+    ) -> Result<Option<OnboardingAccount>> {
+        let key = SystemKeys::onboard_account_key(email_hmac);
+        let entity_opt =
+            self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
+        match entity_opt {
+            Some(entity) => {
+                let account: OnboardingAccount = decode(&entity.value).context(CodecSnafu)?;
+                Ok(Some(account))
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Deletes an onboarding account record.
+    ///
+    /// No-op if the record doesn't exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the delete fails.
+    #[allow(dead_code)] // Used by CompleteRegistration handler
+    pub fn delete_onboarding_account(&self, email_hmac: &str) -> Result<()> {
+        let key = SystemKeys::onboard_account_key(email_hmac);
+        let ops = vec![Operation::DeleteEntity { key }];
+        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        Ok(())
+    }
+
+    // ========================================================================
     // Crypto-Shredding Erasure (GLOBAL control plane)
     // ========================================================================
 
@@ -956,7 +1179,12 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     /// Returns [`SystemError::NotFound`] if the user directory entry does not
     /// exist, or [`SystemError::Codec`] / [`SystemError::State`] if any
     /// underlying operation fails.
-    pub fn erase_user(&self, user_id: UserId, erased_by: &str, region: Region) -> Result<()> {
+    pub fn erase_user(
+        &self,
+        user_id: UserId,
+        region: Region,
+        block_timestamp: DateTime<Utc>,
+    ) -> Result<()> {
         // Step 1: Read directory entry (may already be Deleted on re-execution).
         let entry_opt = self.get_user_directory(user_id)?;
 
@@ -966,7 +1194,11 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         if let Some(entry) = &entry_opt
             && entry.status != UserDirectoryStatus::Deleted
         {
-            self.update_user_directory_status(user_id, UserDirectoryStatus::Deleted)?;
+            self.update_user_directory_status(
+                user_id,
+                UserDirectoryStatus::Deleted,
+                block_timestamp,
+            )?;
         }
 
         // Step 3: Remove global email hash index entries for this user.
@@ -981,10 +1213,14 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             )
             .context(StateSnafu)?;
 
-        let user_id_bytes = user_id.value().to_string().into_bytes();
         let mut delete_ops: Vec<Operation> = Vec::new();
         for entity in &email_hashes {
-            if entity.value == user_id_bytes {
+            let belongs_to_user = match decode::<EmailHashEntry>(&entity.value) {
+                Ok(EmailHashEntry::Active(uid)) => uid == user_id,
+                Ok(EmailHashEntry::Provisioning(ref res)) => res.user_id == user_id,
+                Err(_) => false,
+            };
+            if belongs_to_user {
                 let key = String::from_utf8_lossy(&entity.key).to_string();
                 delete_ops.push(Operation::DeleteEntity { key });
             }
@@ -1001,12 +1237,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         self.state.apply_operations(SYSTEM_VAULT_ID, &delete_key_ops, 0).context(StateSnafu)?;
 
         // Step 5: Write erasure audit record (insert-if-absent for idempotency).
-        let audit_record = ErasureAuditRecord {
-            user_id,
-            erased_at: Utc::now(),
-            erased_by: erased_by.to_string(),
-            region,
-        };
+        let audit_record = ErasureAuditRecord { user_id, erased_at: block_timestamp, region };
         let audit_key = SystemKeys::erasure_audit_key(user_id);
         let audit_value = encode(&audit_record).context(CodecSnafu)?;
 
@@ -1441,10 +1672,11 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         Ok(emails)
     }
 
-    /// Partially updates a user record.
+    /// Updates a user's role or primary email (non-PII fields).
     ///
-    /// Only fields with `Some` values are updated. When changing the primary
-    /// email, verifies that the email belongs to this user.
+    /// Proposed to the GLOBAL Raft group. At least one field must be `Some`.
+    /// When changing the primary email, verifies that the email belongs to
+    /// this user.
     ///
     /// # Errors
     ///
@@ -1454,7 +1686,6 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     pub fn update_user(
         &self,
         user_id: UserId,
-        name: Option<&str>,
         role: Option<UserRole>,
         primary_email: Option<UserEmailId>,
     ) -> Result<User> {
@@ -1462,9 +1693,6 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             .get_user(user_id)?
             .ok_or_else(|| SystemError::NotFound { entity: format!("user:{user_id}") })?;
 
-        if let Some(name) = name {
-            user.name = name.to_string();
-        }
         if let Some(role) = role {
             user.role = role;
         }
@@ -1479,6 +1707,31 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             }
             user.email = email_id;
         }
+        user.updated_at = Utc::now();
+
+        let key = SystemKeys::user_key(user_id);
+        let value = encode(&user).context(CodecSnafu)?;
+        let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
+        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+
+        Ok(user)
+    }
+
+    /// Updates a user's display name (PII field).
+    ///
+    /// Proposed to the REGIONAL Raft group to keep PII out of the GLOBAL log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::NotFound`] if the user does not exist,
+    /// [`SystemError::Codec`] if serialization fails, or
+    /// [`SystemError::State`] for storage failures.
+    pub fn update_user_profile(&self, user_id: UserId, name: &str) -> Result<User> {
+        let mut user = self
+            .get_user(user_id)?
+            .ok_or_else(|| SystemError::NotFound { entity: format!("user:{user_id}") })?;
+
+        user.name = name.to_string();
         user.updated_at = Utc::now();
 
         let key = SystemKeys::user_key(user_id);
@@ -1810,6 +2063,7 @@ mod tests {
     use inferadb_ledger_types::{Region, UserRole, UserSlug, UserStatus};
 
     use super::*;
+    use crate::system::{OrganizationTier, ProvisioningReservation};
 
     fn create_test_service() -> SystemOrganizationService<inferadb_ledger_store::InMemoryBackend> {
         crate::system::create_test_service()
@@ -2142,7 +2396,12 @@ mod tests {
         let entry = make_directory_entry(1, 10001, Region::US_EAST_VA);
         svc.register_user_directory(&entry).unwrap();
 
-        svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Migrating).unwrap();
+        svc.update_user_directory_status(
+            UserId::new(1),
+            UserDirectoryStatus::Migrating,
+            Utc::now(),
+        )
+        .unwrap();
 
         let updated = svc.get_user_directory(UserId::new(1)).unwrap().unwrap();
         assert_eq!(updated.status, UserDirectoryStatus::Migrating);
@@ -2158,7 +2417,8 @@ mod tests {
         let entry = make_directory_entry(1, 10001, Region::US_EAST_VA);
         svc.register_user_directory(&entry).unwrap();
 
-        svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Deleted).unwrap();
+        svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Deleted, Utc::now())
+            .unwrap();
 
         let tombstone = svc.get_user_directory(UserId::new(1)).unwrap().unwrap();
         assert_eq!(tombstone.status, UserDirectoryStatus::Deleted);
@@ -2177,8 +2437,11 @@ mod tests {
     #[test]
     fn test_update_user_directory_status_not_found() {
         let svc = create_test_service();
-        let result =
-            svc.update_user_directory_status(UserId::new(999), UserDirectoryStatus::Deleted);
+        let result = svc.update_user_directory_status(
+            UserId::new(999),
+            UserDirectoryStatus::Deleted,
+            Utc::now(),
+        );
         assert!(result.is_err());
     }
 
@@ -2190,19 +2453,31 @@ mod tests {
         svc.register_user_directory(&entry).unwrap();
 
         // Delete the user
-        svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Deleted).unwrap();
+        svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Deleted, Utc::now())
+            .unwrap();
 
         // Deleted → Active rejected (permanent tombstone)
-        let result = svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Active);
+        let result = svc.update_user_directory_status(
+            UserId::new(1),
+            UserDirectoryStatus::Active,
+            Utc::now(),
+        );
         assert!(result.is_err());
 
         // Deleted → Migrating rejected
-        let result =
-            svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Migrating);
+        let result = svc.update_user_directory_status(
+            UserId::new(1),
+            UserDirectoryStatus::Migrating,
+            Utc::now(),
+        );
         assert!(result.is_err());
 
         // Deleted → Deleted rejected
-        let result = svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Deleted);
+        let result = svc.update_user_directory_status(
+            UserId::new(1),
+            UserDirectoryStatus::Deleted,
+            Utc::now(),
+        );
         assert!(result.is_err());
     }
 
@@ -2213,7 +2488,8 @@ mod tests {
         let entry = make_directory_entry(1, 10001, Region::US_EAST_VA);
         svc.register_user_directory(&entry).unwrap();
 
-        svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Deleted).unwrap();
+        svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Deleted, Utc::now())
+            .unwrap();
 
         // Cannot update region on deleted entry
         let result = svc.update_user_directory_region(UserId::new(1), Region::IE_EAST_DUBLIN);
@@ -2262,7 +2538,12 @@ mod tests {
         svc.register_user_directory(&entry).unwrap();
 
         // Start migration
-        svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Migrating).unwrap();
+        svc.update_user_directory_status(
+            UserId::new(1),
+            UserDirectoryStatus::Migrating,
+            Utc::now(),
+        )
+        .unwrap();
 
         let migrating = svc.get_user_directory(UserId::new(1)).unwrap().unwrap();
         assert_eq!(migrating.status, UserDirectoryStatus::Migrating);
@@ -2271,7 +2552,8 @@ mod tests {
         svc.update_user_directory_region(UserId::new(1), Region::IE_EAST_DUBLIN).unwrap();
 
         // Complete migration
-        svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Active).unwrap();
+        svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Active, Utc::now())
+            .unwrap();
 
         let completed = svc.get_user_directory(UserId::new(1)).unwrap().unwrap();
         assert_eq!(completed.status, UserDirectoryStatus::Active);
@@ -2288,7 +2570,8 @@ mod tests {
         let entry = make_directory_entry(1, 10001, Region::US_EAST_VA);
         svc.register_user_directory(&entry).unwrap();
 
-        svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Deleted).unwrap();
+        svc.update_user_directory_status(UserId::new(1), UserDirectoryStatus::Deleted, Utc::now())
+            .unwrap();
 
         // Entry still exists as tombstone
         let tombstone = svc.get_user_directory(UserId::new(1)).unwrap();
@@ -2355,7 +2638,7 @@ mod tests {
         svc.register_email_hash(hmac, user_id).unwrap();
 
         let result = svc.get_email_hash(hmac).unwrap();
-        assert_eq!(result, Some(user_id));
+        assert_eq!(result, Some(EmailHashEntry::Active(user_id)));
     }
 
     #[test]
@@ -2378,7 +2661,7 @@ mod tests {
         assert!(matches!(result.unwrap_err(), SystemError::AlreadyExists { .. }));
 
         // Original mapping preserved
-        assert_eq!(svc.get_email_hash(hmac).unwrap(), Some(UserId::new(1)));
+        assert_eq!(svc.get_email_hash(hmac).unwrap(), Some(EmailHashEntry::Active(UserId::new(1))));
     }
 
     #[test]
@@ -2409,8 +2692,14 @@ mod tests {
         svc.register_email_hash(&hmac_a, UserId::new(1)).unwrap();
         svc.register_email_hash(&hmac_b, UserId::new(2)).unwrap();
 
-        assert_eq!(svc.get_email_hash(&hmac_a).unwrap(), Some(UserId::new(1)));
-        assert_eq!(svc.get_email_hash(&hmac_b).unwrap(), Some(UserId::new(2)));
+        assert_eq!(
+            svc.get_email_hash(&hmac_a).unwrap(),
+            Some(EmailHashEntry::Active(UserId::new(1)))
+        );
+        assert_eq!(
+            svc.get_email_hash(&hmac_b).unwrap(),
+            Some(EmailHashEntry::Active(UserId::new(2)))
+        );
     }
 
     #[test]
@@ -2423,7 +2712,10 @@ mod tests {
 
         // After removal, the same HMAC can be claimed by a different user
         svc.register_email_hash(&hmac, UserId::new(2)).unwrap();
-        assert_eq!(svc.get_email_hash(&hmac).unwrap(), Some(UserId::new(2)));
+        assert_eq!(
+            svc.get_email_hash(&hmac).unwrap(),
+            Some(EmailHashEntry::Active(UserId::new(2)))
+        );
     }
 
     // ========================================================================
@@ -2545,7 +2837,7 @@ mod tests {
         svc.register_user_directory(&entry).unwrap();
 
         // Erase user
-        svc.erase_user(user_id, "admin@test.com", Region::US_EAST_VA).unwrap();
+        svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
 
         // Subject key is destroyed
         assert!(svc.get_subject_key(user_id).unwrap().is_none());
@@ -2559,7 +2851,7 @@ mod tests {
         let entry = make_directory_entry(55, 10055, Region::US_EAST_VA);
         svc.register_user_directory(&entry).unwrap();
 
-        svc.erase_user(user_id, "gdpr-bot", Region::US_EAST_VA).unwrap();
+        svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
 
         // Tombstone retains only user_id and status=Deleted
         let tombstone = svc.get_user_directory(user_id).unwrap().unwrap();
@@ -2591,7 +2883,7 @@ mod tests {
         assert!(svc.get_email_hash("hash_beta").unwrap().is_some());
 
         // Erase user
-        svc.erase_user(user_id, "compliance-officer", Region::IE_EAST_DUBLIN).unwrap();
+        svc.erase_user(user_id, Region::IE_EAST_DUBLIN, Utc::now()).unwrap();
 
         // Email hashes removed
         assert!(svc.get_email_hash("hash_alpha").unwrap().is_none());
@@ -2606,11 +2898,10 @@ mod tests {
         let entry = make_directory_entry(88, 10088, Region::US_EAST_VA);
         svc.register_user_directory(&entry).unwrap();
 
-        svc.erase_user(user_id, "dpo@company.com", Region::US_EAST_VA).unwrap();
+        svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
 
         let audit = svc.get_erasure_audit(user_id).unwrap().unwrap();
         assert_eq!(audit.user_id, user_id);
-        assert_eq!(audit.erased_by, "dpo@company.com");
         assert_eq!(audit.region, Region::US_EAST_VA);
     }
 
@@ -2625,10 +2916,10 @@ mod tests {
         svc.register_email_hash("idempotent_hash", user_id).unwrap();
 
         // First erasure
-        svc.erase_user(user_id, "admin", Region::US_EAST_VA).unwrap();
+        svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
 
         // Second erasure (idempotent — should not error)
-        svc.erase_user(user_id, "admin", Region::US_EAST_VA).unwrap();
+        svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
 
         // State is the same after both calls
         assert!(svc.get_subject_key(user_id).unwrap().is_none());
@@ -2646,7 +2937,7 @@ mod tests {
         // No directory entry — erase should still succeed (idempotent,
         // handles the case where directory was never created or already
         // cleaned up).
-        svc.erase_user(user_id, "system", Region::US_EAST_VA).unwrap();
+        svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
 
         // Audit record still created
         assert!(svc.get_erasure_audit(user_id).unwrap().is_some());
@@ -2669,7 +2960,7 @@ mod tests {
         svc.register_email_hash("user2_hash", UserId::new(2)).unwrap();
 
         // Erase user 1 only
-        svc.erase_user(UserId::new(1), "admin", Region::US_EAST_VA).unwrap();
+        svc.erase_user(UserId::new(1), Region::US_EAST_VA, Utc::now()).unwrap();
 
         // User 2 is completely unaffected
         let user2 = svc.get_user_directory(UserId::new(2)).unwrap().unwrap();
@@ -2692,8 +2983,8 @@ mod tests {
         svc.register_user_directory(&entry1).unwrap();
         svc.register_user_directory(&entry2).unwrap();
 
-        svc.erase_user(UserId::new(10), "admin", Region::US_EAST_VA).unwrap();
-        svc.erase_user(UserId::new(20), "admin", Region::IE_EAST_DUBLIN).unwrap();
+        svc.erase_user(UserId::new(10), Region::US_EAST_VA, Utc::now()).unwrap();
+        svc.erase_user(UserId::new(20), Region::IE_EAST_DUBLIN, Utc::now()).unwrap();
 
         let erased = svc.list_erased_user_ids().unwrap();
         assert_eq!(erased.len(), 2);
@@ -2728,7 +3019,7 @@ mod tests {
         assert!(svc.get_erasure_audit(user_id).unwrap().is_none());
 
         // Erase
-        svc.erase_user(user_id, "gdpr-request-123", Region::US_EAST_VA).unwrap();
+        svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
 
         // Verify everything is gone/tombstoned
         let tombstone = svc.get_user_directory(user_id).unwrap().unwrap();
@@ -2745,7 +3036,6 @@ mod tests {
 
         // Audit record exists
         let audit = svc.get_erasure_audit(user_id).unwrap().unwrap();
-        assert_eq!(audit.erased_by, "gdpr-request-123");
         assert_eq!(audit.region, Region::US_EAST_VA);
 
         // Listed in erased users
@@ -2901,7 +3191,7 @@ mod tests {
 
         // Verify email hash index created.
         let email_hash_user = svc.get_email_hash("abc123def456").unwrap();
-        assert_eq!(email_hash_user, Some(UserId::new(1)));
+        assert_eq!(email_hash_user, Some(EmailHashEntry::Active(UserId::new(1))));
 
         // Verify subject key stored.
         let subject_key = svc.get_subject_key(UserId::new(1)).unwrap().unwrap();
@@ -3147,7 +3437,7 @@ mod tests {
             )
             .unwrap();
 
-        let updated = svc.update_user(user_id, Some("Alicia"), None, None).unwrap();
+        let updated = svc.update_user_profile(user_id, "Alicia").unwrap();
         assert_eq!(updated.name, "Alicia");
     }
 
@@ -3164,7 +3454,7 @@ mod tests {
             )
             .unwrap();
 
-        let updated = svc.update_user(user_id, None, Some(UserRole::Admin), None).unwrap();
+        let updated = svc.update_user(user_id, Some(UserRole::Admin), None).unwrap();
         assert_eq!(updated.role, UserRole::Admin);
     }
 
@@ -3182,7 +3472,7 @@ mod tests {
             .unwrap();
 
         let new_email_id = svc.create_user_email_record(user_id, "alice2@example.com").unwrap();
-        let updated = svc.update_user(user_id, None, None, Some(new_email_id)).unwrap();
+        let updated = svc.update_user(user_id, None, Some(new_email_id)).unwrap();
         assert_eq!(updated.email, new_email_id);
     }
 
@@ -3208,7 +3498,14 @@ mod tests {
             )
             .unwrap();
 
-        let result = svc.update_user(user_id, None, None, Some(other_email_id));
+        let result = svc.update_user(user_id, None, Some(other_email_id));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_update_user_profile_not_found() {
+        let svc = create_test_service();
+        let result = svc.update_user_profile(UserId::new(9999), "NewName");
         assert!(result.is_err());
     }
 
@@ -3398,5 +3695,363 @@ mod tests {
 
         let dir = svc.get_user_directory_by_slug(slug).unwrap().unwrap();
         assert_eq!(dir.user, user_id);
+    }
+
+    // ========================================================================
+    // Onboarding CRUD Tests
+    // ========================================================================
+
+    #[test]
+    fn test_store_and_get_email_verification() {
+        let svc = create_test_service();
+        let hmac = "verify_hmac_abc123";
+        let now = Utc::now();
+        let record = PendingEmailVerification {
+            email: "alice@example.com".to_string(),
+            code_hash: [0xAB; 32],
+            region: Region::US_EAST_VA,
+            expires_at: now,
+            attempts: 0,
+            rate_limit_count: 1,
+            rate_limit_window_start: now,
+        };
+
+        svc.store_email_verification(hmac, &record).unwrap();
+        let result = svc.get_email_verification(hmac).unwrap();
+        assert_eq!(result, Some(record));
+    }
+
+    #[test]
+    fn test_get_email_verification_not_found() {
+        let svc = create_test_service();
+        let result = svc.get_email_verification("nonexistent").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_store_email_verification_overwrites() {
+        let svc = create_test_service();
+        let hmac = "overwrite_hmac";
+        let now = Utc::now();
+
+        let record1 = PendingEmailVerification {
+            email: "alice@example.com".to_string(),
+            code_hash: [0x11; 32],
+            region: Region::US_EAST_VA,
+            expires_at: now,
+            attempts: 0,
+            rate_limit_count: 1,
+            rate_limit_window_start: now,
+        };
+        svc.store_email_verification(hmac, &record1).unwrap();
+
+        let record2 = PendingEmailVerification {
+            email: "alice@example.com".to_string(),
+            code_hash: [0x22; 32],
+            region: Region::US_EAST_VA,
+            expires_at: now,
+            attempts: 0,
+            rate_limit_count: 2,
+            rate_limit_window_start: now,
+        };
+        svc.store_email_verification(hmac, &record2).unwrap();
+
+        let result = svc.get_email_verification(hmac).unwrap().unwrap();
+        assert_eq!(result.code_hash, [0x22; 32]);
+        assert_eq!(result.rate_limit_count, 2);
+    }
+
+    #[test]
+    fn test_delete_email_verification() {
+        let svc = create_test_service();
+        let hmac = "delete_verify_hmac";
+        let now = Utc::now();
+        let record = PendingEmailVerification {
+            email: "bob@test.com".to_string(),
+            code_hash: [0xCC; 32],
+            region: Region::IE_EAST_DUBLIN,
+            expires_at: now,
+            attempts: 1,
+            rate_limit_count: 1,
+            rate_limit_window_start: now,
+        };
+
+        svc.store_email_verification(hmac, &record).unwrap();
+        assert!(svc.get_email_verification(hmac).unwrap().is_some());
+
+        svc.delete_email_verification(hmac).unwrap();
+        assert_eq!(svc.get_email_verification(hmac).unwrap(), None);
+    }
+
+    #[test]
+    fn test_delete_email_verification_nonexistent_is_noop() {
+        let svc = create_test_service();
+        svc.delete_email_verification("does_not_exist").unwrap();
+    }
+
+    #[test]
+    fn test_store_and_get_onboarding_account() {
+        let svc = create_test_service();
+        let hmac = "account_hmac_xyz";
+        let now = Utc::now();
+        let account = OnboardingAccount {
+            token_hash: [0xDD; 32],
+            region: Region::JP_EAST_TOKYO,
+            expires_at: now,
+            created_at: now,
+        };
+
+        svc.store_onboarding_account(hmac, &account).unwrap();
+        let result = svc.get_onboarding_account_by_hmac(hmac).unwrap();
+        assert_eq!(result, Some(account));
+    }
+
+    #[test]
+    fn test_get_onboarding_account_not_found() {
+        let svc = create_test_service();
+        let result = svc.get_onboarding_account_by_hmac("nonexistent").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_store_onboarding_account_overwrites() {
+        let svc = create_test_service();
+        let hmac = "overwrite_account";
+        let now = Utc::now();
+
+        let account1 = OnboardingAccount {
+            token_hash: [0x11; 32],
+            region: Region::US_EAST_VA,
+            expires_at: now,
+            created_at: now,
+        };
+        svc.store_onboarding_account(hmac, &account1).unwrap();
+
+        let account2 = OnboardingAccount {
+            token_hash: [0x22; 32],
+            region: Region::US_EAST_VA,
+            expires_at: now,
+            created_at: now,
+        };
+        svc.store_onboarding_account(hmac, &account2).unwrap();
+
+        let result = svc.get_onboarding_account_by_hmac(hmac).unwrap().unwrap();
+        assert_eq!(result.token_hash, [0x22; 32]);
+    }
+
+    #[test]
+    fn test_delete_onboarding_account() {
+        let svc = create_test_service();
+        let hmac = "delete_account_hmac";
+        let now = Utc::now();
+        let account = OnboardingAccount {
+            token_hash: [0xEE; 32],
+            region: Region::IE_EAST_DUBLIN,
+            expires_at: now,
+            created_at: now,
+        };
+
+        svc.store_onboarding_account(hmac, &account).unwrap();
+        assert!(svc.get_onboarding_account_by_hmac(hmac).unwrap().is_some());
+
+        svc.delete_onboarding_account(hmac).unwrap();
+        assert_eq!(svc.get_onboarding_account_by_hmac(hmac).unwrap(), None);
+    }
+
+    #[test]
+    fn test_delete_onboarding_account_nonexistent_is_noop() {
+        let svc = create_test_service();
+        svc.delete_onboarding_account("does_not_exist").unwrap();
+    }
+
+    #[test]
+    fn test_verification_and_account_independent() {
+        let svc = create_test_service();
+        let hmac = "independent_hmac";
+        let now = Utc::now();
+
+        let verify = PendingEmailVerification {
+            email: "test@test.com".to_string(),
+            code_hash: [0xAA; 32],
+            region: Region::US_EAST_VA,
+            expires_at: now,
+            attempts: 0,
+            rate_limit_count: 1,
+            rate_limit_window_start: now,
+        };
+        let account = OnboardingAccount {
+            token_hash: [0xBB; 32],
+            region: Region::US_EAST_VA,
+            expires_at: now,
+            created_at: now,
+        };
+
+        // Store both under same HMAC — different key prefixes
+        svc.store_email_verification(hmac, &verify).unwrap();
+        svc.store_onboarding_account(hmac, &account).unwrap();
+
+        // Both retrievable independently
+        assert!(svc.get_email_verification(hmac).unwrap().is_some());
+        assert!(svc.get_onboarding_account_by_hmac(hmac).unwrap().is_some());
+
+        // Delete verification doesn't affect account
+        svc.delete_email_verification(hmac).unwrap();
+        assert_eq!(svc.get_email_verification(hmac).unwrap(), None);
+        assert!(svc.get_onboarding_account_by_hmac(hmac).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_erase_user_removes_provisioning_email_hash() {
+        let svc = create_test_service();
+        let user_id = UserId::new(200);
+        let other_user_id = UserId::new(201);
+
+        let entry = make_directory_entry(200, 10200, Region::US_EAST_VA);
+        svc.register_user_directory(&entry).unwrap();
+
+        // Store an Active entry for user 200
+        svc.register_email_hash("hash_active", user_id).unwrap();
+
+        // Store a Provisioning entry for user 200 directly via raw storage
+        let prov_entry = EmailHashEntry::Provisioning(ProvisioningReservation {
+            user_id,
+            organization_id: OrganizationId::new(1),
+        });
+        let prov_key = SystemKeys::email_hash_index_key("hash_provisioning");
+        let prov_value = encode(&prov_entry).unwrap();
+        let ops = vec![Operation::SetEntity {
+            key: prov_key,
+            value: prov_value,
+            condition: None,
+            expires_at: None,
+        }];
+        svc.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).unwrap();
+
+        // Store a Provisioning entry for a DIFFERENT user (should survive erasure)
+        let other_prov = EmailHashEntry::Provisioning(ProvisioningReservation {
+            user_id: other_user_id,
+            organization_id: OrganizationId::new(2),
+        });
+        let other_key = SystemKeys::email_hash_index_key("hash_other_prov");
+        let other_value = encode(&other_prov).unwrap();
+        let other_ops = vec![Operation::SetEntity {
+            key: other_key,
+            value: other_value,
+            condition: None,
+            expires_at: None,
+        }];
+        svc.state.apply_operations(SYSTEM_VAULT_ID, &other_ops, 0).unwrap();
+
+        // Verify all entries exist
+        assert!(svc.get_email_hash("hash_active").unwrap().is_some());
+        assert!(svc.get_email_hash("hash_provisioning").unwrap().is_some());
+        assert!(svc.get_email_hash("hash_other_prov").unwrap().is_some());
+
+        // Erase user 200
+        svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
+
+        // Both Active and Provisioning entries for user 200 removed
+        assert!(svc.get_email_hash("hash_active").unwrap().is_none());
+        assert!(svc.get_email_hash("hash_provisioning").unwrap().is_none());
+
+        // Other user's Provisioning entry survives
+        let surviving = svc.get_email_hash("hash_other_prov").unwrap().unwrap();
+        assert_eq!(
+            surviving,
+            EmailHashEntry::Provisioning(ProvisioningReservation {
+                user_id: other_user_id,
+                organization_id: OrganizationId::new(2),
+            })
+        );
+    }
+
+    // ── Organization Directory Tests ──
+
+    fn make_org_directory_entry(
+        org_id: i64,
+        slug: u64,
+        region: Region,
+    ) -> OrganizationDirectoryEntry {
+        use inferadb_ledger_types::OrganizationSlug;
+        OrganizationDirectoryEntry {
+            organization: OrganizationId::new(org_id),
+            slug: Some(OrganizationSlug::new(slug)),
+            region: Some(region),
+            tier: OrganizationTier::default(),
+            status: OrganizationDirectoryStatus::Provisioning,
+            updated_at: Some(Utc::now()),
+        }
+    }
+
+    #[test]
+    fn test_register_and_get_organization_directory() {
+        let svc = create_test_service();
+        let entry = make_org_directory_entry(1, 50001, Region::US_EAST_VA);
+
+        svc.register_organization_directory(&entry).unwrap();
+
+        let retrieved = svc.get_organization_directory(OrganizationId::new(1)).unwrap();
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.organization, OrganizationId::new(1));
+        assert_eq!(retrieved.status, OrganizationDirectoryStatus::Provisioning);
+    }
+
+    #[test]
+    fn test_get_organization_directory_not_found() {
+        let svc = create_test_service();
+        let result = svc.get_organization_directory(OrganizationId::new(999)).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_update_organization_directory_status_to_active() {
+        let svc = create_test_service();
+        let entry = make_org_directory_entry(2, 50002, Region::IE_EAST_DUBLIN);
+
+        svc.register_organization_directory(&entry).unwrap();
+        svc.update_organization_directory_status(
+            OrganizationId::new(2),
+            OrganizationDirectoryStatus::Active,
+            Utc::now(),
+        )
+        .unwrap();
+
+        let updated = svc.get_organization_directory(OrganizationId::new(2)).unwrap().unwrap();
+        assert_eq!(updated.status, OrganizationDirectoryStatus::Active);
+    }
+
+    #[test]
+    fn test_update_organization_directory_status_deleted_tombstone_rejects() {
+        let svc = create_test_service();
+        let entry = make_org_directory_entry(3, 50003, Region::US_EAST_VA);
+
+        svc.register_organization_directory(&entry).unwrap();
+        svc.update_organization_directory_status(
+            OrganizationId::new(3),
+            OrganizationDirectoryStatus::Deleted,
+            Utc::now(),
+        )
+        .unwrap();
+
+        // Attempting to change status of a deleted entry fails
+        let result = svc.update_organization_directory_status(
+            OrganizationId::new(3),
+            OrganizationDirectoryStatus::Active,
+            Utc::now(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_update_organization_directory_status_not_found() {
+        let svc = create_test_service();
+
+        let result = svc.update_organization_directory_status(
+            OrganizationId::new(999),
+            OrganizationDirectoryStatus::Active,
+            Utc::now(),
+        );
+        assert!(result.is_err());
     }
 }

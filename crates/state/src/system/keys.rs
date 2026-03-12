@@ -150,6 +150,24 @@ impl SystemKeys {
         format!("_idx:org:slug:{}", slug.value())
     }
 
+    /// Primary key for an organization directory entry in the GLOBAL control plane.
+    ///
+    /// Pattern: `_sys:org:{id}` → postcard-serialized `OrganizationDirectoryEntry`
+    ///
+    /// Directory entries contain no PII — only opaque identifiers, region,
+    /// status, tier, and timestamp. Enables cross-region organization resolution
+    /// from any node.
+    pub fn organization_directory_key(organization: OrganizationId) -> String {
+        format!("_sys:org:{}", organization.value())
+    }
+
+    /// Parses an organization ID from an organization directory key.
+    ///
+    /// Returns `None` if the key doesn't match `_sys:org:{id}`.
+    pub fn parse_organization_directory_key(key: &str) -> Option<OrganizationId> {
+        key.strip_prefix(Self::ORG_DIRECTORY_PREFIX).and_then(|id| id.parse().ok())
+    }
+
     /// Primary key for an organization profile record in the regional store.
     ///
     /// Pattern: `_sys:org_profile:{organization_id}` → postcard-serialized `OrganizationProfile`
@@ -157,18 +175,6 @@ impl SystemKeys {
     /// Contains PII (organization name). Stored in the region declared at creation.
     pub fn organization_profile_key(organization: OrganizationId) -> String {
         format!("_sys:org_profile:{}", organization.value())
-    }
-
-    /// Key for a pending organization profile written by the gRPC handler
-    /// before saga creation.
-    ///
-    /// Pattern: `_sys:pending_org_profile:{saga_id}` → postcard-serialized
-    /// `PendingOrganizationProfile`
-    ///
-    /// Temporary key with TTL; deleted by `WriteOrganizationProfile` on success
-    /// or garbage-collected on saga failure.
-    pub fn pending_organization_profile_key(saga_id: &str) -> String {
-        format!("_sys:pending_org_profile:{saga_id}")
     }
 
     // ========================================================================
@@ -449,6 +455,51 @@ impl SystemKeys {
     }
 
     // ========================================================================
+    // Onboarding Keys (REGIONAL store, ephemeral)
+    // ========================================================================
+
+    /// Key for a pending email verification record.
+    ///
+    /// Pattern: `_tmp:onboard_verify:{email_hmac}` → postcard-serialized
+    /// [`PendingEmailVerification`](super::types::PendingEmailVerification)
+    ///
+    /// Stored in a REGIONAL Raft group. The `email_hmac` suffix is the
+    /// HMAC-SHA256 hex string of the email address (same value used in
+    /// the GLOBAL `_idx:email_hash:` index).
+    #[allow(dead_code)] // Used by InitiateEmailVerification handler in subsequent task
+    pub fn onboard_verify_key(email_hmac: &str) -> String {
+        format!("_tmp:onboard_verify:{email_hmac}")
+    }
+
+    /// Parses an email HMAC hex string from an onboard verify key.
+    ///
+    /// Returns `None` if the key doesn't match `_tmp:onboard_verify:{hmac}`.
+    #[allow(dead_code)] // Used by onboarding GC job in subsequent task
+    pub fn parse_onboard_verify_key(key: &str) -> Option<&str> {
+        key.strip_prefix(Self::ONBOARD_VERIFY_PREFIX)
+    }
+
+    /// Key for an onboarding account record.
+    ///
+    /// Pattern: `_tmp:onboard_account:{email_hmac}` → postcard-serialized
+    /// [`OnboardingAccount`](super::types::OnboardingAccount)
+    ///
+    /// Stored in a REGIONAL Raft group. Contains no PII — the email HMAC
+    /// in the key suffix is the only link to the user's identity.
+    #[allow(dead_code)] // Used by VerifyEmailCode handler in subsequent task
+    pub fn onboard_account_key(email_hmac: &str) -> String {
+        format!("_tmp:onboard_account:{email_hmac}")
+    }
+
+    /// Parses an email HMAC hex string from an onboard account key.
+    ///
+    /// Returns `None` if the key doesn't match `_tmp:onboard_account:{hmac}`.
+    #[allow(dead_code)] // Used by CompleteRegistration handler in subsequent task
+    pub fn parse_onboard_account_key(key: &str) -> Option<&str> {
+        key.strip_prefix(Self::ONBOARD_ACCOUNT_PREFIX)
+    }
+
+    // ========================================================================
     // Key Prefixes (for scanning)
     // ========================================================================
 
@@ -479,11 +530,11 @@ impl SystemKeys {
     /// Prefix for user slug index entries.
     pub const USER_SLUG_INDEX_PREFIX: &'static str = "_idx:user:slug:";
 
+    /// Prefix for all organization directory entries in the GLOBAL control plane.
+    pub const ORG_DIRECTORY_PREFIX: &'static str = "_sys:org:";
+
     /// Prefix for organization profile keys.
     pub const ORG_PROFILE_PREFIX: &'static str = "_sys:org_profile:";
-
-    /// Prefix for pending organization profile keys.
-    pub const PENDING_ORG_PROFILE_PREFIX: &'static str = "_sys:pending_org_profile:";
 
     /// Prefix for all index keys.
     pub const INDEX_PREFIX: &'static str = "_idx:";
@@ -502,6 +553,12 @@ impl SystemKeys {
 
     /// Prefix for erasure audit records.
     pub const ERASURE_AUDIT_PREFIX: &'static str = "_audit:erasure:";
+
+    /// Prefix for onboarding email verification keys (ephemeral, regional).
+    pub const ONBOARD_VERIFY_PREFIX: &'static str = "_tmp:onboard_verify:";
+
+    /// Prefix for onboarding account keys (ephemeral, regional).
+    pub const ONBOARD_ACCOUNT_PREFIX: &'static str = "_tmp:onboard_account:";
 
     // ========================================================================
     // Signing Key Keys
@@ -730,11 +787,6 @@ mod tests {
                 "_sys:org_profile:42",
             ),
             (
-                "pending_organization_profile_key",
-                SystemKeys::pending_organization_profile_key("saga-abc"),
-                "_sys:pending_org_profile:saga-abc",
-            ),
-            (
                 "organization_slug_key",
                 SystemKeys::organization_slug_key(OrganizationSlug::new(12345)),
                 "_idx:org:slug:12345",
@@ -767,6 +819,12 @@ mod tests {
         assert_eq!(SystemKeys::parse_user_directory_key("_sys:user:42"), Some(UserId::new(42)));
         assert_eq!(SystemKeys::parse_user_directory_key("user:42"), None);
         assert_eq!(SystemKeys::parse_user_directory_key("_sys:user:abc"), None);
+        assert_eq!(
+            SystemKeys::parse_organization_directory_key("_sys:org:42"),
+            Some(OrganizationId::new(42))
+        );
+        assert_eq!(SystemKeys::parse_organization_directory_key("org:42"), None);
+        assert_eq!(SystemKeys::parse_organization_directory_key("_sys:org:abc"), None);
     }
 
     #[test]
@@ -786,14 +844,14 @@ mod tests {
             ),
             ("node_key", SystemKeys::node_key(&NodeId::new("n")), &[SystemKeys::NODE_PREFIX]),
             (
+                "organization_directory_key",
+                SystemKeys::organization_directory_key(OrganizationId::new(1)),
+                &[SystemKeys::ORG_DIRECTORY_PREFIX, SystemKeys::SYS_PREFIX],
+            ),
+            (
                 "organization_profile_key",
                 SystemKeys::organization_profile_key(OrganizationId::new(1)),
                 &[SystemKeys::ORG_PROFILE_PREFIX, SystemKeys::SYS_PREFIX],
-            ),
-            (
-                "pending_organization_profile_key",
-                SystemKeys::pending_organization_profile_key("x"),
-                &[SystemKeys::PENDING_ORG_PROFILE_PREFIX, SystemKeys::SYS_PREFIX],
             ),
             (
                 "user_directory_key",
@@ -814,13 +872,6 @@ mod tests {
     }
 
     #[test]
-    fn test_org_profile_does_not_collide_with_pending() {
-        let profile_key = SystemKeys::organization_profile_key(OrganizationId::new(42));
-        let pending_key = SystemKeys::pending_organization_profile_key("42");
-        assert_ne!(profile_key, pending_key);
-    }
-
-    #[test]
     fn test_user_directory_key_does_not_collide_with_user_key() {
         // _sys:user:42 (directory) vs user:42 (regional record) are distinct
         let directory_key = SystemKeys::user_directory_key(UserId::new(42));
@@ -828,6 +879,16 @@ mod tests {
         assert_ne!(directory_key, user_key);
         assert!(directory_key.starts_with("_sys:"));
         assert!(!user_key.starts_with("_sys:"));
+    }
+
+    #[test]
+    fn test_org_directory_key_does_not_collide_with_org_key() {
+        // _sys:org:42 (directory) vs org:42 (registry) are distinct
+        let directory_key = SystemKeys::organization_directory_key(OrganizationId::new(42));
+        let org_key = SystemKeys::organization_key(OrganizationId::new(42));
+        assert_ne!(directory_key, org_key);
+        assert!(directory_key.starts_with("_sys:"));
+        assert!(!org_key.starts_with("_sys:"));
     }
 
     #[test]
@@ -1242,5 +1303,58 @@ mod tests {
         assert_eq!(encode_hex(&[0x00, 0xff, 0xab]), "00ffab");
         assert_eq!(encode_hex(&[]), "");
         assert_eq!(encode_hex(&[0x01]), "01");
+    }
+
+    // ========================================================================
+    // Onboarding Key Tests
+    // ========================================================================
+
+    #[test]
+    fn test_onboard_verify_key() {
+        let hmac = "abc123def456";
+        let key = SystemKeys::onboard_verify_key(hmac);
+        assert_eq!(key, "_tmp:onboard_verify:abc123def456");
+        assert!(key.starts_with(SystemKeys::ONBOARD_VERIFY_PREFIX));
+    }
+
+    #[test]
+    fn test_parse_onboard_verify_key() {
+        let key = "_tmp:onboard_verify:abc123def456";
+        assert_eq!(SystemKeys::parse_onboard_verify_key(key), Some("abc123def456"));
+    }
+
+    #[test]
+    fn test_parse_onboard_verify_key_invalid() {
+        assert_eq!(SystemKeys::parse_onboard_verify_key("_tmp:wrong:abc"), None);
+        assert_eq!(SystemKeys::parse_onboard_verify_key("random_key"), None);
+    }
+
+    #[test]
+    fn test_onboard_account_key() {
+        let hmac = "fedcba987654";
+        let key = SystemKeys::onboard_account_key(hmac);
+        assert_eq!(key, "_tmp:onboard_account:fedcba987654");
+        assert!(key.starts_with(SystemKeys::ONBOARD_ACCOUNT_PREFIX));
+    }
+
+    #[test]
+    fn test_parse_onboard_account_key() {
+        let key = "_tmp:onboard_account:fedcba987654";
+        assert_eq!(SystemKeys::parse_onboard_account_key(key), Some("fedcba987654"));
+    }
+
+    #[test]
+    fn test_parse_onboard_account_key_invalid() {
+        assert_eq!(SystemKeys::parse_onboard_account_key("_tmp:onboard_verify:abc"), None);
+        assert_eq!(SystemKeys::parse_onboard_account_key("other:key"), None);
+    }
+
+    #[test]
+    fn test_onboard_keys_do_not_collide() {
+        let hmac = "same_hmac_value";
+        let verify_key = SystemKeys::onboard_verify_key(hmac);
+        let account_key = SystemKeys::onboard_account_key(hmac);
+        assert_ne!(verify_key, account_key);
+        assert_ne!(SystemKeys::ONBOARD_VERIFY_PREFIX, SystemKeys::ONBOARD_ACCOUNT_PREFIX);
     }
 }

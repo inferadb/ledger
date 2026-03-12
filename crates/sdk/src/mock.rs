@@ -2493,6 +2493,73 @@ impl UserService for MockUserService {
 
         Ok(Response::new(proto::EraseUserResponse { user: Some(proto::UserSlug { slug }) }))
     }
+
+    async fn initiate_email_verification(
+        &self,
+        request: Request<proto::InitiateEmailVerificationRequest>,
+    ) -> Result<Response<proto::InitiateEmailVerificationResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        if req.email.is_empty() {
+            return Err(Status::invalid_argument("email is required"));
+        }
+
+        Ok(Response::new(proto::InitiateEmailVerificationResponse { code: "ABC123".to_string() }))
+    }
+
+    async fn verify_email_code(
+        &self,
+        request: Request<proto::VerifyEmailCodeRequest>,
+    ) -> Result<Response<proto::VerifyEmailCodeResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        if req.email.is_empty() || req.code.is_empty() {
+            return Err(Status::invalid_argument("email and code are required"));
+        }
+
+        // Mock always returns new-user path
+        Ok(Response::new(proto::VerifyEmailCodeResponse {
+            result: Some(proto::verify_email_code_response::Result::NewUser(
+                proto::OnboardingSession { onboarding_token: "ilobt_mock_token".to_string() },
+            )),
+        }))
+    }
+
+    async fn complete_registration(
+        &self,
+        request: Request<proto::CompleteRegistrationRequest>,
+    ) -> Result<Response<proto::CompleteRegistrationResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        if req.email.is_empty() || req.name.is_empty() || req.onboarding_token.is_empty() {
+            return Err(Status::invalid_argument("email, name, and onboarding_token are required"));
+        }
+
+        let user_slug = self.state.next_user_slug.fetch_add(1, Ordering::SeqCst);
+        let now = Self::now_timestamp();
+
+        Ok(Response::new(proto::CompleteRegistrationResponse {
+            user: Some(proto::User {
+                slug: Some(proto::UserSlug { slug: user_slug }),
+                name: req.name,
+                status: proto::UserStatus::Active.into(),
+                role: proto::UserRole::User.into(),
+                created_at: Some(now),
+                updated_at: Some(now),
+                ..Default::default()
+            }),
+            session: Some(proto::TokenPair {
+                access_token: format!("mock_access_{user_slug}"),
+                refresh_token: format!("mock_refresh_{user_slug}"),
+                access_expires_at: None,
+                refresh_expires_at: None,
+            }),
+            organization: Some(proto::OrganizationSlug { slug: user_slug + 1000 }),
+        }))
+    }
 }
 
 #[cfg(test)]

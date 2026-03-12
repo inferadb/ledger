@@ -1502,6 +1502,7 @@ message SearchUsersResponse {
 message CreateUserEmailRequest {
   UserSlug user = 1;              // Owning user
   string email = 2;               // Email address to add
+  string email_hmac = 3;          // HMAC-SHA256 of normalized email (hex). Goes to GLOBAL; plaintext stays regional.
 }
 
 message CreateUserEmailResponse {
@@ -1540,6 +1541,64 @@ message VerifyUserEmailRequest {
 
 message VerifyUserEmailResponse {
   UserEmail email = 1;            // Updated email with verified_at set
+}
+
+// -----------------------------------------------------------------------------
+// Onboarding Messages
+// -----------------------------------------------------------------------------
+
+// Start email verification for user onboarding.
+message InitiateEmailVerificationRequest {
+  string email = 1;               // Plaintext email address
+  Region region = 2;              // Data residency region for this email
+}
+
+// The verification code to send to the user's email.
+message InitiateEmailVerificationResponse {
+  string code = 1;                // 6-character verification code (A-Z, 0-9)
+}
+
+// Verify the code the user received via email.
+message VerifyEmailCodeRequest {
+  string email = 1;               // Same email used in initiation
+  string code = 2;                // Code from the email
+  Region region = 3;              // Same region used in initiation
+}
+
+// Result is either a session for an existing user or an onboarding token
+// for a new user who must complete registration.
+message VerifyEmailCodeResponse {
+  oneof result {
+    ExistingUserSession existing_user = 1;
+    OnboardingSession new_user = 2;
+  }
+}
+
+// Session for an existing user whose email was verified.
+message ExistingUserSession {
+  UserSlug user = 1;
+  TokenPair session = 2;
+}
+
+// Onboarding token for a new user who must complete registration.
+message OnboardingSession {
+  string onboarding_token = 1;    // Opaque token, single-use, 12hr TTL
+}
+
+// Complete registration for a new user after email verification.
+message CompleteRegistrationRequest {
+  string onboarding_token = 1;    // From VerifyEmailCodeResponse
+  string email = 2;               // Same email used in verification
+  Region region = 3;              // Same region used in verification
+  string name = 4;                // User display name (PII, regional)
+  string organization_name = 5;   // Organization name (PII, regional)
+}
+
+// Response after successful registration.
+message CompleteRegistrationResponse {
+  User user = 1;
+  TokenPair session = 2;          // Reuses existing TokenPair message
+  OrganizationSlug organization = 3;  // The auto-created organization
 }
 
 // -----------------------------------------------------------------------------
@@ -1786,6 +1845,21 @@ service UserService {
   // removes email hash indexes, and creates erasure audit record.
   // Each step is idempotent — safe to retry on failure.
   rpc EraseUser(EraseUserRequest) returns (EraseUserResponse);
+
+  // Initiate email verification for onboarding. Sends a 6-character
+  // verification code to the provided email address. Rate-limited per email.
+  rpc InitiateEmailVerification(InitiateEmailVerificationRequest)
+      returns (InitiateEmailVerificationResponse);
+
+  // Verify an email code. Returns either an existing user session (if the
+  // email belongs to a registered user) or an onboarding token (for new users).
+  rpc VerifyEmailCode(VerifyEmailCodeRequest)
+      returns (VerifyEmailCodeResponse);
+
+  // Complete registration for a new user. Creates the user, organization,
+  // and returns a session. Requires a valid onboarding token from VerifyEmailCode.
+  rpc CompleteRegistration(CompleteRegistrationRequest)
+      returns (CompleteRegistrationResponse);
 }
 
 // =============================================================================

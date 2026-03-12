@@ -10,6 +10,7 @@ use std::{fmt, str::FromStr};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -21,9 +22,10 @@ type HmacSha256 = Hmac<Sha256>;
 ///
 /// Loaded from an external key source at node startup. Never persisted to disk
 /// or distributed via Raft.
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct EmailBlindingKey {
     bytes: [u8; 32],
+    #[zeroize(skip)]
     version: u32,
 }
 
@@ -68,8 +70,12 @@ pub fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
 }
 
-/// Computes `HMAC-SHA256(key, normalize(email))` and returns the result
-/// as a lowercase hex string (64 characters).
+/// Computes `HMAC-SHA256(key, "email:" || normalize(email))` and returns the
+/// result as a lowercase hex string (64 characters).
+///
+/// The `"email:"` domain prefix provides cryptographic separation from
+/// [`compute_code_hash`], which uses `"code:"` — even if a verification code
+/// happens to look like an email address, the HMAC outputs will differ.
 ///
 /// The output is deterministic for a given key + email pair, enabling
 /// uniqueness checks without exposing plaintext emails in the global
@@ -83,9 +89,56 @@ pub fn compute_email_hmac(key: &EmailBlindingKey, email: &str) -> String {
         Ok(m) => m,
         Err(_) => return String::new(),
     };
+    mac.update(b"email:");
     mac.update(normalized.as_bytes());
     let result = mac.finalize().into_bytes();
     bytes_to_hex(&result)
+}
+
+/// Computes `HMAC-SHA256(key, "code:" || uppercase(code))` and returns the
+/// 32-byte raw hash.
+///
+/// Used for verification code hashing during onboarding. The `"code:"` domain
+/// prefix provides cryptographic separation from [`compute_email_hmac`], which
+/// uses `"email:"` — even if a verification code happens to look like an email,
+/// the outputs will differ.
+///
+/// The code is uppercased before hashing to make verification case-insensitive
+/// (users may type `abc123` or `ABC123` interchangeably).
+pub fn compute_code_hash(key: &EmailBlindingKey, code: &str) -> [u8; 32] {
+    let uppercased = code.trim().to_uppercase();
+    let mut mac = match HmacSha256::new_from_slice(&key.bytes) {
+        Ok(m) => m,
+        Err(_) => return [0u8; 32],
+    };
+    mac.update(b"code:");
+    mac.update(uppercased.as_bytes());
+    mac.finalize().into_bytes().into()
+}
+
+/// Generates a random verification code and its HMAC hash.
+///
+/// Returns `(code, hash)` where:
+/// - `code` is a [`CODE_LENGTH`](crate::onboarding::CODE_LENGTH)-character string from the `A-Z0-9`
+///   charset (36 characters, 6 positions = 36^6 ≈ 2.18 billion combinations)
+/// - `hash` is `compute_code_hash(key, &code)` (32-byte HMAC-SHA256)
+///
+/// The code is generated using a CSPRNG (`rand::rng()`). Only the hash
+/// is stored in Raft state; the plaintext code is sent to the user via
+/// email and discarded.
+pub fn generate_verification_code(key: &EmailBlindingKey) -> (String, [u8; 32]) {
+    use rand::RngExt;
+
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut rng = rand::rng();
+    let code: String = (0..crate::onboarding::CODE_LENGTH)
+        .map(|_| {
+            let idx = rng.random_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect();
+    let hash = compute_code_hash(key, &code);
+    (code, hash)
 }
 
 /// Converts a byte slice to a lowercase hex string.
@@ -254,6 +307,129 @@ mod tests {
         let hex = format!("  {}  ", "ab".repeat(32));
         let key: EmailBlindingKey = hex.parse().unwrap();
         assert_eq!(key.as_bytes(), &[0xAB; 32]);
+    }
+
+    #[test]
+    fn zeroize_clears_key_material() {
+        let mut key = EmailBlindingKey::new([0xFF; 32], 42);
+        // Verify non-zero before zeroize
+        assert!(key.as_bytes().iter().any(|&b| b != 0));
+        assert_eq!(key.version(), 42);
+
+        // Zeroize trait method zeroes key bytes in-place;
+        // version is skipped (not key material, matches RegionMasterKey pattern)
+        Zeroize::zeroize(&mut key);
+        assert_eq!(key.as_bytes(), &[0u8; 32]);
+        assert_eq!(key.version(), 42);
+    }
+
+    #[test]
+    fn code_hash_deterministic() {
+        let key = test_key(1);
+        let h1 = compute_code_hash(&key, "ABC123");
+        let h2 = compute_code_hash(&key, "ABC123");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn code_hash_case_insensitive() {
+        let key = test_key(1);
+        let h1 = compute_code_hash(&key, "abc123");
+        let h2 = compute_code_hash(&key, "ABC123");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn code_hash_trims_whitespace() {
+        let key = test_key(1);
+        let h1 = compute_code_hash(&key, "  ABC123  ");
+        let h2 = compute_code_hash(&key, "ABC123");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn code_hash_different_codes_differ() {
+        let key = test_key(1);
+        let h1 = compute_code_hash(&key, "ABC123");
+        let h2 = compute_code_hash(&key, "XYZ789");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn code_hash_returns_32_bytes() {
+        let key = test_key(1);
+        let hash = compute_code_hash(&key, "ABC123");
+        assert_eq!(hash.len(), 32);
+        assert_ne!(hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn code_hash_domain_separated_from_email_hmac() {
+        // The same input string through compute_code_hash and
+        // compute_email_hmac must produce different outputs, proving
+        // the "code:" vs implicit domain prefix provides separation.
+        let key = test_key(1);
+        let code_hash = compute_code_hash(&key, "test@example.com");
+        let email_hmac = compute_email_hmac(&key, "test@example.com");
+
+        // Convert code_hash to hex for comparison
+        let code_hex = bytes_to_hex(&code_hash);
+        assert_ne!(code_hex, email_hmac, "code hash and email HMAC must differ for same input");
+    }
+
+    #[test]
+    fn code_hash_different_keys_differ() {
+        let k1 = EmailBlindingKey::new([0xAA; 32], 1);
+        let k2 = EmailBlindingKey::new([0xBB; 32], 2);
+        let h1 = compute_code_hash(&k1, "ABC123");
+        let h2 = compute_code_hash(&k2, "ABC123");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn verification_code_length_matches_constant() {
+        let key = test_key(1);
+        let (code, _hash) = generate_verification_code(&key);
+        assert_eq!(code.len(), crate::onboarding::CODE_LENGTH);
+    }
+
+    #[test]
+    fn verification_code_charset_is_alphanumeric_uppercase() {
+        let key = test_key(1);
+        // Generate several codes and verify charset
+        for _ in 0..20 {
+            let (code, _) = generate_verification_code(&key);
+            assert!(
+                code.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+                "Code contains invalid character: {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn verification_code_hash_matches_compute_code_hash() {
+        let key = test_key(1);
+        let (code, hash) = generate_verification_code(&key);
+        let recomputed = compute_code_hash(&key, &code);
+        assert_eq!(hash, recomputed);
+    }
+
+    #[test]
+    fn verification_code_hash_case_insensitive() {
+        let key = test_key(1);
+        let (code, hash) = generate_verification_code(&key);
+        let lower_hash = compute_code_hash(&key, &code.to_lowercase());
+        assert_eq!(hash, lower_hash);
+    }
+
+    #[test]
+    fn verification_codes_are_not_constant() {
+        let key = test_key(1);
+        let (code1, _) = generate_verification_code(&key);
+        let (code2, _) = generate_verification_code(&key);
+        // With 36^6 combinations, two consecutive codes colliding is ~1/2.18B.
+        // This test has a negligible false-positive rate.
+        assert_ne!(code1, code2, "Two consecutive codes should differ");
     }
 
     proptest! {

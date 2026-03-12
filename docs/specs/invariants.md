@@ -133,6 +133,16 @@ Formal guarantees the system maintains under all conditions.
 | 55  | Deterministic token timestamps   | All time-dependent logic in Raft apply handlers uses `proposed_at` from `RaftPayload`, never `Utc::now()`  |
 | 56  | Cascade revocation completeness  | App disable revokes all app tokens; vault disconnect revokes app+vault tokens; org deletion revokes all    |
 
+## Data Residency Invariants
+
+| #   | Invariant                | Description                                                                                                    |
+| --- | ------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| 57  | GLOBAL PII exclusion     | No plaintext PII (names, emails, addresses) in GLOBAL Raft log entries — only opaque IDs, hashes, and enums    |
+| 58  | Regional PII containment | PII-bearing requests (`CreateUserEmail`, `UpdateUserProfile`) are proposed to the user's REGIONAL Raft group   |
+| 59  | Audit actor locality     | Actor identity for erasure/modification events is captured in canonical log lines (local), not in Raft entries |
+
+**Upgrade constraint**: Versions that remove `SystemRequest` variants (e.g., `CreateOrganizationWithProfile`) require **snapshot compaction before upgrade**. All nodes must take a snapshot and compact the Raft log before deploying the new version. Uncompacted log entries with removed variant discriminants will fail postcard deserialization, blocking node startup.
+
 ## Storage Layer Boundaries
 
 | Layer         | Contents                                  | Truncatable                       | Purpose                    |

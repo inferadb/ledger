@@ -142,9 +142,32 @@ pub struct LedgerServer {
     /// session/vault token lifecycle RPCs.
     #[builder(default)]
     token_service: Option<TokenServiceConfig>,
+    /// HMAC key for privacy-preserving email uniqueness enforcement.
+    ///
+    /// When present, onboarding RPCs (email verification, registration) are
+    /// enabled. When absent, those RPCs return `FAILED_PRECONDITION`.
+    #[builder(default)]
+    email_blinding_key: Option<Arc<inferadb_ledger_types::EmailBlindingKey>>,
+    /// Saga orchestrator handle for submitting cross-region sagas.
+    ///
+    /// Wrapped in `OnceCell` — set after the server starts when the orchestrator
+    /// is ready. Returned to bootstrap via `saga_cell()` for deferred initialization.
+    #[builder(default = Arc::new(tokio::sync::OnceCell::new()))]
+    saga_handle: Arc<tokio::sync::OnceCell<inferadb_ledger_raft::SagaOrchestratorHandle>>,
 }
 
 impl LedgerServer {
+    /// Returns a clone of the saga cell for deferred initialization.
+    ///
+    /// Bootstrap calls this before `serve()` to retain a handle to the
+    /// `OnceCell`. After the saga orchestrator starts, bootstrap sets the
+    /// cell value so service handlers can submit sagas.
+    pub fn saga_cell(
+        &self,
+    ) -> Arc<tokio::sync::OnceCell<inferadb_ledger_raft::SagaOrchestratorHandle>> {
+        self.saga_handle.clone()
+    }
+
     /// Starts the gRPC server.
     ///
     /// This method blocks until the server is shut down. If a `shutdown_rx`
@@ -266,6 +289,12 @@ impl LedgerServer {
             proposal_timeout: self.proposal_timeout,
             event_handle: self.event_handle.clone(),
             health_state: Some(self.health_state.clone()),
+            manager: Some(self.manager.clone()),
+            email_blinding_key: self.email_blinding_key.clone(),
+            jwt_engine: self.token_service.as_ref().map(|ts| ts.jwt_engine.clone()),
+            jwt_config: self.token_service.as_ref().map(|ts| ts.jwt_config.clone()),
+            key_manager: self.token_service.as_ref().map(|ts| ts.key_manager.clone()),
+            saga_handle: self.saga_handle.clone(),
         };
 
         let organization_service = OrganizationService::new(svc_ctx.clone());

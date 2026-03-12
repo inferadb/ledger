@@ -172,7 +172,9 @@ pub use resource_metrics::ResourceMetricsCollector;
 #[doc(hidden)]
 pub use runtime_config::RuntimeConfigHandle;
 #[doc(hidden)]
-pub use saga_orchestrator::SagaOrchestrator;
+pub use saga_orchestrator::{
+    OnboardingPii, OrgPii, SagaOrchestrator, SagaOrchestratorHandle, SagaOutput, SagaSubmission,
+};
 #[doc(hidden)]
 pub use token_maintenance::TokenMaintenanceJob;
 #[doc(hidden)]

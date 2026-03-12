@@ -39,6 +39,18 @@ pub enum ErrorCode {
     /// Authentication failure (invalid token, expired, revoked, bad signature).
     /// Maps to `UNAUTHENTICATED`.
     Unauthenticated,
+
+    /// Rate limit exceeded (too many requests in the time window).
+    /// Maps to `RESOURCE_EXHAUSTED`.
+    RateLimited,
+
+    /// Resource has expired (verification code, onboarding token, etc.).
+    /// Maps to `FAILED_PRECONDITION`.
+    Expired,
+
+    /// Too many failed attempts (code verification, authentication, etc.).
+    /// Maps to `FAILED_PRECONDITION`.
+    TooManyAttempts,
 }
 
 impl ErrorCode {
@@ -52,6 +64,9 @@ impl ErrorCode {
             Self::InvalidArgument => "INVALID_ARGUMENT",
             Self::Internal => "INTERNAL",
             Self::Unauthenticated => "UNAUTHENTICATED",
+            Self::RateLimited => "RESOURCE_EXHAUSTED",
+            Self::Expired => "FAILED_PRECONDITION",
+            Self::TooManyAttempts => "FAILED_PRECONDITION",
         }
     }
 }

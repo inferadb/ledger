@@ -6,10 +6,10 @@ Procedure for upgrading Ledger to a new version.
 
 ## Version Compatibility (Pre-GA)
 
-| From Version | To Version | Upgrade Path            | Notes                              |
-| ------------ | ---------- | ----------------------- | ---------------------------------- |
-| 0.x          | 0.y        | Full cluster wipe       | Schema/format changes between minors |
-| 0.x.y        | 0.x.z      | Full cluster wipe       | Even patch versions may change format |
+| From Version | To Version | Upgrade Path      | Notes                                 |
+| ------------ | ---------- | ----------------- | ------------------------------------- |
+| 0.x          | 0.y        | Full cluster wipe | Schema/format changes between minors  |
+| 0.x.y        | 0.x.z      | Full cluster wipe | Even patch versions may change format |
 
 **Pre-GA constraint**: The on-disk format (B+ tree page layout, snapshot binary format, Raft log encoding) is not yet stable. Any version bump may change internal formats. In-place upgrades risk data corruption.
 
@@ -41,6 +41,32 @@ Running nodes on different binary versions in the same Raft group is **not suppo
 - [ ] New version tested in staging environment
 - [ ] Maintenance window scheduled (cluster unavailable during upgrade)
 - [ ] All clients notified of downtime
+- [ ] Raft log compacted on all nodes (see [Snapshot Compaction](#snapshot-compaction) below)
+
+## Snapshot Compaction
+
+**Required when upgrading across versions that remove `SystemRequest` or `LedgerRequest` variants** (check CHANGELOG.md for "Removed ... Raft log variant" entries). Uncompacted log entries with removed variant discriminants will fail postcard deserialization, blocking node startup.
+
+### When is this required?
+
+This is required when the CHANGELOG lists removal of any Raft log entry variant. The postcard serialization format uses variant indices — removing a variant shifts indices and breaks deserialization of old log entries.
+
+### Procedure
+
+Before deploying the new binary, trigger a snapshot on the leader and wait for all followers to replicate:
+
+```bash
+# Trigger snapshot on leader (compacts Raft WAL up to current applied index)
+grpcurl -plaintext leader:50051 ledger.v1.AdminService/TriggerSnapshot
+
+# Wait for all nodes to install the snapshot (check applied_index matches)
+for node in node1 node2 node3; do
+  grpcurl -plaintext $node:50051 ledger.v1.AdminService/GetClusterInfo \
+    | jq '.nodes[] | {id, applied_index, snapshot_index}'
+done
+```
+
+Verify that `snapshot_index >= applied_index` on all nodes before proceeding with the upgrade. This ensures no uncompacted log entries with removed variants remain.
 
 ## Pre-Upgrade Checks
 
@@ -242,11 +268,11 @@ If the new version has issues after restore:
 
 ## Timing Guidelines
 
-| Cluster Size | Total Upgrade Time | Downtime Window    |
-| ------------ | ------------------ | ------------------ |
-| 3 nodes      | 15-30 minutes      | 15-30 minutes      |
-| 5 nodes      | 20-40 minutes      | 20-40 minutes      |
-| 7 nodes      | 25-45 minutes      | 25-45 minutes      |
+| Cluster Size | Total Upgrade Time | Downtime Window |
+| ------------ | ------------------ | --------------- |
+| 3 nodes      | 15-30 minutes      | 15-30 minutes   |
+| 5 nodes      | 20-40 minutes      | 20-40 minutes   |
+| 7 nodes      | 25-45 minutes      | 25-45 minutes   |
 
 Most time is spent on backup verification and post-restore integrity checks, not the wipe/restart itself.
 

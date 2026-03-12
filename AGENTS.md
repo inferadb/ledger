@@ -7,18 +7,12 @@ InferaDB Ledger: blockchain database for cryptographically verifiable authorizat
 **These rules are non-negotiable:**
 
 - No `unsafe` code
-- No `.unwrap()` — use snafu `.context()`
 - No `panic!`, `todo!()`, `unimplemented!()`
 - No placeholder stubs — fully implement or don't write
 - No TODO/FIXME/HACK comments
 - No backwards compatibility shims or feature flags
 - Write tests before implementation, target 90%+ coverage
 - Never make git commits
-
-## Source of Truth
-
-1. **DESIGN.md** — authoritative spec. Code must match.
-2. **proto/** — gRPC definitions. Keep synced with DESIGN.md.
 
 ## Serena (MCP Server)
 
@@ -56,9 +50,7 @@ Activate at session start: `mcp__plugin_serena_serena__activate_project`
 **Review workflow:**
 
 1. Run `just ci` — all checks must pass
-2. Review changes with CodeRabbit: `mcp__coderabbit__review_changes`
-3. Fix all identified issues — no exceptions
-4. Re-review if fixes were substantial
+2. Fix all identified issues — no exceptions
 
 ## Code Conventions
 

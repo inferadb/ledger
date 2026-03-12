@@ -23,6 +23,7 @@ pub use inferadb_ledger_types::{
 };
 pub use keys::SystemKeys;
 pub use saga::{
+    CreateOnboardingUserInput, CreateOnboardingUserSaga, CreateOnboardingUserSagaState,
     CreateOrganizationInput, CreateOrganizationSaga, CreateOrganizationSagaState,
     CreateSigningKeyInput, CreateSigningKeySaga, CreateSigningKeySagaState, CreateUserInput,
     CreateUserSaga, CreateUserSagaState, DeleteUserInput, DeleteUserSaga, DeleteUserSagaState,
@@ -36,12 +37,13 @@ pub use service::{
 pub use token::{AllUserSessionsRevocationResult, ExpiredTokenCleanupResult, RevocationResult};
 pub use types::{
     App, AppCredentials, AppVaultConnection, ClientAssertionCredentialConfig, ClientAssertionEntry,
-    ClientSecretCredential, EmailVerificationToken, ErasureAuditRecord, MigrationSummary,
-    MtlsCredential, NodeInfo, NodeRole, OrganizationDirectoryEntry, OrganizationDirectoryStatus,
-    OrganizationMember, OrganizationProfile, OrganizationRegistry, OrganizationStatus,
-    OrganizationTier, PendingOrganizationProfile, RefreshToken, SigningKey, SubjectKey, TeamMember,
-    TeamMemberRole, TeamProfile, User, UserDirectoryEntry, UserDirectoryStatus, UserEmail,
-    UserMigrationEntry,
+    ClientSecretCredential, EmailHashEntry, EmailVerificationToken, ErasureAuditRecord,
+    MigrationSummary, MtlsCredential, NodeInfo, NodeRole, OnboardingAccount,
+    OrganizationDirectoryEntry, OrganizationDirectoryStatus, OrganizationMember,
+    OrganizationProfile, OrganizationRegistry, OrganizationStatus, OrganizationTier,
+    PendingEmailVerification, ProvisioningReservation, RefreshToken, SigningKey, SubjectKey,
+    TeamMember, TeamMemberRole, TeamProfile, User, UserDirectoryEntry, UserDirectoryStatus,
+    UserEmail, UserMigrationEntry,
 };
 
 #[cfg(test)]

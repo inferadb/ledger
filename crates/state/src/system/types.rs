@@ -127,6 +127,10 @@ pub struct SubjectKey {
 /// demonstrating in which jurisdiction erasure occurred takes precedence over
 /// metadata minimization for audit records.
 ///
+/// Actor identity (who initiated the erasure) is captured in canonical log
+/// lines and wide events at the service layer, not replicated via Raft.
+/// This prevents PII (admin email/name) from entering the GLOBAL Raft log.
+///
 /// Key pattern: `_audit:erasure:{user_id}` in system vault.
 /// Uses insert-if-absent for idempotent crash-resume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,8 +139,6 @@ pub struct ErasureAuditRecord {
     pub user_id: UserId,
     /// When erasure was performed.
     pub erased_at: DateTime<Utc>,
-    /// Principal (admin user or system) who initiated the erasure.
-    pub erased_by: String,
     /// Region where the user's PII was stored at time of erasure.
     pub region: Region,
 }
@@ -185,6 +187,11 @@ pub struct MigrationSummary {
 /// - `Active` → PII in declared region
 /// - `Migrating` → PII being moved between regions (Task 15)
 /// - `Deleted` → user erased via crypto-shredding (Task 20)
+/// - `Provisioning` → user being set up by onboarding saga
+///
+/// IMPORTANT: Variants must only be appended at the end. Postcard encodes enums
+/// by variant index — inserting before existing variants shifts discriminants and
+/// breaks deserialization of snapshotted data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserDirectoryStatus {
@@ -195,6 +202,10 @@ pub enum UserDirectoryStatus {
     Migrating,
     /// User has been erased. Permanent tombstone.
     Deleted,
+    /// User is being provisioned by the onboarding saga.
+    /// Analogous to [`OrganizationDirectoryStatus::Provisioning`] but at a
+    /// different variant index (appended here for postcard compat).
+    Provisioning,
 }
 
 /// Non-PII user directory record in the GLOBAL control plane.
@@ -325,19 +336,6 @@ pub struct OrganizationProfile {
     /// When this organization was soft-deleted.
     #[serde(default)]
     pub deleted_at: Option<DateTime<Utc>>,
-}
-
-/// Pending organization profile written by the gRPC handler before saga creation.
-///
-/// Contains only the PII (organization name) that must not appear in the saga's
-/// serialized state. All other fields (region, tier, owner) are carried in the
-/// saga's [`super::saga::CreateOrganizationInput`] and combined at apply time.
-///
-/// Key pattern: `_sys:pending_org_profile:{saga_id}` → postcard-serialized entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingOrganizationProfile {
-    /// Human-readable organization name (PII).
-    pub name: String,
 }
 
 /// A member of an organization with their role and join timestamp.
@@ -723,6 +721,99 @@ pub struct RefreshToken {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
+// ============================================================================
+// Email Hash Index Types
+// ============================================================================
+
+/// Value stored in the global email HMAC index (`_idx:email_hash:{hmac}`).
+///
+/// During onboarding, an email hash is first reserved as `Provisioning` to
+/// prevent concurrent registrations from claiming the same address. Once the
+/// saga completes and a `User` record exists, the entry transitions to
+/// `Active(UserId)`.
+///
+/// IMPORTANT: Variants must only be appended at the end. Postcard encodes enums
+/// by variant index — inserting or reordering variants breaks deserialization of
+/// existing data. Snapshot compaction is required before removing a variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)] // Wired into register/get_email_hash in subsequent task
+pub enum EmailHashEntry {
+    /// Email is owned by a fully registered user.
+    Active(UserId),
+    /// Email is reserved by an in-progress onboarding saga.
+    Provisioning(ProvisioningReservation),
+}
+
+/// Reservation metadata for an email hash held by an onboarding saga.
+///
+/// Stored as the payload of [`EmailHashEntry::Provisioning`]. Contains the
+/// pre-allocated user and organization IDs, enabling O(1) idempotency checks
+/// in saga step 0 without additional lookups.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)] // Constructed by CreateOnboardingUserSaga in subsequent task
+pub struct ProvisioningReservation {
+    /// Pre-allocated user ID for the onboarding user.
+    pub user_id: UserId,
+    /// Pre-allocated organization ID for the user's personal organization.
+    pub organization_id: OrganizationId,
+}
+
+// ============================================================================
+// Onboarding State Types
+// ============================================================================
+
+/// Ephemeral email verification record for the onboarding flow.
+///
+/// Stored in a REGIONAL Raft group because `email` is PII. Key pattern:
+/// `_tmp:onboard_verify:{email_hmac}`. Auto-deleted after
+/// [`CODE_TTL`](inferadb_ledger_types::onboarding::CODE_TTL).
+///
+/// Rate limiting uses a count + window approach: when the block timestamp
+/// exceeds `rate_limit_window_start` by 1 hour, the window resets and the
+/// count restarts at 1. This is O(1) in both space and time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)] // Used by InitiateEmailVerification handler in subsequent task
+pub struct PendingEmailVerification {
+    /// Plaintext email address (PII — stored regionally only).
+    pub email: String,
+    /// `HMAC-SHA256(blinding_key, "code:" || uppercase(code))`.
+    pub code_hash: [u8; 32],
+    /// Region where this verification was initiated.
+    pub region: Region,
+    /// When this verification code expires.
+    pub expires_at: DateTime<Utc>,
+    /// Failed verification attempts against the current code.
+    pub attempts: u32,
+    /// Number of initiation requests within the current rate limit window.
+    pub rate_limit_count: u32,
+    /// Start of the current rate limit window (1-hour sliding window).
+    pub rate_limit_window_start: DateTime<Utc>,
+}
+
+/// Ephemeral onboarding account for users who verified email but haven't
+/// completed registration.
+///
+/// Stored in a REGIONAL Raft group. Key pattern:
+/// `_tmp:onboard_account:{email_hmac}`. Auto-deleted after
+/// [`ONBOARDING_TTL`](inferadb_ledger_types::onboarding::ONBOARDING_TTL).
+///
+/// Contains NO PII — `email`, `name`, and `organization_name` are passed
+/// in-memory from the service handler to the saga orchestrator. On crash,
+/// PII is lost and the saga compensates. The client retries
+/// `complete_registration` with the same PII.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)] // Used by VerifyEmailCode handler in subsequent task
+pub struct OnboardingAccount {
+    /// `SHA-256(raw_token_bytes)` — lookup key for `complete_registration`.
+    pub token_hash: [u8; 32],
+    /// Region where the onboarding account was created.
+    pub region: Region,
+    /// When this onboarding account expires.
+    pub expires_at: DateTime<Utc>,
+    /// When this onboarding account was created.
+    pub created_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
@@ -912,6 +1003,59 @@ mod tests {
 
         let json = serde_json::to_string(&UserDirectoryStatus::Deleted).unwrap();
         assert_eq!(json, r#""deleted""#);
+
+        let json = serde_json::to_string(&UserDirectoryStatus::Provisioning).unwrap();
+        assert_eq!(json, r#""provisioning""#);
+
+        // Round-trip
+        let rt: UserDirectoryStatus = serde_json::from_str(r#""provisioning""#).unwrap();
+        assert_eq!(rt, UserDirectoryStatus::Provisioning);
+    }
+
+    #[test]
+    fn test_user_directory_status_postcard_variant_indices() {
+        // Postcard encodes enums by variant index. These indices must remain
+        // stable across releases — new variants must be appended, never inserted.
+        // If this test fails, a variant was inserted or reordered.
+        let active_bytes = postcard::to_allocvec(&UserDirectoryStatus::Active).unwrap();
+        let migrating_bytes = postcard::to_allocvec(&UserDirectoryStatus::Migrating).unwrap();
+        let deleted_bytes = postcard::to_allocvec(&UserDirectoryStatus::Deleted).unwrap();
+        let provisioning_bytes = postcard::to_allocvec(&UserDirectoryStatus::Provisioning).unwrap();
+
+        // Postcard uses varint encoding for enum discriminants
+        assert_eq!(active_bytes, [0]); // index 0
+        assert_eq!(migrating_bytes, [1]); // index 1
+        assert_eq!(deleted_bytes, [2]); // index 2
+        assert_eq!(provisioning_bytes, [3]); // index 3
+
+        // Round-trip each variant
+        for status in [
+            UserDirectoryStatus::Active,
+            UserDirectoryStatus::Migrating,
+            UserDirectoryStatus::Deleted,
+            UserDirectoryStatus::Provisioning,
+        ] {
+            let bytes = postcard::to_allocvec(&status).unwrap();
+            let rt: UserDirectoryStatus = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(rt, status);
+        }
+    }
+
+    #[test]
+    fn test_user_directory_entry_provisioning_serialization() {
+        let entry = UserDirectoryEntry {
+            user: UserId::new(99),
+            slug: Some(UserSlug::new(12345)),
+            region: Some(Region::DE_CENTRAL_FRANKFURT),
+            status: UserDirectoryStatus::Provisioning,
+            updated_at: Some(Utc::now()),
+        };
+
+        let bytes = postcard::to_allocvec(&entry).unwrap();
+        let deserialized: UserDirectoryEntry = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized.user, UserId::new(99));
+        assert_eq!(deserialized.status, UserDirectoryStatus::Provisioning);
+        assert_eq!(deserialized.region, Some(Region::DE_CENTRAL_FRANKFURT));
     }
 
     #[test]
@@ -1226,5 +1370,140 @@ mod tests {
         let bytes = postcard::to_allocvec(&token).unwrap();
         let deserialized: RefreshToken = postcard::from_bytes(&bytes).unwrap();
         assert!(deserialized.revoked_at.is_some());
+    }
+
+    // ========================================================================
+    // EmailHashEntry tests
+    // ========================================================================
+
+    #[test]
+    fn test_email_hash_entry_active_roundtrip() {
+        let entry = EmailHashEntry::Active(UserId::new(42));
+        let bytes = postcard::to_allocvec(&entry).unwrap();
+        let deserialized: EmailHashEntry = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized, entry);
+    }
+
+    #[test]
+    fn test_email_hash_entry_provisioning_roundtrip() {
+        let entry = EmailHashEntry::Provisioning(ProvisioningReservation {
+            user_id: UserId::new(7),
+            organization_id: OrganizationId::new(42),
+        });
+        let bytes = postcard::to_allocvec(&entry).unwrap();
+        let deserialized: EmailHashEntry = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized, entry);
+    }
+
+    #[test]
+    fn test_email_hash_entry_postcard_variant_indices() {
+        // Postcard encodes enums by variant index. These indices must remain
+        // stable across releases — new variants are appended only.
+        let active_bytes = postcard::to_allocvec(&EmailHashEntry::Active(UserId::new(1))).unwrap();
+        let provisioning_bytes =
+            postcard::to_allocvec(&EmailHashEntry::Provisioning(ProvisioningReservation {
+                user_id: UserId::new(1),
+                organization_id: OrganizationId::new(1),
+            }))
+            .unwrap();
+
+        // Active = variant 0, Provisioning = variant 1
+        assert_eq!(active_bytes[0], 0, "Active must be variant index 0");
+        assert_eq!(provisioning_bytes[0], 1, "Provisioning must be variant index 1");
+    }
+
+    #[test]
+    fn test_email_hash_entry_active_ne_provisioning() {
+        let active = EmailHashEntry::Active(UserId::new(1));
+        let provisioning = EmailHashEntry::Provisioning(ProvisioningReservation {
+            user_id: UserId::new(1),
+            organization_id: OrganizationId::new(1),
+        });
+        assert_ne!(active, provisioning);
+    }
+
+    #[test]
+    fn test_provisioning_reservation_fields() {
+        let reservation = ProvisioningReservation {
+            user_id: UserId::new(99),
+            organization_id: OrganizationId::new(55),
+        };
+        assert_eq!(reservation.user_id, UserId::new(99));
+        assert_eq!(reservation.organization_id, OrganizationId::new(55));
+    }
+
+    // ========================================================================
+    // PendingEmailVerification tests
+    // ========================================================================
+
+    #[test]
+    fn test_pending_email_verification_roundtrip() {
+        let now = Utc::now();
+        let record = PendingEmailVerification {
+            email: "alice@example.com".to_string(),
+            code_hash: [0xAB; 32],
+            region: Region::US_EAST_VA,
+            expires_at: now,
+            attempts: 0,
+            rate_limit_count: 1,
+            rate_limit_window_start: now,
+        };
+        let bytes = postcard::to_allocvec(&record).unwrap();
+        let deserialized: PendingEmailVerification = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized, record);
+    }
+
+    #[test]
+    fn test_pending_email_verification_fields() {
+        let now = Utc::now();
+        let record = PendingEmailVerification {
+            email: "bob@test.com".to_string(),
+            code_hash: [0xFF; 32],
+            region: Region::IE_EAST_DUBLIN,
+            expires_at: now,
+            attempts: 3,
+            rate_limit_count: 2,
+            rate_limit_window_start: now,
+        };
+        assert_eq!(record.email, "bob@test.com");
+        assert_eq!(record.code_hash, [0xFF; 32]);
+        assert_eq!(record.region, Region::IE_EAST_DUBLIN);
+        assert_eq!(record.attempts, 3);
+        assert_eq!(record.rate_limit_count, 2);
+    }
+
+    // ========================================================================
+    // OnboardingAccount tests
+    // ========================================================================
+
+    #[test]
+    fn test_onboarding_account_roundtrip() {
+        let now = Utc::now();
+        let account = OnboardingAccount {
+            token_hash: [0xCD; 32],
+            region: Region::JP_EAST_TOKYO,
+            expires_at: now,
+            created_at: now,
+        };
+        let bytes = postcard::to_allocvec(&account).unwrap();
+        let deserialized: OnboardingAccount = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized, account);
+    }
+
+    #[test]
+    fn test_onboarding_account_no_pii_fields() {
+        // Verify the struct contains NO PII fields — email, name, and
+        // organization_name are intentionally excluded. This test documents
+        // the invariant as a compile-time-visible assertion.
+        let now = Utc::now();
+        let account = OnboardingAccount {
+            token_hash: [0; 32],
+            region: Region::US_EAST_VA,
+            expires_at: now,
+            created_at: now,
+        };
+        // Only structural fields — no email, no name, no organization_name
+        assert_eq!(account.token_hash, [0; 32]);
+        assert_eq!(account.region, Region::US_EAST_VA);
     }
 }

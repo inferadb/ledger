@@ -263,10 +263,10 @@ async fn test_completed_saga_not_reexecuted() {
     // Create a saga that's already completed
     let saga_id = "test-completed-saga".to_string();
     let input = CreateOrganizationInput {
+        slug: inferadb_ledger_types::OrganizationSlug::new(777),
         region: Region::US_EAST_VA,
         tier: OrganizationTier::Free,
         admin: UserId::new(999),
-        pending_profile_key: "_sys:pending_org_profile:test-completed".to_string(),
     };
     let mut saga = CreateOrganizationSaga::new(SagaId::new(saga_id.clone()), input);
     saga.state = CreateOrganizationSagaState::Completed {
@@ -327,10 +327,10 @@ async fn test_saga_serialization_roundtrip() {
     // Create saga with various field values
     let saga_id = "test-roundtrip-saga".to_string();
     let input = CreateOrganizationInput {
+        slug: inferadb_ledger_types::OrganizationSlug::new(4242),
         region: Region::US_EAST_VA,
         tier: OrganizationTier::Free,
         admin: UserId::new(42),
-        pending_profile_key: "_sys:pending_org_profile:roundtrip".to_string(),
     };
     let saga = CreateOrganizationSaga::new(SagaId::new(saga_id.clone()), input);
     let wrapped = Saga::CreateOrganization(saga);
@@ -356,7 +356,6 @@ async fn test_saga_serialization_roundtrip() {
             assert_eq!(s.id, saga_id);
             assert_eq!(s.input.region, Region::US_EAST_VA);
             assert_eq!(s.input.admin, UserId::new(42));
-            assert_eq!(s.input.pending_profile_key, "_sys:pending_org_profile:roundtrip");
         },
         _ => panic!("Expected CreateOrganization saga"),
     }

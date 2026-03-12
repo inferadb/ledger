@@ -84,14 +84,15 @@ pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use client::{
     AppClientAssertionInfo, AppClientSecretStatus, AppCredentialType, AppCredentialsInfo, AppInfo,
     AppVaultConnectionInfo, BlindingKeyRehashStatus, BlindingKeyRotationStatus, BlockAnnouncement,
-    BlockHeader, ChainProof, CreateAppClientAssertionResult, Direction, Entity, EventEmissionPath,
-    EventFilter, EventOutcome, EventPage, EventScope, EventSource, HealthCheckResult, HealthStatus,
-    IngestRejection, IngestResult, LedgerClient, ListEntitiesOpts, ListRelationshipsOpts,
-    ListResourcesOpts, MerkleProof, MerkleSibling, MigrationInfo, Operation,
-    OrganizationDeleteInfo, OrganizationInfo, OrganizationMemberInfo, OrganizationMemberRole,
-    OrganizationStatus, OrganizationTier, PagedResult, ReadConsistency, Relationship,
-    SdkEventEntry, SdkIngestEventEntry, SetCondition, UserEmailInfo, UserInfo, UserMigrationInfo,
-    VaultInfo, VaultStatus, VerifiedValue, VerifyOpts, WriteSuccess,
+    BlockHeader, ChainProof, CreateAppClientAssertionResult, Direction, EmailVerificationCode,
+    EmailVerificationResult, Entity, EventEmissionPath, EventFilter, EventOutcome, EventPage,
+    EventScope, EventSource, HealthCheckResult, HealthStatus, IngestRejection, IngestResult,
+    LedgerClient, ListEntitiesOpts, ListRelationshipsOpts, ListResourcesOpts, MerkleProof,
+    MerkleSibling, MigrationInfo, Operation, OrganizationDeleteInfo, OrganizationInfo,
+    OrganizationMemberInfo, OrganizationMemberRole, OrganizationStatus, OrganizationTier,
+    PagedResult, ReadConsistency, RegistrationResult, Relationship, SdkEventEntry,
+    SdkIngestEventEntry, SetCondition, UserEmailInfo, UserInfo, UserMigrationInfo, VaultInfo,
+    VaultStatus, VerifiedValue, VerifyOpts, WriteSuccess,
 };
 pub use config::{
     CertificateData, ClientConfig, ClientConfigBuilder, DiscoveryConfig, RetryPolicy, TlsConfig,

@@ -9,18 +9,21 @@ use inferadb_ledger_state::{
     StateError, StateLayer,
     system::{
         App, AppCredentialType, AppCredentials, AppVaultConnection, ClientAssertionEntry,
-        CreateSigningKeyInput, CreateSigningKeySaga, OrganizationMember, OrganizationMemberRole,
-        OrganizationProfile, OrganizationRegistry, OrganizationStatus, PendingOrganizationProfile,
-        RefreshToken, RevocationResult, SYSTEM_VAULT_ID, Saga, SagaId, SigningKey, SigningKeyScope,
-        SigningKeyStatus, SystemError, SystemKeys, SystemOrganizationService, TeamMember,
-        TeamProfile, User,
+        EmailHashEntry, OnboardingAccount, OrganizationDirectoryEntry, OrganizationDirectoryStatus,
+        OrganizationMember, OrganizationMemberRole, OrganizationProfile, OrganizationRegistry,
+        OrganizationStatus, OrganizationTier, PendingEmailVerification, ProvisioningReservation,
+        RefreshToken, RevocationResult, SYSTEM_VAULT_ID, SigningKey, SigningKeyStatus, SystemError,
+        SystemKeys, SystemOrganizationService, TeamMember, TeamProfile, User, UserDirectoryEntry,
+        UserDirectoryStatus, UserEmail,
     },
 };
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
-    AppId, AppSlug, ErrorCode, Hash, NodeId, Operation, OrganizationId, SetCondition, TeamId,
-    TeamSlug, TokenSubject, TokenType, VaultEntry, VaultId, compute_tx_merkle_root, decode, encode,
+    AppId, AppSlug, ErrorCode, Hash, NodeId, Operation, OrganizationId, TeamId, TeamSlug,
+    TokenSubject, TokenType, TokenVersion, UserRole, UserStatus, VaultEntry, VaultId,
+    compute_tx_merkle_root, decode, encode,
     events::{EventAction, EventEntry, EventOutcome},
+    hash_eq,
 };
 
 use super::{
@@ -32,7 +35,7 @@ use super::{
 };
 use crate::{
     event_writer::ApplyPhaseEmitter,
-    types::{LedgerRequest, LedgerResponse, SystemRequest},
+    types::{EmailCodeVerifiedResult, LedgerRequest, LedgerResponse, SystemRequest},
 };
 
 /// Executes a cascade revocation and logs the outcome.
@@ -70,74 +73,6 @@ fn try_encode<T: serde::Serialize>(value: &T, context: &str) -> Option<Vec<u8>> 
         Err(e) => {
             tracing::error!(context, error = %e, "Failed to encode state — persistence skipped, potential state divergence");
             None
-        },
-    }
-}
-
-/// Writes a `CreateSigningKeySaga` record to `_system` storage.
-///
-/// Called from the `CreateOrganizationWithProfile` apply handler to ensure
-/// newly created orgs get a signing key. The saga orchestrator picks up
-/// the record on its next poll cycle.
-///
-/// This is a synchronous write through the state layer (not Raft) because
-/// the apply handler is already inside a Raft commit. The saga ID is derived
-/// deterministically from the scope to ensure all replicas produce identical
-/// state when applying the same log entry.
-fn write_signing_key_saga_record<B: StorageBackend>(
-    state_layer: &Arc<StateLayer<B>>,
-    scope: SigningKeyScope,
-) {
-    let saga_id = match &scope {
-        SigningKeyScope::Global => SagaId::new("create-signing-key-global"),
-        SigningKeyScope::Organization(org_id) => {
-            SagaId::new(format!("create-signing-key-org-{}", org_id.value()))
-        },
-    };
-    let saga = CreateSigningKeySaga::new(saga_id.clone(), CreateSigningKeyInput { scope });
-    let wrapped = Saga::CreateSigningKey(saga);
-
-    let key = format!("saga:{saga_id}");
-    match serde_json::to_vec(&wrapped) {
-        Ok(value) => {
-            let op = Operation::SetEntity {
-                key: key.clone(),
-                value,
-                condition: Some(SetCondition::MustNotExist),
-                expires_at: None,
-            };
-            match state_layer.apply_operations(SYSTEM_VAULT_ID, &[op], 0) {
-                Ok(_) => {
-                    tracing::info!(
-                        saga_id = %saga_id,
-                        scope = ?scope,
-                        "Wrote CreateSigningKeySaga from apply handler"
-                    );
-                },
-                Err(StateError::PreconditionFailed { .. }) => {
-                    // Expected on log replay — saga already exists from prior apply.
-                    tracing::info!(
-                        saga_id = %saga_id,
-                        scope = ?scope,
-                        "CreateSigningKeySaga already exists (idempotent replay)"
-                    );
-                },
-                Err(e) => {
-                    tracing::error!(
-                        saga_id = %saga_id,
-                        scope = ?scope,
-                        error = %e,
-                        "Failed to write CreateSigningKeySaga record"
-                    );
-                },
-            }
-        },
-        Err(e) => {
-            tracing::error!(
-                saga_id = %saga_id,
-                error = %e,
-                "Failed to serialize CreateSigningKeySaga"
-            );
         },
     }
 }
@@ -2871,14 +2806,28 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         pending.user_slug_index.push((slug, user_id));
                         LedgerResponse::UserCreated { user_id, slug }
                     },
-                    SystemRequest::UpdateUser { user_id, name, role, primary_email } => {
+                    SystemRequest::UpdateUser { user_id, role, primary_email } => {
                         if let Some(sys) = &sys_service {
-                            match sys.update_user(*user_id, name.as_deref(), *role, *primary_email)
-                            {
+                            match sys.update_user(*user_id, *role, *primary_email) {
                                 Ok(_user) => LedgerResponse::UserUpdated { user_id: *user_id },
                                 Err(e) => LedgerResponse::Error {
                                     code: ErrorCode::Internal,
                                     message: format!("Failed to update user: {e}"),
+                                },
+                            }
+                        } else {
+                            LedgerResponse::Empty
+                        }
+                    },
+                    SystemRequest::UpdateUserProfile { user_id, name } => {
+                        if let Some(sys) = &sys_service {
+                            match sys.update_user_profile(*user_id, name) {
+                                Ok(_user) => {
+                                    LedgerResponse::UserProfileUpdated { user_id: *user_id }
+                                },
+                                Err(e) => LedgerResponse::Error {
+                                    code: ErrorCode::Internal,
+                                    message: format!("Failed to update user profile: {e}"),
                                 },
                             }
                         } else {
@@ -3061,7 +3010,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     SystemRequest::UpdateUserDirectoryStatus { user_id, status, region } => {
                         if let Some(sys) = &sys_service {
                             // Update status first
-                            if let Err(e) = sys.update_user_directory_status(*user_id, *status) {
+                            if let Err(e) =
+                                sys.update_user_directory_status(*user_id, *status, block_timestamp)
+                            {
                                 LedgerResponse::Error {
                                     code: ErrorCode::Internal,
                                     message: format!("Failed to update user directory status: {e}"),
@@ -3087,12 +3038,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             LedgerResponse::Empty
                         }
                     },
-                    SystemRequest::EraseUser { user_id, erased_by, region } => {
+                    SystemRequest::EraseUser { user_id, region } => {
                         if let Some(sys) = &sys_service {
                             // Forward-only finalization: each step idempotent.
                             // The service method handles directory update, email hash
                             // removal, subject key deletion, and audit record creation.
-                            if let Err(e) = sys.erase_user(*user_id, erased_by, *region) {
+                            // Actor identity is captured in canonical log lines, not
+                            // replicated via Raft (no PII in GLOBAL log).
+                            if let Err(e) = sys.erase_user(*user_id, *region, block_timestamp) {
                                 LedgerResponse::Error {
                                     code: ErrorCode::Internal,
                                     message: format!("Failed to erase user: {e}"),
@@ -3190,77 +3143,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             organization_slug: *slug,
                         }
                     },
-                    SystemRequest::WriteOrganizationProfile {
-                        organization,
-                        profile_key,
-                        admin,
-                    } => {
+                    SystemRequest::WriteOrganizationProfile { organization, name, admin } => {
                         if let Some(state_layer) = &self.state_layer {
-                            // Read the pending profile written by the gRPC handler
-                            let pending_result =
-                                state_layer.get_entity(SYSTEM_VAULT_ID, profile_key.as_bytes());
-
-                            let org_name = match pending_result {
-                                Ok(Some(entity)) => {
-                                    match decode::<PendingOrganizationProfile>(&entity.value) {
-                                        Ok(pending) => pending.name,
-                                        Err(e) => {
-                                            tracing::error!(
-                                                organization_id = organization.value(),
-                                                profile_key = %profile_key,
-                                                error = %e,
-                                                "Failed to decode pending org profile"
-                                            );
-                                            return (
-                                                LedgerResponse::Error {
-                                                    code: ErrorCode::FailedPrecondition,
-                                                    message: format!(
-                                                        "Failed to decode pending profile for org {}: {e}",
-                                                        organization
-                                                    ),
-                                                },
-                                                None,
-                                            );
-                                        },
-                                    }
-                                },
-                                Ok(None) => {
-                                    tracing::error!(
-                                        organization_id = organization.value(),
-                                        profile_key = %profile_key,
-                                        "Pending org profile not found"
-                                    );
-                                    return (
-                                        LedgerResponse::Error {
-                                            code: ErrorCode::NotFound,
-                                            message: format!(
-                                                "Pending profile not found at key {} for org {}",
-                                                profile_key, organization
-                                            ),
-                                        },
-                                        None,
-                                    );
-                                },
-                                Err(e) => {
-                                    tracing::error!(
-                                        organization_id = organization.value(),
-                                        profile_key = %profile_key,
-                                        error = %e,
-                                        "Failed to read pending org profile"
-                                    );
-                                    return (
-                                        LedgerResponse::Error {
-                                            code: ErrorCode::FailedPrecondition,
-                                            message: format!(
-                                                "Failed to read pending profile for org {}: {e}",
-                                                organization
-                                            ),
-                                        },
-                                        None,
-                                    );
-                                },
-                            };
-
                             // Look up org metadata for region/tier/slug
                             let (region, tier, slug) = if let Some(org_meta) =
                                 state.organizations.get(organization)
@@ -3284,7 +3168,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 organization: *organization,
                                 slug,
                                 region,
-                                name: org_name,
+                                name: name.clone(),
                                 tier,
                                 status: OrganizationStatus::Active,
                                 members: vec![OrganizationMember {
@@ -3299,14 +3183,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                             if let Some(profile_bytes) = try_encode(&profile, "org_profile") {
                                 let final_key = SystemKeys::organization_profile_key(*organization);
-                                let mut ops = vec![Operation::SetEntity {
+                                let ops = vec![Operation::SetEntity {
                                     key: final_key,
                                     value: profile_bytes,
                                     condition: None,
                                     expires_at: None,
                                 }];
-                                // Delete the pending key
-                                ops.push(Operation::DeleteEntity { key: profile_key.clone() });
                                 if let Err(e) =
                                     state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
                                 {
@@ -3364,32 +3246,337 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }
                         }
                     },
-                    SystemRequest::CreateOrganizationWithProfile {
-                        slug,
-                        region,
-                        tier,
-                        name,
-                        admin,
-                    } => {
-                        let organization_id = state.sequences.next_organization();
-                        let org_meta = OrganizationMeta {
-                            organization: organization_id,
-                            slug: *slug,
-                            region: *region,
-                            status: OrganizationStatus::Active,
-                            tier: *tier,
-                            pending_region: None,
-                            storage_bytes: 0,
-                        };
-                        if let Some(blob) = try_encode(&org_meta, "org_meta") {
-                            pending.organizations.push((organization_id, blob));
-                        }
-                        state.organizations.insert(organization_id, org_meta);
-                        state.slug_index.insert(*slug, organization_id);
-                        state.id_to_slug.insert(organization_id, *slug);
-                        pending.slug_index.push((*slug, organization_id));
 
-                        if let Some(state_layer) = &self.state_layer {
+                    // ── Onboarding: CreateEmailVerification (REGIONAL) ──
+                    SystemRequest::CreateEmailVerification {
+                        email_hmac,
+                        email,
+                        code_hash,
+                        region,
+                        expires_at,
+                    } => {
+                        if let Some(sys) = &sys_service {
+                            // 1. Read existing record (if any)
+                            let existing = match sys.get_email_verification(email_hmac) {
+                                Ok(record) => record,
+                                Err(e) => {
+                                    return (
+                                        LedgerResponse::Error {
+                                            code: ErrorCode::Internal,
+                                            message: format!(
+                                                "Failed to read verification record: {e}"
+                                            ),
+                                        },
+                                        None,
+                                    );
+                                },
+                            };
+
+                            // 2. Rate limit check
+                            let window = chrono::Duration::from_std(
+                                inferadb_ledger_types::onboarding::RATE_LIMIT_WINDOW,
+                            )
+                            .unwrap_or(chrono::Duration::hours(1));
+
+                            let (new_count, window_start) = if let Some(ref rec) = existing {
+                                let elapsed = block_timestamp - rec.rate_limit_window_start;
+                                if elapsed < window {
+                                    // Window still active
+                                    if rec.rate_limit_count
+                                        >= inferadb_ledger_types::onboarding::MAX_INITIATIONS_PER_HOUR
+                                    {
+                                        return (
+                                            LedgerResponse::Error {
+                                                code: ErrorCode::RateLimited,
+                                                message: "Too many verification requests"
+                                                    .to_string(),
+                                            },
+                                            None,
+                                        );
+                                    }
+                                    (rec.rate_limit_count + 1, rec.rate_limit_window_start)
+                                } else {
+                                    // Window expired — reset
+                                    (1, block_timestamp)
+                                }
+                            } else {
+                                // No existing record — start fresh
+                                (1, block_timestamp)
+                            };
+
+                            // 3. Write verification record
+                            let record = PendingEmailVerification {
+                                email: email.clone(),
+                                code_hash: *code_hash,
+                                region: *region,
+                                expires_at: *expires_at,
+                                attempts: 0,
+                                rate_limit_count: new_count,
+                                rate_limit_window_start: window_start,
+                            };
+
+                            match sys.store_email_verification(email_hmac, &record) {
+                                Ok(()) => LedgerResponse::EmailVerificationCreated,
+                                Err(e) => LedgerResponse::Error {
+                                    code: ErrorCode::Internal,
+                                    message: format!("Failed to store verification record: {e}"),
+                                },
+                            }
+                        } else {
+                            LedgerResponse::EmailVerificationCreated
+                        }
+                    },
+
+                    // ── Onboarding: VerifyEmailCode (REGIONAL) ──
+                    SystemRequest::VerifyEmailCode {
+                        email_hmac,
+                        code_hash,
+                        region,
+                        existing_user_hmac_hit,
+                        onboarding_token_hash,
+                        onboarding_expires_at,
+                    } => {
+                        if let Some(sys) = &sys_service {
+                            // 1. Read pending verification
+                            let record = match sys.get_email_verification(email_hmac) {
+                                Ok(Some(rec)) => rec,
+                                Ok(None) => {
+                                    return (
+                                        LedgerResponse::Error {
+                                            code: ErrorCode::NotFound,
+                                            message: "No pending verification".to_string(),
+                                        },
+                                        None,
+                                    );
+                                },
+                                Err(e) => {
+                                    return (
+                                        LedgerResponse::Error {
+                                            code: ErrorCode::Internal,
+                                            message: format!("Failed to read verification: {e}"),
+                                        },
+                                        None,
+                                    );
+                                },
+                            };
+
+                            // 2. Check expiry
+                            if record.expires_at < block_timestamp {
+                                let _ = sys.delete_email_verification(email_hmac);
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::Expired,
+                                        message: "Verification code expired".to_string(),
+                                    },
+                                    None,
+                                );
+                            }
+
+                            // 3. Check max attempts
+                            if record.attempts
+                                >= inferadb_ledger_types::onboarding::MAX_CODE_ATTEMPTS
+                            {
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::TooManyAttempts,
+                                        message: "Too many verification attempts".to_string(),
+                                    },
+                                    None,
+                                );
+                            }
+
+                            // 4. Validate code (constant-time comparison)
+                            if !hash_eq(code_hash, &record.code_hash) {
+                                // Increment attempts and write back
+                                let updated = PendingEmailVerification {
+                                    attempts: record.attempts + 1,
+                                    ..record
+                                };
+                                let _ = sys.store_email_verification(email_hmac, &updated);
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::InvalidArgument,
+                                        message: "Invalid verification code".to_string(),
+                                    },
+                                    None,
+                                );
+                            }
+
+                            // 5. Code valid — delete verification record
+                            let _ = sys.delete_email_verification(email_hmac);
+
+                            // 6. Branch on existing_user_hmac_hit
+                            if *existing_user_hmac_hit {
+                                // Existing user: signal only, no writes
+                                LedgerResponse::EmailCodeVerified {
+                                    result: EmailCodeVerifiedResult::ExistingUser,
+                                }
+                            } else {
+                                // New user: create OnboardingAccount
+                                let account = OnboardingAccount {
+                                    token_hash: *onboarding_token_hash,
+                                    region: *region,
+                                    expires_at: *onboarding_expires_at,
+                                    created_at: block_timestamp,
+                                };
+                                match sys.store_onboarding_account(email_hmac, &account) {
+                                    Ok(()) => LedgerResponse::EmailCodeVerified {
+                                        result: EmailCodeVerifiedResult::NewUser,
+                                    },
+                                    Err(e) => LedgerResponse::Error {
+                                        code: ErrorCode::Internal,
+                                        message: format!("Failed to store onboarding account: {e}"),
+                                    },
+                                }
+                            }
+                        } else {
+                            LedgerResponse::EmailCodeVerified {
+                                result: EmailCodeVerifiedResult::NewUser,
+                            }
+                        }
+                    },
+
+                    // ── Onboarding: CreateOnboardingUser — Saga Step 0 (GLOBAL) ──
+                    SystemRequest::CreateOnboardingUser {
+                        email_hmac,
+                        user_slug,
+                        organization_slug,
+                        region,
+                    } => {
+                        if let Some(sys) = &sys_service {
+                            // 1. Idempotency guard: read HMAC index
+                            match sys.get_email_hash(email_hmac) {
+                                Ok(Some(EmailHashEntry::Active(_))) => {
+                                    return (
+                                        LedgerResponse::Error {
+                                            code: ErrorCode::AlreadyExists,
+                                            message: "Email already registered".to_string(),
+                                        },
+                                        None,
+                                    );
+                                },
+                                Ok(Some(EmailHashEntry::Provisioning(ref reservation))) => {
+                                    // Check if this is our own saga retry
+                                    if let Ok(Some(dir)) =
+                                        sys.get_user_directory(reservation.user_id)
+                                        && dir.status == UserDirectoryStatus::Provisioning
+                                        && dir.slug == Some(*user_slug)
+                                    {
+                                        // Step 0 already ran — idempotent return
+                                        return (
+                                            LedgerResponse::OnboardingUserCreated {
+                                                user_id: reservation.user_id,
+                                                organization_id: reservation.organization_id,
+                                            },
+                                            None,
+                                        );
+                                    }
+                                    // Different saga — email reserved by another
+                                    return (
+                                        LedgerResponse::Error {
+                                            code: ErrorCode::AlreadyExists,
+                                            message: "Email already registered".to_string(),
+                                        },
+                                        None,
+                                    );
+                                },
+                                Ok(None) => {
+                                    // No existing entry — proceed
+                                },
+                                Err(e) => {
+                                    return (
+                                        LedgerResponse::Error {
+                                            code: ErrorCode::Internal,
+                                            message: format!("Failed to read email hash: {e}"),
+                                        },
+                                        None,
+                                    );
+                                },
+                            }
+
+                            // 2. Allocate user ID
+                            let user_id = state.sequences.next_user();
+
+                            // 3. Allocate organization ID
+                            let organization_id = state.sequences.next_organization();
+
+                            // 4. Reserve HMAC as Provisioning (CAS MustNotExist)
+                            let reservation = ProvisioningReservation { user_id, organization_id };
+                            let entry = EmailHashEntry::Provisioning(reservation);
+                            let hmac_key = SystemKeys::email_hash_index_key(email_hmac);
+                            let hmac_value = match encode(&entry) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    return (
+                                        LedgerResponse::Error {
+                                            code: ErrorCode::Internal,
+                                            message: format!(
+                                                "Failed to encode email hash entry: {e}"
+                                            ),
+                                        },
+                                        None,
+                                    );
+                                },
+                            };
+                            let hmac_ops = vec![Operation::SetEntity {
+                                key: hmac_key,
+                                value: hmac_value,
+                                condition: Some(inferadb_ledger_types::SetCondition::MustNotExist),
+                                expires_at: None,
+                            }];
+                            if let Some(state_layer) = &self.state_layer
+                                && let Err(e) =
+                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &hmac_ops, 0)
+                            {
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::AlreadyExists,
+                                        message: format!("Email hash CAS failed (race): {e}"),
+                                    },
+                                    None,
+                                );
+                            }
+
+                            // 5. Write GLOBAL user directory (Provisioning status)
+                            let user_dir = UserDirectoryEntry {
+                                user: user_id,
+                                slug: Some(*user_slug),
+                                region: Some(*region),
+                                status: UserDirectoryStatus::Provisioning,
+                                updated_at: Some(block_timestamp),
+                            };
+                            if let Err(e) = sys.register_user_directory(&user_dir) {
+                                tracing::error!(
+                                    user_id = user_id.value(),
+                                    error = %e,
+                                    "Failed to write user directory"
+                                );
+                            }
+
+                            // 6. Update in-memory user indices
+                            state.user_slug_index.insert(*user_slug, user_id);
+                            state.user_id_to_slug.insert(user_id, *user_slug);
+                            pending.user_slug_index.push((*user_slug, user_id));
+
+                            // 7. Write GLOBAL org directory (Provisioning status)
+                            let org_meta = OrganizationMeta {
+                                organization: organization_id,
+                                slug: *organization_slug,
+                                region: *region,
+                                status: OrganizationStatus::Provisioning,
+                                tier: OrganizationTier::default(),
+                                pending_region: None,
+                                storage_bytes: 0,
+                            };
+                            if let Some(blob) = try_encode(&org_meta, "org_meta") {
+                                pending.organizations.push((organization_id, blob));
+                            }
+                            state.organizations.insert(organization_id, org_meta);
+                            state.slug_index.insert(*organization_slug, organization_id);
+                            state.id_to_slug.insert(organization_id, *organization_slug);
+                            pending.slug_index.push((*organization_slug, organization_id));
+
+                            // Write org registry to state layer
                             let registry = OrganizationRegistry {
                                 organization_id,
                                 region: *region,
@@ -3399,84 +3586,413 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     .nodes()
                                     .map(|(id, _)| NodeId::new(id.to_string()))
                                     .collect(),
-                                status: OrganizationStatus::Active,
+                                status: OrganizationStatus::Provisioning,
                                 config_version: 1,
                                 created_at: block_timestamp,
                                 deleted_at: None,
                             };
-                            if let Some(value) = try_encode(&registry, "org_registry") {
-                                let key = SystemKeys::organization_key(organization_id);
-                                let slug_index_key = SystemKeys::organization_slug_key(*slug);
-                                let mut ops = vec![
-                                    Operation::SetEntity {
-                                        key,
-                                        value,
-                                        condition: None,
-                                        expires_at: None,
-                                    },
-                                    Operation::SetEntity {
-                                        key: slug_index_key,
-                                        value: organization_id.to_string().into_bytes(),
-                                        condition: None,
-                                        expires_at: None,
-                                    },
-                                ];
+                            if let Err(e) = sys.register_organization(&registry, *organization_slug)
+                            {
+                                tracing::error!(
+                                    organization_id = organization_id.value(),
+                                    error = %e,
+                                    "Failed to persist org registry"
+                                );
+                            }
 
-                                // Write organization profile atomically
-                                let profile = OrganizationProfile {
-                                    organization: organization_id,
-                                    slug: *slug,
-                                    region: *region,
-                                    name: name.clone(),
-                                    tier: *tier,
-                                    status: OrganizationStatus::Active,
-                                    members: vec![OrganizationMember {
-                                        user_id: *admin,
-                                        role: OrganizationMemberRole::Admin,
-                                        joined_at: block_timestamp,
-                                    }],
-                                    created_at: block_timestamp,
-                                    updated_at: block_timestamp,
-                                    deleted_at: None,
-                                };
-                                if let Some(profile_bytes) = try_encode(&profile, "org_profile") {
-                                    ops.push(Operation::SetEntity {
-                                        key: SystemKeys::organization_profile_key(organization_id),
-                                        value: profile_bytes,
-                                        condition: None,
-                                        expires_at: None,
-                                    });
-                                }
+                            // Write org directory entry to state layer
+                            let org_dir = OrganizationDirectoryEntry {
+                                organization: organization_id,
+                                slug: Some(*organization_slug),
+                                region: Some(*region),
+                                tier: OrganizationTier::default(),
+                                status: OrganizationDirectoryStatus::Provisioning,
+                                updated_at: Some(block_timestamp),
+                            };
+                            if let Err(e) = sys.register_organization_directory(&org_dir) {
+                                tracing::error!(
+                                    organization_id = organization_id.value(),
+                                    error = %e,
+                                    "Failed to persist org directory entry"
+                                );
+                            }
 
-                                if let Err(e) =
-                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
-                                {
-                                    tracing::error!(
-                                        organization_id = organization_id.value(),
-                                        error = %e,
-                                        "Failed to persist organization with profile to StateLayer"
+                            LedgerResponse::OnboardingUserCreated { user_id, organization_id }
+                        } else {
+                            LedgerResponse::Error {
+                                code: ErrorCode::Internal,
+                                message: "State layer not available".to_string(),
+                            }
+                        }
+                    },
+
+                    SystemRequest::WriteOnboardingUserProfile {
+                        user_id,
+                        user_slug,
+                        organization_id,
+                        organization_slug,
+                        email_hmac,
+                        email,
+                        name,
+                        organization_name,
+                        subject_key_bytes,
+                        refresh_token_hash,
+                        refresh_family_id,
+                        refresh_expires_at,
+                        kid,
+                        region,
+                    } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            let sys = SystemOrganizationService::new(state_layer.clone());
+
+                            // 1. Write User record (Provisioning — activated in step 2)
+                            let email_id = state.sequences.next_user_email();
+                            let user = User {
+                                id: *user_id,
+                                slug: *user_slug,
+                                region: *region,
+                                name: name.clone(),
+                                email: email_id,
+                                status: UserStatus::PendingOrg,
+                                role: UserRole::default(),
+                                created_at: block_timestamp,
+                                updated_at: block_timestamp,
+                                deleted_at: None,
+                                version: TokenVersion::default(),
+                            };
+                            let user_key = SystemKeys::user_key(*user_id);
+                            let user_value = match encode(&user) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    return (
+                                        LedgerResponse::Error {
+                                            code: ErrorCode::Internal,
+                                            message: format!("Failed to encode user: {e}"),
+                                        },
+                                        None,
                                     );
-                                } else {
-                                    // Update user→org index for initial admin member
-                                    state
-                                        .user_org_index
-                                        .entry(*admin)
-                                        .or_default()
-                                        .insert(organization_id);
+                                },
+                            };
 
-                                    // Write CreateSigningKeySaga for this org's signing key.
-                                    // The saga orchestrator picks it up on the next poll cycle.
-                                    write_signing_key_saga_record(
-                                        state_layer,
-                                        SigningKeyScope::Organization(organization_id),
+                            // 2. Write UserEmail record (verified_at set)
+                            let user_email = UserEmail {
+                                id: email_id,
+                                user: *user_id,
+                                email: email.to_lowercase(),
+                                created_at: block_timestamp,
+                                verified_at: Some(block_timestamp),
+                            };
+                            let email_key = SystemKeys::user_email_key(email_id);
+                            let email_value = match encode(&user_email) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    return (
+                                        LedgerResponse::Error {
+                                            code: ErrorCode::Internal,
+                                            message: format!("Failed to encode user email: {e}"),
+                                        },
+                                        None,
+                                    );
+                                },
+                            };
+
+                            // Write user + email atomically
+                            let user_ops = vec![
+                                Operation::SetEntity {
+                                    key: user_key,
+                                    value: user_value,
+                                    condition: None,
+                                    expires_at: None,
+                                },
+                                Operation::SetEntity {
+                                    key: email_key,
+                                    value: email_value,
+                                    condition: None,
+                                    expires_at: None,
+                                },
+                            ];
+                            if let Err(e) =
+                                state_layer.apply_operations(SYSTEM_VAULT_ID, &user_ops, 0)
+                            {
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::Internal,
+                                        message: format!("Failed to write user records: {e}"),
+                                    },
+                                    None,
+                                );
+                            }
+
+                            // 3. Store subject encryption key
+                            if let Err(e) = sys.store_subject_key(*user_id, subject_key_bytes) {
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::Internal,
+                                        message: format!("Failed to store subject key: {e}"),
+                                    },
+                                    None,
+                                );
+                            }
+
+                            // 4. Create refresh token
+                            let refresh_token_id = state.sequences.next_refresh_token();
+                            let token = RefreshToken {
+                                id: refresh_token_id,
+                                token_hash: *refresh_token_hash,
+                                family: *refresh_family_id,
+                                token_type: TokenType::UserSession,
+                                subject: TokenSubject::User(*user_slug),
+                                organization: Some(*organization_id),
+                                vault: None,
+                                kid: kid.clone(),
+                                expires_at: *refresh_expires_at,
+                                used: false,
+                                created_at: block_timestamp,
+                                used_at: None,
+                                revoked_at: None,
+                            };
+                            if let Err(e) = sys.store_refresh_token(&token) {
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::Internal,
+                                        message: format!("Failed to store refresh token: {e}"),
+                                    },
+                                    None,
+                                );
+                            }
+
+                            // 5. Write organization profile (PII regional)
+                            let profile = OrganizationProfile {
+                                organization: *organization_id,
+                                slug: *organization_slug,
+                                region: *region,
+                                name: organization_name.clone(),
+                                tier: OrganizationTier::default(),
+                                status: OrganizationStatus::Provisioning,
+                                members: vec![OrganizationMember {
+                                    user_id: *user_id,
+                                    role: OrganizationMemberRole::Admin,
+                                    joined_at: block_timestamp,
+                                }],
+                                created_at: block_timestamp,
+                                updated_at: block_timestamp,
+                                deleted_at: None,
+                            };
+                            if let Err(e) =
+                                save_org_profile(state_layer, *organization_id, &profile)
+                            {
+                                return (e, None);
+                            }
+
+                            // 6. Delete onboarding account record
+                            let account_key = SystemKeys::onboard_account_key(email_hmac);
+                            let cleanup_ops = vec![Operation::DeleteEntity { key: account_key }];
+                            if let Err(e) =
+                                state_layer.apply_operations(SYSTEM_VAULT_ID, &cleanup_ops, 0)
+                            {
+                                tracing::warn!(
+                                    email_hmac = %email_hmac,
+                                    error = %e,
+                                    "Failed to delete onboarding account (non-fatal)"
+                                );
+                            }
+
+                            LedgerResponse::OnboardingUserProfileWritten { refresh_token_id }
+                        } else {
+                            LedgerResponse::Error {
+                                code: ErrorCode::Internal,
+                                message: "State layer not available".to_string(),
+                            }
+                        }
+                    },
+
+                    SystemRequest::ActivateOnboardingUser {
+                        user_id,
+                        user_slug,
+                        organization_id,
+                        organization_slug,
+                        email_hmac,
+                    } => {
+                        if let Some(sys) = &sys_service {
+                            // 1. Activate user directory (Provisioning → Active)
+                            if let Err(e) = sys.update_user_directory_status(
+                                *user_id,
+                                UserDirectoryStatus::Active,
+                                block_timestamp,
+                            ) {
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::Internal,
+                                        message: format!("Failed to activate user directory: {e}"),
+                                    },
+                                    None,
+                                );
+                            }
+
+                            // 2. Activate org directory (Provisioning → Active)
+                            if let Err(e) = sys.update_organization_directory_status(
+                                *organization_id,
+                                OrganizationDirectoryStatus::Active,
+                                block_timestamp,
+                            ) {
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::Internal,
+                                        message: format!("Failed to activate org directory: {e}"),
+                                    },
+                                    None,
+                                );
+                            }
+
+                            // 3. Update HMAC index: Provisioning → Active(user_id)
+                            let hmac_key = SystemKeys::email_hash_index_key(email_hmac);
+                            let active_entry = EmailHashEntry::Active(*user_id);
+                            let hmac_value = match encode(&active_entry) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    return (
+                                        LedgerResponse::Error {
+                                            code: ErrorCode::Internal,
+                                            message: format!(
+                                                "Failed to encode active HMAC entry: {e}"
+                                            ),
+                                        },
+                                        None,
+                                    );
+                                },
+                            };
+                            let hmac_ops = vec![Operation::SetEntity {
+                                key: hmac_key,
+                                value: hmac_value,
+                                condition: None,
+                                expires_at: None,
+                            }];
+                            if let Some(state_layer) = &self.state_layer
+                                && let Err(e) =
+                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &hmac_ops, 0)
+                            {
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::Internal,
+                                        message: format!("Failed to activate HMAC index: {e}"),
+                                    },
+                                    None,
+                                );
+                            }
+
+                            // 4. Update in-memory org meta status
+                            if let Some(meta) = state.organizations.get_mut(organization_id) {
+                                meta.status = OrganizationStatus::Active;
+                            }
+
+                            // 5. Update org registry status
+                            if let Ok(Some(mut registry)) = sys.get_organization(*organization_id) {
+                                registry.status = OrganizationStatus::Active;
+                                if let Err(e) =
+                                    sys.register_organization(&registry, *organization_slug)
+                                {
+                                    return (
+                                        LedgerResponse::Error {
+                                            code: ErrorCode::Internal,
+                                            message: format!(
+                                                "Failed to activate org registry: {e}"
+                                            ),
+                                        },
+                                        None,
                                     );
                                 }
                             }
-                        }
 
-                        LedgerResponse::OrganizationDirectoryCreated {
-                            organization_id,
-                            organization_slug: *slug,
+                            // Ensure slug indices are up to date
+                            state.slug_index.entry(*organization_slug).or_insert(*organization_id);
+                            state.user_slug_index.entry(*user_slug).or_insert(*user_id);
+
+                            LedgerResponse::OnboardingUserActivated
+                        } else {
+                            LedgerResponse::Error {
+                                code: ErrorCode::Internal,
+                                message: "System service not available".to_string(),
+                            }
+                        }
+                    },
+
+                    SystemRequest::CleanupExpiredOnboarding => {
+                        if let Some(state_layer) = &self.state_layer {
+                            let mut codes_deleted: u32 = 0;
+                            let mut accounts_deleted: u32 = 0;
+
+                            // 1. Scan expired verification codes
+                            if let Ok(entities) = state_layer.list_entities(
+                                SYSTEM_VAULT_ID,
+                                Some(SystemKeys::ONBOARD_VERIFY_PREFIX),
+                                None,
+                                inferadb_ledger_types::onboarding::MAX_ONBOARDING_SCAN,
+                            ) {
+                                let mut delete_ops = Vec::new();
+                                for entity in &entities {
+                                    let key_str = String::from_utf8_lossy(&entity.key).to_string();
+                                    if let Ok(record) =
+                                        decode::<PendingEmailVerification>(&entity.value)
+                                        && record.expires_at <= block_timestamp
+                                    {
+                                        delete_ops.push(Operation::DeleteEntity { key: key_str });
+                                    }
+                                }
+                                codes_deleted = delete_ops.len() as u32;
+                                if !delete_ops.is_empty()
+                                    && let Err(e) = state_layer.apply_operations(
+                                        SYSTEM_VAULT_ID,
+                                        &delete_ops,
+                                        0,
+                                    )
+                                {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to delete expired verification codes"
+                                    );
+                                }
+                            }
+
+                            // 2. Scan expired onboarding accounts
+                            if let Ok(entities) = state_layer.list_entities(
+                                SYSTEM_VAULT_ID,
+                                Some(SystemKeys::ONBOARD_ACCOUNT_PREFIX),
+                                None,
+                                inferadb_ledger_types::onboarding::MAX_ONBOARDING_SCAN,
+                            ) {
+                                let mut delete_ops = Vec::new();
+                                for entity in &entities {
+                                    let key_str = String::from_utf8_lossy(&entity.key).to_string();
+                                    if let Ok(record) = decode::<OnboardingAccount>(&entity.value)
+                                        && record.expires_at <= block_timestamp
+                                    {
+                                        delete_ops.push(Operation::DeleteEntity { key: key_str });
+                                    }
+                                }
+                                accounts_deleted = delete_ops.len() as u32;
+                                if !delete_ops.is_empty()
+                                    && let Err(e) = state_layer.apply_operations(
+                                        SYSTEM_VAULT_ID,
+                                        &delete_ops,
+                                        0,
+                                    )
+                                {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to delete expired onboarding accounts"
+                                    );
+                                }
+                            }
+
+                            LedgerResponse::OnboardingCleanedUp {
+                                verification_codes_deleted: codes_deleted,
+                                onboarding_accounts_deleted: accounts_deleted,
+                            }
+                        } else {
+                            LedgerResponse::Error {
+                                code: ErrorCode::Internal,
+                                message: "State layer not available".to_string(),
+                            }
                         }
                     },
                 };
@@ -3544,6 +4060,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         *op_index += 1;
                     },
                     (
+                        LedgerResponse::UserProfileUpdated { user_id },
+                        SystemRequest::UpdateUserProfile { .. },
+                    ) => {
+                        events.push(
+                            ApplyPhaseEmitter::for_system(EventAction::UserUpdated)
+                                .principal("system")
+                                .detail("user_id", &user_id.to_string())
+                                .detail("scope", "profile")
+                                .outcome(EventOutcome::Success)
+                                .build(block_height, *op_index, block_timestamp, ttl_days),
+                        );
+                        *op_index += 1;
+                    },
+                    (
                         LedgerResponse::UserSoftDeleted { user_id, retention_days },
                         SystemRequest::DeleteUser { .. },
                     ) => {
@@ -3600,11 +4130,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     },
                     (
                         LedgerResponse::UserErased { user_id },
-                        SystemRequest::EraseUser { erased_by, region, .. },
+                        SystemRequest::EraseUser { region, .. },
                     ) => {
                         events.push(
                             ApplyPhaseEmitter::for_system(EventAction::UserErased)
-                                .principal(erased_by)
+                                .principal("system")
                                 .detail("user_id", &user_id.to_string())
                                 .detail("region", region.as_str())
                                 .outcome(EventOutcome::Success)
@@ -3633,8 +4163,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             organization_id,
                             organization_slug,
                         },
-                        SystemRequest::CreateOrganizationDirectory { region, .. }
-                        | SystemRequest::CreateOrganizationWithProfile { region, .. },
+                        SystemRequest::CreateOrganizationDirectory { region, .. },
                     ) => {
                         events.push(
                             ApplyPhaseEmitter::for_system(EventAction::OrganizationCreated)

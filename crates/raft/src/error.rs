@@ -104,6 +104,14 @@ pub enum SagaError {
     /// Signing key envelope encryption failed.
     #[snafu(display("Key encryption failed: {message}"))]
     KeyEncryption { message: String },
+
+    /// Orchestrator has shut down (submission channel closed).
+    #[snafu(display("Orchestrator shut down: {message}"))]
+    OrchestratorShutdown { message: String },
+
+    /// PII lost due to crash or leader transfer — saga must compensate.
+    #[snafu(display("PII lost for saga — compensating"))]
+    PiiLost,
 }
 
 // ============================================================================

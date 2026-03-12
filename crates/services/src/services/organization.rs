@@ -4,9 +4,9 @@
 //! and region migration. Write operations flow through Raft for consistency;
 //! read operations hit the local applied state directly.
 //!
-//! Organization creation uses a single atomic Raft entry that writes both
-//! the directory metadata and profile data. Region migration creates a saga
-//! for the orchestrator to drive.
+//! Organization creation uses a fire-and-forget saga that separates GLOBAL
+//! directory metadata from regional PII (organization name). Region migration
+//! also uses a saga for the orchestrator to drive.
 
 use inferadb_ledger_proto::proto::{
     self, CreateOrganizationRequest, CreateOrganizationResponse, CreateOrganizationTeamRequest,
@@ -25,7 +25,7 @@ use inferadb_ledger_raft::{
     error::ServiceError,
     logging::RequestContext,
     metrics, trace_context,
-    types::{LedgerRequest, LedgerResponse, SystemRequest},
+    types::{LedgerRequest, LedgerResponse},
 };
 use inferadb_ledger_state::system::{
     OrganizationMember as DomainOrganizationMember, OrganizationMemberRole as DomainMemberRole,
@@ -373,9 +373,11 @@ impl OrganizationService {
 
 #[tonic::async_trait]
 impl proto::organization_service_server::OrganizationService for OrganizationService {
-    /// Creates a new organization, generates a Snowflake slug, and assigns it to a region via Raft.
+    /// Creates a new organization via a fire-and-forget saga.
     ///
-    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
+    /// Returns immediately with the pre-generated slug and `Provisioning` status.
+    /// The saga orchestrator drives the multi-step creation to completion
+    /// asynchronously. Poll via `GetOrganization` for the final state.
     async fn create_organization(
         &self,
         request: Request<CreateOrganizationRequest>,
@@ -452,75 +454,68 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         let slug = inferadb_ledger_types::snowflake::generate_organization_slug()
             .map_err(|e| Status::internal(format!("Failed to generate organization slug: {e}")))?;
 
-        // Submit atomic create-with-profile through Raft (single entry)
         let tier = crate::proto_compat::organization_tier_from_proto(req.tier());
 
-        let ledger_request = LedgerRequest::System(SystemRequest::CreateOrganizationWithProfile {
-            slug,
-            region,
-            tier,
-            name: req.name,
-            admin: admin_user_id,
-        });
-
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
-
-        match response {
-            LedgerResponse::OrganizationDirectoryCreated {
-                organization_id,
-                organization_slug: created_slug,
-            } => {
-                ctx.set_organization(created_slug.value());
-                ctx.set_region(region);
-                ctx.set_success();
-                metrics::record_organization_operation(organization_id, "create");
-                metrics::record_organization_latency(organization_id, "create", ctx.elapsed_secs());
-
-                if let Some(node_id) = self.ctx.node_id {
-                    self.ctx.record_handler_event(
-                        inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                            EventAction::OrganizationCreated,
-                            organization_id,
-                            Some(created_slug),
-                            node_id,
-                        )
-                        .principal("system")
-                        .detail("region", region.as_str())
-                        .trace_id(&trace_ctx.trace_id)
-                        .outcome(EventOutcomeType::Success)
-                        .build(self.ctx.default_ttl_days()),
-                    );
-                }
-
-                let org_meta = self
-                    .ctx
-                    .applied_state
-                    .get_organization(organization_id)
-                    .ok_or_else(|| Status::internal("Organization not found after creation"))?;
-                let get_resp = self.build_org_response(org_meta, created_slug, None);
-
-                Ok(Response::new(CreateOrganizationResponse {
-                    slug: get_resp.slug,
-                    name: get_resp.name,
-                    region: get_resp.region,
-                    member_nodes: get_resp.member_nodes,
-                    status: get_resp.status,
-                    config_version: get_resp.config_version,
-                    created_at: get_resp.created_at,
-                    tier: get_resp.tier,
-                    members: get_resp.members,
-                    updated_at: get_resp.updated_at,
-                }))
+        // Submit saga via orchestrator handle (PII stays in-memory, not in GLOBAL Raft log)
+        let saga_id = inferadb_ledger_state::system::SagaId::new(uuid::Uuid::new_v4().to_string());
+        let saga = inferadb_ledger_state::system::CreateOrganizationSaga::new(
+            saga_id.clone(),
+            inferadb_ledger_state::system::CreateOrganizationInput {
+                slug,
+                region,
+                tier,
+                admin: admin_user_id,
             },
-            LedgerResponse::Error { code, message } => {
-                ctx.set_error(code.grpc_code_name(), &message);
-                Err(super::helpers::error_code_to_status(code, message))
-            },
-            _ => {
-                ctx.set_error("UnexpectedResponse", "Unexpected response type");
-                Err(Status::internal("Unexpected response type"))
-            },
+        );
+
+        let saga_handle = self.ctx.saga_handle.get().ok_or_else(|| {
+            Status::unavailable("Saga orchestrator not ready — try again shortly")
+        })?;
+
+        saga_handle
+            .submit_saga(inferadb_ledger_raft::SagaSubmission {
+                record: inferadb_ledger_state::system::Saga::CreateOrganization(saga),
+                pii: None,
+                org_pii: Some(inferadb_ledger_raft::OrgPii { name: req.name.clone() }),
+                notify: None, // fire-and-forget — client gets slug immediately
+            })
+            .await
+            .map_err(|e| Status::unavailable(format!("Failed to submit saga: {e}")))?;
+
+        // Saga is now persisted. The orchestrator will drive it to completion.
+        if let Some(node_id) = self.ctx.node_id {
+            self.ctx.record_handler_event(
+                inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
+                    EventAction::OrganizationCreated,
+                    inferadb_ledger_types::OrganizationId::new(0),
+                    Some(slug),
+                    node_id,
+                )
+                .principal("system")
+                .detail("saga_id", saga_id.value())
+                .detail("region", region.as_str())
+                .trace_id(&trace_ctx.trace_id)
+                .outcome(EventOutcomeType::Success)
+                .build(self.ctx.default_ttl_days()),
+            );
         }
+
+        ctx.set_organization(slug.value());
+        ctx.set_region(region);
+        ctx.set_success();
+
+        Ok(Response::new(CreateOrganizationResponse {
+            slug: Some(proto::OrganizationSlug { slug: slug.value() }),
+            name: req.name,
+            region: req.region,
+            member_nodes: vec![],
+            status: ProtoOrganizationStatus::Provisioning as i32,
+            config_version: 0,
+            created_at: None,
+            tier: req.tier.unwrap_or(0),
+            members: vec![],
+            updated_at: None,
+        }))
     }
 
     /// Deletes an organization and all its vaults via Raft consensus.

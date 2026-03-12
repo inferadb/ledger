@@ -128,6 +128,9 @@ pub struct BootstrappedNode {
     /// Saga orchestrator background task handle.
     #[allow(dead_code)] // retained to keep background task alive
     pub saga_handle: tokio::task::JoinHandle<()>,
+    /// Saga orchestrator submission handle for service handlers.
+    #[allow(dead_code)] // retained: will be wired into LedgerServer in Task 4
+    pub saga_orchestrator_handle: inferadb_ledger_raft::SagaOrchestratorHandle,
     /// Orphan cleanup background task handle.
     #[allow(dead_code)] // retained to keep background task alive
     pub orphan_cleanup_handle: tokio::task::JoinHandle<()>,
@@ -367,6 +370,21 @@ pub async fn bootstrap_node(
     let proposal_timeout =
         config.raft.as_ref().map(|r| r.proposal_timeout).unwrap_or(Duration::from_secs(30));
 
+    // Parse email blinding key from hex if configured.
+    // When absent, onboarding RPCs (email verification, registration) return FAILED_PRECONDITION.
+    let email_blinding_key = config
+        .email_blinding_key
+        .as_deref()
+        .map(|hex_str| {
+            let key_bytes = parse_hex_key(hex_str).map_err(|e| BootstrapError::Config {
+                message: format!("email_blinding_key: {e}"),
+            })?;
+            Ok::<_, BootstrapError>(Arc::new(inferadb_ledger_types::EmailBlindingKey::new(
+                key_bytes, 1,
+            )))
+        })
+        .transpose()?;
+
     let server = LedgerServer::builder()
         .manager(manager)
         .addr(config.listen_addr)
@@ -385,6 +403,7 @@ pub async fn bootstrap_node(
         .proposal_timeout(proposal_timeout)
         .health_check_config(config.health_check.clone())
         .max_read_forward_lag(config.max_read_forward_lag)
+        .email_blinding_key(email_blinding_key)
         .build();
     // Wire backup support post-construction because bon's type-state builders
     // don't support conditional field setting (each setter changes the builder type).
@@ -393,6 +412,11 @@ pub async fn bootstrap_node(
     } else {
         server
     };
+
+    // Retain the saga cell so we can fill it after the saga orchestrator starts.
+    // The gRPC server starts before the orchestrator — handlers return UNAVAILABLE
+    // until the cell is set.
+    let saga_cell = server.saga_cell();
 
     // Start the gRPC server BEFORE coordination so peers can reach us.
     // Services gracefully degrade on uninitialized Raft: WriteService returns
@@ -608,7 +632,7 @@ pub async fn bootstrap_node(
     };
 
     // Start saga orchestrator for cross-organization operations (leader-only)
-    let saga_handle = SagaOrchestrator::builder()
+    let (saga_handle, saga_orchestrator_handle) = SagaOrchestrator::builder()
         .raft(raft.clone())
         .node_id(node_id)
         .state(state.clone())
@@ -619,6 +643,8 @@ pub async fn bootstrap_node(
         .build()
         .start();
     tracing::info!("Started saga orchestrator");
+    // Fill the saga cell so service handlers can submit sagas.
+    let _ = saga_cell.set(saga_orchestrator_handle.clone());
 
     // Start orphan cleanup job for removing stale membership records (leader-only)
     let orphan_cleanup_handle = OrphanCleanupJob::builder()
@@ -704,6 +730,7 @@ pub async fn bootstrap_node(
         events_gc_handle,
         runtime_config,
         saga_handle,
+        saga_orchestrator_handle,
         orphan_cleanup_handle,
         integrity_scrub_handle,
         org_purge_handle,
@@ -813,20 +840,22 @@ async fn wait_for_cluster_join(
     }
 }
 
-/// Joins an existing cluster by contacting a peer.
+/// Parses a hex-encoded 32-byte key string into a fixed-size byte array.
 ///
-/// Uses discovery (DNS A records + cached peers) to find cluster entry points.
-/// The node contacts discovered peers and requests to be added to the cluster.
-///
-/// Note: This should be called after the gRPC server has started, since the
-/// leader needs to be able to reach this node to replicate logs.
-///
-/// # Errors
-///
-/// Returns [`BootstrapError`] if:
-/// - Node ID resolution fails
-/// - No peers are discoverable via DNS or cache
-/// - All join attempts to discovered peers fail
+/// Returns an error if the hex string is invalid or does not decode to exactly 32 bytes.
+fn parse_hex_key(hex_str: &str) -> Result<[u8; 32], String> {
+    let hex_str = hex_str.trim();
+    if hex_str.len() != 64 {
+        return Err(format!("expected 64 hex characters (32 bytes), got {}", hex_str.len()));
+    }
+    let mut bytes = [0u8; 32];
+    for i in 0..32 {
+        bytes[i] = u8::from_str_radix(&hex_str[i * 2..i * 2 + 2], 16)
+            .map_err(|e| format!("invalid hex at position {}: {e}", i * 2))?;
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {

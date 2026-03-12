@@ -1235,6 +1235,74 @@ pub fn record_region_node_count(region: &str, count: usize, is_protected: bool) 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Onboarding
+// ---------------------------------------------------------------------------
+
+/// Total email verification initiations (counter).
+///
+/// Labels: `status` = success | failure.
+const ONBOARDING_INITIATION_TOTAL: &str = "ledger_onboarding_initiation_total";
+
+/// Total email verification code attempts (counter).
+///
+/// Labels: `status` = success | failure.
+const ONBOARDING_VERIFICATION_TOTAL: &str = "ledger_onboarding_verification_total";
+
+/// Total registration completions (counter).
+///
+/// Labels: `status` = success | failure.
+const ONBOARDING_REGISTRATION_TOTAL: &str = "ledger_onboarding_registration_total";
+
+/// Records an email verification initiation attempt.
+#[inline]
+pub fn record_onboarding_initiation(status: &str) {
+    counter!(
+        ONBOARDING_INITIATION_TOTAL,
+        "status" => status.to_string()
+    )
+    .increment(1);
+}
+
+/// Records an email verification code attempt.
+#[inline]
+pub fn record_onboarding_verification(status: &str) {
+    counter!(
+        ONBOARDING_VERIFICATION_TOTAL,
+        "status" => status.to_string()
+    )
+    .increment(1);
+}
+
+/// Records a registration completion attempt.
+#[inline]
+pub fn record_onboarding_registration(status: &str) {
+    counter!(
+        ONBOARDING_REGISTRATION_TOTAL,
+        "status" => status.to_string()
+    )
+    .increment(1);
+}
+
+/// Total expired onboarding verification codes cleaned up by background GC (counter).
+const ONBOARDING_VERIFICATION_CODES_GC_TOTAL: &str =
+    "ledger_onboarding_verification_codes_gc_total";
+
+/// Total expired onboarding accounts cleaned up by background GC (counter).
+const ONBOARDING_ACCOUNTS_GC_TOTAL: &str = "ledger_onboarding_accounts_gc_total";
+
+/// Records expired onboarding verification codes deleted.
+#[inline]
+pub fn record_onboarding_gc_codes(count: u64) {
+    counter!(ONBOARDING_VERIFICATION_CODES_GC_TOTAL).increment(count);
+}
+
+/// Records expired onboarding accounts deleted.
+#[inline]
+pub fn record_onboarding_gc_accounts(count: u64) {
+    counter!(ONBOARDING_ACCOUNTS_GC_TOTAL).increment(count);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1306,5 +1374,19 @@ mod tests {
         assert!(CROSS_REGION_FORWARD_LATENCY.ends_with("_seconds"));
         assert!(DATA_RESIDENCY_VIOLATION_TOTAL.starts_with("ledger_"));
         assert!(DATA_RESIDENCY_VIOLATION_TOTAL.ends_with("_total"));
+    }
+
+    #[test]
+    fn test_onboarding_metric_names() {
+        assert!(ONBOARDING_INITIATION_TOTAL.starts_with("ledger_"));
+        assert!(ONBOARDING_INITIATION_TOTAL.ends_with("_total"));
+        assert!(ONBOARDING_VERIFICATION_TOTAL.starts_with("ledger_"));
+        assert!(ONBOARDING_VERIFICATION_TOTAL.ends_with("_total"));
+        assert!(ONBOARDING_REGISTRATION_TOTAL.starts_with("ledger_"));
+        assert!(ONBOARDING_REGISTRATION_TOTAL.ends_with("_total"));
+        assert!(ONBOARDING_VERIFICATION_CODES_GC_TOTAL.starts_with("ledger_"));
+        assert!(ONBOARDING_VERIFICATION_CODES_GC_TOTAL.ends_with("_total"));
+        assert!(ONBOARDING_ACCOUNTS_GC_TOTAL.starts_with("ledger_"));
+        assert!(ONBOARDING_ACCOUNTS_GC_TOTAL.ends_with("_total"));
     }
 }

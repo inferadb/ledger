@@ -28,6 +28,7 @@ serde.workspace = true
 serde_json.workspace = true
 postcard.workspace = true
 schemars.workspace = true
+base64.workspace = true
 
 # Error handling
 snafu.workspace = true
@@ -37,6 +38,9 @@ parking_lot.workspace = true
 
 # Randomness (Snowflake worker ID)
 rand.workspace = true
+
+# Security
+zeroize.workspace = true
 
 # Utilities
 chrono.workspace = true

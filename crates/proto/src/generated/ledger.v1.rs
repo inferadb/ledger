@@ -1716,6 +1716,9 @@ pub struct CreateUserEmailRequest {
     /// Email address to add
     #[prost(string, tag = "2")]
     pub email: ::prost::alloc::string::String,
+    /// HMAC-SHA256 of normalized email (hex). Goes to GLOBAL; plaintext stays regional.
+    #[prost(string, tag = "3")]
+    pub email_hmac: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateUserEmailResponse {
@@ -1774,6 +1777,99 @@ pub struct VerifyUserEmailResponse {
     /// Updated email with verified_at set
     #[prost(message, optional, tag = "1")]
     pub email: ::core::option::Option<UserEmail>,
+}
+/// Start email verification for user onboarding.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InitiateEmailVerificationRequest {
+    /// Plaintext email address
+    #[prost(string, tag = "1")]
+    pub email: ::prost::alloc::string::String,
+    /// Data residency region for this email
+    #[prost(enumeration = "Region", tag = "2")]
+    pub region: i32,
+}
+/// The verification code to send to the user's email.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InitiateEmailVerificationResponse {
+    /// 6-character verification code (A-Z, 0-9)
+    #[prost(string, tag = "1")]
+    pub code: ::prost::alloc::string::String,
+}
+/// Verify the code the user received via email.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct VerifyEmailCodeRequest {
+    /// Same email used in initiation
+    #[prost(string, tag = "1")]
+    pub email: ::prost::alloc::string::String,
+    /// Code from the email
+    #[prost(string, tag = "2")]
+    pub code: ::prost::alloc::string::String,
+    /// Same region used in initiation
+    #[prost(enumeration = "Region", tag = "3")]
+    pub region: i32,
+}
+/// Result is either a session for an existing user or an onboarding token
+/// for a new user who must complete registration.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct VerifyEmailCodeResponse {
+    #[prost(oneof = "verify_email_code_response::Result", tags = "1, 2")]
+    pub result: ::core::option::Option<verify_email_code_response::Result>,
+}
+/// Nested message and enum types in `VerifyEmailCodeResponse`.
+pub mod verify_email_code_response {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Result {
+        #[prost(message, tag = "1")]
+        ExistingUser(super::ExistingUserSession),
+        #[prost(message, tag = "2")]
+        NewUser(super::OnboardingSession),
+    }
+}
+/// Session for an existing user whose email was verified.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExistingUserSession {
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub session: ::core::option::Option<TokenPair>,
+}
+/// Onboarding token for a new user who must complete registration.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OnboardingSession {
+    /// Opaque token, single-use, 12hr TTL
+    #[prost(string, tag = "1")]
+    pub onboarding_token: ::prost::alloc::string::String,
+}
+/// Complete registration for a new user after email verification.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CompleteRegistrationRequest {
+    /// From VerifyEmailCodeResponse
+    #[prost(string, tag = "1")]
+    pub onboarding_token: ::prost::alloc::string::String,
+    /// Same email used in verification
+    #[prost(string, tag = "2")]
+    pub email: ::prost::alloc::string::String,
+    /// Same region used in verification
+    #[prost(enumeration = "Region", tag = "3")]
+    pub region: i32,
+    /// User display name (PII, regional)
+    #[prost(string, tag = "4")]
+    pub name: ::prost::alloc::string::String,
+    /// Organization name (PII, regional)
+    #[prost(string, tag = "5")]
+    pub organization_name: ::prost::alloc::string::String,
+}
+/// Response after successful registration.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CompleteRegistrationResponse {
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<User>,
+    /// Reuses existing TokenPair message
+    #[prost(message, optional, tag = "2")]
+    pub session: ::core::option::Option<TokenPair>,
+    /// The auto-created organization
+    #[prost(message, optional, tag = "3")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
 }
 /// Update runtime-reconfigurable configuration parameters.
 /// Only fields that are set will be updated; unset fields retain current values.
@@ -9809,6 +9905,88 @@ pub mod user_service_client {
                 .insert(GrpcMethod::new("ledger.v1.UserService", "EraseUser"));
             self.inner.unary(req, path, codec).await
         }
+        /// Initiate email verification for onboarding. Sends a 6-character
+        /// verification code to the provided email address. Rate-limited per email.
+        pub async fn initiate_email_verification(
+            &mut self,
+            request: impl tonic::IntoRequest<super::InitiateEmailVerificationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::InitiateEmailVerificationResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.UserService/InitiateEmailVerification",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.UserService", "InitiateEmailVerification"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Verify an email code. Returns either an existing user session (if the
+        /// email belongs to a registered user) or an onboarding token (for new users).
+        pub async fn verify_email_code(
+            &mut self,
+            request: impl tonic::IntoRequest<super::VerifyEmailCodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::VerifyEmailCodeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.UserService/VerifyEmailCode",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.UserService", "VerifyEmailCode"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Complete registration for a new user. Creates the user, organization,
+        /// and returns a session. Requires a valid onboarding token from VerifyEmailCode.
+        pub async fn complete_registration(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CompleteRegistrationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CompleteRegistrationResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.UserService/CompleteRegistration",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.UserService", "CompleteRegistration"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -9925,6 +10103,33 @@ pub mod user_service_server {
             request: tonic::Request<super::EraseUserRequest>,
         ) -> std::result::Result<
             tonic::Response<super::EraseUserResponse>,
+            tonic::Status,
+        >;
+        /// Initiate email verification for onboarding. Sends a 6-character
+        /// verification code to the provided email address. Rate-limited per email.
+        async fn initiate_email_verification(
+            &self,
+            request: tonic::Request<super::InitiateEmailVerificationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::InitiateEmailVerificationResponse>,
+            tonic::Status,
+        >;
+        /// Verify an email code. Returns either an existing user session (if the
+        /// email belongs to a registered user) or an onboarding token (for new users).
+        async fn verify_email_code(
+            &self,
+            request: tonic::Request<super::VerifyEmailCodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::VerifyEmailCodeResponse>,
+            tonic::Status,
+        >;
+        /// Complete registration for a new user. Creates the user, organization,
+        /// and returns a session. Requires a valid onboarding token from VerifyEmailCode.
+        async fn complete_registration(
+            &self,
+            request: tonic::Request<super::CompleteRegistrationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CompleteRegistrationResponse>,
             tonic::Status,
         >;
     }
@@ -10531,6 +10736,149 @@ pub mod user_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = EraseUserSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.UserService/InitiateEmailVerification" => {
+                    #[allow(non_camel_case_types)]
+                    struct InitiateEmailVerificationSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<
+                        super::InitiateEmailVerificationRequest,
+                    > for InitiateEmailVerificationSvc<T> {
+                        type Response = super::InitiateEmailVerificationResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::InitiateEmailVerificationRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::initiate_email_verification(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = InitiateEmailVerificationSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.UserService/VerifyEmailCode" => {
+                    #[allow(non_camel_case_types)]
+                    struct VerifyEmailCodeSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::VerifyEmailCodeRequest>
+                    for VerifyEmailCodeSvc<T> {
+                        type Response = super::VerifyEmailCodeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::VerifyEmailCodeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::verify_email_code(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = VerifyEmailCodeSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.UserService/CompleteRegistration" => {
+                    #[allow(non_camel_case_types)]
+                    struct CompleteRegistrationSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::CompleteRegistrationRequest>
+                    for CompleteRegistrationSvc<T> {
+                        type Response = super::CompleteRegistrationResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CompleteRegistrationRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::complete_registration(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CompleteRegistrationSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

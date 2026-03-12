@@ -28,6 +28,8 @@ pub mod events;
 pub mod hash;
 /// Merkle tree construction and verification.
 pub mod merkle;
+/// Constants for user onboarding (email verification + account creation).
+pub mod onboarding;
 /// Snowflake-style globally unique ID generation.
 pub mod snowflake;
 /// JWT token types for user sessions and vault access.

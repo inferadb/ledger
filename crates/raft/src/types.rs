@@ -140,6 +140,9 @@ openraft::declare_raft_types!(
 ///
 /// This is the "D" (data) type in OpenRaft's type configuration.
 /// Each request targets a specific organization and vault.
+///
+/// Contains no plaintext PII — see [`SystemRequest`] for the data residency
+/// invariant. All variants use numeric IDs, hashes, and enums only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LedgerRequest {
     /// Writes transactions to a vault.
@@ -567,7 +570,32 @@ pub enum LedgerRequest {
     DeleteExpiredRefreshTokens,
 }
 
-/// System-level requests that modify `_system` organization.
+/// System-level requests that modify the `_system` organization.
+///
+/// # Data residency invariant
+///
+/// **No plaintext PII in GLOBAL Raft entries.** Every variant proposed to the
+/// GLOBAL Raft group must contain only opaque identifiers (numeric IDs, slugs),
+/// cryptographic hashes (email HMACs), enums, and system metadata. Plaintext
+/// personal data (names, emails, addresses) must be proposed to the REGIONAL
+/// Raft group via `ServiceContext::propose_regional` or written directly to
+/// the regional state layer.
+///
+/// This invariant ensures PII is never replicated across regions via the
+/// consensus log. Actor identity for audit purposes is captured in canonical
+/// log lines and wide events (local, non-replicated), not in Raft entries.
+///
+/// Variants that carry PII and are proposed to REGIONAL:
+/// - [`CreateUserEmail`](SystemRequest::CreateUserEmail) — plaintext email
+/// - [`UpdateUserProfile`](SystemRequest::UpdateUserProfile) — plaintext name
+/// - [`CreateEmailVerification`](SystemRequest::CreateEmailVerification) — plaintext email
+/// - [`VerifyEmailCode`](SystemRequest::VerifyEmailCode) — verification region
+/// - [`WriteOnboardingUserProfile`](SystemRequest::WriteOnboardingUserProfile) — plaintext email,
+///   name
+/// - [`WriteOrganizationProfile`](SystemRequest::WriteOrganizationProfile) — organization name
+/// - [`CleanupExpiredOnboarding`](SystemRequest::CleanupExpiredOnboarding) — regional GC
+///
+/// All other variants are proposed to GLOBAL and contain no PII.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SystemRequest {
     /// Creates a new user (global control-plane entry only).
@@ -591,15 +619,13 @@ pub enum SystemRequest {
         region: Region,
     },
 
-    /// Updates an existing user's name, role, or primary email.
+    /// Updates an existing user's role or primary email in the GLOBAL Raft log.
     ///
-    /// At least one field must be `Some`. The state machine delegates to
-    /// `SystemOrganizationService::update_user` which performs partial updates.
+    /// At least one field must be `Some`. No PII — name changes go through
+    /// `UpdateUserProfile` proposed to the regional Raft group.
     UpdateUser {
         /// User to update.
         user_id: UserId,
-        /// New display name (if changing).
-        name: Option<String>,
         /// New role (if changing).
         role: Option<inferadb_ledger_types::UserRole>,
         /// New primary email (if changing).
@@ -714,8 +740,6 @@ pub enum SystemRequest {
     EraseUser {
         /// User whose data to erase.
         user_id: UserId,
-        /// Identity of the actor requesting erasure (audit trail).
-        erased_by: String,
         /// Region where the user's PII resides.
         region: Region,
     },
@@ -746,16 +770,17 @@ pub enum SystemRequest {
         tier: inferadb_ledger_state::system::OrganizationTier,
     },
 
-    /// Writes the organization profile to the regional store.
+    /// Writes the organization profile to the REGIONAL system vault.
     ///
-    /// Reads the pending profile from the StateLayer by `profile_key`,
-    /// writes the final `OrganizationProfile` keyed as
-    /// `_sys:org_profile:{organization}`, and deletes the pending key.
+    /// Creates an `OrganizationProfile` keyed as
+    /// `_sys:org_profile:{organization}` with the provided name and admin.
+    /// Organization name is PII — this request is classified as "regional"
+    /// and proposed to the regional Raft group (in multi-Raft mode).
     WriteOrganizationProfile {
         /// Organization whose profile to write.
         organization: OrganizationId,
-        /// StateLayer key where the pending profile is stored.
-        profile_key: String,
+        /// Organization display name.
+        name: String,
         /// Initial administrator for this organization.
         admin: UserId,
     },
@@ -768,22 +793,137 @@ pub enum SystemRequest {
         status: inferadb_ledger_state::system::OrganizationDirectoryStatus,
     },
 
-    /// Atomically creates an organization directory entry and writes its profile.
+    /// Updates a user's display name in the REGIONAL Raft log.
     ///
-    /// Used by the admin API path where all data (name, admin, region, tier) is
-    /// available upfront. Creates the directory, writes the profile, and sets
-    /// status to `Active` in a single Raft entry — no saga needed.
-    CreateOrganizationWithProfile {
-        /// External Snowflake slug (generated before Raft proposal).
-        slug: OrganizationSlug,
-        /// Target data residency region.
-        region: Region,
-        /// Billing tier.
-        tier: inferadb_ledger_state::system::OrganizationTier,
-        /// Organization name (PII — stored in regional profile).
+    /// Name is PII and must not appear in the GLOBAL Raft log.
+    /// Proposed to the user's home region via `propose_regional`.
+    UpdateUserProfile {
+        /// User to update.
+        user_id: UserId,
+        /// New display name.
         name: String,
-        /// Initial administrator for this organization.
-        admin: UserId,
+    },
+
+    // ── Onboarding Requests ──
+    /// Stores a verification code for email onboarding.
+    ///
+    /// Proposed to REGIONAL Raft group — contains PII (email).
+    /// Rate-limited per email via `rate_limit_count` and `rate_limit_window_start`
+    /// in the stored `PendingEmailVerification` record.
+    CreateEmailVerification {
+        /// HMAC of the email address (deterministic key).
+        email_hmac: String,
+        /// Plaintext email — PII, regional Raft log only.
+        email: String,
+        /// HMAC-SHA256(blinding_key, "code:" || uppercase(code)).
+        code_hash: [u8; 32],
+        /// Data residency region.
+        region: Region,
+        /// When the verification code expires.
+        expires_at: DateTime<Utc>,
+    },
+
+    /// Verifies a code and consumes the verification record.
+    ///
+    /// Proposed to REGIONAL Raft group (verification region).
+    /// The apply handler validates the code and branches on `existing_user_hmac_hit`:
+    /// - `true`: Returns `ExistingUser` signal (no session created here).
+    /// - `false`: Creates `OnboardingAccount` at `_tmp:onboard_account:{email_hmac}`.
+    ///
+    /// Session creation for existing users happens at the SERVICE LAYER after
+    /// this apply, because the user's data may live in a different region.
+    VerifyEmailCode {
+        /// HMAC of the email address.
+        email_hmac: String,
+        /// HMAC-SHA256(blinding_key, "code:" || uppercase(code)).
+        code_hash: [u8; 32],
+        /// Data residency region.
+        region: Region,
+        /// Pre-resolved at service layer (GLOBAL HMAC index read).
+        /// `true` = email maps to an existing user.
+        /// `false` = new email, apply handler creates `OnboardingAccount`.
+        existing_user_hmac_hit: bool,
+        /// Hash of the onboarding token (for new-user `OnboardingAccount` creation).
+        /// Ignored when `existing_user_hmac_hit` is `true`.
+        onboarding_token_hash: [u8; 32],
+        /// Onboarding account expiration.
+        /// Ignored when `existing_user_hmac_hit` is `true`.
+        onboarding_expires_at: DateTime<Utc>,
+    },
+
+    /// GC expired verification codes and onboarding accounts.
+    ///
+    /// Proposed to REGIONAL Raft group. Has no fields — the region is
+    /// implicit from the target Raft group. Scans `_tmp:onboard_verify:*`
+    /// and `_tmp:onboard_account:*` up to `MAX_ONBOARDING_SCAN` limit.
+    CleanupExpiredOnboarding,
+
+    // ── Onboarding Saga Requests ──
+    /// Saga step 0 (GLOBAL): Allocate IDs, reserve HMAC, create
+    /// provisioning directory entries.
+    ///
+    /// Idempotency: reads HMAC index — if `Provisioning(reservation)` with
+    /// matching slug exists, returns the existing IDs.
+    CreateOnboardingUser {
+        /// HMAC of the email address.
+        email_hmac: String,
+        /// External Snowflake slug for the user.
+        user_slug: UserSlug,
+        /// External Snowflake slug for the organization.
+        organization_slug: OrganizationSlug,
+        /// Data residency region.
+        region: Region,
+    },
+
+    /// Saga step 1 (REGIONAL): Write all PII and user/org profile data.
+    ///
+    /// PII stays in the regional Raft log. The `email_hmac` is passed
+    /// explicitly — NOT derived in the apply handler (blinding key is
+    /// external, deriving would break state machine determinism).
+    WriteOnboardingUserProfile {
+        /// User ID allocated in step 0.
+        user_id: UserId,
+        /// External user slug.
+        user_slug: UserSlug,
+        /// Organization ID allocated in step 0.
+        organization_id: OrganizationId,
+        /// External organization slug.
+        organization_slug: OrganizationSlug,
+        /// HMAC of the email (explicit, not derived).
+        email_hmac: String,
+        /// Plaintext email — PII, regional only.
+        email: String,
+        /// User display name — PII, regional only.
+        name: String,
+        /// Organization name — PII, regional only.
+        organization_name: String,
+        /// Per-subject encryption key (generated by orchestrator).
+        subject_key_bytes: [u8; 32],
+        /// Refresh token hash.
+        refresh_token_hash: [u8; 32],
+        /// Refresh token family ID (16-byte random, poison detection).
+        refresh_family_id: [u8; 16],
+        /// Refresh token expiration.
+        refresh_expires_at: DateTime<Utc>,
+        /// Signing key identifier for JWT `kid` header.
+        kid: String,
+        /// Data residency region.
+        region: Region,
+    },
+
+    /// Saga step 2 (GLOBAL): Activate user + org directory entries and
+    /// update HMAC index from `Provisioning` to `Active`.
+    ActivateOnboardingUser {
+        /// User ID from step 0.
+        user_id: UserId,
+        /// External user slug.
+        user_slug: UserSlug,
+        /// Organization ID from step 0.
+        organization_id: OrganizationId,
+        /// External organization slug.
+        organization_slug: OrganizationSlug,
+        /// HMAC of the email (for HMAC index update).
+        email_hmac: String,
     },
 }
 
@@ -1173,6 +1313,61 @@ pub enum LedgerResponse {
         /// Number of tokens cleaned up.
         count: u64,
     },
+
+    /// User profile (name) updated in the regional store.
+    UserProfileUpdated {
+        /// Updated user ID.
+        user_id: UserId,
+    },
+
+    // ── Onboarding Responses ──
+    /// Email verification code stored successfully.
+    EmailVerificationCreated,
+
+    /// Email code verified. Result indicates existing vs new user.
+    EmailCodeVerified {
+        /// Whether the email belongs to an existing user or is new.
+        result: EmailCodeVerifiedResult,
+    },
+
+    /// Saga step 0 completed: IDs allocated, HMAC reserved, directories created.
+    OnboardingUserCreated {
+        /// Allocated internal user ID.
+        user_id: UserId,
+        /// Allocated internal organization ID.
+        organization_id: OrganizationId,
+    },
+
+    /// Saga step 1 completed: PII and session material written regionally.
+    OnboardingUserProfileWritten {
+        /// Assigned refresh token ID.
+        refresh_token_id: RefreshTokenId,
+    },
+
+    /// Saga step 2 completed: directories activated, HMAC index updated.
+    OnboardingUserActivated,
+
+    /// Expired onboarding records cleaned up.
+    OnboardingCleanedUp {
+        /// Number of expired verification codes deleted.
+        verification_codes_deleted: u32,
+        /// Number of expired onboarding accounts deleted.
+        onboarding_accounts_deleted: u32,
+    },
+}
+
+/// Result of email code verification.
+///
+/// Both variants carry no fields — they are signals. The service handler
+/// has all context needed (HMAC, token hash, region) in local scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EmailCodeVerifiedResult {
+    /// Code verified, email belongs to an existing user.
+    /// No session data — session creation is handled by the service handler
+    /// (which proposes `CreateRefreshToken` to the user's actual region).
+    ExistingUser,
+    /// Code verified, new email. `OnboardingAccount` created in regional store.
+    NewUser,
 }
 
 impl fmt::Display for LedgerResponse {
@@ -1351,6 +1546,34 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::ExpiredRefreshTokensDeleted { count } => {
                 write!(f, "ExpiredRefreshTokensDeleted(count={})", count)
             },
+            LedgerResponse::UserProfileUpdated { user_id } => {
+                write!(f, "UserProfileUpdated(id={})", user_id)
+            },
+            LedgerResponse::EmailVerificationCreated => {
+                write!(f, "EmailVerificationCreated")
+            },
+            LedgerResponse::EmailCodeVerified { result } => {
+                write!(f, "EmailCodeVerified({result:?})")
+            },
+            LedgerResponse::OnboardingUserCreated { user_id, organization_id } => {
+                write!(f, "OnboardingUserCreated(user={}, org={})", user_id, organization_id)
+            },
+            LedgerResponse::OnboardingUserProfileWritten { refresh_token_id } => {
+                write!(f, "OnboardingUserProfileWritten(refresh={})", refresh_token_id)
+            },
+            LedgerResponse::OnboardingUserActivated => {
+                write!(f, "OnboardingUserActivated")
+            },
+            LedgerResponse::OnboardingCleanedUp {
+                verification_codes_deleted,
+                onboarding_accounts_deleted,
+            } => {
+                write!(
+                    f,
+                    "OnboardingCleanedUp(codes={}, accounts={})",
+                    verification_codes_deleted, onboarding_accounts_deleted
+                )
+            },
         }
     }
 }
@@ -1492,6 +1715,40 @@ mod tests {
         match deserialized {
             SystemRequest::ClearRehashProgress { region } => {
                 assert_eq!(region, Region::IN_WEST_MUMBAI);
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_system_request_update_user_profile_serialization() {
+        let request = SystemRequest::UpdateUserProfile {
+            user_id: UserId::new(42),
+            name: "Alice".to_string(),
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            SystemRequest::UpdateUserProfile { user_id, name } => {
+                assert_eq!(user_id, UserId::new(42));
+                assert_eq!(name, "Alice");
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_ledger_response_user_profile_updated_serialization() {
+        let response = LedgerResponse::UserProfileUpdated { user_id: UserId::new(7) };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerResponse::UserProfileUpdated { user_id } => {
+                assert_eq!(user_id, UserId::new(7));
             },
             _ => panic!("unexpected variant"),
         }
@@ -2252,5 +2509,117 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Classifies a `SystemRequest` variant as GLOBAL or REGIONAL.
+    ///
+    /// REGIONAL variants carry plaintext PII and are proposed via
+    /// `ServiceContext::propose_regional`. GLOBAL variants contain
+    /// no PII and are proposed via `ServiceContext::propose_system_request`.
+    ///
+    /// This function exists solely to be used in the exhaustive match test
+    /// below. When a new `SystemRequest` variant is added, the compiler
+    /// will force the developer to classify it here — catching any
+    /// accidental PII in GLOBAL requests at compile time.
+    fn classify_system_request(req: &SystemRequest) -> &'static str {
+        match req {
+            // GLOBAL variants — no plaintext PII
+            SystemRequest::CreateUser { .. } => "global",
+            SystemRequest::UpdateUser { .. } => "global",
+            SystemRequest::DeleteUser { .. } => "global",
+            SystemRequest::DeleteUserEmail { .. } => "global",
+            SystemRequest::VerifyUserEmail { .. } => "global",
+            SystemRequest::AddNode { .. } => "global",
+            SystemRequest::RemoveNode { .. } => "global",
+            SystemRequest::UpdateOrganizationRouting { .. } => "global",
+            SystemRequest::RegisterEmailHash { .. } => "global",
+            SystemRequest::RemoveEmailHash { .. } => "global",
+            SystemRequest::SetBlindingKeyVersion { .. } => "global",
+            SystemRequest::UpdateRehashProgress { .. } => "global",
+            SystemRequest::ClearRehashProgress { .. } => "global",
+            SystemRequest::UpdateUserDirectoryStatus { .. } => "global",
+            SystemRequest::EraseUser { .. } => "global",
+            SystemRequest::MigrateExistingUsers { .. } => "global",
+            SystemRequest::CreateOrganizationDirectory { .. } => "global",
+            SystemRequest::WriteOrganizationProfile { .. } => "regional",
+            SystemRequest::UpdateOrganizationDirectoryStatus { .. } => "global",
+
+            SystemRequest::CreateOnboardingUser { .. } => "global",
+            SystemRequest::ActivateOnboardingUser { .. } => "global",
+
+            // REGIONAL variants — carry plaintext PII
+            SystemRequest::CreateUserEmail { .. } => "regional",
+            SystemRequest::UpdateUserProfile { .. } => "regional",
+            SystemRequest::CreateEmailVerification { .. } => "regional",
+            SystemRequest::VerifyEmailCode { .. } => "regional",
+            SystemRequest::CleanupExpiredOnboarding => "regional",
+            SystemRequest::WriteOnboardingUserProfile { .. } => "regional",
+        }
+    }
+
+    /// Verifies that the exhaustive classification covers all variants.
+    /// If a new `SystemRequest` variant is added, this test fails at
+    /// compile time until `classify_system_request` is updated.
+    #[test]
+    fn test_system_request_pii_classification_exhaustive() {
+        // CreateUserEmail — REGIONAL (contains plaintext email)
+        let regional_email = SystemRequest::CreateUserEmail {
+            user_id: UserId::new(1),
+            email: "user@example.com".to_string(),
+        };
+        assert_eq!(classify_system_request(&regional_email), "regional");
+
+        // UpdateUserProfile — REGIONAL (contains plaintext name)
+        let regional_profile =
+            SystemRequest::UpdateUserProfile { user_id: UserId::new(1), name: "Alice".to_string() };
+        assert_eq!(classify_system_request(&regional_profile), "regional");
+
+        // EraseUser — GLOBAL (no PII, only user_id + region)
+        let global_erase =
+            SystemRequest::EraseUser { user_id: UserId::new(1), region: Region::US_EAST_VA };
+        assert_eq!(classify_system_request(&global_erase), "global");
+
+        // CreateUser — GLOBAL (no PII, only IDs + slug + region)
+        let global_create = SystemRequest::CreateUser {
+            user: UserId::new(1),
+            admin: false,
+            slug: UserSlug::new(100),
+            region: Region::US_EAST_VA,
+        };
+        assert_eq!(classify_system_request(&global_create), "global");
+    }
+
+    /// Verifies that GLOBAL SystemRequest variants contain no String fields
+    /// that could hold plaintext PII. String fields in GLOBAL variants must
+    /// be cryptographic hashes (HMAC hex), network addresses, or storage
+    /// keys — never user-facing text.
+    ///
+    /// This test documents every String field in GLOBAL variants and its
+    /// purpose, serving as a human-readable audit trail.
+    #[test]
+    fn test_global_string_fields_are_not_pii() {
+        // AddNode::address — gRPC network address, not PII
+        let add_node = SystemRequest::AddNode { node_id: 1, address: "10.0.0.1:50051".to_string() };
+        assert_eq!(classify_system_request(&add_node), "global");
+
+        // RegisterEmailHash::hmac_hex — cryptographic hash, not PII
+        let register_hash = SystemRequest::RegisterEmailHash {
+            hmac_hex: "abcdef1234567890".to_string(),
+            user_id: UserId::new(1),
+        };
+        assert_eq!(classify_system_request(&register_hash), "global");
+
+        // RemoveEmailHash::hmac_hex — cryptographic hash, not PII
+        let remove_hash =
+            SystemRequest::RemoveEmailHash { hmac_hex: "abcdef1234567890".to_string() };
+        assert_eq!(classify_system_request(&remove_hash), "global");
+
+        // WriteOrganizationProfile — carries org name (PII), classified as regional
+        let write_profile = SystemRequest::WriteOrganizationProfile {
+            organization: OrganizationId::new(1),
+            name: "Test Org".to_string(),
+            admin: UserId::new(1),
+        };
+        assert_eq!(classify_system_request(&write_profile), "regional");
     }
 }

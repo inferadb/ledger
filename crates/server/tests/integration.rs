@@ -19,6 +19,7 @@ mod isolation;
 mod leader_failover;
 mod multi_region;
 mod network_simulation;
+mod onboarding;
 mod orphan_cleanup;
 mod replication;
 mod saga_orchestrator;
