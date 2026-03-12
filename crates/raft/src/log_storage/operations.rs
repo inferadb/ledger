@@ -8,12 +8,13 @@ use chrono::{DateTime, Duration, Utc};
 use inferadb_ledger_state::{
     StateError, StateLayer,
     system::{
-        App, AppCredentialType, AppCredentials, AppVaultConnection, ClientAssertionEntry,
-        EmailHashEntry, OnboardingAccount, OrganizationDirectoryEntry, OrganizationDirectoryStatus,
-        OrganizationMember, OrganizationMemberRole, OrganizationProfile, OrganizationRegistry,
-        OrganizationStatus, OrganizationTier, PendingEmailVerification, ProvisioningReservation,
-        RefreshToken, RevocationResult, SYSTEM_VAULT_ID, SigningKey, SigningKeyStatus, SystemError,
-        SystemKeys, SystemOrganizationService, TeamMember, TeamProfile, User, UserDirectoryEntry,
+        App, AppCredentialType, AppCredentials, AppProfile, AppVaultConnection,
+        ClientAssertionEntry, EmailHashEntry, OnboardingAccount, OrganizationDirectoryEntry,
+        OrganizationDirectoryStatus, OrganizationMember, OrganizationMemberRole,
+        OrganizationProfile, OrganizationRegistry, OrganizationStatus, OrganizationTier,
+        PendingEmailVerification, ProvisioningReservation, RefreshToken, RevocationResult,
+        SYSTEM_VAULT_ID, SigningKey, SigningKeyStatus, SystemError, SystemKeys,
+        SystemOrganizationService, TeamMember, TeamProfile, User, UserDirectoryEntry,
         UserDirectoryStatus, UserEmail,
     },
 };
@@ -179,6 +180,29 @@ fn save_app<B: StorageBackend>(
         .apply_operations(SYSTEM_VAULT_ID, &ops, 0)
         .map(|_| ())
         .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to write app: {e}")))
+}
+
+/// Loads an `AppProfile` from the state layer by its storage key.
+///
+/// Returns `Ok(profile)` on success, or `Err(NotFound)` if no profile exists yet.
+fn load_app_profile<B: StorageBackend>(
+    state_layer: &inferadb_ledger_state::StateLayer<B>,
+    organization: OrganizationId,
+    app: AppId,
+) -> Result<AppProfile, LedgerResponse> {
+    let key = SystemKeys::app_profile_key(organization, app);
+    let entity = state_layer
+        .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
+        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to read app profile: {e}")))?
+        .ok_or_else(|| {
+            ledger_error(
+                ErrorCode::NotFound,
+                format!("App profile {} not found in organization {}", app, organization),
+            )
+        })?;
+    decode::<AppProfile>(&entity.value).map_err(|e| {
+        ledger_error(ErrorCode::Internal, format!("Failed to decode app profile: {e}"))
+    })
 }
 
 /// Collects all entities matching a prefix and appends `DeleteEntity` operations for each.
@@ -1093,46 +1117,17 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             );
                         }
                         let team_id = state.sequences.next_team();
-                        // Create profile without name — the name is PII and will be
-                        // written separately via regional WriteTeamProfile.
-                        let profile = TeamProfile {
-                            team: team_id,
-                            organization: *organization,
-                            slug: *slug,
-                            name: String::new(),
-                            members: Vec::new(),
-                            created_at: block_timestamp,
-                            updated_at: block_timestamp,
-                        };
-                        let profile_bytes = match encode(&profile) {
-                            Ok(bytes) => bytes,
-                            Err(e) => {
-                                return (
-                                    LedgerResponse::Error {
-                                        code: ErrorCode::Internal,
-                                        message: format!("Failed to encode team profile: {e}"),
-                                    },
-                                    None,
-                                );
-                            },
-                        };
-                        let profile_key = SystemKeys::team_profile_key(*organization, team_id);
+                        // Only write the slug index to GLOBAL state. The TeamProfile
+                        // (which contains PII like name) is written to REGIONAL state
+                        // via a separate WriteTeamProfile proposal.
                         let slug_key = SystemKeys::team_slug_key(*slug);
                         let slug_value = format!("{}:{}", organization.value(), team_id.value());
-                        let ops = vec![
-                            Operation::SetEntity {
-                                key: profile_key,
-                                value: profile_bytes,
-                                condition: None,
-                                expires_at: None,
-                            },
-                            Operation::SetEntity {
-                                key: slug_key,
-                                value: slug_value.into_bytes(),
-                                condition: None,
-                                expires_at: None,
-                            },
-                        ];
+                        let ops = vec![Operation::SetEntity {
+                            key: slug_key,
+                            value: slug_value.into_bytes(),
+                            condition: None,
+                            expires_at: None,
+                        }];
                         if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
                             return (
                                 LedgerResponse::Error {
@@ -1166,7 +1161,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (response, None)
             },
 
-            LedgerRequest::DeleteOrganizationTeam { organization, team, move_members_to } => {
+            LedgerRequest::DeleteOrganizationTeam { organization, team } => {
+                // GLOBAL cleanup only: slug index and in-memory maps.
+                // Profile deletion and member migration are handled by REGIONAL
+                // DeleteTeamProfile (proposed first by the service handler).
                 let response = match require_active_org_with_state(
                     organization,
                     state,
@@ -1174,65 +1172,39 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     "modify",
                 ) {
                     Ok(state_layer) => {
-                        match load_team_profile(state_layer, *organization, *team) {
-                            Ok(team_profile) => {
-                                // Move members if requested
-                                if let Some(target_team) = move_members_to {
-                                    if *target_team == *team {
-                                        return (
-                                            LedgerResponse::Error {
-                                                code: ErrorCode::FailedPrecondition,
-                                                message: "Cannot move members to the same team being deleted".to_string(),
-                                            },
-                                            None,
-                                        );
-                                    }
-                                    if let Err(resp) = migrate_team_members(
-                                        state_layer,
-                                        *organization,
-                                        &team_profile,
-                                        *target_team,
-                                        block_timestamp,
-                                    ) {
-                                        return (resp, None);
-                                    }
-                                }
-
-                                // Delete team profile and slug index
-                                let profile_key =
-                                    SystemKeys::team_profile_key(*organization, *team);
-                                let slug_key = SystemKeys::team_slug_key(team_profile.slug);
-                                let ops = vec![
-                                    Operation::DeleteEntity { key: profile_key },
-                                    Operation::DeleteEntity { key: slug_key },
-                                ];
-                                if let Err(e) =
-                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
-                                {
-                                    return (
-                                        LedgerResponse::Error {
-                                            code: ErrorCode::Internal,
-                                            message: format!("Failed to delete team profile: {e}"),
-                                        },
-                                        None,
-                                    );
-                                }
-
-                                // Remove from slug and name indices only after successful
-                                // storage write
-                                state.team_slug_index.remove(&team_profile.slug);
-                                state.team_id_to_slug.remove(team);
-                                state
-                                    .team_name_index
-                                    .remove(&(*organization, team_profile.name.clone()));
-                                pending.team_slug_index_deleted.push(team_profile.slug);
-
-                                LedgerResponse::OrganizationTeamDeleted {
-                                    organization_id: *organization,
-                                }
+                        // Look up slug from in-memory index (no profile load needed)
+                        let slug = match state.team_id_to_slug.get(team).copied() {
+                            Some(s) => s,
+                            None => {
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::NotFound,
+                                        message: format!("Team {} not found", team),
+                                    },
+                                    None,
+                                );
                             },
-                            Err(err_response) => err_response,
+                        };
+
+                        // Delete slug index from GLOBAL state
+                        let slug_key = SystemKeys::team_slug_key(slug);
+                        let ops = vec![Operation::DeleteEntity { key: slug_key }];
+                        if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                            return (
+                                LedgerResponse::Error {
+                                    code: ErrorCode::Internal,
+                                    message: format!("Failed to delete team slug index: {e}"),
+                                },
+                                None,
+                            );
                         }
+
+                        // Clean up in-memory GLOBAL indices
+                        state.team_slug_index.remove(&slug);
+                        state.team_id_to_slug.remove(team);
+                        pending.team_slug_index_deleted.push(slug);
+
+                        LedgerResponse::OrganizationTeamDeleted { organization_id: *organization }
                     },
                     Err(err_response) => err_response,
                 };
@@ -1333,6 +1305,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
             },
 
             LedgerRequest::DeleteApp { organization, app } => {
+                // GLOBAL cleanup: app record, slug index, vault connections,
+                // assertions, and cascade token revocation.
+                // Name index and AppProfile are REGIONAL — handled by
+                // DeleteAppProfile (proposed first by the service handler).
                 let response = match require_active_org_with_state(
                     organization,
                     state,
@@ -1340,76 +1316,69 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     "modify",
                 ) {
                     Ok(state_layer) => {
-                        match load_app(state_layer, *organization, *app) {
-                            Ok(app_record) => {
-                                // Delete app record, slug index, and name index
-                                let app_key = SystemKeys::app_key(*organization, *app);
-                                let slug_key = SystemKeys::app_slug_key(app_record.slug);
-                                let name_key =
-                                    SystemKeys::app_name_index_key(*organization, &app_record.name);
-                                let mut ops = vec![
-                                    Operation::DeleteEntity { key: app_key },
-                                    Operation::DeleteEntity { key: slug_key },
-                                    Operation::DeleteEntity { key: name_key },
-                                ];
-                                // Delete all vault connections (paginated)
-                                let vault_prefix =
-                                    SystemKeys::app_vault_prefix(*organization, *app);
-                                collect_all_entities_for_deletion(
-                                    state_layer,
-                                    &vault_prefix,
-                                    &mut ops,
+                        // Look up slug from in-memory index (no profile load needed)
+                        let slug = match state.app_id_to_slug.get(app).copied() {
+                            Some(s) => s,
+                            None => {
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::NotFound,
+                                        message: format!("App {} not found", app),
+                                    },
+                                    None,
                                 );
-                                // Delete all assertion entries (paginated)
-                                let assertion_prefix =
-                                    SystemKeys::app_assertion_prefix(*organization, *app);
-                                collect_all_entities_for_deletion(
-                                    state_layer,
-                                    &assertion_prefix,
-                                    &mut ops,
-                                );
-                                if let Err(e) =
-                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
-                                {
-                                    return (
-                                        LedgerResponse::Error {
-                                            code: ErrorCode::Internal,
-                                            message: format!("Failed to delete app: {e}"),
-                                        },
-                                        None,
-                                    );
-                                }
-                                // Cascade: revoke all refresh tokens for this app
-                                {
-                                    let slug = app_record.slug;
-                                    let _span = tracing::info_span!(
-                                        "cascade_revoke",
-                                        app_id = app.value(),
-                                        app_slug = slug.value()
-                                    )
-                                    .entered();
-                                    cascade_revoke(
-                                        state_layer,
-                                        |sys| {
-                                            sys.revoke_all_subject_tokens(
-                                                &TokenSubject::App(slug),
-                                                block_timestamp,
-                                            )
-                                        },
-                                        "Cascade-revoked refresh tokens on app delete",
-                                        "Failed to cascade-revoke tokens on app delete",
-                                    );
-                                }
-
-                                state.app_slug_index.remove(&app_record.slug);
-                                state.app_id_to_slug.remove(app);
-                                state.app_name_index.remove(&(*organization, app_record.name));
-                                pending.app_slug_index_deleted.push(app_record.slug);
-
-                                LedgerResponse::AppDeleted { organization_id: *organization }
                             },
-                            Err(e) => e,
+                        };
+
+                        // Delete app record and slug index from GLOBAL state
+                        let app_key = SystemKeys::app_key(*organization, *app);
+                        let slug_key = SystemKeys::app_slug_key(slug);
+                        let mut ops = vec![
+                            Operation::DeleteEntity { key: app_key },
+                            Operation::DeleteEntity { key: slug_key },
+                        ];
+                        // Delete all vault connections (paginated)
+                        let vault_prefix = SystemKeys::app_vault_prefix(*organization, *app);
+                        collect_all_entities_for_deletion(state_layer, &vault_prefix, &mut ops);
+                        // Delete all assertion entries (paginated)
+                        let assertion_prefix =
+                            SystemKeys::app_assertion_prefix(*organization, *app);
+                        collect_all_entities_for_deletion(state_layer, &assertion_prefix, &mut ops);
+                        if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                            return (
+                                LedgerResponse::Error {
+                                    code: ErrorCode::Internal,
+                                    message: format!("Failed to delete app: {e}"),
+                                },
+                                None,
+                            );
                         }
+                        // Cascade: revoke all refresh tokens for this app
+                        {
+                            let _span = tracing::info_span!(
+                                "cascade_revoke",
+                                app_id = app.value(),
+                                app_slug = slug.value()
+                            )
+                            .entered();
+                            cascade_revoke(
+                                state_layer,
+                                |sys| {
+                                    sys.revoke_all_subject_tokens(
+                                        &TokenSubject::App(slug),
+                                        block_timestamp,
+                                    )
+                                },
+                                "Cascade-revoked refresh tokens on app delete",
+                                "Failed to cascade-revoke tokens on app delete",
+                            );
+                        }
+
+                        state.app_slug_index.remove(&slug);
+                        state.app_id_to_slug.remove(app);
+                        pending.app_slug_index_deleted.push(slug);
+
+                        LedgerResponse::AppDeleted { organization_id: *organization }
                     },
                     Err(err_response) => err_response,
                 };
@@ -2013,8 +1982,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             pending.team_slug_index_deleted.push(*team_slug);
                         }
 
-                        // Clean up team name index entries for this organization
-                        state.team_name_index.retain(|(org_id, _), _| *org_id != *organization);
+                        // team_name_index and app_name_index are REGIONAL — cleaned up by
+                        // PurgeOrganizationRegional (proposed first by the service handler).
 
                         // Clean up app slug indices for all apps in this organization
                         let app_slugs_to_remove: Vec<(AppSlug, AppId)> = state
@@ -2028,9 +1997,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             state.app_id_to_slug.remove(app_id);
                             pending.app_slug_index_deleted.push(*app_slug);
                         }
-
-                        // Clean up app name index entries for this organization
-                        state.app_name_index.retain(|(org_id, _), _| *org_id != *organization);
 
                         // Clean up user→org index entries for this organization
                         state.user_org_index.retain(|_, orgs| {
@@ -2063,11 +2029,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     key: SystemKeys::organization_slug_key(slug),
                                 });
                             }
-                            // Clean up team profile + slug index keys
-                            for (team_slug, team_id) in &team_slugs_to_remove {
-                                cleanup_ops.push(Operation::DeleteEntity {
-                                    key: SystemKeys::team_profile_key(*organization, *team_id),
-                                });
+                            // Clean up team slug index keys (profiles are REGIONAL)
+                            for (team_slug, _team_id) in &team_slugs_to_remove {
                                 cleanup_ops.push(Operation::DeleteEntity {
                                     key: SystemKeys::team_slug_key(*team_slug),
                                 });
@@ -2096,21 +2059,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     &mut cleanup_ops,
                                 );
                             }
-                            // Clean up app name index keys for this organization
-                            // (scan by prefix since we don't have individual name→key mappings)
-                            let app_name_prefix = SystemKeys::app_name_index_prefix(*organization);
-                            if let Ok(entities) = state_layer.list_entities(
-                                SYSTEM_VAULT_ID,
-                                Some(&app_name_prefix),
-                                None,
-                                10000,
-                            ) {
-                                for entity in &entities {
-                                    cleanup_ops.push(Operation::DeleteEntity {
-                                        key: String::from_utf8_lossy(&entity.key).to_string(),
-                                    });
-                                }
-                            }
+                            // App name index and app profile keys are REGIONAL —
+                            // cleaned up by PurgeOrganizationRegional.
                             if let Err(e) =
                                 state_layer.apply_operations(SYSTEM_VAULT_ID, &cleanup_ops, 0)
                             {
@@ -3725,48 +3675,57 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     },
 
                     // ── WriteTeamProfile (REGIONAL) ──
-                    SystemRequest::WriteTeamProfile { organization, team, name } => {
+                    // Upsert: creates profile from scratch on first call (REGIONAL
+                    // state has no data from GLOBAL CreateOrganizationTeam), or
+                    // updates name on subsequent calls (rename).
+                    SystemRequest::WriteTeamProfile { organization, team, slug, name } => {
                         if let Some(state_layer) = &self.state_layer {
-                            match load_team_profile(state_layer, *organization, *team) {
-                                Ok(mut profile) => {
-                                    if has_team_name_conflict(
-                                        state,
-                                        *organization,
-                                        name,
-                                        Some(*team),
-                                    ) {
-                                        return error_result(
-                                            ErrorCode::AlreadyExists,
-                                            format!(
-                                                "Team name '{}' already exists in organization {}",
-                                                name, organization
-                                            ),
-                                        );
-                                    }
-                                    let old_name = profile.name.clone();
-                                    profile.name.clone_from(name);
-                                    profile.updated_at = block_timestamp;
-                                    match save_team_profile(
-                                        state_layer,
-                                        *organization,
-                                        *team,
-                                        &profile,
-                                    ) {
-                                        Ok(()) => {
-                                            if !old_name.is_empty() {
-                                                state
-                                                    .team_name_index
-                                                    .remove(&(*organization, old_name));
-                                            }
-                                            state
-                                                .team_name_index
-                                                .insert((*organization, name.clone()), *team);
+                            if has_team_name_conflict(state, *organization, name, Some(*team)) {
+                                return error_result(
+                                    ErrorCode::AlreadyExists,
+                                    format!(
+                                        "Team name '{}' already exists in organization {}",
+                                        name, organization
+                                    ),
+                                );
+                            }
 
-                                            LedgerResponse::OrganizationUpdated {
-                                                organization_id: *organization,
-                                            }
-                                        },
-                                        Err(e) => e,
+                            let (profile, old_name) =
+                                match load_team_profile(state_layer, *organization, *team) {
+                                    Ok(mut existing) => {
+                                        let old = existing.name.clone();
+                                        existing.name.clone_from(name);
+                                        existing.updated_at = block_timestamp;
+                                        (existing, Some(old))
+                                    },
+                                    Err(_) => {
+                                        // First write — create from scratch
+                                        let fresh = TeamProfile {
+                                            team: *team,
+                                            organization: *organization,
+                                            slug: *slug,
+                                            name: name.clone(),
+                                            members: Vec::new(),
+                                            created_at: block_timestamp,
+                                            updated_at: block_timestamp,
+                                        };
+                                        (fresh, None)
+                                    },
+                                };
+
+                            match save_team_profile(state_layer, *organization, *team, &profile) {
+                                Ok(()) => {
+                                    if let Some(old) = old_name
+                                        && !old.is_empty()
+                                    {
+                                        state.team_name_index.remove(&(*organization, old));
+                                    }
+                                    state
+                                        .team_name_index
+                                        .insert((*organization, name.clone()), *team);
+
+                                    LedgerResponse::OrganizationUpdated {
+                                        organization_id: *organization,
                                     }
                                 },
                                 Err(e) => e,
@@ -3780,70 +3739,237 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     },
 
                     // ── WriteAppProfile (REGIONAL) ──
+                    // Upsert: creates AppProfile from scratch on first call (REGIONAL
+                    // state has no data from GLOBAL CreateApp), or updates
+                    // name/description on subsequent calls.
                     SystemRequest::WriteAppProfile { organization, app, name, description } => {
                         if let Some(state_layer) = &self.state_layer {
-                            match load_app(state_layer, *organization, *app) {
-                                Ok(mut app_record) => {
-                                    if has_app_name_conflict(state, *organization, name, Some(*app))
-                                    {
-                                        return error_result(
-                                            ErrorCode::AlreadyExists,
-                                            format!(
-                                                "App name '{}' already exists in organization {}",
-                                                name, organization
-                                            ),
-                                        );
-                                    }
-                                    let old_name = app_record.name.clone();
-                                    app_record.name.clone_from(name);
-                                    app_record.description.clone_from(description);
-                                    app_record.updated_at = block_timestamp;
-                                    match save_app(state_layer, *organization, &app_record) {
-                                        Ok(()) => {
-                                            // Update name index: batch delete + insert
-                                            let mut index_ops = Vec::new();
-                                            if !old_name.is_empty() {
-                                                index_ops.push(Operation::DeleteEntity {
-                                                    key: SystemKeys::app_name_index_key(
-                                                        *organization,
-                                                        &old_name,
-                                                    ),
-                                                });
-                                                state
-                                                    .app_name_index
-                                                    .remove(&(*organization, old_name));
-                                            }
-                                            index_ops.push(Operation::SetEntity {
-                                                key: SystemKeys::app_name_index_key(
-                                                    *organization,
-                                                    name,
-                                                ),
-                                                value: app.value().to_string().into_bytes(),
-                                                condition: None,
-                                                expires_at: None,
-                                            });
-                                            let _ = state_layer.apply_operations(
-                                                SYSTEM_VAULT_ID,
-                                                &index_ops,
-                                                0,
-                                            );
-                                            state
-                                                .app_name_index
-                                                .insert((*organization, name.clone()), *app);
-
-                                            LedgerResponse::OrganizationUpdated {
-                                                organization_id: *organization,
-                                            }
-                                        },
-                                        Err(e) => e,
-                                    }
-                                },
-                                Err(e) => e,
+                            // Name conflict check (uses REGIONAL app_name_index)
+                            if has_app_name_conflict(state, *organization, name, Some(*app)) {
+                                return error_result(
+                                    ErrorCode::AlreadyExists,
+                                    format!(
+                                        "App name '{}' already exists in organization {}",
+                                        name, organization
+                                    ),
+                                );
                             }
+
+                            // Upsert: try load existing, create from scratch if not found
+                            let (profile, old_name) =
+                                match load_app_profile(state_layer, *organization, *app) {
+                                    Ok(mut existing) => {
+                                        let old = existing.name.clone();
+                                        existing.name.clone_from(name);
+                                        existing.description.clone_from(description);
+                                        existing.updated_at = block_timestamp;
+                                        (existing, Some(old))
+                                    },
+                                    Err(_) => {
+                                        let fresh = AppProfile {
+                                            app: *app,
+                                            organization: *organization,
+                                            name: name.clone(),
+                                            description: description.clone(),
+                                            updated_at: block_timestamp,
+                                        };
+                                        (fresh, None)
+                                    },
+                                };
+
+                            // Batch profile write + name index ops atomically
+                            let profile_key = SystemKeys::app_profile_key(*organization, *app);
+                            let encoded = match encode(&profile) {
+                                Ok(bytes) => bytes,
+                                Err(e) => {
+                                    return error_result(
+                                        ErrorCode::Internal,
+                                        format!("Failed to encode app profile: {e}"),
+                                    );
+                                },
+                            };
+                            let ops = vec![Operation::SetEntity {
+                                key: profile_key,
+                                value: encoded,
+                                condition: None,
+                                expires_at: None,
+                            }];
+
+                            if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                                return error_result(
+                                    ErrorCode::Internal,
+                                    format!("Failed to write app profile: {e}"),
+                                );
+                            }
+
+                            // Update in-memory indices after storage succeeds
+                            if let Some(old) = old_name
+                                && !old.is_empty()
+                            {
+                                state.app_name_index.remove(&(*organization, old));
+                            }
+                            state.app_name_index.insert((*organization, name.clone()), *app);
+
+                            LedgerResponse::OrganizationUpdated { organization_id: *organization }
                         } else {
                             ledger_error(
                                 ErrorCode::Internal,
                                 "State layer unavailable for app profile write",
+                            )
+                        }
+                    },
+
+                    // ── DeleteTeamProfile (REGIONAL) ──
+                    // Deletes the team profile and name index from REGIONAL state.
+                    // Handles member migration if move_members_to is specified.
+                    SystemRequest::DeleteTeamProfile { organization, team, move_members_to } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            match load_team_profile(state_layer, *organization, *team) {
+                                Ok(team_profile) => {
+                                    // Move members if requested
+                                    if let Some(target_team) = move_members_to {
+                                        if *target_team == *team {
+                                            return error_result(
+                                                ErrorCode::FailedPrecondition,
+                                                "Cannot move members to the same team being deleted",
+                                            );
+                                        }
+                                        if let Err(resp) = migrate_team_members(
+                                            state_layer,
+                                            *organization,
+                                            &team_profile,
+                                            *target_team,
+                                            block_timestamp,
+                                        ) {
+                                            return (resp, None);
+                                        }
+                                    }
+
+                                    // Delete profile from REGIONAL state
+                                    let profile_key =
+                                        SystemKeys::team_profile_key(*organization, *team);
+                                    let ops = vec![Operation::DeleteEntity { key: profile_key }];
+                                    if let Err(e) =
+                                        state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
+                                    {
+                                        return error_result(
+                                            ErrorCode::Internal,
+                                            format!("Failed to delete team profile: {e}"),
+                                        );
+                                    }
+
+                                    // Clean up REGIONAL name index
+                                    state
+                                        .team_name_index
+                                        .remove(&(*organization, team_profile.name));
+
+                                    LedgerResponse::OrganizationTeamDeleted {
+                                        organization_id: *organization,
+                                    }
+                                },
+                                Err(_) => {
+                                    // Profile doesn't exist in REGIONAL state — not an error,
+                                    // proceed with GLOBAL cleanup
+                                    LedgerResponse::OrganizationTeamDeleted {
+                                        organization_id: *organization,
+                                    }
+                                },
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for team profile delete",
+                            )
+                        }
+                    },
+
+                    // ── DeleteAppProfile (REGIONAL) ──
+                    // Deletes the app profile and name index from REGIONAL state.
+                    SystemRequest::DeleteAppProfile { organization, app } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            match load_app_profile(state_layer, *organization, *app) {
+                                Ok(profile) => {
+                                    // Delete profile from REGIONAL state
+                                    let profile_key =
+                                        SystemKeys::app_profile_key(*organization, *app);
+                                    let ops = vec![Operation::DeleteEntity { key: profile_key }];
+
+                                    if let Err(e) =
+                                        state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
+                                    {
+                                        return error_result(
+                                            ErrorCode::Internal,
+                                            format!("Failed to delete app profile: {e}"),
+                                        );
+                                    }
+
+                                    // Update in-memory index only after storage succeeds
+                                    if !profile.name.is_empty() {
+                                        state.app_name_index.remove(&(*organization, profile.name));
+                                    }
+
+                                    LedgerResponse::AppDeleted { organization_id: *organization }
+                                },
+                                Err(_) => {
+                                    // Profile doesn't exist in REGIONAL state — not an error
+                                    LedgerResponse::AppDeleted { organization_id: *organization }
+                                },
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for app profile delete",
+                            )
+                        }
+                    },
+
+                    // ── PurgeOrganizationRegional (REGIONAL) ──
+                    // Deletes all team profiles, app profiles, and name indices
+                    // belonging to this organization from the REGIONAL state layer.
+                    SystemRequest::PurgeOrganizationRegional { organization } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            let mut ops = Vec::new();
+
+                            // Delete all team profiles
+                            let team_prefix = format!(
+                                "{}{}:",
+                                SystemKeys::TEAM_PROFILE_PREFIX,
+                                organization.value()
+                            );
+                            collect_all_entities_for_deletion(state_layer, &team_prefix, &mut ops);
+
+                            // Delete all app profiles
+                            let app_profile_prefix = format!(
+                                "{}{}:",
+                                SystemKeys::APP_PROFILE_PREFIX,
+                                organization.value()
+                            );
+                            collect_all_entities_for_deletion(
+                                state_layer,
+                                &app_profile_prefix,
+                                &mut ops,
+                            );
+
+                            if !ops.is_empty()
+                                && let Err(e) =
+                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
+                            {
+                                tracing::error!(
+                                    organization_id = organization.value(),
+                                    error = %e,
+                                    "Failed to purge REGIONAL organization data"
+                                );
+                            }
+
+                            // Clean up REGIONAL in-memory indices
+                            state.team_name_index.retain(|(org_id, _), _| *org_id != *organization);
+                            state.app_name_index.retain(|(org_id, _), _| *org_id != *organization);
+
+                            LedgerResponse::OrganizationPurged { organization_id: *organization }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for regional purge",
                             )
                         }
                     },

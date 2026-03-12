@@ -283,6 +283,16 @@ impl SystemKeys {
     /// Prefix for app keys.
     pub const APP_PREFIX: &'static str = "_sys:app:";
 
+    /// Primary key for an application's PII profile in the regional state layer.
+    ///
+    /// Pattern: `_sys:app_profile:{organization_id}:{app_id}` → postcard-serialized `AppProfile`
+    pub fn app_profile_key(organization: OrganizationId, app: AppId) -> String {
+        format!("_sys:app_profile:{}:{}", organization.value(), app.value())
+    }
+
+    /// Prefix for app profile keys.
+    pub const APP_PROFILE_PREFIX: &'static str = "_sys:app_profile:";
+
     /// Prefix for app slug index entries.
     pub const APP_SLUG_INDEX_PREFIX: &'static str = "_idx:app:slug:";
 
@@ -956,6 +966,11 @@ mod tests {
                 "_idx:app:name:3:",
             ),
             (
+                "app_profile_key",
+                SystemKeys::app_profile_key(OrganizationId::new(5), AppId::new(42)),
+                "_sys:app_profile:5:42",
+            ),
+            (
                 "app_assertion_key",
                 SystemKeys::app_assertion_key(
                     OrganizationId::new(1),
@@ -1004,6 +1019,11 @@ mod tests {
                 &[SystemKeys::APP_NAME_INDEX_PREFIX, "_idx:app:name:3:"],
             ),
             (
+                "app_profile_key",
+                SystemKeys::app_profile_key(OrganizationId::new(5), AppId::new(42)),
+                &[SystemKeys::APP_PROFILE_PREFIX, "_sys:app_profile:5:"],
+            ),
+            (
                 "app_assertion_key",
                 SystemKeys::app_assertion_key(
                     OrganizationId::new(1),
@@ -1035,10 +1055,18 @@ mod tests {
 
     #[test]
     fn test_app_prefixes_do_not_collide() {
-        // Ensure app, assertion, and vault prefixes are distinct namespaces
-        assert_ne!(SystemKeys::APP_PREFIX, SystemKeys::APP_ASSERTION_PREFIX);
-        assert_ne!(SystemKeys::APP_PREFIX, SystemKeys::APP_VAULT_PREFIX);
-        assert_ne!(SystemKeys::APP_ASSERTION_PREFIX, SystemKeys::APP_VAULT_PREFIX);
+        // Ensure app, profile, assertion, and vault prefixes are distinct namespaces
+        let prefixes = [
+            SystemKeys::APP_PREFIX,
+            SystemKeys::APP_PROFILE_PREFIX,
+            SystemKeys::APP_ASSERTION_PREFIX,
+            SystemKeys::APP_VAULT_PREFIX,
+        ];
+        for (i, a) in prefixes.iter().enumerate() {
+            for b in &prefixes[i + 1..] {
+                assert_ne!(a, b, "{a} should not collide with {b}");
+            }
+        }
     }
 
     // =========================================================================

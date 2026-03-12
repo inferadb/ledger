@@ -18,8 +18,9 @@ use crate::{
     metrics::{
         record_background_job_duration, record_background_job_items, record_background_job_run,
     },
+    raft_manager::RaftManager,
     trace_context::TraceContext,
-    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig, RaftPayload},
+    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig, RaftPayload, SystemRequest},
 };
 
 /// Background job that purges organizations whose soft-delete retention
@@ -41,6 +42,9 @@ pub struct OrganizationPurgeJob<B: StorageBackend + 'static> {
     /// Purge job configuration.
     #[builder(default)]
     config: OrganizationPurgeConfig,
+    /// Raft manager for proposing REGIONAL cleanup before GLOBAL purge.
+    #[builder(default)]
+    manager: Option<Arc<RaftManager>>,
     /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
     #[builder(default)]
     watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
@@ -54,7 +58,7 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
         state: Arc<StateLayer<B>>,
         config: &OrganizationPurgeConfig,
     ) -> Self {
-        Self { raft, node_id, state, config: config.clone(), watchdog_handle: None }
+        Self { raft, node_id, state, config: config.clone(), manager: None, watchdog_handle: None }
     }
 
     /// Checks if this node is the current leader.
@@ -103,7 +107,41 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
         });
 
         for org in expired_orgs.take(self.config.batch_size) {
-            // Retention cooldown has elapsed — submit purge proposal
+            // Step 1: Propose REGIONAL cleanup (profiles, name indices)
+            if let Some(ref manager) = self.manager {
+                let regional_request =
+                    LedgerRequest::System(SystemRequest::PurgeOrganizationRegional {
+                        organization: org.organization_id,
+                    });
+                match manager.get_region_group(org.region) {
+                    Ok(group) => {
+                        if let Err(e) =
+                            group.raft().client_write(RaftPayload::new(regional_request)).await
+                        {
+                            warn!(
+                                trace_id = %trace_ctx.trace_id,
+                                organization_id = %org.organization_id,
+                                region = %org.region,
+                                error = ?e,
+                                "Failed to propose REGIONAL organization purge"
+                            );
+                            // Continue to GLOBAL purge — REGIONAL data is orphaned
+                            // but not a blocker for structural cleanup.
+                        }
+                    },
+                    Err(e) => {
+                        warn!(
+                            trace_id = %trace_ctx.trace_id,
+                            organization_id = %org.organization_id,
+                            region = %org.region,
+                            error = ?e,
+                            "Region group not found for REGIONAL purge"
+                        );
+                    },
+                }
+            }
+
+            // Step 2: Propose GLOBAL purge (slug indices, structural records)
             let request = LedgerRequest::PurgeOrganization { organization: org.organization_id };
 
             match self.raft.client_write(RaftPayload::new(request)).await {

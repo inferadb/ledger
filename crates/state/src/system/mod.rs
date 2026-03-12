@@ -36,9 +36,9 @@ pub use service::{
 };
 pub use token::{AllUserSessionsRevocationResult, ExpiredTokenCleanupResult, RevocationResult};
 pub use types::{
-    App, AppCredentials, AppVaultConnection, ClientAssertionCredentialConfig, ClientAssertionEntry,
-    ClientSecretCredential, EmailHashEntry, EmailVerificationToken, ErasureAuditRecord,
-    MigrationSummary, MtlsCredential, NodeInfo, NodeRole, OnboardingAccount,
+    App, AppCredentials, AppProfile, AppVaultConnection, ClientAssertionCredentialConfig,
+    ClientAssertionEntry, ClientSecretCredential, EmailHashEntry, EmailVerificationToken,
+    ErasureAuditRecord, MigrationSummary, MtlsCredential, NodeInfo, NodeRole, OnboardingAccount,
     OrganizationDirectoryEntry, OrganizationDirectoryStatus, OrganizationMember,
     OrganizationProfile, OrganizationRegistry, OrganizationStatus, OrganizationTier,
     PendingEmailVerification, ProvisioningReservation, RefreshToken, SigningKey, SubjectKey,

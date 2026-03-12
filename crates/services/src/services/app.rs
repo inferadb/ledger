@@ -124,9 +124,31 @@ impl AppService {
         }
     }
 
-    /// Loads an app from the state layer by organization and app ID.
+    /// Loads an app from GLOBAL state and merges with `AppProfile` from REGIONAL state.
+    ///
+    /// The structural `App` record (credentials, enabled, slug) lives in GLOBAL.
+    /// PII fields (name, description) live in a separate `AppProfile` in REGIONAL.
+    /// This method loads both and overlays the PII fields onto the returned `App`.
     fn load_app(&self, org_id: DomainOrganizationId, app_id: DomainAppId) -> Result<App, Status> {
-        super::helpers::load_app(&self.ctx.state, org_id, app_id)
+        let mut app = super::helpers::load_app(&self.ctx.state, org_id, app_id)?;
+        self.overlay_app_profile(&mut app, org_id);
+        Ok(app)
+    }
+
+    /// Overlays PII fields from a REGIONAL `AppProfile` onto a GLOBAL `App`.
+    fn overlay_app_profile(&self, app: &mut App, org_id: DomainOrganizationId) {
+        let regional = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .and_then(|meta| self.ctx.regional_state(meta.region).ok());
+        let Some(state) = regional else { return };
+        let key = SystemKeys::app_profile_key(org_id, app.id);
+        let Ok(Some(entity)) = state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) else { return };
+        if let Ok(profile) = decode::<inferadb_ledger_state::system::AppProfile>(&entity.value) {
+            app.name = profile.name;
+            app.description = profile.description;
+        }
     }
 
     /// Converts a domain `App` to a proto `AppInfo` message.
@@ -156,7 +178,8 @@ impl AppService {
         })
     }
 
-    /// Lists all apps in an organization from the state layer.
+    /// Lists all apps in an organization, merging GLOBAL structural data with
+    /// REGIONAL PII (name, description) from `AppProfile` records.
     fn list_apps_internal(&self, org_id: DomainOrganizationId) -> Result<Vec<App>, Status> {
         let prefix = SystemKeys::app_prefix(org_id);
         let entities = self
@@ -168,7 +191,10 @@ impl AppService {
         let mut apps = Vec::with_capacity(entities.len());
         for entity in &entities {
             match decode::<App>(&entity.value) {
-                Ok(app) => apps.push(app),
+                Ok(mut app) => {
+                    self.overlay_app_profile(&mut app, org_id);
+                    apps.push(app);
+                },
                 Err(e) => {
                     tracing::warn!(error = %e, "corrupt app entry, skipping");
                 },
@@ -494,6 +520,25 @@ impl proto::app_service_server::AppService for AppService {
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
         let (_, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
 
+        // Step 1 (REGIONAL): Delete AppProfile and name index.
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+        let delete_profile = inferadb_ledger_raft::types::SystemRequest::DeleteAppProfile {
+            organization: org_id,
+            app: app_id,
+        };
+        let profile_response = self
+            .ctx
+            .propose_regional(org_meta.region, delete_profile, &grpc_metadata, &mut ctx)
+            .await?;
+        if let LedgerResponse::Error { code, message } = profile_response {
+            return Err(super::helpers::error_code_to_status(code, message));
+        }
+
+        // Step 2 (GLOBAL): Delete App record, slug index, vault connections, assertions.
         let response = self
             .ctx
             .propose_request(

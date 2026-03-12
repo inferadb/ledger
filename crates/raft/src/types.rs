@@ -299,14 +299,15 @@ pub enum LedgerRequest {
         slug: TeamSlug,
     },
 
-    /// Deletes a team from an organization.
+    /// Deletes a team's GLOBAL directory entry (slug index + in-memory maps).
+    ///
+    /// Profile deletion and member migration are handled by the REGIONAL
+    /// [`SystemRequest::DeleteTeamProfile`] (proposed first by the service handler).
     DeleteOrganizationTeam {
         /// Organization containing the team.
         organization: OrganizationId,
         /// Team to delete.
         team: TeamId,
-        /// If set, move members to this team before deleting.
-        move_members_to: Option<TeamId>,
     },
 
     /// Creates a new application within an organization (GLOBAL directory entry).
@@ -936,6 +937,9 @@ pub enum SystemRequest {
         organization: OrganizationId,
         /// Team to write the profile for.
         team: TeamId,
+        /// External Snowflake slug (needed to create profile from scratch
+        /// in REGIONAL state where GLOBAL slug indices are unavailable).
+        slug: TeamSlug,
         /// Team display name (PII — regional only).
         name: String,
     },
@@ -955,6 +959,41 @@ pub enum SystemRequest {
         name: String,
         /// Optional description (PII — regional only).
         description: Option<String>,
+    },
+
+    /// Deletes a team's profile and name index from the REGIONAL state layer.
+    ///
+    /// Handles member migration if `move_members_to` is specified (both source
+    /// and target profiles are in REGIONAL state). Must be proposed before the
+    /// GLOBAL `DeleteOrganizationTeam` which cleans up slug indices.
+    DeleteTeamProfile {
+        /// Organization containing the team.
+        organization: OrganizationId,
+        /// Team whose profile is being deleted.
+        team: TeamId,
+        /// If set, move members to this team before deleting.
+        move_members_to: Option<TeamId>,
+    },
+
+    /// Deletes an app's profile and name index from the REGIONAL state layer.
+    ///
+    /// Must be proposed before the GLOBAL `DeleteApp` which cleans up
+    /// slug indices, vault connections, and assertions.
+    DeleteAppProfile {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App whose profile is being deleted.
+        app: AppId,
+    },
+
+    /// Purges all REGIONAL data for a deleted organization.
+    ///
+    /// Deletes team profiles, app profiles, and name index entries from the
+    /// REGIONAL state layer. Must be proposed before the GLOBAL
+    /// `PurgeOrganization` which cleans up slug indices and structural data.
+    PurgeOrganizationRegional {
+        /// Organization being purged.
+        organization: OrganizationId,
     },
 }
 
@@ -2570,6 +2609,9 @@ mod tests {
             SystemRequest::WriteOnboardingUserProfile { .. } => "regional",
             SystemRequest::WriteTeamProfile { .. } => "regional",
             SystemRequest::WriteAppProfile { .. } => "regional",
+            SystemRequest::DeleteTeamProfile { .. } => "regional",
+            SystemRequest::DeleteAppProfile { .. } => "regional",
+            SystemRequest::PurgeOrganizationRegional { .. } => "regional",
         }
     }
 
@@ -2649,6 +2691,7 @@ mod tests {
         let write_team = SystemRequest::WriteTeamProfile {
             organization: OrganizationId::new(1),
             team: TeamId::new(1),
+            slug: TeamSlug::new(100),
             name: "Engineering".to_string(),
         };
         assert_eq!(classify_system_request(&write_team), "regional");
@@ -2661,6 +2704,26 @@ mod tests {
             description: Some("App description".to_string()),
         };
         assert_eq!(classify_system_request(&write_app), "regional");
+
+        // DeleteTeamProfile — REGIONAL cleanup (profile + name index)
+        let delete_team = SystemRequest::DeleteTeamProfile {
+            organization: OrganizationId::new(1),
+            team: TeamId::new(1),
+            move_members_to: None,
+        };
+        assert_eq!(classify_system_request(&delete_team), "regional");
+
+        // DeleteAppProfile — REGIONAL cleanup (profile + name index)
+        let delete_app_profile = SystemRequest::DeleteAppProfile {
+            organization: OrganizationId::new(1),
+            app: AppId::new(1),
+        };
+        assert_eq!(classify_system_request(&delete_app_profile), "regional");
+
+        // PurgeOrganizationRegional — REGIONAL cleanup during org purge
+        let purge_regional =
+            SystemRequest::PurgeOrganizationRegional { organization: OrganizationId::new(1) };
+        assert_eq!(classify_system_request(&purge_regional), "regional");
     }
 
     /// Classifies whether a `LedgerRequest` contains plaintext PII.

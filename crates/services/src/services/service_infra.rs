@@ -247,7 +247,6 @@ impl ServiceContext {
     ///
     /// - `FAILED_PRECONDITION` if the `RaftManager` is not configured.
     /// - `UNAVAILABLE` if the region's Raft group is not active on this node.
-    #[allow(dead_code)]
     pub(crate) fn regional_state(
         &self,
         region: Region,

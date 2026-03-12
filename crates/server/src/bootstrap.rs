@@ -676,6 +676,7 @@ pub async fn bootstrap_node(
         .raft(raft.clone())
         .node_id(node_id)
         .state(state.clone())
+        .manager(Some(manager.clone()))
         .watchdog_handle(watchdog.map(|w| w.register("org_purge", 7200)))
         .build()
         .start();

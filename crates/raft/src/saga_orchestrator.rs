@@ -658,11 +658,10 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     );
                 } else {
                     // Protected migration: snapshot source data.
-                    // In a multi-Raft setup, this would compute per-vault
-                    // state roots across the source region's Raft group.
-                    // For the current single-Raft implementation, we record
-                    // an empty snapshot marker — the actual data is already
-                    // replicated across all nodes via Raft.
+                    // Cross-region data transfer is not yet implemented —
+                    // recording an empty snapshot marker. The actual per-vault
+                    // state root computation requires reading from the source
+                    // region's Raft group via RaftManager.
                     saga.transition(MigrateOrgSagaState::DataSnapshotTaken {
                         source_state_root: Vec::new(),
                     });
@@ -675,12 +674,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             },
 
             MigrateOrgSagaState::DataSnapshotTaken { .. } => {
-                // Step 2: Write data to target region
-                // For the current single-Raft setup, org data is already
-                // accessible from all nodes. The actual cross-Raft data
-                // transfer requires RaftManager access (future enhancement).
-                // Mark as written for now — the state machine ensures data
-                // consistency through Raft replication.
+                // Step 2: Write data to target region.
+                // Cross-region data transfer is not yet implemented. Writing
+                // org data to a target region requires RaftManager-mediated
+                // cross-group proposals. Marking as written — data consistency
+                // is maintained by per-region Raft replication.
                 saga.transition(MigrateOrgSagaState::DataWritten);
                 info!(
                     saga_id = %saga.id,

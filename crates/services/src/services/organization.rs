@@ -118,14 +118,16 @@ impl OrganizationService {
         decode::<OrganizationRegistry>(&entity.value).ok()
     }
 
-    /// Reads a team profile from the regional store.
+    /// Reads a team profile from the REGIONAL state layer.
     fn read_team_profile(
         &self,
         org_id: DomainOrganizationId,
         team_id: TeamId,
     ) -> Option<TeamProfile> {
+        let org_meta = self.ctx.applied_state.get_organization(org_id)?;
+        let state = self.ctx.regional_state(org_meta.region).ok()?;
         let key = SystemKeys::team_profile_key(org_id, team_id);
-        let entity = self.ctx.state.get_entity(SystemVaultId::new(0), key.as_bytes()).ok()??;
+        let entity = state.get_entity(SystemVaultId::new(0), key.as_bytes()).ok()??;
         decode::<TeamProfile>(&entity.value)
             .inspect_err(|e| {
                 tracing::warn!(
@@ -138,13 +140,22 @@ impl OrganizationService {
             .ok()
     }
 
-    /// Lists all team profiles for an organization.
+    /// Lists all team profiles for an organization from the REGIONAL state layer.
     fn list_team_profiles(&self, org_id: DomainOrganizationId) -> Vec<TeamProfile> {
         /// Maximum number of team profiles to load per organization.
         const MAX_TEAM_PROFILES: usize = 1_000;
 
+        let org_meta = match self.ctx.applied_state.get_organization(org_id) {
+            Some(meta) => meta,
+            None => return Vec::new(),
+        };
+        let state = match self.ctx.regional_state(org_meta.region) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
         let prefix = format!("{}{}:", SystemKeys::TEAM_PROFILE_PREFIX, org_id.value());
-        let entities = match self.ctx.state.list_entities(
+        let entities = match state.list_entities(
             SystemVaultId::new(0),
             Some(&prefix),
             None,
@@ -1475,6 +1486,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         let system_request = inferadb_ledger_raft::types::SystemRequest::WriteTeamProfile {
             organization: organization_id,
             team: team_id,
+            slug: team_slug,
             name,
         };
         let profile_response = self
@@ -1548,11 +1560,29 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         }
         let move_to = move_to.map(|(_, target_team_id)| target_team_id);
 
-        let ledger_request = LedgerRequest::DeleteOrganizationTeam {
+        // Step 1 (REGIONAL): Delete profile, handle member migration, clean up name index.
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+        let delete_profile = inferadb_ledger_raft::types::SystemRequest::DeleteTeamProfile {
             organization: organization_id,
             team: team_id,
             move_members_to: move_to,
         };
+        let profile_response = self
+            .ctx
+            .propose_regional(org_meta.region, delete_profile, &grpc_metadata, &mut ctx)
+            .await?;
+        if let LedgerResponse::Error { code, message } = profile_response {
+            ctx.set_error(code.grpc_code_name(), &message);
+            return Err(super::helpers::error_code_to_status(code, message));
+        }
+
+        // Step 2 (GLOBAL): Clean up slug index and in-memory maps.
+        let ledger_request =
+            LedgerRequest::DeleteOrganizationTeam { organization: organization_id, team: team_id };
         let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
@@ -1629,9 +1659,15 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             .applied_state
             .get_organization(organization_id)
             .ok_or_else(|| Status::not_found("Organization not found"))?;
+        let team_slug = self
+            .ctx
+            .applied_state
+            .resolve_team_id_to_slug(team_id)
+            .ok_or_else(|| Status::not_found(format!("Team {} slug not found", team_id)))?;
         let system_request = inferadb_ledger_raft::types::SystemRequest::WriteTeamProfile {
             organization: organization_id,
             team: team_id,
+            slug: team_slug,
             name,
         };
         let response = self

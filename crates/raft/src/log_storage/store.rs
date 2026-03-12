@@ -8,7 +8,7 @@ use std::{
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{
     BlockArchive, StateLayer,
-    system::{App, SYSTEM_VAULT_ID, SystemKeys, TeamProfile},
+    system::{AppProfile, SYSTEM_VAULT_ID, SystemKeys, TeamProfile},
 };
 use inferadb_ledger_store::{
     Database, DatabaseConfig, FileBackend, Key, StorageBackend, Value, WriteTransaction, tables,
@@ -227,52 +227,34 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// Rebuilds in-memory secondary indices from persisted profiles.
     ///
     /// Rebuilds:
-    /// - `team_name_index`: (org_id, name) → team_id for O(1) name conflict checks
-    /// - `user_org_index`: user_id → {org_ids} for O(1) membership lookups
+    /// - `team_name_index`: (org_id, name) → team_id from `TeamProfile` records
+    /// - `app_name_index`: (org_id, name) → app_id from `AppProfile` records
+    /// - `user_org_index`: user_id → {org_ids} from `OrganizationProfile` records
+    ///
+    /// Uses prefix scans on the state layer instead of in-memory slug indices.
+    /// This correctly handles both GLOBAL and REGIONAL Raft groups:
+    /// - GLOBAL: no profile keys exist → no name index entries (correct)
+    /// - REGIONAL: profile keys exist → name indices populated (correct)
     fn rebuild_secondary_indices(&self, state_layer: &StateLayer<B>) {
-        let state = self.applied_state.read();
-        let team_pairs: Vec<_> =
-            state.team_slug_index.values().map(|(org_id, team_id)| (*org_id, *team_id)).collect();
-        let org_ids: Vec<_> = state.organizations.keys().copied().collect();
-        drop(state);
+        // Rebuild team name index via prefix scan on _sys:team_profile:*
+        let name_entries = scan_prefix_decode::<B, TeamProfile, _>(
+            state_layer,
+            SystemKeys::TEAM_PROFILE_PREFIX,
+            |profile| ((profile.organization, profile.name), profile.team),
+        );
 
-        // Rebuild team name index
-        let mut name_entries = Vec::with_capacity(team_pairs.len());
-        for (org_id, team_id) in team_pairs {
-            let key = SystemKeys::team_profile_key(org_id, team_id);
-            match state_layer.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
-                Ok(Some(entity)) => match decode::<TeamProfile>(&entity.value) {
-                    Ok(profile) => {
-                        name_entries.push(((org_id, profile.name), team_id));
-                    },
-                    Err(e) => {
-                        warn!(
-                            organization_id = %org_id,
-                            team_id = %team_id,
-                            error = %e,
-                            "Failed to decode team profile during index rebuild"
-                        );
-                    },
-                },
-                Ok(None) => {
-                    warn!(
-                        organization_id = %org_id,
-                        team_id = %team_id,
-                        "Team profile missing during index rebuild"
-                    );
-                },
-                Err(e) => {
-                    warn!(
-                        organization_id = %org_id,
-                        team_id = %team_id,
-                        error = %e,
-                        "Failed to read team profile during index rebuild"
-                    );
-                },
-            }
-        }
+        // Rebuild app name index via prefix scan on _sys:app_profile:*
+        let app_name_entries = scan_prefix_decode::<B, AppProfile, _>(
+            state_layer,
+            SystemKeys::APP_PROFILE_PREFIX,
+            |profile| ((profile.organization, profile.name), profile.app),
+        );
 
         // Rebuild user→org index from organization profiles
+        let org_ids: Vec<_> = {
+            let state = self.applied_state.read();
+            state.organizations.keys().copied().collect()
+        };
         let mut user_org_entries: std::collections::HashMap<
             UserId,
             std::collections::HashSet<OrganizationId>,
@@ -306,46 +288,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         organization_id = %org_id,
                         error = %e,
                         "Failed to read organization profile during index rebuild"
-                    );
-                },
-            }
-        }
-
-        // Rebuild app name index
-        let app_pairs: Vec<_> = {
-            let state = self.applied_state.read();
-            state.app_slug_index.values().map(|(org_id, app_id)| (*org_id, *app_id)).collect()
-        };
-        let mut app_name_entries = Vec::with_capacity(app_pairs.len());
-        for (org_id, app_id) in app_pairs {
-            let key = SystemKeys::app_key(org_id, app_id);
-            match state_layer.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
-                Ok(Some(entity)) => match decode::<App>(&entity.value) {
-                    Ok(app) => {
-                        app_name_entries.push(((org_id, app.name), app_id));
-                    },
-                    Err(e) => {
-                        warn!(
-                            organization_id = %org_id,
-                            app_id = %app_id,
-                            error = %e,
-                            "Failed to decode app during index rebuild"
-                        );
-                    },
-                },
-                Ok(None) => {
-                    warn!(
-                        organization_id = %org_id,
-                        app_id = %app_id,
-                        "App entity missing during index rebuild"
-                    );
-                },
-                Err(e) => {
-                    warn!(
-                        organization_id = %org_id,
-                        app_id = %app_id,
-                        error = %e,
-                        "Failed to read app during index rebuild"
                     );
                 },
             }
@@ -1135,6 +1077,50 @@ impl<B: StorageBackend> RaftLogStore<B> {
         ));
         Ok((org_id, vault_id))
     }
+}
+
+/// Prefix-scans the state layer, deserializes each entity, and maps to results.
+///
+/// Pages through `list_entities` with the given prefix. Decode failures are
+/// logged and skipped.
+fn scan_prefix_decode<B: StorageBackend, T: serde::de::DeserializeOwned, R>(
+    state_layer: &StateLayer<B>,
+    prefix: &str,
+    map_fn: impl Fn(T) -> R,
+) -> Vec<R> {
+    const PAGE_SIZE: usize = 1000;
+    let mut results = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        match state_layer.list_entities(SYSTEM_VAULT_ID, Some(prefix), cursor.as_deref(), PAGE_SIZE)
+        {
+            Ok(page) => {
+                let is_last = page.len() < PAGE_SIZE;
+                for entity in &page {
+                    let key_str = String::from_utf8_lossy(&entity.key).into_owned();
+                    cursor = Some(key_str.clone());
+                    match decode::<T>(&entity.value) {
+                        Ok(value) => results.push(map_fn(value)),
+                        Err(e) => {
+                            warn!(
+                                key = %key_str,
+                                error = %e,
+                                "Failed to decode profile during index rebuild"
+                            );
+                        },
+                    }
+                }
+                if is_last {
+                    break;
+                }
+            },
+            Err(e) => {
+                warn!(prefix = %prefix, error = %e, "Failed to scan profiles for index rebuild");
+                break;
+            },
+        }
+    }
+    results
 }
 
 #[cfg(test)]

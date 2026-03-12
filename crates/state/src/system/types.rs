@@ -461,6 +461,28 @@ pub struct App {
     pub updated_at: DateTime<Utc>,
 }
 
+/// PII portion of an application, stored in the REGIONAL state layer.
+///
+/// Separated from [`App`] because `name` and `description` are PII data
+/// subject to regional residency requirements, while structural fields
+/// (`enabled`, `credentials`) stay in GLOBAL state.
+///
+/// Key pattern: `_sys:app_profile:{organization_id}:{app_id}` → postcard-serialized entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppProfile {
+    /// Internal app identifier.
+    pub app: AppId,
+    /// Organization this app belongs to.
+    pub organization: OrganizationId,
+    /// Human-readable app name (unique within organization).
+    pub name: String,
+    /// Optional description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Last modification timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Credential configuration for an application.
 ///
 /// Each credential type has an independent `enabled` toggle. All default
