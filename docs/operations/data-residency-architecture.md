@@ -55,6 +55,21 @@ Zero plaintext PII appears in any GLOBAL Raft entry.
 
 3 regions are non-protected: `GLOBAL`, `US_EAST_VA`, `US_WEST_OR`. These have no federal data residency requirement. All nodes hold RMKs for non-protected regions.
 
+#### US Region Replication Behavior
+
+`US_EAST_VA` and `US_WEST_OR` are **non-protected** (`requires_residency() == false`). This means:
+
+- User PII (names, emails) for organizations assigned to US regions is replicated to **all** nodes in the cluster, regardless of geographic location.
+- A cluster with both US and non-US nodes (e.g., a Frankfurt node for EU) will receive US user data on all nodes.
+- This is a deliberate design choice — there is no US federal data residency mandate comparable to GDPR.
+
+**Operators with CCPA or contractual data residency requirements** should either:
+
+1. Deploy US-only clusters (no non-US nodes) to ensure US data stays within US infrastructure.
+2. Use separate cluster deployments per jurisdiction rather than a single multi-region cluster.
+
+Making US regions optionally protected is a large architectural change (`requires_residency()` is a compile-time `const fn`) and is not currently supported. Contact InferaDB if this is a requirement for your deployment.
+
 ### Crypto-Shredding
 
 User-scoped REGIONAL Raft entries are encrypted with the user's `SubjectKey` (256-bit AES key). When `erase_user()` is called:

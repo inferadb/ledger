@@ -1343,6 +1343,50 @@ pub struct UpdateOrganizationTeamResponse {
     #[prost(message, optional, tag = "1")]
     pub team: ::core::option::Option<OrganizationTeam>,
 }
+/// Get a single team by slug. Caller must be an organization member.
+/// Non-admin members can only see teams they belong to.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetOrganizationTeamRequest {
+    #[prost(message, optional, tag = "1")]
+    pub slug: ::core::option::Option<TeamSlug>,
+    /// Must be an organization member
+    #[prost(message, optional, tag = "2")]
+    pub caller: ::core::option::Option<UserSlug>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetOrganizationTeamResponse {
+    #[prost(message, optional, tag = "1")]
+    pub team: ::core::option::Option<OrganizationTeam>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AddTeamMemberRequest {
+    #[prost(message, optional, tag = "1")]
+    pub team: ::core::option::Option<TeamSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub user: ::core::option::Option<UserSlug>,
+    #[prost(enumeration = "OrganizationTeamMemberRole", tag = "3")]
+    pub role: i32,
+    /// Must be org admin or team manager
+    #[prost(message, optional, tag = "4")]
+    pub initiator: ::core::option::Option<UserSlug>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AddTeamMemberResponse {
+    #[prost(message, optional, tag = "1")]
+    pub team: ::core::option::Option<OrganizationTeam>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveTeamMemberRequest {
+    #[prost(message, optional, tag = "1")]
+    pub team: ::core::option::Option<TeamSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub user: ::core::option::Option<UserSlug>,
+    /// Must be org admin or team manager
+    #[prost(message, optional, tag = "3")]
+    pub initiator: ::core::option::Option<UserSlug>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveTeamMemberResponse {}
 /// Request to migrate a user's PII to a different region.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MigrateUserRegionRequest {
@@ -1449,6 +1493,18 @@ pub struct ListVaultsResponse {
     #[prost(bytes = "vec", optional, tag = "2")]
     pub next_page_token: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
+/// Update vault metadata. Currently supports updating retention policy.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateVaultRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub retention_policy: ::core::option::Option<BlockRetentionPolicy>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateVaultResponse {}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateSnapshotRequest {
     #[prost(message, optional, tag = "1")]
@@ -2540,6 +2596,18 @@ pub struct RevokeAllUserSessionsRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RevokeAllUserSessionsResponse {
+    #[prost(uint64, tag = "1")]
+    pub revoked_count: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeAllAppSessionsRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub app: ::core::option::Option<AppSlug>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeAllAppSessionsResponse {
     #[prost(uint64, tag = "1")]
     pub revoked_count: u64,
 }
@@ -6140,6 +6208,91 @@ pub mod organization_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Get a single team by slug. Caller must be an org member.
+        /// Non-admin members can only see teams they belong to.
+        pub async fn get_organization_team(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetOrganizationTeamRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetOrganizationTeamResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.OrganizationService/GetOrganizationTeam",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "ledger.v1.OrganizationService",
+                        "GetOrganizationTeam",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Add a member to a team. Caller must be org admin or team manager.
+        pub async fn add_team_member(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AddTeamMemberRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AddTeamMemberResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.OrganizationService/AddTeamMember",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.OrganizationService", "AddTeamMember"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Remove a member from a team. Caller must be org admin or team manager.
+        pub async fn remove_team_member(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RemoveTeamMemberRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RemoveTeamMemberResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.OrganizationService/RemoveTeamMember",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.OrganizationService", "RemoveTeamMember"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -6267,6 +6420,31 @@ pub mod organization_service_server {
             request: tonic::Request<super::UpdateOrganizationTeamRequest>,
         ) -> std::result::Result<
             tonic::Response<super::UpdateOrganizationTeamResponse>,
+            tonic::Status,
+        >;
+        /// Get a single team by slug. Caller must be an org member.
+        /// Non-admin members can only see teams they belong to.
+        async fn get_organization_team(
+            &self,
+            request: tonic::Request<super::GetOrganizationTeamRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetOrganizationTeamResponse>,
+            tonic::Status,
+        >;
+        /// Add a member to a team. Caller must be org admin or team manager.
+        async fn add_team_member(
+            &self,
+            request: tonic::Request<super::AddTeamMemberRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AddTeamMemberResponse>,
+            tonic::Status,
+        >;
+        /// Remove a member from a team. Caller must be org admin or team manager.
+        async fn remove_team_member(
+            &self,
+            request: tonic::Request<super::RemoveTeamMemberRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RemoveTeamMemberResponse>,
             tonic::Status,
         >;
     }
@@ -6996,6 +7174,150 @@ pub mod organization_service_server {
                     };
                     Box::pin(fut)
                 }
+                "/ledger.v1.OrganizationService/GetOrganizationTeam" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetOrganizationTeamSvc<T: OrganizationService>(pub Arc<T>);
+                    impl<
+                        T: OrganizationService,
+                    > tonic::server::UnaryService<super::GetOrganizationTeamRequest>
+                    for GetOrganizationTeamSvc<T> {
+                        type Response = super::GetOrganizationTeamResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetOrganizationTeamRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OrganizationService>::get_organization_team(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetOrganizationTeamSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.OrganizationService/AddTeamMember" => {
+                    #[allow(non_camel_case_types)]
+                    struct AddTeamMemberSvc<T: OrganizationService>(pub Arc<T>);
+                    impl<
+                        T: OrganizationService,
+                    > tonic::server::UnaryService<super::AddTeamMemberRequest>
+                    for AddTeamMemberSvc<T> {
+                        type Response = super::AddTeamMemberResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AddTeamMemberRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OrganizationService>::add_team_member(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AddTeamMemberSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.OrganizationService/RemoveTeamMember" => {
+                    #[allow(non_camel_case_types)]
+                    struct RemoveTeamMemberSvc<T: OrganizationService>(pub Arc<T>);
+                    impl<
+                        T: OrganizationService,
+                    > tonic::server::UnaryService<super::RemoveTeamMemberRequest>
+                    for RemoveTeamMemberSvc<T> {
+                        type Response = super::RemoveTeamMemberResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RemoveTeamMemberRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OrganizationService>::remove_team_member(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RemoveTeamMemberSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 _ => {
                     Box::pin(async move {
                         let mut response = http::Response::new(
@@ -7227,6 +7549,31 @@ pub mod vault_service_client {
                 .insert(GrpcMethod::new("ledger.v1.VaultService", "ListVaults"));
             self.inner.unary(req, path, codec).await
         }
+        /// Update vault metadata (retention policy).
+        pub async fn update_vault(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateVaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateVaultResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.VaultService/UpdateVault",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.VaultService", "UpdateVault"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -7272,6 +7619,14 @@ pub mod vault_service_server {
             request: tonic::Request<super::ListVaultsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ListVaultsResponse>,
+            tonic::Status,
+        >;
+        /// Update vault metadata (retention policy).
+        async fn update_vault(
+            &self,
+            request: tonic::Request<super::UpdateVaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateVaultResponse>,
             tonic::Status,
         >;
     }
@@ -7516,6 +7871,51 @@ pub mod vault_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ListVaultsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.VaultService/UpdateVault" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpdateVaultSvc<T: VaultService>(pub Arc<T>);
+                    impl<
+                        T: VaultService,
+                    > tonic::server::UnaryService<super::UpdateVaultRequest>
+                    for UpdateVaultSvc<T> {
+                        type Response = super::UpdateVaultResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UpdateVaultRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as VaultService>::update_vault(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpdateVaultSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -12774,6 +13174,33 @@ pub mod token_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Revoke all sessions for an app (increments app token version).
+        pub async fn revoke_all_app_sessions(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RevokeAllAppSessionsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RevokeAllAppSessionsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.TokenService/RevokeAllAppSessions",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.TokenService", "RevokeAllAppSessions"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Create a new signing key for the given scope.
         pub async fn create_signing_key(
             &mut self,
@@ -12937,6 +13364,14 @@ pub mod token_service_server {
             request: tonic::Request<super::RevokeAllUserSessionsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::RevokeAllUserSessionsResponse>,
+            tonic::Status,
+        >;
+        /// Revoke all sessions for an app (increments app token version).
+        async fn revoke_all_app_sessions(
+            &self,
+            request: tonic::Request<super::RevokeAllAppSessionsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RevokeAllAppSessionsResponse>,
             tonic::Status,
         >;
         /// Create a new signing key for the given scope.
@@ -13311,6 +13746,55 @@ pub mod token_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = RevokeAllUserSessionsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.TokenService/RevokeAllAppSessions" => {
+                    #[allow(non_camel_case_types)]
+                    struct RevokeAllAppSessionsSvc<T: TokenService>(pub Arc<T>);
+                    impl<
+                        T: TokenService,
+                    > tonic::server::UnaryService<super::RevokeAllAppSessionsRequest>
+                    for RevokeAllAppSessionsSvc<T> {
+                        type Response = super::RevokeAllAppSessionsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RevokeAllAppSessionsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TokenService>::revoke_all_app_sessions(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RevokeAllAppSessionsSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

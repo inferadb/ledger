@@ -266,6 +266,36 @@ impl SystemKeys {
         format!("_sys:app_assertion:{}:{}:", organization.value(), app.value())
     }
 
+    /// Key for a client assertion's user-provided name (REGIONAL state).
+    ///
+    /// Pattern: `_sys:assertion_name:{org_id}:{app_id}:{assertion_id}`
+    pub fn assertion_name_key(
+        organization: OrganizationId,
+        app: AppId,
+        assertion: ClientAssertionId,
+    ) -> String {
+        format!(
+            "_sys:assertion_name:{}:{}:{}",
+            organization.value(),
+            app.value(),
+            assertion.value()
+        )
+    }
+
+    /// Prefix for listing all assertion names for an app (REGIONAL state).
+    ///
+    /// Pattern: `_sys:assertion_name:{org_id}:{app_id}:`
+    pub fn assertion_name_prefix(organization: OrganizationId, app: AppId) -> String {
+        format!("_sys:assertion_name:{}:{}:", organization.value(), app.value())
+    }
+
+    /// Prefix for listing all assertion names for an organization (REGIONAL state).
+    ///
+    /// Pattern: `_sys:assertion_name:{org_id}:`
+    pub fn assertion_name_org_prefix(organization: OrganizationId) -> String {
+        format!("_sys:assertion_name:{}:", organization.value())
+    }
+
     /// Primary key for a vault connection for an app.
     ///
     /// Pattern: `_sys:app_vault:{org_id}:{app_id}:{vault_id}`
@@ -443,6 +473,26 @@ impl SystemKeys {
     }
 
     // ========================================================================
+    // Organization Key Functions (per-org encryption for crypto-shredding)
+    // ========================================================================
+
+    /// Per-organization encryption key for crypto-shredding.
+    ///
+    /// Stored in the regional store where the organization's PII resides.
+    /// Encrypted at rest by the region's RMK (via `EncryptedBackend`).
+    /// Destroying this key makes the organization's PII cryptographically unrecoverable.
+    pub fn org_key(organization: OrganizationId) -> String {
+        format!("_key:org:{}", organization.value())
+    }
+
+    /// Parses an organization ID from an org key.
+    ///
+    /// Returns `None` if the key doesn't match `_key:org:{id}`.
+    pub fn parse_org_key(key: &str) -> Option<OrganizationId> {
+        key.strip_prefix(Self::ORG_KEY_PREFIX).and_then(|id| id.parse().ok())
+    }
+
+    // ========================================================================
     // Erasure Audit Keys (GLOBAL control plane)
     // ========================================================================
 
@@ -556,6 +606,9 @@ impl SystemKeys {
 
     /// Prefix for per-subject encryption keys.
     pub const SUBJECT_KEY_PREFIX: &'static str = "_key:user:";
+
+    /// Prefix for per-organization encryption keys.
+    pub const ORG_KEY_PREFIX: &'static str = "_key:org:";
 
     /// Prefix for erasure audit records.
     pub const ERASURE_AUDIT_PREFIX: &'static str = "_audit:erasure:";

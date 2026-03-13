@@ -34,12 +34,15 @@ pub use saga::{
 pub use service::{
     SYSTEM_ORGANIZATION_ID, SYSTEM_VAULT_ID, SystemError, SystemOrganizationService,
 };
-pub use token::{AllUserSessionsRevocationResult, ExpiredTokenCleanupResult, RevocationResult};
+pub use token::{
+    AllAppSessionsRevocationResult, AllUserSessionsRevocationResult, ExpiredTokenCleanupResult,
+    RevocationResult,
+};
 pub use types::{
     App, AppCredentials, AppProfile, AppVaultConnection, ClientAssertionCredentialConfig,
     ClientAssertionEntry, ClientSecretCredential, EmailHashEntry, EmailVerificationToken,
     ErasureAuditRecord, MigrationSummary, MtlsCredential, NodeInfo, NodeRole, OnboardingAccount,
-    OrganizationDirectoryEntry, OrganizationDirectoryStatus, OrganizationMember,
+    OrgKey, OrganizationDirectoryEntry, OrganizationDirectoryStatus, OrganizationMember,
     OrganizationProfile, OrganizationRegistry, OrganizationStatus, OrganizationTier,
     PendingEmailVerification, ProvisioningReservation, RefreshToken, SigningKey, SubjectKey,
     TeamMember, TeamMemberRole, TeamProfile, User, UserDirectoryEntry, UserDirectoryStatus,

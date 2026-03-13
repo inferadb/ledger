@@ -838,6 +838,16 @@ service OrganizationService {
 
   // Update team metadata. Only organization admins or team managers can update.
   rpc UpdateOrganizationTeam(UpdateOrganizationTeamRequest) returns (UpdateOrganizationTeamResponse);
+
+  // Get a single team by slug. Caller must be an org member.
+  // Non-admin members can only see teams they belong to.
+  rpc GetOrganizationTeam(GetOrganizationTeamRequest) returns (GetOrganizationTeamResponse);
+
+  // Add a member to a team. Caller must be org admin or team manager.
+  rpc AddTeamMember(AddTeamMemberRequest) returns (AddTeamMemberResponse);
+
+  // Remove a member from a team. Caller must be org admin or team manager.
+  rpc RemoveTeamMember(RemoveTeamMemberRequest) returns (RemoveTeamMemberResponse);
 }
 
 // =============================================================================
@@ -856,6 +866,9 @@ service VaultService {
 
   // List all vaults on this node
   rpc ListVaults(ListVaultsRequest) returns (ListVaultsResponse);
+
+  // Update vault metadata (retention policy).
+  rpc UpdateVault(UpdateVaultRequest) returns (UpdateVaultResponse);
 }
 
 // =============================================================================
@@ -1226,6 +1239,36 @@ message UpdateOrganizationTeamResponse {
   OrganizationTeam team = 1;
 }
 
+// Get a single team by slug. Caller must be an organization member.
+// Non-admin members can only see teams they belong to.
+message GetOrganizationTeamRequest {
+  TeamSlug slug = 1;
+  UserSlug caller = 2; // Must be an organization member
+}
+
+message GetOrganizationTeamResponse {
+  OrganizationTeam team = 1;
+}
+
+message AddTeamMemberRequest {
+  TeamSlug team = 1;
+  UserSlug user = 2;
+  OrganizationTeamMemberRole role = 3;
+  UserSlug initiator = 4; // Must be org admin or team manager
+}
+
+message AddTeamMemberResponse {
+  OrganizationTeam team = 1;
+}
+
+message RemoveTeamMemberRequest {
+  TeamSlug team = 1;
+  UserSlug user = 2;
+  UserSlug initiator = 3; // Must be org admin or team manager
+}
+
+message RemoveTeamMemberResponse {}
+
 // Request to migrate a user's PII to a different region.
 message MigrateUserRegionRequest {
   UserSlug slug = 1;
@@ -1319,6 +1362,15 @@ message ListVaultsResponse {
   repeated GetVaultResponse vaults = 1;
   optional bytes next_page_token = 2; // Absent if no more pages
 }
+
+// Update vault metadata. Currently supports updating retention policy.
+message UpdateVaultRequest {
+  OrganizationSlug organization = 1;
+  VaultSlug vault = 2;
+  optional BlockRetentionPolicy retention_policy = 3;
+}
+
+message UpdateVaultResponse {}
 
 message CreateSnapshotRequest {
   OrganizationSlug organization = 1;
@@ -2184,6 +2236,9 @@ service TokenService {
   // Revoke all sessions for a user (increments token version).
   rpc RevokeAllUserSessions(RevokeAllUserSessionsRequest) returns (RevokeAllUserSessionsResponse);
 
+  // Revoke all sessions for an app (increments app token version).
+  rpc RevokeAllAppSessions(RevokeAllAppSessionsRequest) returns (RevokeAllAppSessionsResponse);
+
   // Create a new signing key for the given scope.
   rpc CreateSigningKey(CreateSigningKeyRequest) returns (CreateSigningKeyResponse);
 
@@ -2290,6 +2345,15 @@ message RevokeAllUserSessionsRequest {
 }
 
 message RevokeAllUserSessionsResponse {
+  uint64 revoked_count = 1;
+}
+
+message RevokeAllAppSessionsRequest {
+  OrganizationSlug organization = 1;
+  AppSlug app = 2;
+}
+
+message RevokeAllAppSessionsResponse {
   uint64 revoked_count = 1;
 }
 

@@ -280,13 +280,40 @@ impl AppService {
     }
 
     /// Converts a domain `ClientAssertionEntry` to a proto `AppClientAssertionInfo`.
-    fn assertion_to_proto(entry: &ClientAssertionEntry) -> AppClientAssertionInfo {
+    ///
+    /// The `name` parameter is loaded separately from REGIONAL state.
+    fn assertion_to_proto(entry: &ClientAssertionEntry, name: String) -> AppClientAssertionInfo {
         AppClientAssertionInfo {
             id: Some(proto::ClientAssertionId { id: entry.id.value() }),
-            name: entry.name.clone(),
+            name,
             enabled: entry.enabled,
             expires_at: Some(crate::proto_compat::datetime_to_proto(&entry.expires_at)),
             created_at: Some(crate::proto_compat::datetime_to_proto(&entry.created_at)),
+        }
+    }
+
+    /// Loads the assertion name from REGIONAL state.
+    ///
+    /// Returns an empty string if the organization's region is unavailable
+    /// or the name record does not exist (graceful degradation for read path).
+    fn load_assertion_name(
+        &self,
+        org_id: DomainOrganizationId,
+        app_id: DomainAppId,
+        assertion_id: inferadb_ledger_types::ClientAssertionId,
+    ) -> String {
+        let regional = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .and_then(|meta| self.ctx.regional_state(meta.region).ok());
+        let Some(state) = regional else {
+            return String::new();
+        };
+        let key = SystemKeys::assertion_name_key(org_id, app_id, assertion_id);
+        match state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
+            Ok(Some(entity)) => String::from_utf8(entity.value).unwrap_or_default(),
+            _ => String::new(),
         }
     }
 }
@@ -364,6 +391,7 @@ impl proto::app_service_server::AppService for AppService {
         };
 
         // Step 2 (REGIONAL): Write app name and description to the org's regional store.
+        // Encrypted with OrgKey for crypto-shredding on organization purge.
         let org_meta = self
             .ctx
             .applied_state
@@ -377,7 +405,13 @@ impl proto::app_service_server::AppService for AppService {
         };
         let profile_response = self
             .ctx
-            .propose_regional(org_meta.region, system_request, &grpc_metadata, &mut ctx)
+            .propose_regional_org_encrypted(
+                org_meta.region,
+                system_request,
+                org_id,
+                &grpc_metadata,
+                &mut ctx,
+            )
             .await?;
 
         if let LedgerResponse::Error { code, message } = profile_response {
@@ -473,6 +507,7 @@ impl proto::app_service_server::AppService for AppService {
         };
 
         // Route to the org's regional Raft group (name/description are PII).
+        // Encrypted with OrgKey for crypto-shredding on organization purge.
         let org_meta = self
             .ctx
             .applied_state
@@ -486,7 +521,13 @@ impl proto::app_service_server::AppService for AppService {
         };
         let response = self
             .ctx
-            .propose_regional(org_meta.region, system_request, &grpc_metadata, &mut ctx)
+            .propose_regional_org_encrypted(
+                org_meta.region,
+                system_request,
+                org_id,
+                &grpc_metadata,
+                &mut ctx,
+            )
             .await?;
 
         match response {
@@ -796,8 +837,13 @@ impl proto::app_service_server::AppService for AppService {
         }
 
         let entries = self.list_assertions_internal(resolved_org, app_id)?;
-        let assertions: Vec<AppClientAssertionInfo> =
-            entries.iter().map(Self::assertion_to_proto).collect();
+        let assertions: Vec<AppClientAssertionInfo> = entries
+            .iter()
+            .map(|entry| {
+                let name = self.load_assertion_name(resolved_org, app_id, entry.id);
+                Self::assertion_to_proto(entry, name)
+            })
+            .collect();
         Ok(Response::new(ListAppClientAssertionsResponse { assertions }))
     }
 
@@ -869,13 +915,13 @@ impl proto::app_service_server::AppService for AppService {
             (pk, pem)
         };
 
+        // Phase 1: Propose structural entry to GLOBAL Raft (no PII).
         let response = self
             .ctx
             .propose_request(
                 LedgerRequest::CreateAppClientAssertion {
                     organization: org_id,
                     app: app_id,
-                    name: name.clone(),
                     expires_at,
                     public_key_bytes,
                 },
@@ -886,16 +932,41 @@ impl proto::app_service_server::AppService for AppService {
 
         match response {
             LedgerResponse::AppClientAssertionCreated { assertion_id } => {
+                // Phase 2: Write assertion name to REGIONAL Raft (PII isolation).
+                // Encrypted with OrgKey for crypto-shredding on organization purge.
+                let org_meta = self
+                    .ctx
+                    .applied_state
+                    .get_organization(org_id)
+                    .ok_or_else(|| Status::not_found("Organization not found"))?;
+                let name_request =
+                    inferadb_ledger_raft::types::SystemRequest::WriteClientAssertionName {
+                        organization: org_id,
+                        app: app_id,
+                        assertion: assertion_id,
+                        name: name.clone(),
+                    };
+                self.ctx
+                    .propose_regional_org_encrypted(
+                        org_meta.region,
+                        name_request,
+                        org_id,
+                        &grpc_metadata,
+                        &mut ctx,
+                    )
+                    .await?;
+
                 self.emit_event(
                     EventAction::AppAssertionCreated,
                     org_id,
                     org_slug_val,
                     &trace_ctx.trace_id,
                 );
+
                 // Build the assertion info from the committed data
                 let assertion_info = AppClientAssertionInfo {
                     id: Some(proto::ClientAssertionId { id: assertion_id.value() }),
-                    name,
+                    name: name.clone(),
                     enabled: true,
                     expires_at: Some(crate::proto_compat::datetime_to_proto(&expires_at)),
                     created_at: None,
@@ -905,7 +976,7 @@ impl proto::app_service_server::AppService for AppService {
                 let key = SystemKeys::app_assertion_key(org_id, app_id, assertion_id);
                 let final_info = match self.ctx.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
                     Ok(Some(entity)) => match decode::<ClientAssertionEntry>(&entity.value) {
-                        Ok(entry) => Self::assertion_to_proto(&entry),
+                        Ok(entry) => Self::assertion_to_proto(&entry, name),
                         Err(_) => assertion_info,
                     },
                     _ => assertion_info,
@@ -953,6 +1024,33 @@ impl proto::app_service_server::AppService for AppService {
             .ok_or_else(|| Status::invalid_argument("Missing assertion ID"))?;
         let assertion = DomainClientAssertionId::new(assertion_id.id);
 
+        // Phase 1: Delete assertion name from REGIONAL Raft (best-effort).
+        if let Some(org_meta) = self.ctx.applied_state.get_organization(org_id) {
+            let name_request =
+                inferadb_ledger_raft::types::SystemRequest::DeleteClientAssertionName {
+                    organization: org_id,
+                    app: app_id,
+                    assertion,
+                };
+            // Regional delete is best-effort: if region is unavailable, the
+            // GLOBAL delete still proceeds and `PurgeOrganizationRegional`
+            // will clean up orphaned names.
+            if let Err(e) = self
+                .ctx
+                .propose_regional(org_meta.region, name_request, &grpc_metadata, &mut ctx)
+                .await
+            {
+                tracing::warn!(
+                    %e,
+                    org_id = %org_id,
+                    app_id = %app_id,
+                    assertion_id = %assertion,
+                    "Failed to delete assertion name from regional state"
+                );
+            }
+        }
+
+        // Phase 2: Delete structural entry from GLOBAL Raft.
         let response = self
             .ctx
             .propose_request(

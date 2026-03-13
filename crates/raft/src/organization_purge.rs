@@ -3,25 +3,44 @@
 //! Periodically scans for organizations in `Deleted` status whose retention
 //! cooldown has elapsed and submits `PurgeOrganization` Raft proposals to
 //! finalize removal. Only runs on the leader node.
+//!
+//! Failed purge steps are retried up to 3 times with exponential backoff
+//! within a cycle. Organizations that exhaust all retries are tracked in a
+//! priority set and retried on every subsequent tick until successful.
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    collections::HashSet,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use chrono::Utc;
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::config::OrganizationPurgeConfig;
+use inferadb_ledger_types::{OrganizationId, config::OrganizationPurgeConfig};
 use openraft::Raft;
-use tokio::time::interval;
-use tracing::{debug, info, warn};
+use tokio::time::{interval, sleep};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     metrics::{
         record_background_job_duration, record_background_job_items, record_background_job_run,
+        record_org_purge_global_failure, record_org_purge_regional_failure,
+        record_org_purge_retry_exhausted,
     },
     raft_manager::RaftManager,
     trace_context::TraceContext,
     types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig, RaftPayload, SystemRequest},
 };
+
+/// Maximum number of retry attempts per purge step.
+const MAX_RETRIES: u32 = 3;
+
+/// Base delay for exponential backoff (100ms, 500ms, 2.5s).
+const BACKOFF_BASE: Duration = Duration::from_millis(100);
+
+/// Backoff multiplier between retry attempts.
+const BACKOFF_MULTIPLIER: u32 = 5;
 
 /// Background job that purges organizations whose soft-delete retention
 /// cooldown has expired.
@@ -30,6 +49,9 @@ use crate::{
 /// whose `deleted_at + region.retention_days()` is in the past. For each
 /// expired organization, proposes a `PurgeOrganization` Raft request to
 /// finalize removal of all organization data.
+///
+/// Failed purges are tracked and retried on every subsequent tick until
+/// successful (bypassing the retention cooldown check).
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct OrganizationPurgeJob<B: StorageBackend + 'static> {
@@ -67,8 +89,119 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
         metrics.current_leader == Some(self.node_id)
     }
 
+    /// Proposes a REGIONAL purge with retry and backoff.
+    ///
+    /// Returns `true` if the regional purge succeeded (or no manager is
+    /// configured), `false` if all retries were exhausted.
+    async fn propose_regional_with_retry(
+        &self,
+        org_id: OrganizationId,
+        region: inferadb_ledger_types::Region,
+        trace_id: &str,
+    ) -> bool {
+        let Some(ref manager) = self.manager else {
+            return true;
+        };
+
+        let group = match manager.get_region_group(region) {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    trace_id = %trace_id,
+                    organization_id = %org_id,
+                    region = %region,
+                    error = ?e,
+                    "Region group not found for REGIONAL purge"
+                );
+                return false;
+            },
+        };
+
+        for attempt in 0..MAX_RETRIES {
+            let regional_request =
+                LedgerRequest::System(SystemRequest::PurgeOrganizationRegional {
+                    organization: org_id,
+                });
+
+            match group.raft().client_write(RaftPayload::new(regional_request)).await {
+                Ok(_) => return true,
+                Err(e) => {
+                    record_org_purge_regional_failure(&region.to_string());
+                    let remaining = MAX_RETRIES - attempt - 1;
+                    if remaining > 0 {
+                        let delay = BACKOFF_BASE * BACKOFF_MULTIPLIER.pow(attempt);
+                        warn!(
+                            trace_id = %trace_id,
+                            organization_id = %org_id,
+                            region = %region,
+                            attempt = attempt + 1,
+                            retries_remaining = remaining,
+                            error = ?e,
+                            "REGIONAL purge failed, retrying after {}ms",
+                            delay.as_millis(),
+                        );
+                        sleep(delay).await;
+                    } else {
+                        error!(
+                            trace_id = %trace_id,
+                            organization_id = %org_id,
+                            region = %region,
+                            error = ?e,
+                            "REGIONAL purge failed after {MAX_RETRIES} attempts"
+                        );
+                    }
+                },
+            }
+        }
+
+        false
+    }
+
+    /// Proposes a GLOBAL purge with retry and backoff.
+    ///
+    /// Returns `true` if the global purge succeeded, `false` if all retries
+    /// were exhausted.
+    async fn propose_global_with_retry(&self, org_id: OrganizationId, trace_id: &str) -> bool {
+        for attempt in 0..MAX_RETRIES {
+            let request = LedgerRequest::PurgeOrganization { organization: org_id };
+
+            match self.raft.client_write(RaftPayload::new(request)).await {
+                Ok(_) => return true,
+                Err(e) => {
+                    record_org_purge_global_failure();
+                    let remaining = MAX_RETRIES - attempt - 1;
+                    if remaining > 0 {
+                        let delay = BACKOFF_BASE * BACKOFF_MULTIPLIER.pow(attempt);
+                        warn!(
+                            trace_id = %trace_id,
+                            organization_id = %org_id,
+                            attempt = attempt + 1,
+                            retries_remaining = remaining,
+                            error = ?e,
+                            "GLOBAL purge failed, retrying after {}ms",
+                            delay.as_millis(),
+                        );
+                        sleep(delay).await;
+                    } else {
+                        error!(
+                            trace_id = %trace_id,
+                            organization_id = %org_id,
+                            error = ?e,
+                            "GLOBAL purge failed after {MAX_RETRIES} attempts"
+                        );
+                    }
+                },
+            }
+        }
+
+        false
+    }
+
     /// Runs a single purge cycle, returning the number of organizations purged.
-    async fn run_cycle(&self) -> usize {
+    ///
+    /// Priority organizations (those that failed in a previous cycle) are
+    /// processed first and are not gated by the retention cooldown.
+    async fn run_cycle(&self, priority: &mut HashSet<OrganizationId>) -> usize {
         if !self.is_leader() {
             debug!("Skipping organization purge cycle (not leader)");
             return 0;
@@ -98,71 +231,47 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
         let now = Utc::now();
         let mut purged_count = 0;
 
-        let expired_orgs = organizations.iter().filter(|org| {
-            org.status == inferadb_ledger_state::system::OrganizationStatus::Deleted
-                && org.deleted_at.is_some_and(|deleted_at| {
-                    let retention = chrono::Duration::days(i64::from(org.region.retention_days()));
-                    now >= deleted_at + retention
-                })
-        });
+        // Phase 1: Retry priority organizations (previously failed).
+        let priority_snapshot: Vec<OrganizationId> = priority.iter().copied().collect();
+        for org_id in &priority_snapshot {
+            let org = organizations.iter().find(|o| o.organization_id == *org_id);
+            let Some(org) = org else {
+                // Organization no longer exists in state — remove from priority set.
+                priority.remove(org_id);
+                continue;
+            };
 
-        for org in expired_orgs.take(self.config.batch_size) {
-            // Step 1: Propose REGIONAL cleanup (profiles, name indices)
-            if let Some(ref manager) = self.manager {
-                let regional_request =
-                    LedgerRequest::System(SystemRequest::PurgeOrganizationRegional {
-                        organization: org.organization_id,
-                    });
-                match manager.get_region_group(org.region) {
-                    Ok(group) => {
-                        if let Err(e) =
-                            group.raft().client_write(RaftPayload::new(regional_request)).await
-                        {
-                            warn!(
-                                trace_id = %trace_ctx.trace_id,
-                                organization_id = %org.organization_id,
-                                region = %org.region,
-                                error = ?e,
-                                "Failed to propose REGIONAL organization purge"
-                            );
-                            // Continue to GLOBAL purge — REGIONAL data is orphaned
-                            // but not a blocker for structural cleanup.
-                        }
-                    },
-                    Err(e) => {
-                        warn!(
-                            trace_id = %trace_ctx.trace_id,
-                            organization_id = %org.organization_id,
-                            region = %org.region,
-                            error = ?e,
-                            "Region group not found for REGIONAL purge"
-                        );
-                    },
-                }
+            if self.purge_organization(org, &trace_ctx.trace_id).await {
+                priority.remove(org_id);
+                purged_count += 1;
             }
+        }
 
-            // Step 2: Propose GLOBAL purge (slug indices, structural records)
-            let request = LedgerRequest::PurgeOrganization { organization: org.organization_id };
+        // Phase 2: Scan for newly eligible organizations.
+        // Collect indices first to avoid borrow conflict with `priority`.
+        let expired_indices: Vec<usize> = organizations
+            .iter()
+            .enumerate()
+            .filter(|(_, org)| {
+                !priority.contains(&org.organization_id)
+                    && org.status == inferadb_ledger_state::system::OrganizationStatus::Deleted
+                    && org.deleted_at.is_some_and(|deleted_at| {
+                        let retention =
+                            chrono::Duration::days(i64::from(org.region.retention_days()));
+                        now >= deleted_at + retention
+                    })
+            })
+            .take(self.config.batch_size)
+            .map(|(i, _)| i)
+            .collect();
 
-            match self.raft.client_write(RaftPayload::new(request)).await {
-                Ok(_) => {
-                    info!(
-                        trace_id = %trace_ctx.trace_id,
-                        organization_id = %org.organization_id,
-                        region = %org.region,
-                        deleted_at = ?org.deleted_at,
-                        "Organization retention expired, purge proposed"
-                    );
-                    purged_count += 1;
-                },
-                Err(e) => {
-                    warn!(
-                        trace_id = %trace_ctx.trace_id,
-                        organization_id = %org.organization_id,
-                        error = ?e,
-                        "Failed to propose organization purge"
-                    );
-                },
+        for idx in expired_indices {
+            let org = &organizations[idx];
+            if self.purge_organization(org, &trace_ctx.trace_id).await {
+                purged_count += 1;
+            } else {
+                priority.insert(org.organization_id);
+                record_org_purge_retry_exhausted();
             }
         }
 
@@ -176,6 +285,7 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
                 trace_id = %trace_ctx.trace_id,
                 purged_count,
                 scanned = organizations.len(),
+                priority_pending = priority.len(),
                 duration_secs = duration,
                 "Organization purge cycle complete"
             );
@@ -184,6 +294,7 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
             debug!(
                 trace_id = %trace_ctx.trace_id,
                 scanned = organizations.len(),
+                priority_pending = priority.len(),
                 duration_secs = duration,
                 "Organization purge cycle complete (no expired organizations)"
             );
@@ -203,6 +314,45 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
         purged_count
     }
 
+    /// Attempts to purge a single organization (REGIONAL + GLOBAL).
+    ///
+    /// Returns `true` if the GLOBAL purge succeeded. REGIONAL failures are
+    /// tolerated (orphaned data is cleaned up on subsequent cycles).
+    async fn purge_organization(
+        &self,
+        org: &inferadb_ledger_state::system::OrganizationRegistry,
+        trace_id: &str,
+    ) -> bool {
+        // Step 1: Propose REGIONAL cleanup (profiles, name indices).
+        // REGIONAL failure is tolerated — orphaned data will be cleaned on retry.
+        let regional_ok =
+            self.propose_regional_with_retry(org.organization_id, org.region, trace_id).await;
+
+        if !regional_ok {
+            warn!(
+                trace_id = %trace_id,
+                organization_id = %org.organization_id,
+                region = %org.region,
+                "REGIONAL purge exhausted retries, proceeding to GLOBAL purge"
+            );
+        }
+
+        // Step 2: Propose GLOBAL purge (slug indices, structural records).
+        if self.propose_global_with_retry(org.organization_id, trace_id).await {
+            info!(
+                trace_id = %trace_id,
+                organization_id = %org.organization_id,
+                region = %org.region,
+                deleted_at = ?org.deleted_at,
+                regional_ok,
+                "Organization retention expired, purge proposed"
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     /// Starts the organization purge background task.
     ///
     /// Returns a handle that can be used to abort the task.
@@ -210,10 +360,11 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
         let tick_interval = std::time::Duration::from_secs(self.config.interval_secs);
         tokio::spawn(async move {
             let mut ticker = interval(tick_interval);
+            let mut priority_retries: HashSet<OrganizationId> = HashSet::new();
 
             loop {
                 ticker.tick().await;
-                self.run_cycle().await;
+                self.run_cycle(&mut priority_retries).await;
             }
         })
     }
@@ -268,5 +419,16 @@ mod tests {
         let config: OrganizationPurgeConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config.interval_secs, 3600);
         assert_eq!(config.batch_size, 50);
+    }
+
+    #[test]
+    fn test_backoff_schedule() {
+        // Verify exponential backoff: 100ms, 500ms, 2500ms
+        let delays: Vec<Duration> = (0..MAX_RETRIES)
+            .map(|attempt| BACKOFF_BASE * BACKOFF_MULTIPLIER.pow(attempt))
+            .collect();
+        assert_eq!(delays[0], Duration::from_millis(100));
+        assert_eq!(delays[1], Duration::from_millis(500));
+        assert_eq!(delays[2], Duration::from_millis(2500));
     }
 }

@@ -647,6 +647,49 @@ pub fn record_btree_compaction(pages_merged: u64, pages_freed: u64) {
     counter!(BTREE_COMPACTION_PAGES_FREED).increment(pages_freed);
 }
 
+// ─── Post-Erasure Compaction ──────────────────────────────────
+
+/// Snapshots triggered by the post-erasure compaction job.
+///
+/// Labels: `region` = region name, `trigger` = time_based | erasure_detected
+const POST_ERASURE_COMPACTION_TRIGGERED_TOTAL: &str =
+    "ledger_post_erasure_compaction_triggered_total";
+
+/// Records a post-erasure compaction snapshot trigger.
+pub fn record_post_erasure_compaction_triggered(region: &str) {
+    counter!(
+        POST_ERASURE_COMPACTION_TRIGGERED_TOTAL,
+        "region" => region.to_string(),
+    )
+    .increment(1);
+}
+
+// ─── Organization Purge ──────────────────────────────────────
+
+/// REGIONAL purge step failures.
+const ORG_PURGE_REGIONAL_FAILURES_TOTAL: &str = "ledger_org_purge_regional_failures_total";
+
+/// GLOBAL purge step failures.
+const ORG_PURGE_GLOBAL_FAILURES_TOTAL: &str = "ledger_org_purge_global_failures_total";
+
+/// Organizations that failed all retry attempts.
+const ORG_PURGE_RETRY_EXHAUSTED_TOTAL: &str = "ledger_org_purge_retry_exhausted_total";
+
+/// Records a REGIONAL purge step failure.
+pub fn record_org_purge_regional_failure(region: &str) {
+    counter!(ORG_PURGE_REGIONAL_FAILURES_TOTAL, "region" => region.to_string()).increment(1);
+}
+
+/// Records a GLOBAL purge step failure.
+pub fn record_org_purge_global_failure() {
+    counter!(ORG_PURGE_GLOBAL_FAILURES_TOTAL).increment(1);
+}
+
+/// Records an organization whose purge retries were exhausted.
+pub fn record_org_purge_retry_exhausted() {
+    counter!(ORG_PURGE_RETRY_EXHAUSTED_TOTAL).increment(1);
+}
+
 // ─── Hot Key Detection ────────────────────────────────────────
 
 /// Hot key detection events.
@@ -1379,6 +1422,8 @@ mod tests {
         assert!(BACKGROUND_JOB_RUNS_TOTAL.ends_with("_total"));
         assert!(BACKGROUND_JOB_ITEMS_PROCESSED_TOTAL.starts_with("ledger_"));
         assert!(BACKGROUND_JOB_ITEMS_PROCESSED_TOTAL.ends_with("_total"));
+        assert!(POST_ERASURE_COMPACTION_TRIGGERED_TOTAL.starts_with("ledger_"));
+        assert!(POST_ERASURE_COMPACTION_TRIGGERED_TOTAL.ends_with("_total"));
     }
 
     #[test]

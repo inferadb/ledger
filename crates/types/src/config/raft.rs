@@ -190,6 +190,111 @@ fn default_proposal_timeout() -> Duration {
 }
 
 // =========================================================================
+// PostErasureCompactionConfig
+// =========================================================================
+
+/// Default maximum log retention in seconds (1 hour).
+///
+/// After this duration without a snapshot, the compaction job triggers one
+/// to ensure Raft log entries (which may contain encrypted PII) are purged.
+const fn default_max_log_retention_secs() -> u64 {
+    3600
+}
+
+/// Default interval between compaction check cycles in seconds (5 minutes).
+const fn default_compaction_check_interval_secs() -> u64 {
+    300
+}
+
+/// Configuration for post-erasure Raft log compaction.
+///
+/// After user erasure or organization purge, encrypted PII entries remain
+/// in the Raft log until the next snapshot triggers log compaction. This
+/// job enforces a maximum log retention period by triggering proactive
+/// snapshots when the time since last snapshot exceeds the threshold.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::PostErasureCompactionConfig;
+/// let config = PostErasureCompactionConfig::builder()
+///     .max_log_retention_secs(1800)
+///     .check_interval_secs(120)
+///     .build()
+///     .expect("valid compaction config");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PostErasureCompactionConfig {
+    /// Maximum seconds a Raft log may retain entries before a snapshot
+    /// is triggered to compact them.
+    ///
+    /// Must be >= 300 (5 minutes). Default: 3600 (1 hour).
+    #[serde(default = "default_max_log_retention_secs")]
+    pub max_log_retention_secs: u64,
+    /// Interval between compaction check cycles in seconds.
+    ///
+    /// Must be >= 60. Default: 300 (5 minutes).
+    #[serde(default = "default_compaction_check_interval_secs")]
+    pub check_interval_secs: u64,
+}
+
+impl Default for PostErasureCompactionConfig {
+    fn default() -> Self {
+        Self {
+            max_log_retention_secs: default_max_log_retention_secs(),
+            check_interval_secs: default_compaction_check_interval_secs(),
+        }
+    }
+}
+
+#[bon::bon]
+impl PostErasureCompactionConfig {
+    /// Creates a new post-erasure compaction configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if:
+    /// - `max_log_retention_secs` < 300
+    /// - `check_interval_secs` < 60
+    #[builder]
+    pub fn new(
+        #[builder(default = default_max_log_retention_secs())] max_log_retention_secs: u64,
+        #[builder(default = default_compaction_check_interval_secs())] check_interval_secs: u64,
+    ) -> Result<Self, ConfigError> {
+        let config = Self { max_log_retention_secs, check_interval_secs };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl PostErasureCompactionConfig {
+    /// Validates the configuration values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_log_retention_secs < 300 {
+            return Err(ConfigError::Validation {
+                message: format!(
+                    "max_log_retention_secs must be >= 300, got {}",
+                    self.max_log_retention_secs
+                ),
+            });
+        }
+        if self.check_interval_secs < 60 {
+            return Err(ConfigError::Validation {
+                message: format!(
+                    "check_interval_secs must be >= 60, got {}",
+                    self.check_interval_secs
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+// =========================================================================
 // BatchConfig
 // =========================================================================
 

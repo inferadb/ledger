@@ -320,6 +320,50 @@ mod tests {
     }
 
     // =========================================================================
+    // PostErasureCompactionConfig validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_post_erasure_compaction_config_defaults_are_valid() {
+        let config =
+            PostErasureCompactionConfig::builder().build().expect("defaults should be valid");
+        assert_eq!(config.max_log_retention_secs, 3600);
+        assert_eq!(config.check_interval_secs, 300);
+    }
+
+    #[test]
+    fn test_post_erasure_compaction_config_custom_values() {
+        let config = PostErasureCompactionConfig::builder()
+            .max_log_retention_secs(1800)
+            .check_interval_secs(120)
+            .build()
+            .expect("valid config");
+        assert_eq!(config.max_log_retention_secs, 1800);
+        assert_eq!(config.check_interval_secs, 120);
+    }
+
+    #[test]
+    fn test_post_erasure_compaction_config_retention_too_small() {
+        let result = PostErasureCompactionConfig::builder().max_log_retention_secs(299).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_post_erasure_compaction_config_interval_too_small() {
+        let result = PostErasureCompactionConfig::builder().check_interval_secs(59).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_post_erasure_compaction_config_validate_method() {
+        let mut config = PostErasureCompactionConfig::default();
+        assert!(config.validate().is_ok());
+
+        config.max_log_retention_secs = 100;
+        assert!(config.validate().is_err());
+    }
+
+    // =========================================================================
     // Node config and integration tests
     // =========================================================================
 

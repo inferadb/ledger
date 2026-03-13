@@ -1678,6 +1678,55 @@ impl OrganizationServiceTrait for MockOrganizationService {
 
         Ok(Response::new(proto::UpdateOrganizationTeamResponse { team: Some(response_team) }))
     }
+
+    async fn get_organization_team(
+        &self,
+        request: Request<proto::GetOrganizationTeamRequest>,
+    ) -> Result<Response<proto::GetOrganizationTeamResponse>, Status> {
+        self.state.check_injection().await?;
+        let req = request.into_inner();
+        let team_slug = req.slug.map_or(0, |n| n.slug);
+
+        let teams = self.state.teams.read();
+        let team_data = teams.get(&team_slug).ok_or_else(|| Status::not_found("Team not found"))?;
+
+        let response_team = proto::OrganizationTeam {
+            slug: Some(proto::TeamSlug { slug: team_slug }),
+            organization: Some(proto::OrganizationSlug { slug: team_data.org_slug }),
+            name: team_data.name.clone(),
+            members: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+
+        Ok(Response::new(proto::GetOrganizationTeamResponse { team: Some(response_team) }))
+    }
+
+    async fn add_team_member(
+        &self,
+        request: Request<proto::AddTeamMemberRequest>,
+    ) -> Result<Response<proto::AddTeamMemberResponse>, Status> {
+        self.state.check_injection().await?;
+        let req = request.into_inner();
+
+        let team = proto::OrganizationTeam {
+            slug: req.team,
+            organization: None,
+            name: String::new(),
+            members: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        Ok(Response::new(proto::AddTeamMemberResponse { team: Some(team) }))
+    }
+
+    async fn remove_team_member(
+        &self,
+        _request: Request<proto::RemoveTeamMemberRequest>,
+    ) -> Result<Response<proto::RemoveTeamMemberResponse>, Status> {
+        self.state.check_injection().await?;
+        Ok(Response::new(proto::RemoveTeamMemberResponse {}))
+    }
 }
 
 // =============================================================================
@@ -1819,6 +1868,14 @@ impl VaultServiceTrait for MockVaultService {
             .collect();
 
         Ok(Response::new(proto::ListVaultsResponse { vaults: responses, next_page_token: None }))
+    }
+
+    async fn update_vault(
+        &self,
+        _request: Request<proto::UpdateVaultRequest>,
+    ) -> Result<Response<proto::UpdateVaultResponse>, Status> {
+        self.state.check_injection().await?;
+        Ok(Response::new(proto::UpdateVaultResponse {}))
     }
 }
 

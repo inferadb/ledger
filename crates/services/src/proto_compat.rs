@@ -81,6 +81,15 @@ pub(crate) fn team_member_role_to_proto(role: TeamMemberRole) -> proto::Organiza
     }
 }
 
+/// Converts a proto `OrganizationTeamMemberRole` to its domain representation.
+pub(crate) fn proto_to_team_member_role(role: proto::OrganizationTeamMemberRole) -> TeamMemberRole {
+    match role {
+        proto::OrganizationTeamMemberRole::Manager => TeamMemberRole::Manager,
+        proto::OrganizationTeamMemberRole::Member
+        | proto::OrganizationTeamMemberRole::Unspecified => TeamMemberRole::Member,
+    }
+}
+
 /// Decodes an opaque page token as a big-endian u64 slug cursor.
 ///
 /// Returns `None` for absent or malformed tokens (non-8-byte), which callers

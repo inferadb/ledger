@@ -12,9 +12,10 @@ use inferadb_ledger_proto::proto::{
     self, CreateSigningKeyRequest, CreateSigningKeyResponse, CreateUserSessionRequest,
     CreateUserSessionResponse, CreateVaultTokenRequest, CreateVaultTokenResponse,
     GetPublicKeysRequest, GetPublicKeysResponse, PublicKeyInfo, RefreshTokenRequest,
-    RefreshTokenResponse, RevokeAllUserSessionsRequest, RevokeAllUserSessionsResponse,
-    RevokeSigningKeyRequest, RevokeSigningKeyResponse, RevokeTokenRequest, RevokeTokenResponse,
-    RotateSigningKeyRequest, RotateSigningKeyResponse, ValidateTokenRequest, ValidateTokenResponse,
+    RefreshTokenResponse, RevokeAllAppSessionsRequest, RevokeAllAppSessionsResponse,
+    RevokeAllUserSessionsRequest, RevokeAllUserSessionsResponse, RevokeSigningKeyRequest,
+    RevokeSigningKeyResponse, RevokeTokenRequest, RevokeTokenResponse, RotateSigningKeyRequest,
+    RotateSigningKeyResponse, ValidateTokenRequest, ValidateTokenResponse,
 };
 use inferadb_ledger_raft::{
     rate_limit::RateLimiter,
@@ -748,6 +749,54 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         ctx.set_success();
 
         Ok(Response::new(RevokeAllUserSessionsResponse { revoked_count }))
+    }
+
+    /// Revokes all sessions for an app (increments app token version).
+    ///
+    /// Forwarded to leader.
+    async fn revoke_all_app_sessions(
+        &self,
+        request: Request<RevokeAllAppSessionsRequest>,
+    ) -> Result<Response<RevokeAllAppSessionsResponse>, Status> {
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = self.ctx.make_request_context(
+            "TokenService",
+            "revoke_all_app_sessions",
+            &grpc_metadata,
+            &trace_ctx,
+        );
+
+        let resolver = self.resolver();
+        let app_slug = SlugResolver::extract_app_slug(&req.app)?;
+        let (org_id, app_id) = resolver.resolve_app(app_slug)?;
+
+        let ledger_request =
+            LedgerRequest::RevokeAllAppSessions { organization: org_id, app: app_id };
+        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+
+        let revoked_count = match response {
+            LedgerResponse::AllAppSessionsRevoked { count, .. } => count,
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
+                return Err(super::helpers::error_code_to_status(code, message));
+            },
+            other => {
+                ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                tracing::error!(response = %other, "Unexpected Raft response for RevokeAllAppSessions");
+                return Err(Status::internal("Unexpected response type"));
+            },
+        };
+
+        self.emit_event(EventAction::TokenRevoked, &trace_ctx);
+        ctx.set_success();
+
+        Ok(Response::new(RevokeAllAppSessionsResponse { revoked_count }))
     }
 
     /// Creates a new signing key for the given scope.

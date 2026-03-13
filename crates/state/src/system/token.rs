@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
-    AppSlug, Operation, OrganizationId, RefreshTokenId, SigningKeyId, SigningKeyScope,
+    AppId, AppSlug, Operation, OrganizationId, RefreshTokenId, SigningKeyId, SigningKeyScope,
     SigningKeyStatus, TokenSubject, TokenVersion, UserId, UserSlug, VaultId, decode, encode,
 };
 use snafu::ResultExt;
@@ -15,7 +15,7 @@ use tracing::warn;
 use super::{
     keys::SystemKeys,
     service::{CodecSnafu, Result, SYSTEM_VAULT_ID, StateSnafu, SystemOrganizationService},
-    types::{RefreshToken, SigningKey, User},
+    types::{App, RefreshToken, SigningKey, User},
 };
 
 /// Maximum number of entries scanned in a prefix iteration.
@@ -67,6 +67,15 @@ pub struct RevocationResult {
 /// Result of revoking all user sessions (tokens + version bump).
 #[derive(Debug)]
 pub struct AllUserSessionsRevocationResult {
+    /// Number of individual tokens revoked.
+    pub revoked_count: u64,
+    /// New token version after increment.
+    pub new_version: TokenVersion,
+}
+
+/// Result of revoking all app sessions (tokens + version bump).
+#[derive(Debug)]
+pub struct AllAppSessionsRevocationResult {
     /// Number of individual tokens revoked.
     pub revoked_count: u64,
     /// New token version after increment.
@@ -753,6 +762,73 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         }
 
         Ok(AllUserSessionsRevocationResult { revoked_count, new_version })
+    }
+
+    /// Revokes all app sessions atomically: revokes tokens + increments version.
+    ///
+    /// Used by credential compromise or admin force-revoke.
+    pub fn revoke_all_app_sessions(
+        &self,
+        organization: OrganizationId,
+        app_id: AppId,
+        app_slug: AppSlug,
+        now: DateTime<Utc>,
+    ) -> Result<AllAppSessionsRevocationResult> {
+        let subject = TokenSubject::App(app_slug);
+        let revocation_result = self.revoke_all_subject_tokens(&subject, now);
+
+        let (revoked_count, was_incomplete) = match revocation_result {
+            Ok(result) => (result.revoked_count, false),
+            Err(super::service::SystemError::RevocationIncomplete { revoked, .. }) => {
+                (revoked, true)
+            },
+            Err(e) => return Err(e),
+        };
+
+        let new_version = self.increment_app_token_version(organization, app_id, now)?;
+
+        if was_incomplete {
+            warn!(
+                revoked_count,
+                new_version = new_version.value(),
+                "Partial revocation in revoke_all_app_sessions — version bumped as backstop"
+            );
+        }
+
+        Ok(AllAppSessionsRevocationResult { revoked_count, new_version })
+    }
+
+    /// Increments an app's token version and returns the new value.
+    ///
+    /// Used by `RevokeAllAppSessions` for forced session invalidation.
+    fn increment_app_token_version(
+        &self,
+        organization: OrganizationId,
+        app_id: AppId,
+        now: DateTime<Utc>,
+    ) -> Result<TokenVersion> {
+        let app_key = SystemKeys::app_key(organization, app_id);
+        let entity_opt =
+            self.state.get_entity(SYSTEM_VAULT_ID, app_key.as_bytes()).context(StateSnafu)?;
+
+        let mut app: App = match entity_opt {
+            Some(entity) => decode(&entity.value).context(CodecSnafu)?,
+            None => {
+                return Err(super::service::SystemError::NotFound {
+                    entity: format!("app:{app_id}"),
+                });
+            },
+        };
+
+        let new_version = app.version.increment();
+        app.version = new_version;
+        app.updated_at = now;
+
+        let value = encode(&app).context(CodecSnafu)?;
+        let ops = vec![set_entity(app_key, value)];
+        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+
+        Ok(new_version)
     }
 
     /// Scans a token index prefix, resolves each entry to a token, and revokes

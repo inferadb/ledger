@@ -9,17 +9,19 @@
 //! also uses a saga for the orchestrator to drive.
 
 use inferadb_ledger_proto::proto::{
-    self, CreateOrganizationRequest, CreateOrganizationResponse, CreateOrganizationTeamRequest,
-    CreateOrganizationTeamResponse, DeleteOrganizationRequest, DeleteOrganizationResponse,
-    DeleteOrganizationTeamRequest, DeleteOrganizationTeamResponse, GetOrganizationRequest,
-    GetOrganizationResponse, ListOrganizationMembersRequest, ListOrganizationMembersResponse,
-    ListOrganizationTeamsRequest, ListOrganizationTeamsResponse, ListOrganizationsRequest,
-    ListOrganizationsResponse, MigrateOrganizationRequest, MigrateOrganizationResponse, NodeId,
-    OrganizationSlug, OrganizationStatus as ProtoOrganizationStatus, Region as ProtoRegion,
-    RemoveOrganizationMemberRequest, RemoveOrganizationMemberResponse,
-    UpdateOrganizationMemberRoleRequest, UpdateOrganizationMemberRoleResponse,
-    UpdateOrganizationRequest, UpdateOrganizationResponse, UpdateOrganizationTeamRequest,
-    UpdateOrganizationTeamResponse,
+    self, AddTeamMemberRequest, AddTeamMemberResponse, CreateOrganizationRequest,
+    CreateOrganizationResponse, CreateOrganizationTeamRequest, CreateOrganizationTeamResponse,
+    DeleteOrganizationRequest, DeleteOrganizationResponse, DeleteOrganizationTeamRequest,
+    DeleteOrganizationTeamResponse, GetOrganizationRequest, GetOrganizationResponse,
+    GetOrganizationTeamRequest, GetOrganizationTeamResponse, ListOrganizationMembersRequest,
+    ListOrganizationMembersResponse, ListOrganizationTeamsRequest, ListOrganizationTeamsResponse,
+    ListOrganizationsRequest, ListOrganizationsResponse, MigrateOrganizationRequest,
+    MigrateOrganizationResponse, NodeId, OrganizationSlug,
+    OrganizationStatus as ProtoOrganizationStatus, Region as ProtoRegion,
+    RemoveOrganizationMemberRequest, RemoveOrganizationMemberResponse, RemoveTeamMemberRequest,
+    RemoveTeamMemberResponse, UpdateOrganizationMemberRoleRequest,
+    UpdateOrganizationMemberRoleResponse, UpdateOrganizationRequest, UpdateOrganizationResponse,
+    UpdateOrganizationTeamRequest, UpdateOrganizationTeamResponse,
 };
 use inferadb_ledger_raft::{
     error::ServiceError,
@@ -1008,7 +1010,8 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             .ok_or_else(|| Status::not_found("Organization not found"))?;
 
         // Route the name update to the REGIONAL Raft group — name is PII
-        // and must not appear in the GLOBAL Raft log.
+        // and must not appear in the GLOBAL Raft log. Encrypted with OrgKey
+        // for crypto-shredding on organization purge.
         let system_request =
             inferadb_ledger_raft::types::SystemRequest::UpdateOrganizationProfile {
                 organization: organization_id,
@@ -1016,7 +1019,13 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             };
         let response = self
             .ctx
-            .propose_regional(org_meta.region, system_request, &grpc_metadata, &mut ctx)
+            .propose_regional_org_encrypted(
+                org_meta.region,
+                system_request,
+                organization_id,
+                &grpc_metadata,
+                &mut ctx,
+            )
             .await?;
 
         match response {
@@ -1404,6 +1413,59 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         Ok(Response::new(ListOrganizationTeamsResponse { teams: proto_teams, next_page_token }))
     }
 
+    /// Retrieves a single team by slug.
+    ///
+    /// Admins can see any team in the organization; non-admin members can
+    /// only see teams they belong to (consistent with list behavior).
+    async fn get_organization_team(
+        &self,
+        request: Request<GetOrganizationTeamRequest>,
+    ) -> Result<Response<GetOrganizationTeamResponse>, Status> {
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let inner = request.into_inner();
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "get_organization_team",
+            &grpc_metadata,
+            &trace_ctx,
+        );
+
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
+        let (organization_id, team_id) =
+            slug_resolver.extract_and_resolve_team(&inner.slug).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
+        let org_slug = slug_resolver.resolve_slug(organization_id)?;
+
+        // Verify caller is an org member
+        let (caller_id, profile) =
+            self.validate_org_member(&slug_resolver, organization_id, &inner.caller, &mut ctx)?;
+
+        let is_admin = profile
+            .members
+            .iter()
+            .any(|m| m.user_id == caller_id && m.role == DomainMemberRole::Admin);
+
+        // Read team profile from REGIONAL state
+        let team = self.read_team_profile(organization_id, team_id).ok_or_else(|| {
+            ctx.set_error("NotFound", "Team not found");
+            Status::not_found("Team not found")
+        })?;
+
+        // Non-admin members can only see teams they belong to
+        if !is_admin && !team.members.iter().any(|m| m.user_id == caller_id) {
+            ctx.set_error("NotFound", "Team not found");
+            return Err(Status::not_found("Team not found"));
+        }
+
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let proto_team = Self::team_to_proto(&sys_svc, &team, org_slug);
+
+        ctx.set_success();
+        Ok(Response::new(GetOrganizationTeamResponse { team: Some(proto_team) }))
+    }
+
     async fn create_organization_team(
         &self,
         request: Request<CreateOrganizationTeamRequest>,
@@ -1478,6 +1540,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         };
 
         // Step 2 (REGIONAL): Write team name to the org's regional store.
+        // Encrypted with OrgKey for crypto-shredding on organization purge.
         let org_meta = self
             .ctx
             .applied_state
@@ -1491,7 +1554,13 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         };
         let profile_response = self
             .ctx
-            .propose_regional(org_meta.region, system_request, &grpc_metadata, &mut ctx)
+            .propose_regional_org_encrypted(
+                org_meta.region,
+                system_request,
+                organization_id,
+                &grpc_metadata,
+                &mut ctx,
+            )
             .await?;
 
         if let LedgerResponse::Error { code, message } = profile_response {
@@ -1654,6 +1723,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         };
 
         // Route name update to the org's regional Raft group (PII).
+        // Encrypted with OrgKey for crypto-shredding on organization purge.
         let org_meta = self
             .ctx
             .applied_state
@@ -1672,21 +1742,198 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         };
         let response = self
             .ctx
-            .propose_regional(org_meta.region, system_request, &grpc_metadata, &mut ctx)
+            .propose_regional_org_encrypted(
+                org_meta.region,
+                system_request,
+                organization_id,
+                &grpc_metadata,
+                &mut ctx,
+            )
             .await?;
 
         match response {
-            LedgerResponse::Error { code, message } => {
-                ctx.set_error(code.grpc_code_name(), &message);
-                Err(super::helpers::error_code_to_status(code, message))
-            },
-            _ => {
+            LedgerResponse::OrganizationUpdated { .. } => {
                 ctx.set_success();
                 let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
                 let team = self
                     .read_team_profile(organization_id, team_id)
                     .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));
                 Ok(Response::new(UpdateOrganizationTeamResponse { team }))
+            },
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
+                Err(super::helpers::error_code_to_status(code, message))
+            },
+            other => {
+                ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                tracing::error!(response = %other, "Unexpected Raft response for UpdateOrganizationTeam");
+                Err(Status::internal("Unexpected response type"))
+            },
+        }
+    }
+
+    async fn add_team_member(
+        &self,
+        request: Request<AddTeamMemberRequest>,
+    ) -> Result<Response<AddTeamMemberResponse>, Status> {
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let inner = request.into_inner();
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "add_team_member",
+            &grpc_metadata,
+            &trace_ctx,
+        );
+
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
+        let (organization_id, team_id) = slug_resolver
+            .extract_and_resolve_team(&inner.team)
+            .inspect_err(|status| ctx.set_error("InvalidArgument", status.message()))?;
+        let org_slug = slug_resolver.resolve_slug(organization_id)?;
+
+        self.validate_org_admin_or_team_manager(
+            &slug_resolver,
+            organization_id,
+            team_id,
+            &inner.initiator,
+            &mut ctx,
+        )?;
+
+        let user_id =
+            slug_resolver.extract_and_resolve_user(&inner.user).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
+
+        let role = crate::proto_compat::proto_to_team_member_role(inner.role());
+
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+
+        // Verify the target user is a member of the organization
+        let org_profile = self.read_org_profile(organization_id).ok_or_else(|| {
+            ctx.set_error("NotFound", "Organization profile not found");
+            Status::not_found("Organization profile not found")
+        })?;
+        if !org_profile.members.iter().any(|m| m.user_id == user_id) {
+            ctx.set_error("FailedPrecondition", "User is not a member of the organization");
+            return Err(Status::failed_precondition("User is not a member of the organization"));
+        }
+
+        let system_request = inferadb_ledger_raft::types::SystemRequest::AddTeamMember {
+            organization: organization_id,
+            team: team_id,
+            user_id,
+            role,
+        };
+        let response = self
+            .ctx
+            .propose_regional_org_encrypted(
+                org_meta.region,
+                system_request,
+                organization_id,
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
+
+        match response {
+            LedgerResponse::OrganizationUpdated { .. } => {
+                ctx.set_success();
+                let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+                let team = self
+                    .read_team_profile(organization_id, team_id)
+                    .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));
+                Ok(Response::new(AddTeamMemberResponse { team }))
+            },
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
+                Err(super::helpers::error_code_to_status(code, message))
+            },
+            other => {
+                ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                tracing::error!(response = %other, "Unexpected Raft response for AddTeamMember");
+                Err(Status::internal("Unexpected response type"))
+            },
+        }
+    }
+
+    async fn remove_team_member(
+        &self,
+        request: Request<RemoveTeamMemberRequest>,
+    ) -> Result<Response<RemoveTeamMemberResponse>, Status> {
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let inner = request.into_inner();
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "remove_team_member",
+            &grpc_metadata,
+            &trace_ctx,
+        );
+
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
+        let (organization_id, team_id) = slug_resolver
+            .extract_and_resolve_team(&inner.team)
+            .inspect_err(|status| ctx.set_error("InvalidArgument", status.message()))?;
+
+        self.validate_org_admin_or_team_manager(
+            &slug_resolver,
+            organization_id,
+            team_id,
+            &inner.initiator,
+            &mut ctx,
+        )?;
+
+        let user_id =
+            slug_resolver.extract_and_resolve_user(&inner.user).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
+
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+
+        let system_request = inferadb_ledger_raft::types::SystemRequest::RemoveTeamMember {
+            organization: organization_id,
+            team: team_id,
+            user_id,
+        };
+        let response = self
+            .ctx
+            .propose_regional_org_encrypted(
+                org_meta.region,
+                system_request,
+                organization_id,
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
+
+        match response {
+            LedgerResponse::OrganizationUpdated { .. } => {
+                ctx.set_success();
+                Ok(Response::new(RemoveTeamMemberResponse {}))
+            },
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
+                Err(super::helpers::error_code_to_status(code, message))
+            },
+            other => {
+                ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                tracing::error!(response = %other, "Unexpected Raft response for RemoveTeamMember");
+                Err(Status::internal("Unexpected response type"))
             },
         }
     }

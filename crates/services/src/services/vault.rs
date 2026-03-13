@@ -10,7 +10,7 @@
 use inferadb_ledger_proto::proto::{
     BlockHeader, CreateVaultRequest, CreateVaultResponse, DeleteVaultRequest, DeleteVaultResponse,
     GetVaultRequest, GetVaultResponse, Hash, ListVaultsRequest, ListVaultsResponse, NodeId,
-    OrganizationSlug, VaultSlug as ProtoVaultSlug,
+    OrganizationSlug, UpdateVaultRequest, UpdateVaultResponse, VaultSlug as ProtoVaultSlug,
 };
 use inferadb_ledger_raft::{
     metrics, trace_context,
@@ -392,5 +392,87 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         ctx.set_success();
 
         Ok(Response::new(ListVaultsResponse { vaults, next_page_token }))
+    }
+
+    /// Updates vault metadata (retention policy).
+    async fn update_vault(
+        &self,
+        request: Request<UpdateVaultRequest>,
+    ) -> Result<Response<UpdateVaultResponse>, Status> {
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = self.ctx.make_request_context(
+            "VaultService",
+            "update_vault",
+            &grpc_metadata,
+            &trace_ctx,
+        );
+
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
+        let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
+        let organization_id =
+            slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
+        let vault_id =
+            slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
+
+        let vault_val = req.vault.as_ref().map_or(0, |v| v.slug);
+        ctx.set_target(organization_slug_val, vault_val);
+
+        // Convert proto retention policy to domain type
+        let retention_policy = req.retention_policy.map(|p| {
+            let mode = match p.mode() {
+                inferadb_ledger_proto::proto::BlockRetentionMode::Unspecified
+                | inferadb_ledger_proto::proto::BlockRetentionMode::Full => {
+                    BlockRetentionMode::Full
+                },
+                inferadb_ledger_proto::proto::BlockRetentionMode::Compacted => {
+                    BlockRetentionMode::Compacted
+                },
+            };
+            BlockRetentionPolicy { mode, retention_blocks: p.retention_blocks }
+        });
+
+        let ledger_request = LedgerRequest::UpdateVault {
+            organization: organization_id,
+            vault: vault_id,
+            retention_policy,
+        };
+
+        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+
+        match response {
+            LedgerResponse::VaultUpdated { success } => {
+                if success {
+                    ctx.set_success();
+                    metrics::record_organization_operation(organization_id, "update_vault");
+                    metrics::record_organization_latency(
+                        organization_id,
+                        "update_vault",
+                        ctx.elapsed_secs(),
+                    );
+                    Ok(Response::new(UpdateVaultResponse {}))
+                } else {
+                    ctx.set_error("UpdateFailed", "Failed to update vault");
+                    Err(Status::internal("Failed to update vault"))
+                }
+            },
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
+                Err(super::helpers::error_code_to_status(code, message))
+            },
+            _ => {
+                ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                Err(Status::internal("Unexpected response type"))
+            },
+        }
     }
 }

@@ -15,9 +15,9 @@ use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_raft::{
     AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, EventsGarbageCollector,
     GrpcRaftNetworkFactory, HotKeyDetector, IntegrityScrubberJob, LearnerRefreshJob, LedgerNodeId,
-    LedgerTypeConfig, OrganizationPurgeJob, OrphanCleanupJob, RaftLogStore, RaftManager,
-    RaftManagerConfig, RateLimiter, ResourceMetricsCollector, RuntimeConfigHandle,
-    SagaOrchestrator, TokenMaintenanceJob, TtlGarbageCollector,
+    LedgerTypeConfig, OrganizationPurgeJob, OrphanCleanupJob, PostErasureCompactionJob,
+    RaftLogStore, RaftManager, RaftManagerConfig, RateLimiter, ResourceMetricsCollector,
+    RuntimeConfigHandle, SagaOrchestrator, TokenMaintenanceJob, TtlGarbageCollector,
     event_writer::{EventHandle, EventWriter},
 };
 use inferadb_ledger_services::LedgerServer;
@@ -144,6 +144,9 @@ pub struct BootstrappedNode {
     /// Token maintenance background task handle (leader-only).
     #[allow(dead_code)] // retained to keep background task alive
     pub token_maintenance_handle: tokio::task::JoinHandle<()>,
+    /// Post-erasure compaction background task handle (leader-only).
+    #[allow(dead_code)] // retained to keep background task alive
+    pub post_erasure_compaction_handle: tokio::task::JoinHandle<()>,
     /// Snapshot demotion background task handle (only active when warm tier is configured).
     #[allow(dead_code)] // retained to keep background task alive
     pub snapshot_demotion_handle: Option<tokio::task::JoinHandle<()>>,
@@ -693,6 +696,19 @@ pub async fn bootstrap_node(
         .start();
     tracing::info!("Started token maintenance job");
 
+    // Start post-erasure compaction job to enforce maximum Raft log retention.
+    // Triggers proactive snapshots on all Raft groups (GLOBAL + regional) when
+    // time since last snapshot exceeds the configured threshold, ensuring
+    // encrypted PII entries are compacted within the retention window.
+    let post_erasure_compaction_handle = PostErasureCompactionJob::builder()
+        .node_id(node_id)
+        .raft(raft.clone())
+        .manager(Some(manager.clone()))
+        .watchdog_handle(watchdog.map(|w| w.register("post_erasure_compaction", 600)))
+        .build()
+        .start();
+    tracing::info!("Started post-erasure compaction job");
+
     // Start snapshot demotion task if warm tier is configured.
     // Periodically moves old snapshots from local SSD to object storage.
     // S3 unavailability degrades gracefully: logs the error and retries next cycle.
@@ -738,6 +754,7 @@ pub async fn bootstrap_node(
         integrity_scrub_handle,
         org_purge_handle,
         token_maintenance_handle,
+        post_erasure_compaction_handle,
         snapshot_demotion_handle,
     })
 }

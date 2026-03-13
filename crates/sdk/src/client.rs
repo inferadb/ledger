@@ -529,6 +529,14 @@ impl TeamMemberRole {
             _ => TeamMemberRole::Member,
         }
     }
+
+    /// Converts to protobuf enum value.
+    fn to_proto(self) -> proto::OrganizationTeamMemberRole {
+        match self {
+            TeamMemberRole::Manager => proto::OrganizationTeamMemberRole::Manager,
+            TeamMemberRole::Member => proto::OrganizationTeamMemberRole::Member,
+        }
+    }
 }
 
 /// A member of a team.
@@ -4458,6 +4466,131 @@ impl LedgerClient {
         .await
     }
 
+    /// Retrieves a single team by slug.
+    ///
+    /// Admins can see any team; non-admin callers can only see teams they
+    /// belong to.
+    pub async fn get_organization_team(
+        &self,
+        team: TeamSlug,
+        caller: UserSlug,
+    ) -> Result<TeamInfo> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "get_organization_team",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "get_organization_team",
+                || async {
+                    let mut client = connected_client!(pool, create_organization_client);
+
+                    let request = proto::GetOrganizationTeamRequest {
+                        slug: Some(proto::TeamSlug { slug: team.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
+                    };
+
+                    let response = client
+                        .get_organization_team(tonic::Request::new(request))
+                        .await?
+                        .into_inner();
+
+                    response.team.as_ref().map(TeamInfo::from_proto).ok_or_else(|| {
+                        missing_response_field("team", "GetOrganizationTeamResponse")
+                    })
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Adds a member to a team.
+    ///
+    /// Returns the updated team info.
+    pub async fn add_team_member(
+        &self,
+        team: TeamSlug,
+        user: UserSlug,
+        role: TeamMemberRole,
+        initiator: UserSlug,
+    ) -> Result<TeamInfo> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "add_team_member",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "add_team_member",
+                || async {
+                    let mut client = connected_client!(pool, create_organization_client);
+
+                    let request = proto::AddTeamMemberRequest {
+                        team: Some(proto::TeamSlug { slug: team.value() }),
+                        user: Some(proto::UserSlug { slug: user.value() }),
+                        role: role.to_proto().into(),
+                        initiator: Some(proto::UserSlug { slug: initiator.value() }),
+                    };
+
+                    let response =
+                        client.add_team_member(tonic::Request::new(request)).await?.into_inner();
+
+                    response
+                        .team
+                        .as_ref()
+                        .map(TeamInfo::from_proto)
+                        .ok_or_else(|| missing_response_field("team", "AddTeamMemberResponse"))
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Removes a member from a team.
+    pub async fn remove_team_member(
+        &self,
+        team: TeamSlug,
+        user: UserSlug,
+        initiator: UserSlug,
+    ) -> Result<()> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "remove_team_member",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "remove_team_member",
+                || async {
+                    let mut client = connected_client!(pool, create_organization_client);
+
+                    let request = proto::RemoveTeamMemberRequest {
+                        team: Some(proto::TeamSlug { slug: team.value() }),
+                        user: Some(proto::UserSlug { slug: user.value() }),
+                        initiator: Some(proto::UserSlug { slug: initiator.value() }),
+                    };
+
+                    client.remove_team_member(tonic::Request::new(request)).await?;
+                    Ok(())
+                },
+            ),
+        )
+        .await
+    }
+
     /// Initiates migration of an organization to a different region.
     ///
     /// Transitions the organization to `Migrating` status and creates a background
@@ -5376,6 +5509,43 @@ impl LedgerClient {
                     let vaults = response.vaults.into_iter().map(VaultInfo::from_proto).collect();
 
                     Ok((vaults, response.next_page_token))
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Updates vault metadata (retention policy).
+    pub async fn update_vault(
+        &self,
+        organization: OrganizationSlug,
+        vault: VaultSlug,
+        retention_policy: Option<proto::BlockRetentionPolicy>,
+    ) -> Result<()> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "update_vault",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "update_vault",
+                || async {
+                    let mut client = connected_client!(pool, create_vault_client);
+
+                    let request = proto::UpdateVaultRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        vault: Some(proto::VaultSlug { slug: vault.value() }),
+                        retention_policy,
+                    };
+
+                    client.update_vault(tonic::Request::new(request)).await?;
+
+                    Ok(())
                 },
             ),
         )
@@ -7290,6 +7460,42 @@ impl LedgerClient {
 
                     let response = client
                         .revoke_all_user_sessions(tonic::Request::new(request))
+                        .await?
+                        .into_inner();
+
+                    Ok(response.revoked_count)
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Revokes all sessions for an app.
+    ///
+    /// Returns the number of sessions revoked.
+    pub async fn revoke_all_app_sessions(&self, app: AppSlug) -> Result<u64> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "revoke_all_app_sessions",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "revoke_all_app_sessions",
+                || async {
+                    let mut client = connected_client!(pool, create_token_client);
+
+                    let request = proto::RevokeAllAppSessionsRequest {
+                        organization: None,
+                        app: Some(proto::AppSlug { slug: app.value() }),
+                    };
+
+                    let response = client
+                        .revoke_all_app_sessions(tonic::Request::new(request))
                         .await?
                         .into_inner();
 

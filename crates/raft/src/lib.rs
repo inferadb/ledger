@@ -108,6 +108,8 @@ pub mod organization_purge;
 #[doc(hidden)]
 pub mod orphan_cleanup;
 #[doc(hidden)]
+pub mod post_erasure_compaction;
+#[doc(hidden)]
 pub mod raft_network;
 #[doc(hidden)]
 pub mod rate_limit;
@@ -161,6 +163,8 @@ pub use log_storage::RaftLogStore;
 pub use organization_purge::OrganizationPurgeJob;
 #[doc(hidden)]
 pub use orphan_cleanup::OrphanCleanupJob;
+#[doc(hidden)]
+pub use post_erasure_compaction::PostErasureCompactionJob;
 #[doc(hidden)]
 pub use raft_manager::{RaftManager, RaftManagerConfig, RegionConfig, RegionGroup};
 #[doc(hidden)]

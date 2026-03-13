@@ -23,7 +23,7 @@ use super::{
     keys::SystemKeys,
     types::{
         EmailHashEntry, EmailVerificationToken, ErasureAuditRecord, MigrationSummary, NodeInfo,
-        OnboardingAccount, OrganizationDirectoryEntry, OrganizationDirectoryStatus,
+        OnboardingAccount, OrgKey, OrganizationDirectoryEntry, OrganizationDirectoryStatus,
         OrganizationRegistry, OrganizationStatus, PendingEmailVerification, SubjectKey, User,
         UserDirectoryEntry, UserDirectoryStatus, UserEmail, UserMigrationEntry,
     },
@@ -1162,9 +1162,10 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     /// 2. Mark directory entry as `Deleted` (tombstone minimization).
     /// 3. Revoke all refresh token families and bump token version.
     /// 4. Remove global email hash index entries for this user.
-    /// 5. Delete all `UserEmail` records and clear user-to-emails index.
+    /// 5. Delete all `UserEmail` records, email uniqueness indices, and user-to-emails index.
     /// 6. Delete per-subject encryption key.
-    /// 7. Write erasure audit record (insert-if-absent for idempotency).
+    /// 7. Delete the User record (contains plaintext name — PII).
+    /// 8. Write erasure audit record (insert-if-absent for idempotency).
     ///
     /// After erasure, the `UserDirectoryEntry` retains only `user: UserId` and
     /// `status: Deleted`. The subject key is destroyed, rendering all
@@ -1202,8 +1203,13 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         // Only possible when slug is available (not yet tombstoned).
         if let Some(entry) = &entry_opt
             && let Some(slug) = entry.slug
+            && let Err(e) = self.revoke_all_user_sessions(user_id, slug, block_timestamp)
         {
-            let _ = self.revoke_all_user_sessions(user_id, slug, block_timestamp);
+            tracing::warn!(
+                user_id = user_id.value(),
+                error = %e,
+                "Failed to revoke user sessions during erasure"
+            );
         }
 
         // Step 4: Remove global email hash index entries for this user.
@@ -1234,24 +1240,27 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             self.state.apply_operations(SYSTEM_VAULT_ID, &delete_ops, 0).context(StateSnafu)?;
         }
 
-        // Step 5: Delete all UserEmail records for this user.
+        // Step 5: Delete all UserEmail records and their plaintext indices.
         // Bypasses `delete_user_email_record` which refuses primary email deletion.
         let email_ids = self.get_user_email_ids(user_id)?;
         if !email_ids.is_empty() {
             let mut email_delete_ops: Vec<Operation> = Vec::new();
             for email_id in &email_ids {
+                // Read the email record to get the plaintext address for index cleanup.
+                // Missing record (already deleted) is fine; read errors are propagated
+                // to avoid silently leaving PII index entries behind.
+                if let Some(email_record) = self.get_user_email(*email_id)? {
+                    let idx_key = SystemKeys::email_index_key(&email_record.email);
+                    email_delete_ops.push(Operation::DeleteEntity { key: idx_key });
+                }
                 email_delete_ops
                     .push(Operation::DeleteEntity { key: SystemKeys::user_email_key(*email_id) });
             }
+            // Clear the user-to-emails index in the same batch.
+            email_delete_ops
+                .push(Operation::DeleteEntity { key: SystemKeys::user_emails_index_key(user_id) });
             self.state
                 .apply_operations(SYSTEM_VAULT_ID, &email_delete_ops, 0)
-                .context(StateSnafu)?;
-
-            // Clear the user-to-emails index.
-            let index_key = SystemKeys::user_emails_index_key(user_id);
-            let clear_index_ops = vec![Operation::DeleteEntity { key: index_key }];
-            self.state
-                .apply_operations(SYSTEM_VAULT_ID, &clear_index_ops, 0)
                 .context(StateSnafu)?;
         }
 
@@ -1262,7 +1271,12 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         let delete_key_ops = vec![Operation::DeleteEntity { key: subject_key_key }];
         self.state.apply_operations(SYSTEM_VAULT_ID, &delete_key_ops, 0).context(StateSnafu)?;
 
-        // Step 7: Write erasure audit record (insert-if-absent for idempotency).
+        // Step 7: Delete the User record (contains plaintext name — PII).
+        let user_key = SystemKeys::user_key(user_id);
+        let delete_user_ops = vec![Operation::DeleteEntity { key: user_key }];
+        self.state.apply_operations(SYSTEM_VAULT_ID, &delete_user_ops, 0).context(StateSnafu)?;
+
+        // Step 8: Write erasure audit record (insert-if-absent for idempotency).
         let audit_record = ErasureAuditRecord { user_id, erased_at: block_timestamp, region };
         let audit_key = SystemKeys::erasure_audit_key(user_id);
         let audit_value = encode(&audit_record).context(CodecSnafu)?;
@@ -1340,6 +1354,53 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             Some(entity) => {
                 let subject_key: SubjectKey = decode(&entity.value).context(CodecSnafu)?;
                 Ok(Some(subject_key))
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Stores a per-organization encryption key.
+    ///
+    /// The key is stored in the system vault, encrypted at rest by the
+    /// region's RMK via `EncryptedBackend`. Used for crypto-shredding of
+    /// organization-scoped PII (org names, team names, app names).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::Codec`] or [`SystemError::State`] if the
+    /// write fails.
+    pub fn store_org_key(&self, organization: OrganizationId, key_bytes: &[u8; 32]) -> Result<()> {
+        let org_key = OrgKey { organization, key: *key_bytes, created_at: Utc::now() };
+        let storage_key = SystemKeys::org_key(organization);
+        let value = encode(&org_key).context(CodecSnafu)?;
+
+        let ops = vec![Operation::SetEntity {
+            key: storage_key,
+            value,
+            condition: None,
+            expires_at: None,
+        }];
+        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+
+        Ok(())
+    }
+
+    /// Returns a per-organization encryption key, if one exists.
+    ///
+    /// Returns `None` if the key has been destroyed (organization purged).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemError::State`] if the read fails, or
+    /// [`SystemError::Codec`] if deserialization fails.
+    pub fn get_org_key(&self, organization: OrganizationId) -> Result<Option<OrgKey>> {
+        let key = SystemKeys::org_key(organization);
+        let entity_opt =
+            self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
+        match entity_opt {
+            Some(entity) => {
+                let org_key: OrgKey = decode(&entity.value).context(CodecSnafu)?;
+                Ok(Some(org_key))
             },
             None => Ok(None),
         }
@@ -3035,6 +3096,10 @@ mod tests {
         // Register email hash
         svc.register_email_hash("user42_email_hash", user_id).unwrap();
 
+        // Create flat User record (contains PII name field)
+        let user = make_test_user(42, 10042, Region::US_EAST_VA);
+        write_flat_user(&svc, &user);
+
         // Verify everything exists pre-erasure
         assert!(svc.get_user_directory(user_id).unwrap().is_some());
         assert!(svc.get_subject_key(user_id).unwrap().is_some());
@@ -3042,12 +3107,14 @@ mod tests {
         assert!(
             svc.get_user_id_by_slug(inferadb_ledger_types::UserSlug::new(10042)).unwrap().is_some()
         );
+        assert!(svc.get_user(user_id).unwrap().is_some());
         assert!(svc.get_erasure_audit(user_id).unwrap().is_none());
 
         // Erase
         svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
 
         // Verify everything is gone/tombstoned
+        assert!(svc.get_user(user_id).unwrap().is_none());
         let tombstone = svc.get_user_directory(user_id).unwrap().unwrap();
         assert_eq!(tombstone.status, UserDirectoryStatus::Deleted);
         assert!(tombstone.slug.is_none());
@@ -3067,6 +3134,33 @@ mod tests {
         // Listed in erased users
         let erased = svc.list_erased_user_ids().unwrap();
         assert!(erased.contains(&user_id));
+    }
+
+    #[test]
+    fn test_erase_user_deletes_user_record() {
+        let svc = create_test_service();
+        let user_id = UserId::new(80);
+
+        // Create user directory
+        let entry = make_directory_entry(80, 10080, Region::US_EAST_VA);
+        svc.register_user_directory(&entry).unwrap();
+
+        // Create flat User record (contains PII name field)
+        let user = make_test_user(80, 10080, Region::US_EAST_VA);
+        write_flat_user(&svc, &user);
+
+        // Verify user record exists pre-erasure
+        assert!(svc.get_user(user_id).unwrap().is_some());
+
+        // Erase
+        svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
+
+        // Verify user record is deleted
+        assert!(svc.get_user(user_id).unwrap().is_none());
+
+        // Verify idempotency: second erase does not error
+        svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
+        assert!(svc.get_user(user_id).unwrap().is_none());
     }
 
     #[test]
@@ -3090,6 +3184,8 @@ mod tests {
         write_flat_user_email(&svc, &email1);
         write_flat_user_email(&svc, &email2);
         write_user_emails_index(&svc, user_id, &[email_id, email2_id]);
+        write_email_index(&svc, "primary@example.com", email_id);
+        write_email_index(&svc, "secondary@example.com", email2_id);
 
         // Verify emails exist pre-erasure
         assert!(svc.get_user_email(email_id).unwrap().is_some());
@@ -3103,6 +3199,51 @@ mod tests {
         assert!(svc.get_user_email(email_id).unwrap().is_none());
         assert!(svc.get_user_email(email2_id).unwrap().is_none());
         assert!(svc.get_user_email_ids(user_id).unwrap().is_empty());
+
+        // Verify email uniqueness indices are deleted
+        assert!(svc.search_users_by_email("primary@example.com").unwrap().is_none());
+        assert!(svc.search_users_by_email("secondary@example.com").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_erase_user_deletes_email_indices() {
+        let svc = create_test_service();
+        let user_id = UserId::new(90);
+        let email_id = inferadb_ledger_types::UserEmailId::new(900);
+        let email2_id = inferadb_ledger_types::UserEmailId::new(901);
+
+        // Create user directory
+        let entry = make_directory_entry(90, 10090, Region::US_EAST_VA);
+        svc.register_user_directory(&entry).unwrap();
+
+        // Create flat User record
+        let user = make_test_user(90, 10090, Region::US_EAST_VA);
+        write_flat_user(&svc, &user);
+
+        // Create two email records, user-to-emails index, and email uniqueness indices
+        let email1 = make_test_user_email(900, 90, "primary@example.com");
+        let email2 = make_test_user_email(901, 90, "secondary@example.com");
+        write_flat_user_email(&svc, &email1);
+        write_flat_user_email(&svc, &email2);
+        write_user_emails_index(&svc, user_id, &[email_id, email2_id]);
+        write_email_index(&svc, "primary@example.com", email_id);
+        write_email_index(&svc, "secondary@example.com", email2_id);
+
+        // Verify email search works pre-erasure
+        assert!(svc.search_users_by_email("primary@example.com").unwrap().is_some());
+        assert!(svc.search_users_by_email("secondary@example.com").unwrap().is_some());
+
+        // Erase
+        svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
+
+        // Verify email uniqueness indices are deleted
+        assert!(svc.search_users_by_email("primary@example.com").unwrap().is_none());
+        assert!(svc.search_users_by_email("secondary@example.com").unwrap().is_none());
+
+        // Verify idempotency: second erase does not error and indices remain gone
+        svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
+        assert!(svc.search_users_by_email("primary@example.com").unwrap().is_none());
+        assert!(svc.search_users_by_email("secondary@example.com").unwrap().is_none());
     }
 
     // ========================================================================
@@ -3769,7 +3910,6 @@ mod tests {
         let hmac = "verify_hmac_abc123";
         let now = Utc::now();
         let record = PendingEmailVerification {
-            email: "alice@example.com".to_string(),
             code_hash: [0xAB; 32],
             region: Region::US_EAST_VA,
             expires_at: now,
@@ -3797,7 +3937,6 @@ mod tests {
         let now = Utc::now();
 
         let record1 = PendingEmailVerification {
-            email: "alice@example.com".to_string(),
             code_hash: [0x11; 32],
             region: Region::US_EAST_VA,
             expires_at: now,
@@ -3808,7 +3947,6 @@ mod tests {
         svc.store_email_verification(hmac, &record1).unwrap();
 
         let record2 = PendingEmailVerification {
-            email: "alice@example.com".to_string(),
             code_hash: [0x22; 32],
             region: Region::US_EAST_VA,
             expires_at: now,
@@ -3829,7 +3967,6 @@ mod tests {
         let hmac = "delete_verify_hmac";
         let now = Utc::now();
         let record = PendingEmailVerification {
-            email: "bob@test.com".to_string(),
             code_hash: [0xCC; 32],
             region: Region::IE_EAST_DUBLIN,
             expires_at: now,
@@ -3933,7 +4070,6 @@ mod tests {
         let now = Utc::now();
 
         let verify = PendingEmailVerification {
-            email: "test@test.com".to_string(),
             code_hash: [0xAA; 32],
             region: Region::US_EAST_VA,
             expires_at: now,

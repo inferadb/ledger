@@ -119,6 +119,30 @@ pub struct SubjectKey {
     pub created_at: DateTime<Utc>,
 }
 
+// ============================================================================
+// Organization Key Types (per-org encryption for crypto-shredding)
+// ============================================================================
+
+/// Per-organization encryption key for crypto-shredding.
+///
+/// Organization PII (names, team names, app names) is encrypted with the
+/// org key. On organization purge, the key is destroyed — encrypted PII
+/// in the Raft log becomes cryptographically unrecoverable.
+///
+/// Mirrors the per-user [`SubjectKey`] pattern. Stored in the regional
+/// store, encrypted at rest under the region's RMK (via `EncryptedBackend`).
+///
+/// Key pattern: `_key:org:{org_id}` in the regional store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgKey {
+    /// Organization this key belongs to.
+    pub organization: OrganizationId,
+    /// 256-bit AES key material (encrypted at rest by EncryptedBackend).
+    pub key: [u8; 32],
+    /// When this key was generated.
+    pub created_at: DateTime<Utc>,
+}
+
 /// Non-PII audit record for user erasure (GDPR Article 17(2) accountability).
 ///
 /// Stored in the GLOBAL control plane. Retains only opaque identifiers and
@@ -287,7 +311,7 @@ pub enum OrganizationDirectoryStatus {
 /// without touching regional stores. Contains no personally identifiable
 /// information — only opaque identifiers, enums, and timestamps.
 ///
-/// Key pattern: `_sys:org_dir:{organization_id}` → postcard-serialized entry.
+/// Key pattern: `_sys:org:{organization_id}` → postcard-serialized entry.
 ///
 /// Mirrors [`UserDirectoryEntry`] for users.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -455,6 +479,11 @@ pub struct App {
     /// Credential configuration for this app.
     #[serde(default)]
     pub credentials: AppCredentials,
+    /// Monotonic counter for forced session invalidation.
+    /// Incremented on credential compromise or admin force-revoke.
+    /// Mirrors [`User::version`] for app-scoped JWT backstop validation.
+    #[serde(default)]
+    pub version: TokenVersion,
     /// App creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Last modification timestamp.
@@ -549,13 +578,14 @@ pub struct ClientAssertionCredentialConfig {
 /// Only the public key (DER-encoded) is persisted for JWT signature
 /// verification.
 ///
+/// The user-provided name is stored separately in REGIONAL state via
+/// [`super::keys::SystemKeys::assertion_name_key`] to avoid PII in the GLOBAL Raft log.
+///
 /// Key pattern: `_sys:app_assertion:{org_id}:{app_id}:{assertion_id}`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientAssertionEntry {
     /// Internal assertion entry identifier.
     pub id: ClientAssertionId,
-    /// User-provided name for this assertion entry.
-    pub name: String,
     /// Whether this individual assertion entry is enabled.
     #[serde(default)]
     pub enabled: bool,
@@ -793,8 +823,6 @@ pub struct ProvisioningReservation {
 /// count restarts at 1. This is O(1) in both space and time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingEmailVerification {
-    /// Plaintext email address (PII — stored regionally only).
-    pub email: String,
     /// `HMAC-SHA256(blinding_key, "code:" || uppercase(code))`.
     pub code_hash: [u8; 32],
     /// Region where this verification was initiated.
@@ -1458,7 +1486,6 @@ mod tests {
     fn test_pending_email_verification_roundtrip() {
         let now = Utc::now();
         let record = PendingEmailVerification {
-            email: "alice@example.com".to_string(),
             code_hash: [0xAB; 32],
             region: Region::US_EAST_VA,
             expires_at: now,
@@ -1475,7 +1502,6 @@ mod tests {
     fn test_pending_email_verification_fields() {
         let now = Utc::now();
         let record = PendingEmailVerification {
-            email: "bob@test.com".to_string(),
             code_hash: [0xFF; 32],
             region: Region::IE_EAST_DUBLIN,
             expires_at: now,
@@ -1483,7 +1509,6 @@ mod tests {
             rate_limit_count: 2,
             rate_limit_window_start: now,
         };
-        assert_eq!(record.email, "bob@test.com");
         assert_eq!(record.code_hash, [0xFF; 32]);
         assert_eq!(record.region, Region::IE_EAST_DUBLIN);
         assert_eq!(record.attempts, 3);

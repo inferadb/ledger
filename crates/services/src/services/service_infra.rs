@@ -315,8 +315,9 @@ impl ServiceContext {
     /// state. When the user is erased and their `SubjectKey` is destroyed, all
     /// historical log entries become cryptographically unrecoverable (crypto-shredding).
     ///
-    /// Falls back to plaintext proposal if the `SubjectKey` is not found
-    /// (e.g., during initial onboarding before the key is created).
+    /// Returns `NOT_FOUND` if the `SubjectKey` is absent — the user may have been
+    /// erased or is not yet provisioned. This function must only be called for
+    /// post-registration operations where the `SubjectKey` is guaranteed to exist.
     pub(crate) async fn propose_regional_encrypted(
         &self,
         region: Region,
@@ -331,26 +332,72 @@ impl ServiceContext {
             Status::internal(format!("Failed to read SubjectKey for user {user_id}: {e}"))
         })?;
 
-        let request = match subject_key {
-            Some(sk) => {
-                let encrypted = inferadb_ledger_raft::entry_crypto::encrypt_system_request(
-                    &system_request,
-                    &sk.key,
-                    user_id,
-                )
-                .map_err(|e| Status::internal(format!("Failed to encrypt Raft entry: {e}")))?;
-                LedgerRequest::EncryptedSystem(encrypted)
-            },
-            None => {
-                tracing::warn!(
-                    user_id = user_id.value(),
-                    "SubjectKey not found, falling back to plaintext regional proposal"
-                );
-                LedgerRequest::System(system_request)
-            },
-        };
+        let sk = subject_key.ok_or_else(|| {
+            Status::not_found(format!(
+                "SubjectKey not found for user {user_id}: user may have been erased"
+            ))
+        })?;
 
-        self.propose_regional_ledger_request(region, request, grpc_metadata, ctx).await
+        let encrypted = inferadb_ledger_raft::entry_crypto::encrypt_user_system_request(
+            &system_request,
+            &sk.key,
+            user_id,
+        )
+        .map_err(|e| Status::internal(format!("Failed to encrypt Raft entry: {e}")))?;
+
+        self.propose_regional_ledger_request(
+            region,
+            LedgerRequest::EncryptedUserSystem(encrypted),
+            grpc_metadata,
+            ctx,
+        )
+        .await
+    }
+
+    /// Proposes an org-scoped `SystemRequest` to a region with PII encryption.
+    ///
+    /// Encrypts the `SystemRequest` with the organization's `OrgKey` before
+    /// entering the Raft log. At apply time, the state machine decrypts using
+    /// the key from state. When the organization is purged and its `OrgKey`
+    /// destroyed, all historical log entries become cryptographically
+    /// unrecoverable (crypto-shredding).
+    ///
+    /// Returns `NOT_FOUND` if the `OrgKey` is absent — the organization may
+    /// have been purged or is not yet provisioned.
+    pub(crate) async fn propose_regional_org_encrypted(
+        &self,
+        region: Region,
+        system_request: SystemRequest,
+        organization: inferadb_ledger_types::OrganizationId,
+        grpc_metadata: &tonic::metadata::MetadataMap,
+        ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, Status> {
+        let sys_svc =
+            inferadb_ledger_state::system::SystemOrganizationService::new(self.state.clone());
+        let org_key = sys_svc.get_org_key(organization).map_err(|e| {
+            Status::internal(format!("Failed to read OrgKey for organization {organization}: {e}"))
+        })?;
+
+        let org_key = org_key.ok_or_else(|| {
+            Status::not_found(format!(
+                "OrgKey not found for organization {organization}: organization may have been purged"
+            ))
+        })?;
+
+        let encrypted = inferadb_ledger_raft::entry_crypto::encrypt_org_system_request(
+            &system_request,
+            &org_key.key,
+            organization,
+        )
+        .map_err(|e| Status::internal(format!("Failed to encrypt Raft entry: {e}")))?;
+
+        self.propose_regional_ledger_request(
+            region,
+            LedgerRequest::EncryptedOrgSystem(encrypted),
+            grpc_metadata,
+            ctx,
+        )
+        .await
     }
 
     /// Records a handler-phase audit event if the event handle is configured.

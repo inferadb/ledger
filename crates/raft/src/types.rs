@@ -191,6 +191,16 @@ pub enum LedgerRequest {
         vault: VaultId,
     },
 
+    /// Updates vault metadata (retention policy).
+    UpdateVault {
+        /// Organization containing the vault.
+        organization: OrganizationId,
+        /// Vault to update.
+        vault: VaultId,
+        /// New retention policy (if provided).
+        retention_policy: Option<BlockRetentionPolicy>,
+    },
+
     /// Suspends an organization (billing hold or policy violation).
     /// Suspended organizations reject writes but allow reads.
     SuspendOrganization {
@@ -367,13 +377,15 @@ pub enum LedgerRequest {
     },
 
     /// Creates a client assertion entry (Ed25519 keypair).
+    ///
+    /// Structural entry only (public key, expiry). The user-provided name
+    /// is written separately via [`SystemRequest::WriteClientAssertionName`]
+    /// to the REGIONAL Raft group (PII isolation).
     CreateAppClientAssertion {
         /// Organization containing the app.
         organization: OrganizationId,
         /// App to add the assertion to.
         app: AppId,
-        /// User-provided name.
-        name: String,
         /// When this entry expires.
         expires_at: DateTime<Utc>,
         /// Raw 32-byte Ed25519 public key.
@@ -540,6 +552,14 @@ pub enum LedgerRequest {
         user: UserId,
     },
 
+    /// Atomically revokes all app sessions and increments the app's `TokenVersion`.
+    RevokeAllAppSessions {
+        /// Organization owning the app.
+        organization: OrganizationId,
+        /// App whose sessions to revoke.
+        app: AppId,
+    },
+
     /// Deletes expired refresh tokens and garbage-collects poisoned families.
     /// Used by `TokenMaintenanceJob`. Apply handler uses `proposed_at` as cutoff.
     DeleteExpiredRefreshTokens,
@@ -554,7 +574,18 @@ pub enum LedgerRequest {
     /// The apply handler decrypts using the `SubjectKey` from state. If the
     /// key has been destroyed (user erased), the entry is skipped — the state
     /// machine already reflects the erasure.
-    EncryptedSystem(crate::entry_crypto::EncryptedSystemRequest),
+    EncryptedUserSystem(crate::entry_crypto::EncryptedUserSystemRequest),
+
+    /// Organization-scoped encrypted form of a [`SystemRequest`].
+    ///
+    /// Organization-scoped REGIONAL requests (org/team/app profile writes) are
+    /// encrypted with the organization's `OrgKey` before entering the Raft log.
+    /// When the organization is purged and the `OrgKey` destroyed, all
+    /// historical log entries become cryptographically unrecoverable.
+    ///
+    /// The apply handler decrypts using the `OrgKey` from state. If the
+    /// key has been destroyed (org purged), the entry is skipped.
+    EncryptedOrgSystem(crate::entry_crypto::EncryptedOrgSystemRequest),
 }
 
 /// System-level requests that modify the `_system` organization.
@@ -573,12 +604,10 @@ pub enum LedgerRequest {
 /// log lines and wide events (local, non-replicated), not in Raft entries.
 ///
 /// Variants that carry PII and are proposed to REGIONAL:
-/// - [`CreateUserEmail`](SystemRequest::CreateUserEmail) — plaintext email
-/// - [`UpdateUserProfile`](SystemRequest::UpdateUserProfile) — plaintext name
-/// - [`CreateEmailVerification`](SystemRequest::CreateEmailVerification) — plaintext email
-/// - [`VerifyEmailCode`](SystemRequest::VerifyEmailCode) — verification region
-/// - [`WriteOnboardingUserProfile`](SystemRequest::WriteOnboardingUserProfile) — plaintext email,
-///   name
+/// - [`CreateUserEmail`](SystemRequest::CreateUserEmail) — encrypted via SubjectKey
+/// - [`UpdateUserProfile`](SystemRequest::UpdateUserProfile) — encrypted via SubjectKey
+/// - [`WriteOnboardingUserProfile`](SystemRequest::WriteOnboardingUserProfile) — PII sealed with
+///   SubjectKey (bootstrap entry, key also in entry for cross-replica provisioning)
 /// - [`WriteOrganizationProfile`](SystemRequest::WriteOrganizationProfile) — organization name
 /// - [`WriteTeamProfile`](SystemRequest::WriteTeamProfile) — team name
 /// - [`WriteAppProfile`](SystemRequest::WriteAppProfile) — app name, description
@@ -763,15 +792,23 @@ pub enum SystemRequest {
     ///
     /// Creates an `OrganizationProfile` keyed as
     /// `_sys:org_profile:{organization}` with the provided name and admin.
-    /// Organization name is PII — this request is classified as "regional"
-    /// and proposed to the regional Raft group (in multi-Raft mode).
+    ///
+    /// The name is AES-256-GCM sealed with `org_key_bytes` before entering
+    /// the Raft log (crypto-shredding). The apply handler stores the OrgKey
+    /// first, then decrypts the name and writes the profile. On replay after
+    /// org purge, the OrgKey is absent and the entry is skipped.
     WriteOrganizationProfile {
         /// Organization whose profile to write.
         organization: OrganizationId,
-        /// Organization display name.
-        name: String,
+        /// AES-256-GCM sealed organization name.
+        sealed_name: Vec<u8>,
+        /// Nonce for sealed_name decryption.
+        name_nonce: [u8; 12],
         /// Initial administrator for this organization.
         admin: UserId,
+        /// Per-organization 256-bit AES key for crypto-shredding.
+        /// Stored by the apply handler for future profile writes.
+        org_key_bytes: [u8; 32],
     },
 
     /// Updates the organization profile name in the REGIONAL Raft log.
@@ -807,14 +844,14 @@ pub enum SystemRequest {
     // ── Onboarding Requests ──
     /// Stores a verification code for email onboarding.
     ///
-    /// Proposed to REGIONAL Raft group — contains PII (email).
+    /// Proposed to REGIONAL Raft group — no PII (email excluded from Raft log).
+    /// The plaintext email is used by the service handler to send the verification
+    /// email *before* the Raft proposal; it is not needed in state.
     /// Rate-limited per email via `rate_limit_count` and `rate_limit_window_start`
     /// in the stored `PendingEmailVerification` record.
     CreateEmailVerification {
         /// HMAC of the email address (deterministic key).
         email_hmac: String,
-        /// Plaintext email — PII, regional Raft log only.
-        email: String,
         /// HMAC-SHA256(blinding_key, "code:" || uppercase(code)).
         code_hash: [u8; 32],
         /// Data residency region.
@@ -877,9 +914,14 @@ pub enum SystemRequest {
 
     /// Saga step 1 (REGIONAL): Write all PII and user/org profile data.
     ///
-    /// PII stays in the regional Raft log. The `email_hmac` is passed
-    /// explicitly — NOT derived in the apply handler (blinding key is
-    /// external, deriving would break state machine determinism).
+    /// PII fields (email, name, org_name) are AES-256-GCM sealed with the
+    /// `subject_key_bytes` before entering the Raft log. On log replay after
+    /// user erasure, the apply handler detects the erasure tombstone and
+    /// skips the entry — the sealed PII is unrecoverable without re-provisioning
+    /// the key, which the tombstone prevents.
+    ///
+    /// The `email_hmac` is passed explicitly — NOT derived in the apply handler
+    /// (blinding key is external, deriving would break state machine determinism).
     WriteOnboardingUserProfile {
         /// User ID allocated in step 0.
         user_id: UserId,
@@ -891,12 +933,10 @@ pub enum SystemRequest {
         organization_slug: OrganizationSlug,
         /// HMAC of the email (explicit, not derived).
         email_hmac: String,
-        /// Plaintext email — PII, regional only.
-        email: String,
-        /// User display name — PII, regional only.
-        name: String,
-        /// Organization name — PII, regional only.
-        organization_name: String,
+        /// AES-256-GCM sealed PII (email, name, org_name).
+        sealed_pii: Vec<u8>,
+        /// Nonce for `sealed_pii` decryption.
+        pii_nonce: [u8; 12],
         /// Per-subject encryption key (generated by orchestrator).
         subject_key_bytes: [u8; 32],
         /// Refresh token hash.
@@ -975,7 +1015,65 @@ pub enum SystemRequest {
         move_members_to: Option<TeamId>,
     },
 
-    /// Deletes an app's profile and name index from the REGIONAL state layer.
+    /// Adds a member to a team's profile in REGIONAL state.
+    ///
+    /// Proposed to the REGIONAL Raft group via `propose_regional_org_encrypted()`.
+    /// Requires the team profile to exist and the user to not already be a member.
+    AddTeamMember {
+        /// Organization containing the team.
+        organization: OrganizationId,
+        /// Team to add the member to.
+        team: TeamId,
+        /// User to add.
+        user_id: UserId,
+        /// Role for the new member.
+        role: inferadb_ledger_state::system::TeamMemberRole,
+    },
+
+    /// Removes a member from a team's profile in REGIONAL state.
+    ///
+    /// Proposed to the REGIONAL Raft group via `propose_regional_org_encrypted()`.
+    /// No-op if the user is not a member.
+    RemoveTeamMember {
+        /// Organization containing the team.
+        organization: OrganizationId,
+        /// Team to remove the member from.
+        team: TeamId,
+        /// User to remove.
+        user_id: UserId,
+    },
+
+    /// Writes a client assertion's user-provided name to REGIONAL state.
+    ///
+    /// Proposed to the REGIONAL Raft group after the GLOBAL
+    /// `CreateAppClientAssertion`. Separates the user-provided name
+    /// (potential PII) from the structural assertion entry.
+    WriteClientAssertionName {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App containing the assertion.
+        app: AppId,
+        /// Assertion whose name is being written.
+        assertion: ClientAssertionId,
+        /// User-provided name for this assertion entry.
+        name: String,
+    },
+
+    /// Deletes a client assertion's name from REGIONAL state.
+    ///
+    /// Proposed to the REGIONAL Raft group before the GLOBAL
+    /// `DeleteAppClientAssertion`.
+    DeleteClientAssertionName {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App containing the assertion.
+        app: AppId,
+        /// Assertion whose name is being deleted.
+        assertion: ClientAssertionId,
+    },
+
+    /// Deletes an app's profile, name index, and assertion names from
+    /// the REGIONAL state layer.
     ///
     /// Must be proposed before the GLOBAL `DeleteApp` which cleans up
     /// slug indices, vault connections, and assertions.
@@ -1121,6 +1219,12 @@ pub enum LedgerResponse {
     /// Vault deleted.
     VaultDeleted {
         /// Whether the deletion was successful.
+        success: bool,
+    },
+
+    /// Vault metadata updated.
+    VaultUpdated {
+        /// Whether the update was successful.
         success: bool,
     },
 
@@ -1366,6 +1470,14 @@ pub enum LedgerResponse {
         version: TokenVersion,
     },
 
+    /// All app sessions revoked and `TokenVersion` incremented.
+    AllAppSessionsRevoked {
+        /// Number of tokens revoked.
+        count: u64,
+        /// New `TokenVersion` after increment.
+        version: TokenVersion,
+    },
+
     /// Expired refresh tokens deleted and poisoned families cleaned.
     ExpiredRefreshTokensDeleted {
         /// Number of tokens cleaned up.
@@ -1501,6 +1613,9 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::VaultDeleted { success } => {
                 write!(f, "VaultDeleted(success={})", success)
             },
+            LedgerResponse::VaultUpdated { success } => {
+                write!(f, "VaultUpdated(success={})", success)
+            },
             LedgerResponse::VaultHealthUpdated { success } => {
                 write!(f, "VaultHealthUpdated(success={})", success)
             },
@@ -1595,6 +1710,9 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::AllUserSessionsRevoked { count, version } => {
                 write!(f, "AllUserSessionsRevoked(count={}, version={})", count, version)
             },
+            LedgerResponse::AllAppSessionsRevoked { count, version } => {
+                write!(f, "AllAppSessionsRevoked(count={}, version={})", count, version)
+            },
             LedgerResponse::ExpiredRefreshTokensDeleted { count } => {
                 write!(f, "ExpiredRefreshTokensDeleted(count={})", count)
             },
@@ -1634,6 +1752,19 @@ impl fmt::Display for LedgerResponse {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Classifies whether a Raft request targets the GLOBAL or REGIONAL group.
+    ///
+    /// GLOBAL requests contain no plaintext PII (only IDs, slugs, hashes).
+    /// REGIONAL requests carry plaintext PII and must be proposed via
+    /// encrypted regional channels.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RaftScope {
+        /// No plaintext PII — proposed to the global Raft group.
+        Global,
+        /// Contains plaintext PII — proposed to a regional Raft group.
+        Regional,
+    }
 
     #[test]
     fn test_ledger_request_serialization() {
@@ -2261,6 +2392,25 @@ mod tests {
     }
 
     #[test]
+    fn test_revoke_all_app_sessions_serialization() {
+        let request = LedgerRequest::RevokeAllAppSessions {
+            organization: OrganizationId::new(1),
+            app: AppId::new(42),
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+
+        match deserialized {
+            LedgerRequest::RevokeAllAppSessions { organization, app } => {
+                assert_eq!(organization, OrganizationId::new(1));
+                assert_eq!(app, AppId::new(42));
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
     fn test_delete_expired_refresh_tokens_serialization() {
         let request = LedgerRequest::DeleteExpiredRefreshTokens;
 
@@ -2374,6 +2524,17 @@ mod tests {
         let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
         assert_eq!(response, deserialized);
         assert_eq!(format!("{response}"), "AllUserSessionsRevoked(count=10, version=v2)");
+    }
+
+    #[test]
+    fn test_all_app_sessions_revoked_response_serialization() {
+        let response =
+            LedgerResponse::AllAppSessionsRevoked { count: 7, version: TokenVersion::new(3) };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "AllAppSessionsRevoked(count=7, version=v3)");
     }
 
     #[test]
@@ -2573,45 +2734,48 @@ mod tests {
     /// below. When a new `SystemRequest` variant is added, the compiler
     /// will force the developer to classify it here — catching any
     /// accidental PII in GLOBAL requests at compile time.
-    fn classify_system_request(req: &SystemRequest) -> &'static str {
+    fn classify_system_request(req: &SystemRequest) -> RaftScope {
         match req {
             // GLOBAL variants — no plaintext PII
-            SystemRequest::CreateUser { .. } => "global",
-            SystemRequest::UpdateUser { .. } => "global",
-            SystemRequest::DeleteUser { .. } => "global",
-            SystemRequest::DeleteUserEmail { .. } => "global",
-            SystemRequest::VerifyUserEmail { .. } => "global",
-            SystemRequest::AddNode { .. } => "global",
-            SystemRequest::RemoveNode { .. } => "global",
-            SystemRequest::UpdateOrganizationRouting { .. } => "global",
-            SystemRequest::RegisterEmailHash { .. } => "global",
-            SystemRequest::RemoveEmailHash { .. } => "global",
-            SystemRequest::SetBlindingKeyVersion { .. } => "global",
-            SystemRequest::UpdateRehashProgress { .. } => "global",
-            SystemRequest::ClearRehashProgress { .. } => "global",
-            SystemRequest::UpdateUserDirectoryStatus { .. } => "global",
-            SystemRequest::EraseUser { .. } => "global",
-            SystemRequest::MigrateExistingUsers { .. } => "global",
-            SystemRequest::CreateOrganizationDirectory { .. } => "global",
-            SystemRequest::WriteOrganizationProfile { .. } => "regional",
-            SystemRequest::UpdateOrganizationProfile { .. } => "regional",
-            SystemRequest::UpdateOrganizationDirectoryStatus { .. } => "global",
-
-            SystemRequest::CreateOnboardingUser { .. } => "global",
-            SystemRequest::ActivateOnboardingUser { .. } => "global",
+            SystemRequest::ActivateOnboardingUser { .. } => RaftScope::Global,
+            SystemRequest::AddNode { .. } => RaftScope::Global,
+            SystemRequest::ClearRehashProgress { .. } => RaftScope::Global,
+            SystemRequest::CreateOnboardingUser { .. } => RaftScope::Global,
+            SystemRequest::CreateOrganizationDirectory { .. } => RaftScope::Global,
+            SystemRequest::CreateUser { .. } => RaftScope::Global,
+            SystemRequest::DeleteUser { .. } => RaftScope::Global,
+            SystemRequest::DeleteUserEmail { .. } => RaftScope::Global,
+            SystemRequest::EraseUser { .. } => RaftScope::Global,
+            SystemRequest::MigrateExistingUsers { .. } => RaftScope::Global,
+            SystemRequest::RegisterEmailHash { .. } => RaftScope::Global,
+            SystemRequest::RemoveEmailHash { .. } => RaftScope::Global,
+            SystemRequest::RemoveNode { .. } => RaftScope::Global,
+            SystemRequest::SetBlindingKeyVersion { .. } => RaftScope::Global,
+            SystemRequest::UpdateOrganizationDirectoryStatus { .. } => RaftScope::Global,
+            SystemRequest::UpdateOrganizationRouting { .. } => RaftScope::Global,
+            SystemRequest::UpdateRehashProgress { .. } => RaftScope::Global,
+            SystemRequest::UpdateUser { .. } => RaftScope::Global,
+            SystemRequest::UpdateUserDirectoryStatus { .. } => RaftScope::Global,
+            SystemRequest::VerifyUserEmail { .. } => RaftScope::Global,
 
             // REGIONAL variants — carry plaintext PII
-            SystemRequest::CreateUserEmail { .. } => "regional",
-            SystemRequest::UpdateUserProfile { .. } => "regional",
-            SystemRequest::CreateEmailVerification { .. } => "regional",
-            SystemRequest::VerifyEmailCode { .. } => "regional",
-            SystemRequest::CleanupExpiredOnboarding => "regional",
-            SystemRequest::WriteOnboardingUserProfile { .. } => "regional",
-            SystemRequest::WriteTeamProfile { .. } => "regional",
-            SystemRequest::WriteAppProfile { .. } => "regional",
-            SystemRequest::DeleteTeamProfile { .. } => "regional",
-            SystemRequest::DeleteAppProfile { .. } => "regional",
-            SystemRequest::PurgeOrganizationRegional { .. } => "regional",
+            SystemRequest::AddTeamMember { .. } => RaftScope::Regional,
+            SystemRequest::CleanupExpiredOnboarding => RaftScope::Regional,
+            SystemRequest::CreateEmailVerification { .. } => RaftScope::Regional,
+            SystemRequest::CreateUserEmail { .. } => RaftScope::Regional,
+            SystemRequest::DeleteAppProfile { .. } => RaftScope::Regional,
+            SystemRequest::DeleteClientAssertionName { .. } => RaftScope::Regional,
+            SystemRequest::DeleteTeamProfile { .. } => RaftScope::Regional,
+            SystemRequest::PurgeOrganizationRegional { .. } => RaftScope::Regional,
+            SystemRequest::RemoveTeamMember { .. } => RaftScope::Regional,
+            SystemRequest::UpdateOrganizationProfile { .. } => RaftScope::Regional,
+            SystemRequest::UpdateUserProfile { .. } => RaftScope::Regional,
+            SystemRequest::VerifyEmailCode { .. } => RaftScope::Regional,
+            SystemRequest::WriteAppProfile { .. } => RaftScope::Regional,
+            SystemRequest::WriteClientAssertionName { .. } => RaftScope::Regional,
+            SystemRequest::WriteOnboardingUserProfile { .. } => RaftScope::Regional,
+            SystemRequest::WriteOrganizationProfile { .. } => RaftScope::Regional,
+            SystemRequest::WriteTeamProfile { .. } => RaftScope::Regional,
         }
     }
 
@@ -2625,17 +2789,17 @@ mod tests {
             user_id: UserId::new(1),
             email: "user@example.com".to_string(),
         };
-        assert_eq!(classify_system_request(&regional_email), "regional");
+        assert_eq!(classify_system_request(&regional_email), RaftScope::Regional);
 
         // UpdateUserProfile — REGIONAL (contains plaintext name)
         let regional_profile =
             SystemRequest::UpdateUserProfile { user_id: UserId::new(1), name: "Alice".to_string() };
-        assert_eq!(classify_system_request(&regional_profile), "regional");
+        assert_eq!(classify_system_request(&regional_profile), RaftScope::Regional);
 
         // EraseUser — GLOBAL (no PII, only user_id + region)
         let global_erase =
             SystemRequest::EraseUser { user_id: UserId::new(1), region: Region::US_EAST_VA };
-        assert_eq!(classify_system_request(&global_erase), "global");
+        assert_eq!(classify_system_request(&global_erase), RaftScope::Global);
 
         // CreateUser — GLOBAL (no PII, only IDs + slug + region)
         let global_create = SystemRequest::CreateUser {
@@ -2644,7 +2808,7 @@ mod tests {
             slug: UserSlug::new(100),
             region: Region::US_EAST_VA,
         };
-        assert_eq!(classify_system_request(&global_create), "global");
+        assert_eq!(classify_system_request(&global_create), RaftScope::Global);
     }
 
     /// Verifies that GLOBAL SystemRequest variants contain no String fields
@@ -2658,34 +2822,36 @@ mod tests {
     fn test_global_string_fields_are_not_pii() {
         // AddNode::address — gRPC network address, not PII
         let add_node = SystemRequest::AddNode { node_id: 1, address: "10.0.0.1:50051".to_string() };
-        assert_eq!(classify_system_request(&add_node), "global");
+        assert_eq!(classify_system_request(&add_node), RaftScope::Global);
 
         // RegisterEmailHash::hmac_hex — cryptographic hash, not PII
         let register_hash = SystemRequest::RegisterEmailHash {
             hmac_hex: "abcdef1234567890".to_string(),
             user_id: UserId::new(1),
         };
-        assert_eq!(classify_system_request(&register_hash), "global");
+        assert_eq!(classify_system_request(&register_hash), RaftScope::Global);
 
         // RemoveEmailHash::hmac_hex — cryptographic hash, not PII
         let remove_hash =
             SystemRequest::RemoveEmailHash { hmac_hex: "abcdef1234567890".to_string() };
-        assert_eq!(classify_system_request(&remove_hash), "global");
+        assert_eq!(classify_system_request(&remove_hash), RaftScope::Global);
 
-        // WriteOrganizationProfile — carries org name (PII), classified as regional
+        // WriteOrganizationProfile — carries sealed org name, classified as regional
         let write_profile = SystemRequest::WriteOrganizationProfile {
             organization: OrganizationId::new(1),
-            name: "Test Org".to_string(),
+            sealed_name: vec![0; 48],
+            name_nonce: [0; 12],
             admin: UserId::new(1),
+            org_key_bytes: [0xAA; 32],
         };
-        assert_eq!(classify_system_request(&write_profile), "regional");
+        assert_eq!(classify_system_request(&write_profile), RaftScope::Regional);
 
         // UpdateOrganizationProfile — carries org name (PII), classified as regional
         let update_profile = SystemRequest::UpdateOrganizationProfile {
             organization: OrganizationId::new(1),
             name: "Updated Org".to_string(),
         };
-        assert_eq!(classify_system_request(&update_profile), "regional");
+        assert_eq!(classify_system_request(&update_profile), RaftScope::Regional);
 
         // WriteTeamProfile — carries team name (PII), classified as regional
         let write_team = SystemRequest::WriteTeamProfile {
@@ -2694,7 +2860,7 @@ mod tests {
             slug: TeamSlug::new(100),
             name: "Engineering".to_string(),
         };
-        assert_eq!(classify_system_request(&write_team), "regional");
+        assert_eq!(classify_system_request(&write_team), RaftScope::Regional);
 
         // WriteAppProfile — carries app name + description (PII), classified as regional
         let write_app = SystemRequest::WriteAppProfile {
@@ -2703,7 +2869,7 @@ mod tests {
             name: "My App".to_string(),
             description: Some("App description".to_string()),
         };
-        assert_eq!(classify_system_request(&write_app), "regional");
+        assert_eq!(classify_system_request(&write_app), RaftScope::Regional);
 
         // DeleteTeamProfile — REGIONAL cleanup (profile + name index)
         let delete_team = SystemRequest::DeleteTeamProfile {
@@ -2711,19 +2877,53 @@ mod tests {
             team: TeamId::new(1),
             move_members_to: None,
         };
-        assert_eq!(classify_system_request(&delete_team), "regional");
+        assert_eq!(classify_system_request(&delete_team), RaftScope::Regional);
 
-        // DeleteAppProfile — REGIONAL cleanup (profile + name index)
+        // AddTeamMember — REGIONAL (member data is in team profile)
+        let add_member = SystemRequest::AddTeamMember {
+            organization: OrganizationId::new(1),
+            team: TeamId::new(1),
+            user_id: UserId::new(1),
+            role: inferadb_ledger_state::system::TeamMemberRole::Member,
+        };
+        assert_eq!(classify_system_request(&add_member), RaftScope::Regional);
+
+        // RemoveTeamMember — REGIONAL (member data is in team profile)
+        let remove_member = SystemRequest::RemoveTeamMember {
+            organization: OrganizationId::new(1),
+            team: TeamId::new(1),
+            user_id: UserId::new(1),
+        };
+        assert_eq!(classify_system_request(&remove_member), RaftScope::Regional);
+
+        // WriteClientAssertionName — REGIONAL (assertion name is potential PII)
+        let write_assertion_name = SystemRequest::WriteClientAssertionName {
+            organization: OrganizationId::new(1),
+            app: AppId::new(1),
+            assertion: ClientAssertionId::new(1),
+            name: "test".to_string(),
+        };
+        assert_eq!(classify_system_request(&write_assertion_name), RaftScope::Regional);
+
+        // DeleteClientAssertionName — REGIONAL cleanup
+        let delete_assertion_name = SystemRequest::DeleteClientAssertionName {
+            organization: OrganizationId::new(1),
+            app: AppId::new(1),
+            assertion: ClientAssertionId::new(1),
+        };
+        assert_eq!(classify_system_request(&delete_assertion_name), RaftScope::Regional);
+
+        // DeleteAppProfile — REGIONAL cleanup (profile + name index + assertion names)
         let delete_app_profile = SystemRequest::DeleteAppProfile {
             organization: OrganizationId::new(1),
             app: AppId::new(1),
         };
-        assert_eq!(classify_system_request(&delete_app_profile), "regional");
+        assert_eq!(classify_system_request(&delete_app_profile), RaftScope::Regional);
 
         // PurgeOrganizationRegional — REGIONAL cleanup during org purge
         let purge_regional =
             SystemRequest::PurgeOrganizationRegional { organization: OrganizationId::new(1) };
-        assert_eq!(classify_system_request(&purge_regional), "regional");
+        assert_eq!(classify_system_request(&purge_regional), RaftScope::Regional);
     }
 
     /// Classifies whether a `LedgerRequest` contains plaintext PII.
@@ -2736,45 +2936,48 @@ mod tests {
     ///
     /// This exhaustive match ensures new variants are reviewed for PII before
     /// they can be added without a compile error.
-    fn classify_ledger_request(req: &LedgerRequest) -> &'static str {
+    fn classify_ledger_request(req: &LedgerRequest) -> RaftScope {
         match req {
-            LedgerRequest::Write { .. } => "global",
-            LedgerRequest::CreateVault { .. } => "global",
-            LedgerRequest::DeleteOrganization { .. } => "global",
-            LedgerRequest::DeleteVault { .. } => "global",
-            LedgerRequest::SuspendOrganization { .. } => "global",
-            LedgerRequest::ResumeOrganization { .. } => "global",
-            LedgerRequest::RemoveOrganizationMember { .. } => "global",
-            LedgerRequest::UpdateOrganizationMemberRole { .. } => "global",
-            LedgerRequest::PurgeOrganization { .. } => "global",
-            LedgerRequest::StartMigration { .. } => "global",
-            LedgerRequest::CompleteMigration { .. } => "global",
-            LedgerRequest::UpdateVaultHealth { .. } => "global",
-            LedgerRequest::BatchWrite { .. } => "global",
-            LedgerRequest::CreateOrganizationTeam { .. } => "global",
-            LedgerRequest::DeleteOrganizationTeam { .. } => "global",
-            LedgerRequest::CreateApp { .. } => "global",
-            LedgerRequest::DeleteApp { .. } => "global",
-            LedgerRequest::SetAppEnabled { .. } => "global",
-            LedgerRequest::SetAppCredentialEnabled { .. } => "global",
-            LedgerRequest::RotateAppClientSecret { .. } => "global",
-            LedgerRequest::CreateAppClientAssertion { .. } => "global",
-            LedgerRequest::DeleteAppClientAssertion { .. } => "global",
-            LedgerRequest::SetAppClientAssertionEnabled { .. } => "global",
-            LedgerRequest::AddAppVault { .. } => "global",
-            LedgerRequest::UpdateAppVault { .. } => "global",
-            LedgerRequest::RemoveAppVault { .. } => "global",
-            LedgerRequest::CreateSigningKey { .. } => "global",
-            LedgerRequest::RotateSigningKey { .. } => "global",
-            LedgerRequest::RevokeSigningKey { .. } => "global",
-            LedgerRequest::TransitionSigningKeyRevoked { .. } => "global",
-            LedgerRequest::CreateRefreshToken { .. } => "global",
-            LedgerRequest::UseRefreshToken { .. } => "global",
-            LedgerRequest::RevokeTokenFamily { .. } => "global",
-            LedgerRequest::RevokeAllUserSessions { .. } => "global",
-            LedgerRequest::DeleteExpiredRefreshTokens => "global",
-            LedgerRequest::System { .. } => "global",
-            LedgerRequest::EncryptedSystem(_) => "regional",
+            LedgerRequest::Write { .. } => RaftScope::Global,
+            LedgerRequest::CreateVault { .. } => RaftScope::Global,
+            LedgerRequest::DeleteOrganization { .. } => RaftScope::Global,
+            LedgerRequest::DeleteVault { .. } => RaftScope::Global,
+            LedgerRequest::UpdateVault { .. } => RaftScope::Global,
+            LedgerRequest::SuspendOrganization { .. } => RaftScope::Global,
+            LedgerRequest::ResumeOrganization { .. } => RaftScope::Global,
+            LedgerRequest::RemoveOrganizationMember { .. } => RaftScope::Global,
+            LedgerRequest::UpdateOrganizationMemberRole { .. } => RaftScope::Global,
+            LedgerRequest::PurgeOrganization { .. } => RaftScope::Global,
+            LedgerRequest::StartMigration { .. } => RaftScope::Global,
+            LedgerRequest::CompleteMigration { .. } => RaftScope::Global,
+            LedgerRequest::UpdateVaultHealth { .. } => RaftScope::Global,
+            LedgerRequest::BatchWrite { .. } => RaftScope::Global,
+            LedgerRequest::CreateOrganizationTeam { .. } => RaftScope::Global,
+            LedgerRequest::DeleteOrganizationTeam { .. } => RaftScope::Global,
+            LedgerRequest::CreateApp { .. } => RaftScope::Global,
+            LedgerRequest::DeleteApp { .. } => RaftScope::Global,
+            LedgerRequest::SetAppEnabled { .. } => RaftScope::Global,
+            LedgerRequest::SetAppCredentialEnabled { .. } => RaftScope::Global,
+            LedgerRequest::RotateAppClientSecret { .. } => RaftScope::Global,
+            LedgerRequest::CreateAppClientAssertion { .. } => RaftScope::Global,
+            LedgerRequest::DeleteAppClientAssertion { .. } => RaftScope::Global,
+            LedgerRequest::SetAppClientAssertionEnabled { .. } => RaftScope::Global,
+            LedgerRequest::AddAppVault { .. } => RaftScope::Global,
+            LedgerRequest::UpdateAppVault { .. } => RaftScope::Global,
+            LedgerRequest::RemoveAppVault { .. } => RaftScope::Global,
+            LedgerRequest::CreateSigningKey { .. } => RaftScope::Global,
+            LedgerRequest::RotateSigningKey { .. } => RaftScope::Global,
+            LedgerRequest::RevokeSigningKey { .. } => RaftScope::Global,
+            LedgerRequest::TransitionSigningKeyRevoked { .. } => RaftScope::Global,
+            LedgerRequest::CreateRefreshToken { .. } => RaftScope::Global,
+            LedgerRequest::UseRefreshToken { .. } => RaftScope::Global,
+            LedgerRequest::RevokeTokenFamily { .. } => RaftScope::Global,
+            LedgerRequest::RevokeAllUserSessions { .. } => RaftScope::Global,
+            LedgerRequest::RevokeAllAppSessions { .. } => RaftScope::Global,
+            LedgerRequest::DeleteExpiredRefreshTokens => RaftScope::Global,
+            LedgerRequest::System { .. } => RaftScope::Global,
+            LedgerRequest::EncryptedUserSystem(_) => RaftScope::Regional,
+            LedgerRequest::EncryptedOrgSystem(_) => RaftScope::Regional,
         }
     }
 
@@ -2789,27 +2992,36 @@ mod tests {
             idempotency_key: [0; 16],
             request_hash: 0,
         };
-        assert_eq!(classify_ledger_request(&write), "global");
+        assert_eq!(classify_ledger_request(&write), RaftScope::Global);
 
         let create_team = LedgerRequest::CreateOrganizationTeam {
             organization: OrganizationId::new(1),
             slug: TeamSlug::new(100),
         };
-        assert_eq!(classify_ledger_request(&create_team), "global");
+        assert_eq!(classify_ledger_request(&create_team), RaftScope::Global);
 
         let create_app = LedgerRequest::CreateApp {
             organization: OrganizationId::new(1),
             slug: AppSlug::new(200),
         };
-        assert_eq!(classify_ledger_request(&create_app), "global");
+        assert_eq!(classify_ledger_request(&create_app), RaftScope::Global);
 
-        // EncryptedSystem — REGIONAL (contains encrypted PII)
+        // EncryptedUserSystem — REGIONAL (contains encrypted user PII)
         let encrypted =
-            LedgerRequest::EncryptedSystem(crate::entry_crypto::EncryptedSystemRequest {
+            LedgerRequest::EncryptedUserSystem(crate::entry_crypto::EncryptedUserSystemRequest {
                 sealed: vec![0; 48],
                 nonce: [0; 12],
                 user_id: UserId::new(1),
             });
-        assert_eq!(classify_ledger_request(&encrypted), "regional");
+        assert_eq!(classify_ledger_request(&encrypted), RaftScope::Regional);
+
+        // EncryptedOrgSystem — REGIONAL (contains encrypted org PII)
+        let encrypted_org =
+            LedgerRequest::EncryptedOrgSystem(crate::entry_crypto::EncryptedOrgSystemRequest {
+                sealed: vec![0; 48],
+                nonce: [0; 12],
+                organization: OrganizationId::new(1),
+            });
+        assert_eq!(classify_ledger_request(&encrypted_org), RaftScope::Regional);
     }
 }

@@ -1318,14 +1318,9 @@ impl proto::user_service_server::UserService for UserService {
             inferadb_ledger_types::email_hash::generate_verification_code(blinding_key);
         let expires_at = Utc::now() + inferadb_ledger_types::onboarding::CODE_TTL;
 
-        // Propose to REGIONAL Raft (email + code are PII)
-        let system_request = SystemRequest::CreateEmailVerification {
-            email_hmac,
-            email: req.email,
-            code_hash,
-            region,
-            expires_at,
-        };
+        // Propose to REGIONAL Raft (code hash is not PII, email excluded from log)
+        let system_request =
+            SystemRequest::CreateEmailVerification { email_hmac, code_hash, region, expires_at };
         let response =
             self.ctx.propose_regional(region, system_request, &grpc_metadata, &mut ctx).await?;
 

@@ -52,7 +52,7 @@
 //!
 //! async fn handle_request() {
 //!     let mut ctx = CanonicalLogLine::new("WriteService", "write");
-//!     ctx.set_client_info("client_123", 42, Some("user@example.com".into()));
+//!     ctx.set_client_info("client_123", 42, Some("user:7kQ3xP9m".into()));
 //!     ctx.set_target(1, 2);
 //!
 //!     // ... process request ...
@@ -656,7 +656,9 @@ impl RequestContext {
     ///
     /// * `client_id` - Idempotency client identifier (truncated to 128 chars).
     /// * `sequence` - Per-client sequence number.
-    /// * `actor` - Identity performing the operation.
+    /// * `actor` - Identity performing the operation. Must be an opaque identifier (slug, numeric
+    ///   ID), never an email or display name. Canonical log lines may be shipped to external
+    ///   aggregators without data residency controls.
     pub fn set_client_info(&mut self, client_id: &str, sequence: u64, actor: Option<String>) {
         self.client_id = Some(truncate_string(&sanitize_string(client_id), 128));
         self.sequence = Some(sequence);
@@ -674,6 +676,10 @@ impl RequestContext {
     }
 
     /// Sets the actor only.
+    ///
+    /// Must be an opaque identifier (slug, numeric ID), never an email or
+    /// display name. Canonical log lines may be shipped to external aggregators
+    /// without data residency controls.
     pub fn set_actor(&mut self, actor: &str) {
         self.actor = Some(sanitize_string(actor));
     }
@@ -1319,10 +1325,10 @@ mod tests {
     #[test]
     fn test_set_client_info() {
         let mut ctx = RequestContext::new("WriteService", "write");
-        ctx.set_client_info("client_123", 42, Some("user@example.com".into()));
+        ctx.set_client_info("client_123", 42, Some("user:7kQ3xP9m".into()));
         assert_eq!(ctx.client_id.as_deref(), Some("client_123"));
         assert_eq!(ctx.sequence, Some(42));
-        assert_eq!(ctx.actor.as_deref(), Some("user@example.com"));
+        assert_eq!(ctx.actor.as_deref(), Some("user:7kQ3xP9m"));
         ctx.suppress_emission();
     }
 
