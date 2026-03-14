@@ -115,6 +115,7 @@ mod tests {
                 slug,
                 region,
                 tier: Default::default(),
+                admin: UserId::new(1),
             }),
             state,
         );
@@ -188,6 +189,7 @@ mod tests {
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
             region: Region::US_EAST_VA,
             tier: Default::default(),
+            admin: UserId::new(1),
         });
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
@@ -223,6 +225,7 @@ mod tests {
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
             region: Region::US_EAST_VA,
             tier: Default::default(),
+            admin: UserId::new(1),
         });
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
@@ -265,6 +268,7 @@ mod tests {
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
             region: Region::IE_EAST_DUBLIN,
             tier: Default::default(),
+            admin: UserId::new(1),
         });
 
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
@@ -1879,6 +1883,7 @@ mod tests {
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
+                admin: UserId::new(1),
             }),
             LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
                 organization: OrganizationId::new(1),
@@ -1888,6 +1893,7 @@ mod tests {
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
+                admin: UserId::new(1),
             }),
             LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
                 organization: OrganizationId::new(2),
@@ -2114,6 +2120,7 @@ mod tests {
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
+                admin: UserId::new(1),
             }),
             LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
                 organization: OrganizationId::new(1),
@@ -2547,6 +2554,7 @@ mod tests {
                         slug: inferadb_ledger_types::OrganizationSlug::new(0),
                         region: Region::US_EAST_VA,
                         tier: Default::default(),
+                        admin: UserId::new(1),
                     },
                 ))),
             })
@@ -4207,6 +4215,7 @@ mod tests {
             slug: inferadb_ledger_types::OrganizationSlug::new(42_000),
             region: Region::US_EAST_VA,
             tier: Default::default(),
+            admin: UserId::new(1),
         });
 
         let mut events: Vec<EventEntry> = Vec::new();
@@ -4473,6 +4482,7 @@ mod tests {
             slug: inferadb_ledger_types::OrganizationSlug::new(9999),
             region: Region::US_EAST_VA,
             tier: Default::default(),
+            admin: UserId::new(1),
         });
         let mut all_events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
@@ -5600,6 +5610,7 @@ mod tests {
                         slug: inferadb_ledger_types::OrganizationSlug::new(1000),
                         region: Region::US_EAST_VA,
                         tier: Default::default(),
+                        admin: UserId::new(1),
                     },
                 ))),
             },
@@ -5642,6 +5653,7 @@ mod tests {
                         slug: inferadb_ledger_types::OrganizationSlug::new(2000),
                         region: Region::US_EAST_VA,
                         tier: Default::default(),
+                        admin: UserId::new(1),
                     },
                 ))),
             },
@@ -5921,6 +5933,7 @@ mod tests {
                     slug: inferadb_ledger_types::OrganizationSlug::new(999),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
+                    admin: UserId::new(1),
                 },
             ))),
         };
@@ -6046,6 +6059,7 @@ mod tests {
                     slug: inferadb_ledger_types::OrganizationSlug::new(9999),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
+                    admin: UserId::new(1),
                 }),
                 proposed_at: Utc::now(),
                 state_root_commitments: commitments,
@@ -6098,6 +6112,7 @@ mod tests {
                     slug: inferadb_ledger_types::OrganizationSlug::new(8888),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
+                    admin: UserId::new(1),
                 }),
                 proposed_at: Utc::now(),
                 state_root_commitments: commitments,
@@ -6139,6 +6154,7 @@ mod tests {
                     slug: inferadb_ledger_types::OrganizationSlug::new(7777),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
+                    admin: UserId::new(1),
                 }),
                 proposed_at: Utc::now(),
                 state_root_commitments: vec![crate::types::StateRootCommitment {
@@ -6180,6 +6196,7 @@ mod tests {
                     slug: inferadb_ledger_types::OrganizationSlug::new(6666),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
+                    admin: UserId::new(1),
                 }),
                 proposed_at: Utc::now(),
                 state_root_commitments: vec![crate::types::StateRootCommitment {
@@ -6270,6 +6287,7 @@ mod tests {
                     slug: inferadb_ledger_types::OrganizationSlug::new(5555),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
+                    admin: UserId::new(1),
                 }),
                 proposed_at: Utc::now(),
                 state_root_commitments: commitments,

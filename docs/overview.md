@@ -158,11 +158,11 @@ _meta:seq:refresh_token   → next RefreshTokenId
 | Email index          | `_idx:email:{email}`         | `_idx:email:alice@example.com`  |
 | User emails index    | `_idx:user_emails:{user_id}` | `_idx:user_emails:1`            |
 | Organization routing | `ns:{organization_slug}`     | `ns:1`                          |
-| Node info            | `node:{id}`                  | `node:A`                        |
-| Signing key          | `_sys:signing_key:{id}`      | `_sys:signing_key:1`            |
+| Node info            | `_meta:node:{id}`            | `_meta:node:A`                  |
+| Signing key          | `signing_key:{id}`           | `signing_key:1`                 |
 | Signing key index    | `_idx:signing_key:kid:{kid}` | `_idx:signing_key:kid:{uuid}`   |
 | Signing key scope    | `_idx:signing_key:scope:...` | `_idx:signing_key:scope:global` |
-| Refresh token        | `_sys:refresh_token:{id}`    | `_sys:refresh_token:1`          |
+| Refresh token        | `refresh_token:{id}`         | `refresh_token:1`               |
 | Refresh token hash   | `_idx:refresh_token:hash:..` | `_idx:refresh_token:hash:{hex}` |
 | Sequence counter     | `_meta:seq:{entity_type}`    | `_meta:seq:user`                |
 

@@ -30,14 +30,15 @@ use inferadb_ledger_raft::{
     types::{LedgerRequest, LedgerResponse},
 };
 use inferadb_ledger_state::system::{
-    OrganizationMember as DomainOrganizationMember, OrganizationMemberRole as DomainMemberRole,
-    OrganizationProfile, OrganizationRegistry, OrganizationStatus as DomainOrganizationStatus,
-    SystemKeys, SystemOrganizationService, TeamProfile,
+    Organization, OrganizationMember as DomainOrganizationMember,
+    OrganizationMemberRole as DomainMemberRole, OrganizationProfile, OrganizationRegistry,
+    OrganizationStatus as DomainOrganizationStatus, SYSTEM_VAULT_ID, SystemKeys,
+    SystemOrganizationService, Team,
 };
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
     OrganizationId as DomainOrganizationId, OrganizationSlug as DomainOrganizationSlug, TeamId,
-    VaultId as SystemVaultId, decode,
+    decode,
     events::{EventAction, EventOutcome as EventOutcomeType},
     validation,
 };
@@ -98,54 +99,74 @@ impl OrganizationService {
         ))
     }
 
-    /// Reads the organization profile from the regional store.
-    fn read_org_profile(&self, org_id: DomainOrganizationId) -> Option<OrganizationProfile> {
-        let key = SystemKeys::organization_profile_key(org_id);
-        let entity = self.ctx.state.get_entity(SystemVaultId::new(0), key.as_bytes()).ok()??;
-        decode::<OrganizationProfile>(&entity.value)
+    /// Reads the `Organization` skeleton from the GLOBAL state layer and overlays
+    /// PII (name) from the REGIONAL `OrganizationProfile`.
+    ///
+    /// Returns the merged view. When REGIONAL is unavailable, the skeleton
+    /// is returned with `name: ""` (graceful degradation).
+    fn read_organization(&self, org_id: DomainOrganizationId) -> Option<Organization> {
+        let key = SystemKeys::organization_key(org_id);
+        let entity = self.ctx.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).ok()??;
+        let mut org = decode::<Organization>(&entity.value)
             .inspect_err(|e| {
                 tracing::warn!(
                     organization = org_id.value(),
                     error = %e,
-                    "corrupt organization profile, skipping"
+                    "corrupt Organization skeleton, skipping"
                 );
             })
-            .ok()
+            .ok()?;
+        self.overlay_org_profile(&mut org, org_id);
+        Some(org)
+    }
+
+    /// Overlays PII fields from a REGIONAL `OrganizationProfile` onto a GLOBAL
+    /// `Organization` skeleton. Matching the `overlay_app_profile()` pattern.
+    fn overlay_org_profile(&self, org: &mut Organization, org_id: DomainOrganizationId) {
+        let regional = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .and_then(|meta| self.ctx.regional_state(meta.region).ok());
+        let Some(state) = regional else { return };
+        let key = SystemKeys::organization_profile_key(org_id);
+        let Ok(Some(entity)) = state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) else {
+            return;
+        };
+        if let Ok(profile) = decode::<OrganizationProfile>(&entity.value) {
+            org.name = profile.name;
+        }
     }
 
     /// Reads the organization registry from the StateLayer.
     fn read_org_registry(&self, org_id: DomainOrganizationId) -> Option<OrganizationRegistry> {
-        let key = SystemKeys::organization_key(org_id);
-        let entity = self.ctx.state.get_entity(SystemVaultId::new(0), key.as_bytes()).ok()??;
+        let key = SystemKeys::organization_registry_key(org_id);
+        let entity = self.ctx.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).ok()??;
         decode::<OrganizationRegistry>(&entity.value).ok()
     }
 
-    /// Reads a team profile from the REGIONAL state layer.
-    fn read_team_profile(
-        &self,
-        org_id: DomainOrganizationId,
-        team_id: TeamId,
-    ) -> Option<TeamProfile> {
+    /// Reads a team record from the REGIONAL state layer.
+    fn read_team(&self, org_id: DomainOrganizationId, team_id: TeamId) -> Option<Team> {
         let org_meta = self.ctx.applied_state.get_organization(org_id)?;
         let state = self.ctx.regional_state(org_meta.region).ok()?;
-        let key = SystemKeys::team_profile_key(org_id, team_id);
-        let entity = state.get_entity(SystemVaultId::new(0), key.as_bytes()).ok()??;
-        decode::<TeamProfile>(&entity.value)
+        let key = SystemKeys::team_key(org_id, team_id);
+        let entity = state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).ok()??;
+        decode::<Team>(&entity.value)
             .inspect_err(|e| {
                 tracing::warn!(
                     organization = org_id.value(),
                     team = team_id.value(),
                     error = %e,
-                    "corrupt team profile, skipping"
+                    "corrupt team record, skipping"
                 );
             })
             .ok()
     }
 
-    /// Lists all team profiles for an organization from the REGIONAL state layer.
-    fn list_team_profiles(&self, org_id: DomainOrganizationId) -> Vec<TeamProfile> {
-        /// Maximum number of team profiles to load per organization.
-        const MAX_TEAM_PROFILES: usize = 1_000;
+    /// Lists all team records for an organization from the REGIONAL state layer.
+    fn list_teams(&self, org_id: DomainOrganizationId) -> Vec<Team> {
+        /// Maximum number of team records to load per organization.
+        const MAX_TEAMS: usize = 1_000;
 
         let org_meta = match self.ctx.applied_state.get_organization(org_id) {
             Some(meta) => meta,
@@ -156,26 +177,21 @@ impl OrganizationService {
             Err(_) => return Vec::new(),
         };
 
-        let prefix = format!("{}{}:", SystemKeys::TEAM_PROFILE_PREFIX, org_id.value());
-        let entities = match state.list_entities(
-            SystemVaultId::new(0),
-            Some(&prefix),
-            None,
-            MAX_TEAM_PROFILES,
-        ) {
+        let prefix = format!("{}{}:", SystemKeys::TEAM_PREFIX, org_id.value());
+        let entities = match state.list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, MAX_TEAMS) {
             Ok(entities) => entities,
             Err(_) => return Vec::new(),
         };
         entities
             .iter()
             .filter_map(|e| {
-                decode::<TeamProfile>(&e.value)
+                decode::<Team>(&e.value)
                     .inspect_err(|err| {
                         tracing::warn!(
                             organization = org_id.value(),
                             key = %String::from_utf8_lossy(&e.key),
                             error = %err,
-                            "corrupt team profile, skipping"
+                            "corrupt team record, skipping"
                         );
                     })
                     .ok()
@@ -183,10 +199,10 @@ impl OrganizationService {
             .collect()
     }
 
-    /// Converts a domain `TeamProfile` to its proto representation.
+    /// Converts a domain `Team` to its proto representation.
     fn team_to_proto(
         sys_svc: &SystemOrganizationService<FileBackend>,
-        team: &TeamProfile,
+        team: &Team,
         org_slug: DomainOrganizationSlug,
     ) -> proto::OrganizationTeam {
         let members = team
@@ -213,17 +229,17 @@ impl OrganizationService {
         }
     }
 
-    /// Resolves a user slug to a `UserId` and loads the non-deleted organization profile.
+    /// Resolves a user slug to a `UserId` and loads the non-deleted organization.
     ///
     /// Shared precondition check for `validate_org_admin`, `validate_org_member`,
     /// and `validate_org_admin_or_team_manager`.
-    fn resolve_user_and_org_profile(
+    fn resolve_user_and_organization(
         &self,
         slug_resolver: &SlugResolver,
         organization_id: DomainOrganizationId,
         user_slug: &Option<proto::UserSlug>,
         ctx: &mut RequestContext,
-    ) -> Result<(inferadb_ledger_types::UserId, OrganizationProfile), Status> {
+    ) -> Result<(inferadb_ledger_types::UserId, Organization), Status> {
         let user_id = slug_resolver.extract_and_resolve_user(user_slug).inspect_err(|status| {
             ctx.set_error("InvalidArgument", status.message());
         })?;
@@ -236,12 +252,12 @@ impl OrganizationService {
             return Err(Status::not_found("Organization not found"));
         }
 
-        let profile = self.read_org_profile(organization_id).ok_or_else(|| {
-            ctx.set_error("NotFound", "Organization profile not found");
+        let org = self.read_organization(organization_id).ok_or_else(|| {
+            ctx.set_error("NotFound", "Organization not found");
             Status::not_found("Organization not found")
         })?;
 
-        Ok((user_id, profile))
+        Ok((user_id, org))
     }
 
     /// Validates that the initiator is an administrator of the given organization.
@@ -254,10 +270,14 @@ impl OrganizationService {
         initiator_slug: &Option<proto::UserSlug>,
         ctx: &mut RequestContext,
     ) -> Result<inferadb_ledger_types::UserId, Status> {
-        let (initiator_id, profile) =
-            self.resolve_user_and_org_profile(slug_resolver, organization_id, initiator_slug, ctx)?;
+        let (initiator_id, org) = self.resolve_user_and_organization(
+            slug_resolver,
+            organization_id,
+            initiator_slug,
+            ctx,
+        )?;
 
-        let is_admin = profile
+        let is_admin = org
             .members
             .iter()
             .any(|m| m.user_id == initiator_id && m.role == DomainMemberRole::Admin);
@@ -271,24 +291,24 @@ impl OrganizationService {
 
     /// Validates that the caller is a member of the given organization (any role).
     ///
-    /// Returns the resolved `UserId` and profile on success.
+    /// Returns the resolved `UserId` and organization on success.
     fn validate_org_member(
         &self,
         slug_resolver: &SlugResolver,
         organization_id: DomainOrganizationId,
         caller_slug: &Option<proto::UserSlug>,
         ctx: &mut RequestContext,
-    ) -> Result<(inferadb_ledger_types::UserId, OrganizationProfile), Status> {
-        let (caller_id, profile) =
-            self.resolve_user_and_org_profile(slug_resolver, organization_id, caller_slug, ctx)?;
+    ) -> Result<(inferadb_ledger_types::UserId, Organization), Status> {
+        let (caller_id, org) =
+            self.resolve_user_and_organization(slug_resolver, organization_id, caller_slug, ctx)?;
 
-        let is_member = profile.members.iter().any(|m| m.user_id == caller_id);
+        let is_member = org.members.iter().any(|m| m.user_id == caller_id);
         if !is_member {
             ctx.set_error("NotFound", "Organization not found");
             return Err(Status::not_found("Organization not found"));
         }
 
-        Ok((caller_id, profile))
+        Ok((caller_id, org))
     }
 
     /// Validates that the initiator is an org admin or team manager.
@@ -302,14 +322,18 @@ impl OrganizationService {
         initiator_slug: &Option<proto::UserSlug>,
         ctx: &mut RequestContext,
     ) -> Result<inferadb_ledger_types::UserId, Status> {
-        let (initiator_id, profile) =
-            self.resolve_user_and_org_profile(slug_resolver, organization_id, initiator_slug, ctx)?;
+        let (initiator_id, org) = self.resolve_user_and_organization(
+            slug_resolver,
+            organization_id,
+            initiator_slug,
+            ctx,
+        )?;
 
-        let is_org_admin = profile
+        let is_org_admin = org
             .members
             .iter()
             .any(|m| m.user_id == initiator_id && m.role == DomainMemberRole::Admin);
-        let is_team_manager = self.read_team_profile(organization_id, team_id).is_some_and(|t| {
+        let is_team_manager = self.read_team(organization_id, team_id).is_some_and(|t| {
             t.members.iter().any(|m| {
                 m.user_id == initiator_id
                     && m.role == inferadb_ledger_state::system::TeamMemberRole::Manager
@@ -341,20 +365,20 @@ impl OrganizationService {
 
     /// Builds a `GetOrganizationResponse` from Raft state + StateLayer data.
     ///
-    /// Accepts an optional pre-loaded profile to avoid a redundant StateLayer read
-    /// when the caller already has the profile (e.g. from `validate_org_member`).
+    /// Accepts an optional pre-loaded `Organization` to avoid a redundant
+    /// StateLayer read when the caller already has it (e.g. from `validate_org_member`).
     fn build_org_response(
         &self,
-        org: inferadb_ledger_raft::log_storage::OrganizationMeta,
+        org_meta: inferadb_ledger_raft::log_storage::OrganizationMeta,
         resolved_slug: DomainOrganizationSlug,
-        cached_profile: Option<OrganizationProfile>,
+        cached_org: Option<Organization>,
     ) -> GetOrganizationResponse {
-        let profile = cached_profile.or_else(|| self.read_org_profile(org.organization));
-        let registry = self.read_org_registry(org.organization);
-        let status = crate::proto_compat::organization_status_to_proto(org.status);
-        let tier = crate::proto_compat::organization_tier_to_proto(org.tier);
+        let org = cached_org.or_else(|| self.read_organization(org_meta.organization));
+        let registry = self.read_org_registry(org_meta.organization);
+        let status = crate::proto_compat::organization_status_to_proto(org_meta.status);
+        let tier = crate::proto_compat::organization_tier_to_proto(org_meta.tier);
 
-        let name = profile.as_ref().map_or(String::new(), |p| p.name.clone());
+        let name = org.as_ref().map_or(String::new(), |o| o.name.clone());
         let member_nodes = registry.as_ref().map_or(vec![], |r| {
             r.member_nodes.iter().map(|id| NodeId { id: id.to_string() }).collect()
         });
@@ -362,17 +386,17 @@ impl OrganizationService {
         let created_at =
             registry.as_ref().map(|r| crate::proto_compat::datetime_to_proto(&r.created_at));
 
-        let members = profile.as_ref().map_or(vec![], |p| {
+        let members = org.as_ref().map_or(vec![], |o| {
             let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
-            p.members.iter().filter_map(|m| Self::member_to_proto(&sys_svc, m)).collect()
+            o.members.iter().filter_map(|m| Self::member_to_proto(&sys_svc, m)).collect()
         });
         let updated_at =
-            profile.as_ref().map(|p| crate::proto_compat::datetime_to_proto(&p.updated_at));
+            org.as_ref().map(|o| crate::proto_compat::datetime_to_proto(&o.updated_at));
 
         GetOrganizationResponse {
             slug: Some(OrganizationSlug { slug: resolved_slug.value() }),
             name,
-            region: ProtoRegion::from(org.region).into(),
+            region: ProtoRegion::from(org_meta.region).into(),
             member_nodes,
             status: status.into(),
             config_version,
@@ -859,7 +883,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             },
         );
 
-        let saga_key = format!("saga:{}", saga.id);
+        let saga_key = format!("_meta:saga:{}", saga.id);
         let saga_wrapped = inferadb_ledger_state::system::Saga::MigrateOrg(saga);
         let saga_bytes = serde_json::to_vec(&saga_wrapped)
             .map_err(|e| Status::internal(format!("Failed to serialize migration saga: {e}")))?;
@@ -1010,7 +1034,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             .ok_or_else(|| Status::not_found("Organization not found"))?;
 
         // Route the name update to the REGIONAL Raft group — name is PII
-        // and must not appear in the GLOBAL Raft log. Encrypted with OrgKey
+        // and must not appear in the GLOBAL Raft log. Encrypted with OrgShredKey
         // for crypto-shredding on organization purge.
         let system_request =
             inferadb_ledger_raft::types::SystemRequest::UpdateOrganizationProfile {
@@ -1176,7 +1200,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             })?;
 
         // Read the profile to validate the operation
-        let profile = self.read_org_profile(organization_id).ok_or_else(|| {
+        let profile = self.read_organization(organization_id).ok_or_else(|| {
             ctx.set_error("NotFound", "Organization profile not found");
             Status::not_found("Organization not found")
         })?;
@@ -1294,7 +1318,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         let new_role = crate::proto_compat::member_role_from_proto(proto_role);
 
         // Read profile to validate target is a member and check last-admin rule
-        let profile = self.read_org_profile(organization_id).ok_or_else(|| {
+        let profile = self.read_organization(organization_id).ok_or_else(|| {
             ctx.set_error("NotFound", "Organization profile not found");
             Status::not_found("Organization not found")
         })?;
@@ -1329,7 +1353,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
 
                 // Re-read profile after Raft apply for fresh data
                 let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
-                let member = self.read_org_profile(organization_id).and_then(|p| {
+                let member = self.read_organization(organization_id).and_then(|p| {
                     p.members
                         .iter()
                         .find(|m| m.user_id == target_id)
@@ -1386,7 +1410,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             .iter()
             .any(|m| m.user_id == caller_id && m.role == DomainMemberRole::Admin);
 
-        let mut teams = self.list_team_profiles(organization_id);
+        let mut teams = self.list_teams(organization_id);
         if !is_admin {
             // Non-admin members only see teams they belong to
             teams.retain(|t| t.members.iter().any(|m| m.user_id == caller_id));
@@ -1448,7 +1472,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             .any(|m| m.user_id == caller_id && m.role == DomainMemberRole::Admin);
 
         // Read team profile from REGIONAL state
-        let team = self.read_team_profile(organization_id, team_id).ok_or_else(|| {
+        let team = self.read_team(organization_id, team_id).ok_or_else(|| {
             ctx.set_error("NotFound", "Team not found");
             Status::not_found("Team not found")
         })?;
@@ -1496,7 +1520,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        let profile = self.read_org_profile(organization_id);
+        let profile = self.read_organization(organization_id);
         let is_org_admin = profile.as_ref().is_some_and(|p| {
             p.members.iter().any(|m| m.user_id == initiator_id && m.role == DomainMemberRole::Admin)
         });
@@ -1540,13 +1564,13 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         };
 
         // Step 2 (REGIONAL): Write team name to the org's regional store.
-        // Encrypted with OrgKey for crypto-shredding on organization purge.
+        // Encrypted with OrgShredKey for crypto-shredding on organization purge.
         let org_meta = self
             .ctx
             .applied_state
             .get_organization(organization_id)
             .ok_or_else(|| Status::not_found("Organization not found"))?;
-        let system_request = inferadb_ledger_raft::types::SystemRequest::WriteTeamProfile {
+        let system_request = inferadb_ledger_raft::types::SystemRequest::WriteTeam {
             organization: organization_id,
             team: team_id,
             slug: team_slug,
@@ -1571,7 +1595,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         ctx.set_success();
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let team = self
-            .read_team_profile(organization_id, team_id)
+            .read_team(organization_id, team_id)
             .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));
         Ok(Response::new(CreateOrganizationTeamResponse { team }))
     }
@@ -1635,16 +1659,16 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             .applied_state
             .get_organization(organization_id)
             .ok_or_else(|| Status::not_found("Organization not found"))?;
-        let delete_profile = inferadb_ledger_raft::types::SystemRequest::DeleteTeamProfile {
+        let delete_team = inferadb_ledger_raft::types::SystemRequest::DeleteTeam {
             organization: organization_id,
             team: team_id,
             move_members_to: move_to,
         };
-        let profile_response = self
+        let delete_team_response = self
             .ctx
-            .propose_regional(org_meta.region, delete_profile, &grpc_metadata, &mut ctx)
+            .propose_regional(org_meta.region, delete_team, &grpc_metadata, &mut ctx)
             .await?;
-        if let LedgerResponse::Error { code, message } = profile_response {
+        if let LedgerResponse::Error { code, message } = delete_team_response {
             ctx.set_error(code.grpc_code_name(), &message);
             return Err(super::helpers::error_code_to_status(code, message));
         }
@@ -1723,7 +1747,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         };
 
         // Route name update to the org's regional Raft group (PII).
-        // Encrypted with OrgKey for crypto-shredding on organization purge.
+        // Encrypted with OrgShredKey for crypto-shredding on organization purge.
         let org_meta = self
             .ctx
             .applied_state
@@ -1734,7 +1758,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             .applied_state
             .resolve_team_id_to_slug(team_id)
             .ok_or_else(|| Status::not_found(format!("Team {} slug not found", team_id)))?;
-        let system_request = inferadb_ledger_raft::types::SystemRequest::WriteTeamProfile {
+        let system_request = inferadb_ledger_raft::types::SystemRequest::WriteTeam {
             organization: organization_id,
             team: team_id,
             slug: team_slug,
@@ -1756,7 +1780,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                 ctx.set_success();
                 let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
                 let team = self
-                    .read_team_profile(organization_id, team_id)
+                    .read_team(organization_id, team_id)
                     .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));
                 Ok(Response::new(UpdateOrganizationTeamResponse { team }))
             },
@@ -1817,7 +1841,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             .ok_or_else(|| Status::not_found("Organization not found"))?;
 
         // Verify the target user is a member of the organization
-        let org_profile = self.read_org_profile(organization_id).ok_or_else(|| {
+        let org_profile = self.read_organization(organization_id).ok_or_else(|| {
             ctx.set_error("NotFound", "Organization profile not found");
             Status::not_found("Organization profile not found")
         })?;
@@ -1848,7 +1872,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                 ctx.set_success();
                 let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
                 let team = self
-                    .read_team_profile(organization_id, team_id)
+                    .read_team(organization_id, team_id)
                     .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));
                 Ok(Response::new(AddTeamMemberResponse { team }))
             },

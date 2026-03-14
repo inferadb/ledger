@@ -115,8 +115,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         // For organization-scoped keys, add an org prefix index entry
         // so org deletion can find all signing keys for a given org.
         if let SigningKeyScope::Organization(org_id) = key.scope {
-            let org_index_key =
-                format!("{}{}", SystemKeys::signing_key_org_prefix(org_id), key.id.value());
+            let org_index_key = SystemKeys::signing_key_org_entry(org_id, key.id);
             ops.push(set_entity(org_index_key, encode(&key.id).context(CodecSnafu)?));
         }
 
@@ -249,11 +248,8 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
         let mut kids = Vec::new();
         for entry in entries {
-            let key_str = String::from_utf8_lossy(&entry.key);
-            // Skip org index entries (they're secondary indexes, not primary records)
-            if key_str.contains(":org:") {
-                continue;
-            }
+            // Org-index entries live under `_idx:signing_key:org:` which is
+            // disjoint from the `signing_key:` primary prefix — no filtering needed.
             let key: SigningKey = match decode(&entry.value) {
                 Ok(k) => k,
                 Err(e) => {
@@ -336,8 +332,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             // Kid index
             ops.push(Operation::DeleteEntity { key: SystemKeys::signing_key_kid_index(&key.kid) });
             // Org prefix index entry
-            let org_index_key =
-                format!("{}{}", SystemKeys::signing_key_org_prefix(org), key.id.value());
+            let org_index_key = SystemKeys::signing_key_org_entry(org, key.id);
             ops.push(Operation::DeleteEntity { key: org_index_key });
         }
 

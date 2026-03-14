@@ -215,7 +215,7 @@ async fn test_delete_user_saga_state_transitions() {
     let wrapped = Saga::DeleteUser(saga);
 
     // Write saga to storage
-    let saga_key = format!("saga:{}", saga_id);
+    let saga_key = format!("_meta:saga:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
     write_entity(leader.addr, organization, vault, &saga_key, &saga_value, "delete-test-client")
@@ -277,7 +277,7 @@ async fn test_completed_saga_not_reexecuted() {
     let wrapped = Saga::CreateOrganization(saga);
 
     // Write completed saga
-    let saga_key = format!("saga:{}", saga_id);
+    let saga_key = format!("_meta:saga:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
     write_entity(leader.addr, organization, vault, &saga_key, &saga_value, "completed-test-client")
@@ -336,7 +336,7 @@ async fn test_saga_serialization_roundtrip() {
     let wrapped = Saga::CreateOrganization(saga);
 
     // Write to storage
-    let saga_key = format!("saga:{}", saga_id);
+    let saga_key = format!("_meta:saga:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
     write_entity(leader.addr, organization, vault, &saga_key, &saga_value, "roundtrip-client")

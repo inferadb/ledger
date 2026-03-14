@@ -391,7 +391,7 @@ impl proto::app_service_server::AppService for AppService {
         };
 
         // Step 2 (REGIONAL): Write app name and description to the org's regional store.
-        // Encrypted with OrgKey for crypto-shredding on organization purge.
+        // Encrypted with OrgShredKey for crypto-shredding on organization purge.
         let org_meta = self
             .ctx
             .applied_state
@@ -507,7 +507,7 @@ impl proto::app_service_server::AppService for AppService {
         };
 
         // Route to the org's regional Raft group (name/description are PII).
-        // Encrypted with OrgKey for crypto-shredding on organization purge.
+        // Encrypted with OrgShredKey for crypto-shredding on organization purge.
         let org_meta = self
             .ctx
             .applied_state
@@ -933,7 +933,7 @@ impl proto::app_service_server::AppService for AppService {
         match response {
             LedgerResponse::AppClientAssertionCreated { assertion_id } => {
                 // Phase 2: Write assertion name to REGIONAL Raft (PII isolation).
-                // Encrypted with OrgKey for crypto-shredding on organization purge.
+                // Encrypted with OrgShredKey for crypto-shredding on organization purge.
                 let org_meta = self
                     .ctx
                     .applied_state

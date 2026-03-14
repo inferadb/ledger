@@ -310,14 +310,14 @@ impl ServiceContext {
 
     /// Proposes a user-scoped `SystemRequest` to a region with PII encryption.
     ///
-    /// Encrypts the `SystemRequest` with the user's `SubjectKey` before entering
+    /// Encrypts the `SystemRequest` with the user's `UserShredKey` before entering
     /// the Raft log. At apply time, the state machine decrypts using the key from
-    /// state. When the user is erased and their `SubjectKey` is destroyed, all
+    /// state. When the user is erased and their `UserShredKey` is destroyed, all
     /// historical log entries become cryptographically unrecoverable (crypto-shredding).
     ///
-    /// Returns `NOT_FOUND` if the `SubjectKey` is absent — the user may have been
+    /// Returns `NOT_FOUND` if the `UserShredKey` is absent — the user may have been
     /// erased or is not yet provisioned. This function must only be called for
-    /// post-registration operations where the `SubjectKey` is guaranteed to exist.
+    /// post-registration operations where the `UserShredKey` is guaranteed to exist.
     pub(crate) async fn propose_regional_encrypted(
         &self,
         region: Region,
@@ -328,19 +328,19 @@ impl ServiceContext {
     ) -> Result<LedgerResponse, Status> {
         let sys_svc =
             inferadb_ledger_state::system::SystemOrganizationService::new(self.state.clone());
-        let subject_key = sys_svc.get_subject_key(user_id).map_err(|e| {
-            Status::internal(format!("Failed to read SubjectKey for user {user_id}: {e}"))
+        let shred_key = sys_svc.get_user_shred_key(user_id).map_err(|e| {
+            Status::internal(format!("Failed to read UserShredKey for user {user_id}: {e}"))
         })?;
 
-        let sk = subject_key.ok_or_else(|| {
+        let shred_key = shred_key.ok_or_else(|| {
             Status::not_found(format!(
-                "SubjectKey not found for user {user_id}: user may have been erased"
+                "UserShredKey not found for user {user_id}: user may have been erased"
             ))
         })?;
 
         let encrypted = inferadb_ledger_raft::entry_crypto::encrypt_user_system_request(
             &system_request,
-            &sk.key,
+            &shred_key.key,
             user_id,
         )
         .map_err(|e| Status::internal(format!("Failed to encrypt Raft entry: {e}")))?;
@@ -356,13 +356,13 @@ impl ServiceContext {
 
     /// Proposes an org-scoped `SystemRequest` to a region with PII encryption.
     ///
-    /// Encrypts the `SystemRequest` with the organization's `OrgKey` before
+    /// Encrypts the `SystemRequest` with the organization's `OrgShredKey` before
     /// entering the Raft log. At apply time, the state machine decrypts using
-    /// the key from state. When the organization is purged and its `OrgKey`
+    /// the key from state. When the organization is purged and its `OrgShredKey`
     /// destroyed, all historical log entries become cryptographically
     /// unrecoverable (crypto-shredding).
     ///
-    /// Returns `NOT_FOUND` if the `OrgKey` is absent — the organization may
+    /// Returns `NOT_FOUND` if the `OrgShredKey` is absent — the organization may
     /// have been purged or is not yet provisioned.
     pub(crate) async fn propose_regional_org_encrypted(
         &self,
@@ -374,19 +374,21 @@ impl ServiceContext {
     ) -> Result<LedgerResponse, Status> {
         let sys_svc =
             inferadb_ledger_state::system::SystemOrganizationService::new(self.state.clone());
-        let org_key = sys_svc.get_org_key(organization).map_err(|e| {
-            Status::internal(format!("Failed to read OrgKey for organization {organization}: {e}"))
+        let shred_key = sys_svc.get_org_shred_key(organization).map_err(|e| {
+            Status::internal(format!(
+                "Failed to read OrgShredKey for organization {organization}: {e}"
+            ))
         })?;
 
-        let org_key = org_key.ok_or_else(|| {
+        let shred_key = shred_key.ok_or_else(|| {
             Status::not_found(format!(
-                "OrgKey not found for organization {organization}: organization may have been purged"
+                "OrgShredKey not found for organization {organization}: organization may have been purged"
             ))
         })?;
 
         let encrypted = inferadb_ledger_raft::entry_crypto::encrypt_org_system_request(
             &system_request,
-            &org_key.key,
+            &shred_key.key,
             organization,
         )
         .map_err(|e| Status::internal(format!("Failed to encrypt Raft entry: {e}")))?;

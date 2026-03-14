@@ -24,17 +24,17 @@ Every PII field in the system, its owning struct, storage location, and encrypti
 
 | Field           | Struct      | Key Pattern             | Raft Scope | Encryption Key |
 | --------------- | ----------- | ----------------------- | ---------- | -------------- |
-| `name: String`  | `User`      | `user:{user_id}`        | REGIONAL   | SubjectKey     |
-| `email: String` | `UserEmail` | `user_email:{email_id}` | REGIONAL   | SubjectKey     |
+| `name: String`  | `User`      | `user:{user_id}`        | REGIONAL   | UserShredKey     |
+| `email: String` | `UserEmail` | `user_email:{email_id}` | REGIONAL   | UserShredKey     |
 
 **Non-PII user data** (stored GLOBAL):
 
 | Field                         | Struct               | Key Pattern           |
 | ----------------------------- | -------------------- | --------------------- |
-| `user: UserId`                | `UserDirectoryEntry` | `_sys:user:{user_id}` |
-| `slug: Option<UserSlug>`      | `UserDirectoryEntry` | `_sys:user:{user_id}` |
-| `region: Option<Region>`      | `UserDirectoryEntry` | `_sys:user:{user_id}` |
-| `status: UserDirectoryStatus` | `UserDirectoryEntry` | `_sys:user:{user_id}` |
+| `user: UserId`                | `UserDirectoryEntry` | `_dir:user:{user_id}` |
+| `slug: Option<UserSlug>`      | `UserDirectoryEntry` | `_dir:user:{user_id}` |
+| `region: Option<Region>`      | `UserDirectoryEntry` | `_dir:user:{user_id}` |
+| `status: UserDirectoryStatus` | `UserDirectoryEntry` | `_dir:user:{user_id}` |
 
 **Email uniqueness** (stored GLOBAL, no plaintext):
 
@@ -55,17 +55,17 @@ Source: `crates/state/src/system/types.rs:18-76`, `crates/state/src/system/keys.
 
 | Field          | Struct                | Key Pattern                 | Raft Scope | Encryption Key |
 | -------------- | --------------------- | --------------------------- | ---------- | -------------- |
-| `name: String` | `OrganizationProfile` | `_sys:org_profile:{org_id}` | REGIONAL   | OrgKey         |
+| `name: String` | `OrganizationProfile` | `org_profile:{org_id}` | REGIONAL   | OrgShredKey         |
 
 **Non-PII organization data** (stored GLOBAL):
 
 | Field                                 | Struct                       | Key Pattern             |
 | ------------------------------------- | ---------------------------- | ----------------------- |
-| `organization: OrganizationId`        | `OrganizationDirectoryEntry` | `_sys:org_dir:{org_id}` |
-| `slug: Option<OrganizationSlug>`      | `OrganizationDirectoryEntry` | `_sys:org_dir:{org_id}` |
-| `region: Option<Region>`              | `OrganizationDirectoryEntry` | `_sys:org_dir:{org_id}` |
-| `tier: OrganizationTier`              | `OrganizationDirectoryEntry` | `_sys:org_dir:{org_id}` |
-| `status: OrganizationDirectoryStatus` | `OrganizationDirectoryEntry` | `_sys:org_dir:{org_id}` |
+| `organization: OrganizationId`        | `OrganizationDirectoryEntry` | `_dir:org:{org_id}` |
+| `slug: Option<OrganizationSlug>`      | `OrganizationDirectoryEntry` | `_dir:org:{org_id}` |
+| `region: Option<Region>`              | `OrganizationDirectoryEntry` | `_dir:org:{org_id}` |
+| `tier: OrganizationTier`              | `OrganizationDirectoryEntry` | `_dir:org:{org_id}` |
+| `status: OrganizationDirectoryStatus` | `OrganizationDirectoryEntry` | `_dir:org:{org_id}` |
 
 Source: `crates/state/src/system/types.rs:308-363`
 
@@ -73,9 +73,9 @@ Source: `crates/state/src/system/types.rs:308-363`
 
 | Field          | Struct        | Key Pattern                            | Raft Scope | Encryption Key |
 | -------------- | ------------- | -------------------------------------- | ---------- | -------------- |
-| `name: String` | `TeamProfile` | `_sys:team_profile:{org_id}:{team_id}` | REGIONAL   | OrgKey         |
+| `name: String` | `Team` | `team:{org_id}:{team_id}` | REGIONAL   | OrgShredKey         |
 
-Teams inherit the owning organization's OrgKey. No per-team encryption key exists.
+Teams inherit the owning organization's OrgShredKey. No per-team encryption key exists.
 
 Source: `crates/state/src/system/types.rs:376-395`
 
@@ -83,10 +83,10 @@ Source: `crates/state/src/system/types.rs:376-395`
 
 | Field                         | Struct       | Key Pattern                          | Raft Scope | Encryption Key |
 | ----------------------------- | ------------ | ------------------------------------ | ---------- | -------------- |
-| `name: String`                | `AppProfile` | `_sys:app_profile:{org_id}:{app_id}` | REGIONAL   | OrgKey         |
-| `description: Option<String>` | `AppProfile` | `_sys:app_profile:{org_id}:{app_id}` | REGIONAL   | OrgKey         |
+| `name: String`                | `AppProfile` | `app_profile:{org_id}:{app_id}` | REGIONAL   | OrgShredKey         |
+| `description: Option<String>` | `AppProfile` | `app_profile:{org_id}:{app_id}` | REGIONAL   | OrgShredKey         |
 
-The `App` struct (`_sys:app:{org_id}:{app_id}`) stores structural fields only (`enabled`, `credentials`, `version`) in GLOBAL state. PII is separated into `AppProfile` in REGIONAL state.
+The `App` struct (`app:{org_id}:{app_id}`) stores structural fields only (`enabled`, `credentials`, `version`) in GLOBAL state. PII is separated into `AppProfile` in REGIONAL state.
 
 Source: `crates/state/src/system/types.rs:456-513`
 
@@ -94,9 +94,9 @@ Source: `crates/state/src/system/types.rs:456-513`
 
 | Field          | Struct       | Key Pattern                                            | Raft Scope | Encryption Key |
 | -------------- | ------------ | ------------------------------------------------------ | ---------- | -------------- |
-| assertion name | (raw string) | `_sys:assertion_name:{org_id}:{app_id}:{assertion_id}` | REGIONAL   | OrgKey         |
+| assertion name | (raw string) | `assertion_name:{org_id}:{app_id}:{assertion_id}` | REGIONAL   | OrgShredKey         |
 
-The `ClientAssertionEntry` struct (`_sys:app_assertion:{org_id}:{app_id}:{assertion_id}`) stores only the public key, enabled flag, and expiry in GLOBAL state. The user-provided name is stored separately in REGIONAL state.
+The `ClientAssertionEntry` struct (`app_assertion:{org_id}:{app_id}:{assertion_id}`) stores only the public key, enabled flag, and expiry in GLOBAL state. The user-provided name is stored separately in REGIONAL state.
 
 Source: `crates/state/src/system/types.rs:575-598`, `crates/state/src/system/keys.rs`
 
@@ -132,40 +132,40 @@ RegionMasterKey (RMK) — 256-bit, per-region, versioned
     │        ▼
     │    B+ tree page bodies — AES-256-GCM, page header as AAD
     │
-    ├──▶ encrypts SubjectKey storage (SubjectKey records are B+ tree entities)
+    ├──▶ encrypts UserShredKey storage (UserShredKey records are B+ tree entities)
     │
-    └──▶ encrypts OrgKey storage (OrgKey records are B+ tree entities)
+    └──▶ encrypts OrgShredKey storage (OrgShredKey records are B+ tree entities)
 ```
 
 ### Per-Entity Encryption Keys
 
-**SubjectKey** — per-user, for crypto-shredding user PII:
+**UserShredKey** — per-user, for crypto-shredding user PII:
 
 ```rust
-pub struct SubjectKey {
+pub struct UserShredKey {
     pub user_id: UserId,
     pub key: [u8; 32],        // 256-bit AES key material
     pub created_at: DateTime<Utc>,
 }
 ```
 
-- Storage: `_key:user:{user_id}` in REGIONAL store
+- Storage: `_shred:user:{user_id}` in REGIONAL store
 - Encrypted at rest by EncryptedBackend (RMK-wrapped DEK)
 - Destruction renders all `EncryptedUserSystemRequest` entries unrecoverable
 
 Source: `crates/state/src/system/types.rs:99-120`
 
-**OrgKey** — per-organization, for crypto-shredding org/team/app PII:
+**OrgShredKey** — per-organization, for crypto-shredding org/team/app PII:
 
 ```rust
-pub struct OrgKey {
+pub struct OrgShredKey {
     pub organization: OrganizationId,
     pub key: [u8; 32],        // 256-bit AES key material
     pub created_at: DateTime<Utc>,
 }
 ```
 
-- Storage: `_key:org:{org_id}` in REGIONAL store
+- Storage: `_shred:org:{org_id}` in REGIONAL store
 - Encrypted at rest by EncryptedBackend (RMK-wrapped DEK)
 - Destruction renders all `EncryptedOrgSystemRequest` entries unrecoverable
 
@@ -186,7 +186,7 @@ pub struct EncryptedUserSystemRequest {
 ```
 
 - Encrypts: `UpdateUserProfile`, `CreateUserEmail`, other user-scoped PII writes
-- Key: user's SubjectKey
+- Key: user's UserShredKey
 - AAD: `user_id.value().to_le_bytes()` (prevents cross-user key substitution)
 
 **EncryptedOrgSystemRequest** — organization-scoped:
@@ -200,7 +200,7 @@ pub struct EncryptedOrgSystemRequest {
 ```
 
 - Encrypts: org profile writes, team profile writes, app profile writes, assertion name writes
-- Key: organization's OrgKey
+- Key: organization's OrgShredKey
 - AAD: `organization.value().to_le_bytes()` (prevents cross-org key substitution)
 
 **Encryption flow:**
@@ -213,7 +213,7 @@ pub struct EncryptedOrgSystemRequest {
 
 **Decryption flow** (apply handler):
 
-1. Look up SubjectKey/OrgKey from REGIONAL state
+1. Look up UserShredKey/OrgShredKey from REGIONAL state
 2. If key is `None` (destroyed): skip entry silently (crypto-shredding)
 3. AES-256-GCM decrypt with stored nonce and entity-ID AAD
 4. Postcard-deserialize to `SystemRequest`
@@ -258,7 +258,7 @@ The multi-Raft architecture separates PII from structural data at the consensus 
 - Team profiles with names
 - App profiles with names and descriptions
 - Client assertion names
-- SubjectKeys and OrgKeys (encrypted at rest under RMK)
+- UserShredKeys and OrgShredKeys (encrypted at rest under RMK)
 
 **Routing rule**: any `SystemRequest` carrying plaintext PII is proposed to the REGIONAL Raft group. `EncryptedUserSystem` and `EncryptedOrgSystem` entries go to REGIONAL with PII encrypted before entering the log.
 
@@ -285,15 +285,15 @@ The onboarding saga creates a user, organization, and initial session in three s
 
 **Step 1 — REGIONAL** (`WriteOnboardingUserProfile`):
 
-1. Seal `OnboardingPii { email, name, organization_name }` with SubjectKey via AES-256-GCM
-2. Generate 32-byte SubjectKey and 32-byte OrgKey
-3. Raft entry carries: sealed PII, PII nonce, SubjectKey bytes, OrgKey bytes, refresh token hash, refresh family ID, KID
-4. Apply handler unseals PII using SubjectKey and user_id AAD
+1. Seal `OnboardingPii { email, name, organization_name }` with UserShredKey via AES-256-GCM
+2. Generate 32-byte UserShredKey and 32-byte OrgShredKey
+3. Raft entry carries: sealed PII, PII nonce, UserShredKey bytes, OrgShredKey bytes, refresh token hash, refresh family ID, KID
+4. Apply handler unseals PII using UserShredKey and user_id AAD
 5. Creates `User` record (name from sealed PII)
 6. Creates `UserEmail` record (email from sealed PII)
-7. Stores `SubjectKey` at `_key:user:{user_id}`
+7. Stores `UserShredKey` at `_shred:user:{user_id}`
 8. Creates `OrganizationProfile` (org name from sealed PII)
-9. Stores `OrgKey` at `_key:org:{org_id}`
+9. Stores `OrgShredKey` at `_shred:org:{org_id}`
 10. Creates `RefreshToken` record
 
 **Step 2 — GLOBAL** (`ActivateOnboardingUser`):
@@ -324,7 +324,7 @@ Source: `crates/raft/src/saga_orchestrator.rs`, `crates/raft/src/log_storage/ope
 `SystemRequest::CreateOrganizationTeam` (GLOBAL):
 
 - Creates team record with slug index — no PII
-- Team profile with name created via REGIONAL `EncryptedOrgSystem` entry wrapping `WriteTeamProfile`
+- Team profile with name created via REGIONAL `EncryptedOrgSystem` entry wrapping `WriteTeam`
 
 ### App Creation
 
@@ -350,17 +350,17 @@ All REGIONAL records live in the `_system` vault (`SYSTEM_VAULT_ID`) within the 
 
 ```
 _system vault (REGIONAL)
-├── user:{user_id}                                     → User (name PII)
-├── user_email:{email_id}                              → UserEmail (email PII)
-├── _idx:email:{email_lower}                           → UserEmailId
-├── _idx:user_emails:{user_id}                         → Vec<UserEmailId>
-├── _key:user:{user_id}                                → SubjectKey (key material)
-├── _sys:org_profile:{org_id}                          → OrganizationProfile (name PII)
-├── _key:org:{org_id}                                  → OrgKey (key material)
-├── _sys:team_profile:{org_id}:{team_id}               → TeamProfile (name PII)
-├── _sys:app_profile:{org_id}:{app_id}                 → AppProfile (name, description PII)
-├── _sys:assertion_name:{org_id}:{app_id}:{assert_id}  → assertion name (string PII)
-├── _audit:erasure:{user_id}                           → ErasureAuditRecord (no PII)
+├── user:{user_id}                                → User (name PII)
+├── user_email:{email_id}                         → UserEmail (email PII)
+├── _idx:email:{email_lower}                      → UserEmailId
+├── _idx:user_emails:{user_id}                    → Vec<UserEmailId>
+├── _shred:user:{user_id}                         → UserShredKey (key material)
+├── org_profile:{org_id}                          → OrganizationProfile (name PII)
+├── _shred:org:{org_id}                           → OrgShredKey (key material)
+├── team:{org_id}:{team_id}                       → Team (name PII)
+├── app_profile:{org_id}:{app_id}                 → AppProfile (name, description PII)
+├── assertion_name:{org_id}:{app_id}:{assert_id}  → assertion name (string PII)
+├── _audit:erasure:{user_id}                      → ErasureAuditRecord (no PII)
 └── ...
 ```
 
@@ -368,14 +368,15 @@ _system vault (REGIONAL)
 
 ```
 _system vault (GLOBAL)
-├── _sys:user:{user_id}                → UserDirectoryEntry (no PII)
-├── _idx:user:slug:{slug}              → UserId
-├── _idx:email_hash:{hmac_hex}         → EmailHashEntry (no PII — HMAC)
-├── _sys:org_dir:{org_id}              → OrganizationDirectoryEntry (no PII)
-├── _idx:org:slug:{slug}               → OrganizationId
-├── _sys:app:{org_id}:{app_id}         → App (no PII — credentials only)
-├── _idx:app:slug:{slug}               → AppId
-├── _sys:app_assertion:{o}:{a}:{id}    → ClientAssertionEntry (no PII — public key)
+├── _dir:user:{user_id}              → UserDirectoryEntry (no PII)
+├── _idx:user:slug:{slug}            → UserId
+├── _idx:email_hash:{hmac_hex}       → EmailHashEntry (no PII — HMAC)
+├── _dir:org:{org_id}                → OrganizationDirectoryEntry (no PII)
+├── org:{org_id}                     → Organization (skeleton, no PII)
+├── _idx:org:slug:{slug}             → OrganizationId
+├── app:{org_id}:{app_id}           → App (no PII — credentials only)
+├── _idx:app:slug:{slug}             → AppId
+├── app_assertion:{org_id}:{app_id}:{assertion_id} → ClientAssertionEntry (no PII — public key)
 └── ...
 ```
 
@@ -387,7 +388,7 @@ _system vault (GLOBAL)
 
 1. Client provides `UserSlug` (external Snowflake ID)
 2. GLOBAL lookup: `_idx:user:slug:{slug}` → `UserId`
-3. GLOBAL lookup: `_sys:user:{user_id}` → `UserDirectoryEntry` (get region)
+3. GLOBAL lookup: `_dir:user:{user_id}` → `UserDirectoryEntry` (get region)
 4. REGIONAL lookup: `user:{user_id}` → `User` (contains plaintext name)
 5. Storage layer decryption: page cache → DEK cache → RMK unwrap → AES-256-GCM decrypt page
 6. Postcard deserialize → `User` struct with plaintext `name` field
@@ -398,8 +399,9 @@ Email retrieval follows the same pattern: `user_email:{email_id}` → `UserEmail
 
 1. Client provides `OrganizationSlug`
 2. GLOBAL: `_idx:org:slug:{slug}` → `OrganizationId`
-3. GLOBAL: `_sys:org_dir:{org_id}` → `OrganizationDirectoryEntry` (get region)
-4. REGIONAL: `_sys:org_profile:{org_id}` → `OrganizationProfile` (contains plaintext `name`)
+3. GLOBAL: `org:{org_id}` → `Organization` skeleton (structural fields, `name: ""`)
+4. REGIONAL: `org_profile:{org_id}` → `OrganizationProfile` (PII overlay: `name`)
+5. Service layer merges via `overlay_org_profile()` — degrades gracefully with `name: ""` when REGIONAL unavailable
 
 ### Team/App Retrieval
 
@@ -445,9 +447,9 @@ Eight idempotent steps executed in `erase_user()`:
 - Clear `_idx:user_emails:{user_id}` index
 - Batched into a single `apply_operations` call
 
-**Step 6: Delete SubjectKey** (REGIONAL, crypto-shredding)
+**Step 6: Delete UserShredKey** (REGIONAL, crypto-shredding)
 
-- Delete `_key:user:{user_id}` from REGIONAL store
+- Delete `_shred:user:{user_id}` from REGIONAL store
 - All `EncryptedUserSystemRequest` entries in Raft log become permanently unrecoverable
 - On subsequent log replay, apply handler detects missing key and silently skips the entry
 
@@ -473,11 +475,11 @@ Two-phase purge triggered by `OrganizationPurgeJob` after `deleted_at + region.r
 
 **Phase 1 — REGIONAL** (`PurgeOrganizationRegional`):
 
-1. Delete all `TeamProfile` records (`_sys:team_profile:{org_id}:*`)
-2. Delete all `AppProfile` records (`_sys:app_profile:{org_id}:*`)
-3. Delete all assertion name records (`_sys:assertion_name:{org_id}:*`)
-4. Delete `OrganizationProfile` (`_sys:org_profile:{org_id}`) — contains plaintext name
-5. Destroy `OrgKey` (`_key:org:{org_id}`) — crypto-shredding
+1. Delete all `Team` records (`team:{org_id}:*`)
+2. Delete all `AppProfile` records (`app_profile:{org_id}:*`)
+3. Delete all assertion name records (`assertion_name:{org_id}:*`)
+4. Delete `OrganizationProfile` (`org_profile:{org_id}`) — contains plaintext name
+5. Destroy `OrgShredKey` (`_shred:org:{org_id}`) — crypto-shredding
 6. Clean up in-memory name indices (`team_name_index`, `app_name_index`)
 
 **Phase 2 — GLOBAL** (`PurgeOrganization`):
@@ -502,7 +504,7 @@ After key destruction, encrypted entries remain in the Raft log until a snapshot
 
 - Raft log is truncated up to the snapshot index
 - Crypto-shredded entries are discarded (no longer replayed)
-- The snapshot itself reflects post-erasure state (SubjectKey/OrgKey already destroyed)
+- The snapshot itself reflects post-erasure state (UserShredKey/OrgShredKey already destroyed)
 - On log replay from snapshot, apply handler finds no key → skips encrypted entries
 
 Source: `crates/raft/src/post_erasure_compaction.rs`
@@ -517,14 +519,14 @@ Source: `crates/raft/src/post_erasure_compaction.rs`
 | ------------------------------------------------------ | ------------ | --------------------------------------------------- |
 | `UserDirectoryEntry { user: UserId, status: Deleted }` | GLOBAL       | No — slug, region, updated_at cleared               |
 | `ErasureAuditRecord { user_id, erased_at, region }`    | GLOBAL       | No — opaque IDs and timestamps                      |
-| Encrypted Raft log entries (pre-truncation)            | REGIONAL log | No — SubjectKey destroyed, ciphertext unrecoverable |
+| Encrypted Raft log entries (pre-truncation)            | REGIONAL log | No — UserShredKey destroyed, ciphertext unrecoverable |
 
 **Destroyed**:
 
 - `User` record at `user:{user_id}` (plaintext name)
 - All `UserEmail` records (email addresses)
 - Email uniqueness indices `_idx:email:{email_lower}` (plaintext email in key pattern)
-- `SubjectKey` (key material)
+- `UserShredKey` (key material)
 - Email hash indices `_idx:email_hash:*` (GLOBAL, uniqueness released)
 - User-to-emails index `_idx:user_emails:{user_id}`
 - Slug indices (slug freed)
@@ -535,15 +537,15 @@ Source: `crates/raft/src/post_erasure_compaction.rs`
 | What Remains                                                | Location     | Contains PII?                                   |
 | ----------------------------------------------------------- | ------------ | ----------------------------------------------- |
 | `OrganizationRegistry { organization_id, status: Deleted }` | GLOBAL       | No — structural only                            |
-| Encrypted Raft log entries (pre-truncation)                 | REGIONAL log | No — OrgKey destroyed, ciphertext unrecoverable |
+| Encrypted Raft log entries (pre-truncation)                 | REGIONAL log | No — OrgShredKey destroyed, ciphertext unrecoverable |
 
 **Destroyed**:
 
 - `OrganizationProfile` (name)
-- All `TeamProfile` records (names)
+- All `Team` records (names)
 - All `AppProfile` records (names, descriptions)
 - All assertion name records
-- `OrgKey` (key material)
+- `OrgShredKey` (key material)
 - Organization/team/app slug indices
 - In-memory name indices
 
@@ -596,7 +598,7 @@ The GLOBAL/REGIONAL split ensures no plaintext PII enters the GLOBAL Raft log. R
 
 ### Sensitive Data in Memory
 
-- `SubjectKey.key` and `OrgKey.key` exist as `[u8; 32]` in memory during active use
+- `UserShredKey.key` and `OrgShredKey.key` exist as `[u8; 32]` in memory during active use
 - `DataEncryptionKey` implements `Zeroize` — key bytes are zeroed on drop
 - `RegionMasterKey` implements `Zeroize` — key bytes are zeroed on drop
-- SubjectKey/OrgKey do not implement `Zeroize` (they are short-lived deserialized values)
+- UserShredKey/OrgShredKey do not implement `Zeroize` (they are short-lived deserialized values)

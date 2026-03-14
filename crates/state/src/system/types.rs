@@ -60,7 +60,8 @@ pub struct User {
 /// email the [`User::email`] field references. Verification status is derived
 /// from `verified_at` — if present, the email is verified.
 ///
-/// Global email uniqueness is enforced via the `_idx:email:{email}` index.
+/// Global email uniqueness is enforced via the `_idx:email_hash:{hmac}` index
+/// (HMAC-blinded, GLOBAL). The plaintext `_idx:email:{email}` index is REGIONAL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserEmail {
     /// Unique email record identifier.
@@ -93,24 +94,24 @@ pub struct EmailVerificationToken {
 }
 
 // ============================================================================
-// Subject Key Types (per-user encryption for crypto-shredding)
+// Crypto-Shredding Key Types (per-user and per-org encryption)
 // ============================================================================
 
-/// Per-subject encryption key for GDPR Article 17 crypto-shredding.
+/// Per-user encryption key for GDPR Article 17 crypto-shredding.
 ///
-/// Each user's PII is encrypted with a unique subject key. To exercise right
-/// to erasure, destroy the subject key — encrypted PII in Raft log and
+/// Each user's PII is encrypted with a unique shred key. To exercise right
+/// to erasure, destroy the shred key — encrypted PII in Raft log and
 /// snapshots becomes cryptographically unrecoverable.
 ///
-/// Subject keys are the sole exception to the "no key material in Raft"
-/// principle. Unlike infrastructure keys (RMKs), subject keys are
+/// Shred keys are the sole exception to the "no key material in Raft"
+/// principle. Unlike infrastructure keys (RMKs), shred keys are
 /// application-level data stored inside Ledger's regional stores, encrypted
 /// at rest under the region's RMK (via `EncryptedBackend`). This is
 /// intentional: the key must be destroyable via a single Raft write.
 ///
-/// Key pattern: `_key:user:{user_id}` in the regional store.
+/// Key pattern: `_shred:user:{user_id}` in the regional store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubjectKey {
+pub struct UserShredKey {
     /// User this key belongs to.
     pub user_id: UserId,
     /// 256-bit AES key material (encrypted at rest by EncryptedBackend).
@@ -120,21 +121,21 @@ pub struct SubjectKey {
 }
 
 // ============================================================================
-// Organization Key Types (per-org encryption for crypto-shredding)
+// Organization Shred Key Types (per-org encryption for crypto-shredding)
 // ============================================================================
 
 /// Per-organization encryption key for crypto-shredding.
 ///
 /// Organization PII (names, team names, app names) is encrypted with the
-/// org key. On organization purge, the key is destroyed — encrypted PII
+/// org shred key. On organization purge, the key is destroyed — encrypted PII
 /// in the Raft log becomes cryptographically unrecoverable.
 ///
-/// Mirrors the per-user [`SubjectKey`] pattern. Stored in the regional
+/// Mirrors the per-user [`UserShredKey`] pattern. Stored in the regional
 /// store, encrypted at rest under the region's RMK (via `EncryptedBackend`).
 ///
-/// Key pattern: `_key:org:{org_id}` in the regional store.
+/// Key pattern: `_shred:org:{org_id}` in the regional store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OrgKey {
+pub struct OrgShredKey {
     /// Organization this key belongs to.
     pub organization: OrganizationId,
     /// 256-bit AES key material (encrypted at rest by EncryptedBackend).
@@ -238,7 +239,7 @@ pub enum UserDirectoryStatus {
 /// touching regional stores. Contains no personally identifiable information
 /// — only opaque identifiers, enums, and timestamps.
 ///
-/// Key pattern: `_sys:user:{user_id}` → postcard-serialized entry.
+/// Key pattern: `_dir:user:{user_id}` → postcard-serialized entry.
 ///
 /// Optional fields are set to `None` after erasure (tombstone minimization):
 /// only `user` and `status = Deleted` survive.
@@ -260,9 +261,12 @@ pub struct UserDirectoryEntry {
 // Organization Routing
 // ============================================================================
 
-/// Organization routing table entry.
+/// Organization routing table entry (cluster topology).
 ///
-/// Maps an organization to its region for request routing.
+/// Internal routing infrastructure — maps an organization to its region
+/// for request routing. Never exposed via the API.
+///
+/// Key pattern: `_dir:org_registry:{organization_id}` → postcard-serialized entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrganizationRegistry {
     /// Organization identifier.
@@ -311,7 +315,7 @@ pub enum OrganizationDirectoryStatus {
 /// without touching regional stores. Contains no personally identifiable
 /// information — only opaque identifiers, enums, and timestamps.
 ///
-/// Key pattern: `_sys:org:{organization_id}` → postcard-serialized entry.
+/// Key pattern: `_dir:org:{organization_id}` → postcard-serialized entry.
 ///
 /// Mirrors [`UserDirectoryEntry`] for users.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,22 +334,26 @@ pub struct OrganizationDirectoryEntry {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-/// Organization profile record stored in a regional store.
+/// Organization skeleton stored in the GLOBAL state layer.
 ///
-/// Organization PII (name) resides in the region declared at creation.
-/// The GLOBAL control plane holds a non-PII [`OrganizationDirectoryEntry`]
-/// for cross-region resolution.
+/// Contains all structural fields needed by GLOBAL handlers
+/// (`RemoveOrganizationMember`, `UpdateOrganizationMemberRole`).
+/// The `name` field is always `""` in GLOBAL; the real name is overlaid
+/// from the REGIONAL [`OrganizationProfile`] via `overlay_org_profile()`.
 ///
-/// Key pattern: `_sys:org_profile:{organization_id}` → postcard-serialized entry.
+/// Key pattern: `org:{organization_id}` → postcard-serialized entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OrganizationProfile {
-    /// Organization identifier (matches [`OrganizationDirectoryEntry::organization`]).
+pub struct Organization {
+    /// Organization identifier.
     pub organization: OrganizationId,
     /// External Snowflake identifier.
     pub slug: OrganizationSlug,
-    /// Data residency region where this record is stored.
+    /// Data residency region.
     pub region: Region,
-    /// Human-readable organization name (PII — stays regional).
+    /// Human-readable organization name.
+    ///
+    /// Always `""` in GLOBAL storage. Filled by overlay from REGIONAL
+    /// `OrganizationProfile` on read.
     pub name: String,
     /// Billing tier.
     pub tier: OrganizationTier,
@@ -362,6 +370,21 @@ pub struct OrganizationProfile {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
+/// Organization PII overlay stored in the REGIONAL state layer.
+///
+/// Contains only PII fields that must reside in the region declared at
+/// creation. Merged onto the GLOBAL [`Organization`] skeleton via
+/// `overlay_org_profile()`.
+///
+/// Key pattern: `org_profile:{organization_id}` → postcard-serialized entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrganizationProfile {
+    /// Human-readable organization name (PII — stays regional).
+    pub name: String,
+    /// Last modification timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
 /// A member of an organization with their role and join timestamp.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrganizationMember {
@@ -373,11 +396,15 @@ pub struct OrganizationMember {
     pub joined_at: DateTime<Utc>,
 }
 
-/// Team profile record stored in the system vault.
+/// Team record stored in the system vault (REGIONAL-only, Pattern 1).
 ///
-/// Key pattern: `_sys:team_profile:{organization_id}:{team_id}` → postcard-serialized entry.
+/// Teams are REGIONAL-only entities — no GLOBAL skeleton exists.
+/// The full record (including PII name) resides in the region where
+/// the parent organization is stored.
+///
+/// Key pattern: `team:{organization_id}:{team_id}` → postcard-serialized entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TeamProfile {
+pub struct Team {
     /// Internal team identifier.
     pub team: TeamId,
     /// Organization this team belongs to.
@@ -459,7 +486,7 @@ pub enum OrganizationTier {
 /// machine-to-machine authentication. Each app has its own set of
 /// credentials and vault connections.
 ///
-/// Key pattern: `_sys:app:{organization_id}:{app_id}` → postcard-serialized entry.
+/// Key pattern: `app:{organization_id}:{app_id}` → postcard-serialized entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct App {
     /// Internal app identifier.
@@ -496,7 +523,7 @@ pub struct App {
 /// subject to regional residency requirements, while structural fields
 /// (`enabled`, `credentials`) stay in GLOBAL state.
 ///
-/// Key pattern: `_sys:app_profile:{organization_id}:{app_id}` → postcard-serialized entry.
+/// Key pattern: `app_profile:{organization_id}:{app_id}` → postcard-serialized entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppProfile {
     /// Internal app identifier.
@@ -581,7 +608,7 @@ pub struct ClientAssertionCredentialConfig {
 /// The user-provided name is stored separately in REGIONAL state via
 /// [`super::keys::SystemKeys::assertion_name_key`] to avoid PII in the GLOBAL Raft log.
 ///
-/// Key pattern: `_sys:app_assertion:{org_id}:{app_id}:{assertion_id}`
+/// Key pattern: `app_assertion:{org_id}:{app_id}:{assertion_id}`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientAssertionEntry {
     /// Internal assertion entry identifier.
@@ -603,7 +630,7 @@ pub struct ClientAssertionEntry {
 /// Scopes are stored for authorization policy but JWT generation
 /// is out of scope.
 ///
-/// Key pattern: `_sys:app_vault:{org_id}:{app_id}:{vault_id}`
+/// Key pattern: `app_vault:{org_id}:{app_id}:{vault_id}`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppVaultConnection {
     /// Internal vault identifier.
@@ -675,7 +702,7 @@ pub enum NodeRole {
 /// Private key material is envelope-encrypted: a per-key DEK wrapped by the
 /// region's RMK via AES-KWP. The plaintext private key never appears in state.
 ///
-/// Key pattern: `_sys:signing_key:{id}` → postcard-serialized entry.
+/// Key pattern: `signing_key:{id}` → postcard-serialized entry.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SigningKey {
     /// Internal sequential identifier.
@@ -737,7 +764,7 @@ impl std::fmt::Debug for SigningKey {
 /// Each refresh creates a new token in the same family; reuse of a consumed
 /// token poisons the entire family.
 ///
-/// Key pattern: `_sys:refresh_token:{id}` → postcard-serialized entry.
+/// Key pattern: `refresh_token:{id}` → postcard-serialized entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshToken {
     /// Internal sequential identifier.
@@ -1184,13 +1211,13 @@ mod tests {
     }
 
     #[test]
-    fn test_organization_profile_serialization() {
+    fn test_organization_skeleton_serialization() {
         let now = Utc::now();
-        let profile = OrganizationProfile {
+        let org = Organization {
             organization: OrganizationId::new(42),
             slug: OrganizationSlug::new(9999),
             region: Region::US_EAST_VA,
-            name: "Evan's Organization".to_string(),
+            name: String::new(),
             tier: OrganizationTier::Free,
             status: OrganizationStatus::Active,
             members: vec![OrganizationMember {
@@ -1202,14 +1229,25 @@ mod tests {
             updated_at: now,
             deleted_at: None,
         };
-        let bytes = postcard::to_allocvec(&profile).unwrap();
-        let deserialized: OrganizationProfile = postcard::from_bytes(&bytes).unwrap();
+        let bytes = postcard::to_allocvec(&org).unwrap();
+        let deserialized: Organization = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(deserialized.organization, OrganizationId::new(42));
-        assert_eq!(deserialized.name, "Evan's Organization");
+        assert_eq!(deserialized.name, "");
         assert_eq!(deserialized.members.len(), 1);
         assert_eq!(deserialized.members[0].user_id, UserId::new(1));
         assert_eq!(deserialized.members[0].role, OrganizationMemberRole::Admin);
         assert_eq!(deserialized.tier, OrganizationTier::Free);
+    }
+
+    #[test]
+    fn test_organization_profile_pii_only_serialization() {
+        let now = Utc::now();
+        let profile =
+            OrganizationProfile { name: "Evan's Organization".to_string(), updated_at: now };
+        let bytes = postcard::to_allocvec(&profile).unwrap();
+        let deserialized: OrganizationProfile = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized.name, "Evan's Organization");
+        assert_eq!(deserialized.updated_at, now);
     }
 
     #[test]

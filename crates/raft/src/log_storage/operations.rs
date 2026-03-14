@@ -9,13 +9,13 @@ use inferadb_ledger_state::{
     StateError, StateLayer,
     system::{
         App, AppCredentialType, AppCredentials, AppProfile, AppVaultConnection,
-        ClientAssertionEntry, EmailHashEntry, OnboardingAccount, OrganizationDirectoryEntry,
-        OrganizationDirectoryStatus, OrganizationMember, OrganizationMemberRole,
-        OrganizationProfile, OrganizationRegistry, OrganizationStatus, OrganizationTier,
-        PendingEmailVerification, ProvisioningReservation, RefreshToken, RevocationResult,
-        SYSTEM_VAULT_ID, SigningKey, SigningKeyStatus, SystemError, SystemKeys,
-        SystemOrganizationService, TeamMember, TeamProfile, User, UserDirectoryEntry,
-        UserDirectoryStatus, UserEmail,
+        ClientAssertionEntry, EmailHashEntry, KeyTier, OnboardingAccount,
+        OrganizationDirectoryEntry, OrganizationDirectoryStatus, OrganizationMember,
+        OrganizationMemberRole, OrganizationProfile, OrganizationRegistry, OrganizationStatus,
+        OrganizationTier, PendingEmailVerification, ProvisioningReservation, RefreshToken,
+        RevocationResult, SYSTEM_VAULT_ID, SigningKey, SigningKeyStatus, SystemError, SystemKeys,
+        SystemOrganizationService, Team, TeamMember, User, UserDirectoryEntry, UserDirectoryStatus,
+        UserEmail,
     },
 };
 use inferadb_ledger_store::StorageBackend;
@@ -91,35 +91,60 @@ fn error_result(
     (ledger_error(code, message), None)
 }
 
-/// Loads and decodes an `OrganizationProfile` from the state layer.
-fn load_org_profile<B: StorageBackend>(
+/// Loads and decodes an `Organization` skeleton from the GLOBAL state layer.
+fn load_organization<B: StorageBackend>(
     state_layer: &inferadb_ledger_state::StateLayer<B>,
     organization: OrganizationId,
-) -> Result<OrganizationProfile, LedgerResponse> {
-    let key = SystemKeys::organization_profile_key(organization);
+) -> Result<inferadb_ledger_state::system::Organization, LedgerResponse> {
+    let key = SystemKeys::organization_key(organization);
     let entity = state_layer
         .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
         .map_err(|e| {
-            ledger_error(ErrorCode::Internal, format!("Failed to read organization profile: {e}"))
+            ledger_error(ErrorCode::Internal, format!("Failed to read organization: {e}"))
         })?
         .ok_or_else(|| {
-            ledger_error(
-                ErrorCode::NotFound,
-                format!("Organization profile not found for {organization}"),
-            )
+            ledger_error(ErrorCode::NotFound, format!("Organization not found for {organization}"))
         })?;
-    decode::<OrganizationProfile>(&entity.value).map_err(|e| {
-        ledger_error(ErrorCode::Internal, format!("Failed to decode organization profile: {e}"))
+    decode::<inferadb_ledger_state::system::Organization>(&entity.value).map_err(|e| {
+        ledger_error(ErrorCode::Internal, format!("Failed to decode organization: {e}"))
     })
 }
 
-/// Encodes and writes an `OrganizationProfile` back to the state layer.
+/// Encodes and writes an `Organization` skeleton back to the GLOBAL state layer.
+///
+/// The skeleton must have an empty `name` — PII lives in the REGIONAL
+/// `OrganizationProfile` overlay. A non-empty name here would leak PII to GLOBAL.
+fn save_organization<B: StorageBackend>(
+    state_layer: &inferadb_ledger_state::StateLayer<B>,
+    organization: OrganizationId,
+    org: &inferadb_ledger_state::system::Organization,
+) -> Result<(), LedgerResponse> {
+    debug_assert!(
+        org.name.is_empty(),
+        "BUG: Organization skeleton must not carry a name to GLOBAL (org={})",
+        organization
+    );
+    let key = SystemKeys::organization_key(organization);
+    SystemKeys::validate_key_tier(&key, KeyTier::Global)
+        .map_err(|msg| ledger_error(ErrorCode::Internal, msg))?;
+    let bytes = encode(org).map_err(|e| {
+        ledger_error(ErrorCode::Internal, format!("Failed to encode organization: {e}"))
+    })?;
+    let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
+    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0).map(|_| ()).map_err(|e| {
+        ledger_error(ErrorCode::Internal, format!("Failed to write organization: {e}"))
+    })
+}
+
+/// Encodes and writes a slimmed `OrganizationProfile` (PII only) to the REGIONAL state layer.
 fn save_org_profile<B: StorageBackend>(
     state_layer: &inferadb_ledger_state::StateLayer<B>,
     organization: OrganizationId,
     profile: &OrganizationProfile,
 ) -> Result<(), LedgerResponse> {
     let key = SystemKeys::organization_profile_key(organization);
+    SystemKeys::validate_key_tier(&key, KeyTier::Regional)
+        .map_err(|msg| ledger_error(ErrorCode::Internal, msg))?;
     let bytes = encode(profile).map_err(|e| {
         ledger_error(ErrorCode::Internal, format!("Failed to encode organization profile: {e}"))
     })?;
@@ -166,13 +191,15 @@ fn load_app<B: StorageBackend>(
         .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to decode app: {e}")))
 }
 
-/// Saves an `App` to the state layer.
+/// Saves an `App` skeleton to the GLOBAL state layer.
 fn save_app<B: StorageBackend>(
     state_layer: &inferadb_ledger_state::StateLayer<B>,
     organization: OrganizationId,
     app: &App,
 ) -> Result<(), LedgerResponse> {
     let key = SystemKeys::app_key(organization, app.id);
+    SystemKeys::validate_key_tier(&key, KeyTier::Global)
+        .map_err(|msg| ledger_error(ErrorCode::Internal, msg))?;
     let bytes = encode(app)
         .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to encode app: {e}")))?;
     let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
@@ -241,7 +268,7 @@ fn collect_all_entities_for_deletion<B: StorageBackend>(
 /// Checks whether a team name already exists within an organization.
 ///
 /// Uses the in-memory `team_name_index` for O(1) lookups instead of
-/// scanning all team profiles. The `exclude_team` parameter allows
+/// scanning all team records. The `exclude_team` parameter allows
 /// renaming a team to the same name (self-conflict).
 fn has_team_name_conflict(
     state: &AppliedState,
@@ -256,42 +283,41 @@ fn has_team_name_conflict(
     }
 }
 
-/// Loads and decodes a team profile from the state layer.
+/// Loads and decodes a team record from the state layer.
 ///
-/// Returns the decoded `TeamProfile` or a structured `LedgerResponse::Error`
+/// Returns the decoded `Team` or a structured `LedgerResponse::Error`
 /// suitable for direct return from the apply handler.
-fn load_team_profile<B: StorageBackend>(
+fn load_team<B: StorageBackend>(
     state_layer: &inferadb_ledger_state::StateLayer<B>,
     organization: OrganizationId,
     team: TeamId,
-) -> Result<TeamProfile, LedgerResponse> {
-    let profile_key = SystemKeys::team_profile_key(organization, team);
+) -> Result<Team, LedgerResponse> {
+    let key = SystemKeys::team_key(organization, team);
     let entity = state_layer
-        .get_entity(SYSTEM_VAULT_ID, profile_key.as_bytes())
-        .map_err(|e| {
-            ledger_error(ErrorCode::Internal, format!("Failed to read team profile: {e}"))
-        })?
+        .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
+        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to read team: {e}")))?
         .ok_or_else(|| ledger_error(ErrorCode::NotFound, format!("Team {} not found", team)))?;
-    decode::<TeamProfile>(&entity.value).map_err(|e| {
-        ledger_error(ErrorCode::Internal, format!("Failed to decode team profile: {e}"))
-    })
+    decode::<Team>(&entity.value)
+        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to decode team: {e}")))
 }
 
-/// Saves a team profile to the state layer.
-fn save_team_profile<B: StorageBackend>(
+/// Saves a team record to the REGIONAL state layer.
+fn save_team<B: StorageBackend>(
     state_layer: &inferadb_ledger_state::StateLayer<B>,
     organization: OrganizationId,
     team: TeamId,
-    profile: &TeamProfile,
+    record: &Team,
 ) -> Result<(), LedgerResponse> {
-    let key = SystemKeys::team_profile_key(organization, team);
-    let bytes = encode(profile).map_err(|e| {
-        ledger_error(ErrorCode::Internal, format!("Failed to encode team profile: {e}"))
-    })?;
+    let key = SystemKeys::team_key(organization, team);
+    SystemKeys::validate_key_tier(&key, KeyTier::Regional)
+        .map_err(|msg| ledger_error(ErrorCode::Internal, msg))?;
+    let bytes = encode(record)
+        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to encode team: {e}")))?;
     let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
-    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0).map(|_| ()).map_err(|e| {
-        ledger_error(ErrorCode::Internal, format!("Failed to write team profile: {e}"))
-    })
+    state_layer
+        .apply_operations(SYSTEM_VAULT_ID, &ops, 0)
+        .map(|_| ())
+        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to write team: {e}")))
 }
 
 /// Validates that an organization exists, is not deleted, and returns the state layer.
@@ -363,39 +389,22 @@ fn require_fully_active_org(
 fn migrate_team_members<B: StorageBackend>(
     state_layer: &inferadb_ledger_state::StateLayer<B>,
     organization: OrganizationId,
-    source_profile: &TeamProfile,
+    source: &Team,
     target_team: TeamId,
     block_timestamp: DateTime<Utc>,
 ) -> Result<(), LedgerResponse> {
-    let mut target_profile = load_team_profile(state_layer, organization, target_team)?;
-    for member in &source_profile.members {
-        if !target_profile.members.iter().any(|m| m.user_id == member.user_id) {
-            target_profile.members.push(TeamMember {
+    let mut target = load_team(state_layer, organization, target_team)?;
+    for member in &source.members {
+        if !target.members.iter().any(|m| m.user_id == member.user_id) {
+            target.members.push(TeamMember {
                 user_id: member.user_id,
                 role: member.role,
                 joined_at: member.joined_at,
             });
         }
     }
-    target_profile.updated_at = block_timestamp;
-    let target_bytes = encode(&target_profile).map_err(|e| LedgerResponse::Error {
-        code: ErrorCode::Internal,
-        message: format!("Failed to encode target team profile: {e}"),
-    })?;
-    let target_key = SystemKeys::team_profile_key(organization, target_team);
-    let ops = vec![Operation::SetEntity {
-        key: target_key,
-        value: target_bytes,
-        condition: None,
-        expires_at: None,
-    }];
-    state_layer
-        .apply_operations(SYSTEM_VAULT_ID, &ops, 0)
-        .map_err(|e| LedgerResponse::Error {
-            code: ErrorCode::Internal,
-            message: format!("Failed to migrate members to target team: {e}"),
-        })
-        .map(|_| ())
+    target.updated_at = block_timestamp;
+    save_team(state_layer, organization, target_team, &target)
 }
 
 /// Converts a `u64` seconds value into a `chrono::Duration`, saturating at `i64::MAX`.
@@ -811,7 +820,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         // Update OrganizationRegistry in state layer so the purge
                         // job can discover this org's deleted_at timestamp.
                         if let Some(state_layer) = &self.state_layer {
-                            let reg_key = SystemKeys::organization_key(*organization);
+                            let reg_key = SystemKeys::organization_registry_key(*organization);
                             if let Ok(Some(reg_entity)) = state_layer
                                 .get_entity(SYSTEM_VAULT_ID, reg_key.as_bytes())
                                 .inspect_err(|e| tracing::error!(error = %e, "Failed to read org registry for deletion"))
@@ -982,10 +991,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     &self.state_layer,
                     "modify",
                 ) {
-                    Ok(state_layer) => match load_org_profile(state_layer, *organization) {
-                        Ok(mut profile) => {
-                            let Some(pos) =
-                                profile.members.iter().position(|m| m.user_id == *target)
+                    Ok(state_layer) => match load_organization(state_layer, *organization) {
+                        Ok(mut org) => {
+                            let Some(pos) = org.members.iter().position(|m| m.user_id == *target)
                             else {
                                 return error_result(
                                     ErrorCode::FailedPrecondition,
@@ -996,9 +1004,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 );
                             };
                             // Last-admin safety (authoritative at apply time, prevents TOCTOU)
-                            let is_last_admin = profile.members[pos].role
+                            let is_last_admin = org.members[pos].role
                                 == OrganizationMemberRole::Admin
-                                && profile
+                                && org
                                     .members
                                     .iter()
                                     .filter(|m| m.role == OrganizationMemberRole::Admin)
@@ -1013,9 +1021,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     ),
                                 );
                             }
-                            profile.members.remove(pos);
-                            profile.updated_at = block_timestamp;
-                            if let Err(e) = save_org_profile(state_layer, *organization, &profile) {
+                            org.members.remove(pos);
+                            org.updated_at = block_timestamp;
+                            if let Err(e) = save_organization(state_layer, *organization, &org) {
                                 return (e, None);
                             }
                             // Update user→org index
@@ -1061,10 +1069,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     &self.state_layer,
                     "modify",
                 ) {
-                    Ok(state_layer) => match load_org_profile(state_layer, *organization) {
-                        Ok(mut profile) => {
-                            let Some(pos) =
-                                profile.members.iter().position(|m| m.user_id == *target)
+                    Ok(state_layer) => match load_organization(state_layer, *organization) {
+                        Ok(mut org) => {
+                            let Some(pos) = org.members.iter().position(|m| m.user_id == *target)
                             else {
                                 return error_result(
                                     ErrorCode::FailedPrecondition,
@@ -1075,9 +1082,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 );
                             };
                             // Last-admin safety (authoritative at apply time, prevents TOCTOU)
-                            if profile.members[pos].role == OrganizationMemberRole::Admin
+                            if org.members[pos].role == OrganizationMemberRole::Admin
                                 && *role == OrganizationMemberRole::Member
-                                && profile
+                                && org
                                     .members
                                     .iter()
                                     .filter(|m| m.role == OrganizationMemberRole::Admin)
@@ -1092,9 +1099,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     ),
                                 );
                             }
-                            profile.members[pos].role = *role;
-                            profile.updated_at = block_timestamp;
-                            if let Err(e) = save_org_profile(state_layer, *organization, &profile) {
+                            org.members[pos].role = *role;
+                            org.updated_at = block_timestamp;
+                            if let Err(e) = save_organization(state_layer, *organization, &org) {
                                 return (e, None);
                             }
                             // Re-serialize org meta
@@ -1146,9 +1153,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             );
                         }
                         let team_id = state.sequences.next_team();
-                        // Only write the slug index to GLOBAL state. The TeamProfile
+                        // Only write the slug index to GLOBAL state. The Team
                         // (which contains PII like name) is written to REGIONAL state
-                        // via a separate WriteTeamProfile proposal.
+                        // via a separate WriteTeam proposal.
                         let slug_key = SystemKeys::team_slug_key(*slug);
                         let slug_value = format!("{}:{}", organization.value(), team_id.value());
                         let ops = vec![Operation::SetEntity {
@@ -1193,7 +1200,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             LedgerRequest::DeleteOrganizationTeam { organization, team } => {
                 // GLOBAL cleanup only: slug index and in-memory maps.
                 // Profile deletion and member migration are handled by REGIONAL
-                // DeleteTeamProfile (proposed first by the service handler).
+                // DeleteTeam (proposed first by the service handler).
                 let response = match require_active_org_with_state(
                     organization,
                     state,
@@ -2042,14 +2049,16 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         state.organizations.remove(organization);
                         pending.organizations_deleted.push(*organization);
 
-                        // Clean up state layer entities (registry, profile, slug index key)
+                        // Clean up GLOBAL state layer entities (registry, skeleton, slug
+                        // index key). Organization profile cleanup is handled by
+                        // PurgeOrganizationRegional (profile lives in REGIONAL state).
                         if let Some(state_layer) = &self.state_layer {
                             let mut cleanup_ops = vec![
                                 Operation::DeleteEntity {
-                                    key: SystemKeys::organization_key(*organization),
+                                    key: SystemKeys::organization_registry_key(*organization),
                                 },
                                 Operation::DeleteEntity {
-                                    key: SystemKeys::organization_profile_key(*organization),
+                                    key: SystemKeys::organization_key(*organization),
                                 },
                             ];
                             if let Some(slug) = org_slug {
@@ -2724,7 +2733,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         if let Some(sys) = &sys_service {
                             // Forward-only finalization: each step idempotent.
                             // The service method handles directory update, email hash
-                            // removal, subject key deletion, and audit record creation.
+                            // removal, user shred key deletion, and audit record creation.
                             // Actor identity is captured in canonical log lines, not
                             // replicated via Raft (no PII in GLOBAL log).
                             if let Err(e) = sys.erase_user(*user_id, *region, block_timestamp) {
@@ -2757,7 +2766,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             LedgerResponse::Empty
                         }
                     },
-                    SystemRequest::CreateOrganizationDirectory { slug, region, tier } => {
+                    SystemRequest::CreateOrganizationDirectory { slug, region, tier, admin } => {
                         let organization_id = state.sequences.next_organization();
                         let org_meta = OrganizationMeta {
                             organization: organization_id,
@@ -2792,7 +2801,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 deleted_at: None,
                             };
                             if let Some(value) = try_encode(&registry, "org_registry") {
-                                let key = SystemKeys::organization_key(organization_id);
+                                let key = SystemKeys::organization_registry_key(organization_id);
                                 let slug_index_key = SystemKeys::organization_slug_key(*slug);
                                 let ops = vec![
                                     Operation::SetEntity {
@@ -2818,7 +2827,36 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     );
                                 }
                             }
+
+                            // Write Organization skeleton to GLOBAL (name = "").
+                            // The skeleton is the authoritative record for structural
+                            // fields — GLOBAL handlers (RemoveOrganizationMember,
+                            // UpdateOrganizationMemberRole) operate on it directly.
+                            let org_skeleton = inferadb_ledger_state::system::Organization {
+                                organization: organization_id,
+                                slug: *slug,
+                                region: *region,
+                                name: String::new(),
+                                tier: *tier,
+                                status: OrganizationStatus::Provisioning,
+                                members: vec![OrganizationMember {
+                                    user_id: *admin,
+                                    role: OrganizationMemberRole::Admin,
+                                    joined_at: block_timestamp,
+                                }],
+                                created_at: block_timestamp,
+                                updated_at: block_timestamp,
+                                deleted_at: None,
+                            };
+                            if let Err(e) =
+                                save_organization(state_layer, organization_id, &org_skeleton)
+                            {
+                                return (e, None);
+                            }
                         }
+
+                        // Update user→org index for initial admin member
+                        state.user_org_index.entry(*admin).or_default().insert(organization_id);
 
                         LedgerResponse::OrganizationDirectoryCreated {
                             organization_id,
@@ -2829,24 +2867,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         organization,
                         sealed_name,
                         name_nonce,
-                        admin,
-                        org_key_bytes,
+                        shred_key_bytes,
                     } => {
                         if let Some(state_layer) = &self.state_layer {
-                            // Step 1: Store the OrgKey for future crypto-shredding.
+                            // Step 1: Store the OrgShredKey for future crypto-shredding.
                             let sys = inferadb_ledger_state::system::SystemOrganizationService::new(
                                 state_layer.clone(),
                             );
-                            if let Err(e) = sys.store_org_key(*organization, org_key_bytes) {
+                            if let Err(e) = sys.store_org_shred_key(*organization, shred_key_bytes)
+                            {
                                 tracing::error!(
                                     organization_id = organization.value(),
                                     error = %e,
-                                    "Failed to store OrgKey"
+                                    "Failed to store OrgShredKey"
                                 );
                                 return (
                                     LedgerResponse::Error {
                                         code: ErrorCode::Internal,
-                                        message: format!("Failed to store OrgKey: {e}"),
+                                        message: format!("Failed to store OrgShredKey: {e}"),
                                     },
                                     None,
                                 );
@@ -2857,7 +2895,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             let name = match crate::entry_crypto::unseal(
                                 sealed_name,
                                 name_nonce,
-                                org_key_bytes,
+                                shred_key_bytes,
                                 &aad,
                             ) {
                                 Ok(bytes) => match String::from_utf8(bytes) {
@@ -2897,66 +2935,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 },
                             };
 
-                            // Step 3: Look up org metadata for region/tier/slug.
-                            let (region, tier, slug) = if let Some(org_meta) =
-                                state.organizations.get(organization)
-                            {
-                                (org_meta.region, org_meta.tier, org_meta.slug)
-                            } else {
-                                tracing::error!(
-                                    organization_id = organization.value(),
-                                    "Organization not found in state during profile write"
-                                );
-                                return (
-                                    LedgerResponse::Error {
-                                        code: ErrorCode::NotFound,
-                                        message: format!("Organization {} not found", organization),
-                                    },
-                                    None,
-                                );
-                            };
-
-                            let profile = OrganizationProfile {
-                                organization: *organization,
-                                slug,
-                                region,
-                                name,
-                                tier,
-                                status: OrganizationStatus::Active,
-                                members: vec![OrganizationMember {
-                                    user_id: *admin,
-                                    role: OrganizationMemberRole::Admin,
-                                    joined_at: block_timestamp,
-                                }],
-                                created_at: block_timestamp,
-                                updated_at: block_timestamp,
-                                deleted_at: None,
-                            };
-
-                            if let Some(profile_bytes) = try_encode(&profile, "org_profile") {
-                                let final_key = SystemKeys::organization_profile_key(*organization);
-                                let ops = vec![Operation::SetEntity {
-                                    key: final_key,
-                                    value: profile_bytes,
-                                    condition: None,
-                                    expires_at: None,
-                                }];
-                                if let Err(e) =
-                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
-                                {
-                                    tracing::error!(
-                                        organization_id = organization.value(),
-                                        error = %e,
-                                        "Failed to write organization profile"
-                                    );
-                                } else {
-                                    // Update user→org index for initial admin member
-                                    state
-                                        .user_org_index
-                                        .entry(*admin)
-                                        .or_default()
-                                        .insert(*organization);
-                                }
+                            // Step 3: Write slimmed OrganizationProfile (PII) to REGIONAL.
+                            // The Organization skeleton (with admin member) was already
+                            // created by CreateOrganizationDirectory (GLOBAL). The
+                            // user_org_index was also updated there. We only write PII here.
+                            let profile = OrganizationProfile { name, updated_at: block_timestamp };
+                            if let Err(e) = save_org_profile(state_layer, *organization, &profile) {
+                                return (e, None);
                             }
                         }
 
@@ -2966,21 +2951,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     },
                     SystemRequest::UpdateOrganizationProfile { organization, name } => {
                         if let Some(state_layer) = &self.state_layer {
-                            match load_org_profile(state_layer, *organization) {
-                                Ok(mut profile) => {
-                                    profile.name = name.clone();
-                                    profile.updated_at = block_timestamp;
-                                    if let Err(e) =
-                                        save_org_profile(state_layer, *organization, &profile)
-                                    {
-                                        return (e, None);
-                                    }
-                                    LedgerResponse::OrganizationUpdated {
-                                        organization_id: *organization,
-                                    }
-                                },
-                                Err(e) => e,
+                            let profile = OrganizationProfile {
+                                name: name.clone(),
+                                updated_at: block_timestamp,
+                            };
+                            if let Err(e) = save_org_profile(state_layer, *organization, &profile) {
+                                return (e, None);
                             }
+                            LedgerResponse::OrganizationUpdated { organization_id: *organization }
                         } else {
                             ledger_error(
                                 ErrorCode::Internal,
@@ -3374,6 +3352,33 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 );
                             }
 
+                            // Write Organization skeleton to GLOBAL (name = "").
+                            // This skeleton is the authoritative record for structural
+                            // fields — GLOBAL handlers (RemoveOrganizationMember,
+                            // UpdateOrganizationMemberRole) operate on it directly.
+                            let org_skeleton = inferadb_ledger_state::system::Organization {
+                                organization: organization_id,
+                                slug: *organization_slug,
+                                region: *region,
+                                name: String::new(),
+                                tier: OrganizationTier::default(),
+                                status: OrganizationStatus::Provisioning,
+                                members: vec![OrganizationMember {
+                                    user_id,
+                                    role: OrganizationMemberRole::Admin,
+                                    joined_at: block_timestamp,
+                                }],
+                                created_at: block_timestamp,
+                                updated_at: block_timestamp,
+                                deleted_at: None,
+                            };
+                            if let Some(sl) = &self.state_layer
+                                && let Err(e) =
+                                    save_organization(sl, organization_id, &org_skeleton)
+                            {
+                                return (e, None);
+                            }
+
                             // Write org directory entry to state layer
                             let org_dir = OrganizationDirectoryEntry {
                                 organization: organization_id,
@@ -3404,11 +3409,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         user_id,
                         user_slug,
                         organization_id,
-                        organization_slug,
+                        organization_slug: _,
                         email_hmac,
                         sealed_pii,
                         pii_nonce,
-                        subject_key_bytes,
+                        shred_key_bytes,
                         refresh_token_hash,
                         refresh_family_id,
                         refresh_expires_at,
@@ -3418,12 +3423,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         if let Some(state_layer) = &self.state_layer {
                             let sys = SystemOrganizationService::new(state_layer.clone());
 
-                            // Unseal PII using the subject key from this entry
+                            // Unseal PII using the shred key from this entry
                             let aad = user_id.value().to_le_bytes();
                             let pii_bytes = match crate::entry_crypto::unseal(
                                 sealed_pii,
                                 pii_nonce,
-                                subject_key_bytes,
+                                shred_key_bytes,
                                 &aad,
                             ) {
                                 Ok(bytes) => bytes,
@@ -3533,12 +3538,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 );
                             }
 
-                            // 3. Store subject encryption key
-                            if let Err(e) = sys.store_subject_key(*user_id, subject_key_bytes) {
+                            // 3. Store user shred key
+                            if let Err(e) = sys.store_user_shred_key(*user_id, shred_key_bytes) {
                                 return (
                                     LedgerResponse::Error {
                                         code: ErrorCode::Internal,
-                                        message: format!("Failed to store subject key: {e}"),
+                                        message: format!("Failed to store user shred key: {e}"),
                                     },
                                     None,
                                 );
@@ -3571,22 +3576,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 );
                             }
 
-                            // 5. Write organization profile (PII regional)
+                            // 5. Write slimmed OrganizationProfile (PII only) to REGIONAL.
                             let profile = OrganizationProfile {
-                                organization: *organization_id,
-                                slug: *organization_slug,
-                                region: *region,
                                 name: pii.organization_name.clone(),
-                                tier: OrganizationTier::default(),
-                                status: OrganizationStatus::Provisioning,
-                                members: vec![OrganizationMember {
-                                    user_id: *user_id,
-                                    role: OrganizationMemberRole::Admin,
-                                    joined_at: block_timestamp,
-                                }],
-                                created_at: block_timestamp,
                                 updated_at: block_timestamp,
-                                deleted_at: None,
                             };
                             if let Err(e) =
                                 save_org_profile(state_layer, *organization_id, &profile)
@@ -3595,6 +3588,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }
 
                             // 6. Delete onboarding account record
+                            // Note: Organization skeleton (with admin member) was already
+                            // created by CreateOnboardingUser (GLOBAL). We don't modify
+                            // it here — REGIONAL handlers must not write GLOBAL data.
                             let account_key = SystemKeys::onboard_account_key(email_hmac);
                             let cleanup_ops = vec![Operation::DeleteEntity { key: account_key }];
                             if let Err(e) =
@@ -3806,11 +3802,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         }
                     },
 
-                    // ── WriteTeamProfile (REGIONAL) ──
+                    // ── WriteTeam (REGIONAL) ──
                     // Upsert: creates profile from scratch on first call (REGIONAL
                     // state has no data from GLOBAL CreateOrganizationTeam), or
                     // updates name on subsequent calls (rename).
-                    SystemRequest::WriteTeamProfile { organization, team, slug, name } => {
+                    SystemRequest::WriteTeam { organization, team, slug, name } => {
                         if let Some(state_layer) = &self.state_layer {
                             if has_team_name_conflict(state, *organization, name, Some(*team)) {
                                 return error_result(
@@ -3823,7 +3819,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }
 
                             let (profile, old_name) =
-                                match load_team_profile(state_layer, *organization, *team) {
+                                match load_team(state_layer, *organization, *team) {
                                     Ok(mut existing) => {
                                         let old = existing.name.clone();
                                         existing.name.clone_from(name);
@@ -3832,7 +3828,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     },
                                     Err(_) => {
                                         // First write — create from scratch
-                                        let fresh = TeamProfile {
+                                        let fresh = Team {
                                             team: *team,
                                             organization: *organization,
                                             slug: *slug,
@@ -3845,7 +3841,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     },
                                 };
 
-                            match save_team_profile(state_layer, *organization, *team, &profile) {
+                            match save_team(state_layer, *organization, *team, &profile) {
                                 Ok(()) => {
                                     if let Some(old) = old_name
                                         && !old.is_empty()
@@ -3865,7 +3861,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         } else {
                             ledger_error(
                                 ErrorCode::Internal,
-                                "State layer unavailable for team profile write",
+                                "State layer unavailable for team write",
                             )
                         }
                     },
@@ -3951,13 +3947,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         }
                     },
 
-                    // ── DeleteTeamProfile (REGIONAL) ──
-                    // Deletes the team profile and name index from REGIONAL state.
+                    // ── DeleteTeam (REGIONAL) ──
+                    // Deletes the team record and name index from REGIONAL state.
                     // Handles member migration if move_members_to is specified.
-                    SystemRequest::DeleteTeamProfile { organization, team, move_members_to } => {
+                    SystemRequest::DeleteTeam { organization, team, move_members_to } => {
                         if let Some(state_layer) = &self.state_layer {
-                            match load_team_profile(state_layer, *organization, *team) {
-                                Ok(team_profile) => {
+                            match load_team(state_layer, *organization, *team) {
+                                Ok(team_record) => {
                                     // Move members if requested
                                     if let Some(target_team) = move_members_to {
                                         if *target_team == *team {
@@ -3969,7 +3965,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         if let Err(resp) = migrate_team_members(
                                             state_layer,
                                             *organization,
-                                            &team_profile,
+                                            &team_record,
                                             *target_team,
                                             block_timestamp,
                                         ) {
@@ -3977,23 +3973,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         }
                                     }
 
-                                    // Delete profile from REGIONAL state
-                                    let profile_key =
-                                        SystemKeys::team_profile_key(*organization, *team);
-                                    let ops = vec![Operation::DeleteEntity { key: profile_key }];
+                                    // Delete team from REGIONAL state
+                                    let team_storage_key =
+                                        SystemKeys::team_key(*organization, *team);
+                                    let ops =
+                                        vec![Operation::DeleteEntity { key: team_storage_key }];
                                     if let Err(e) =
                                         state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
                                     {
                                         return error_result(
                                             ErrorCode::Internal,
-                                            format!("Failed to delete team profile: {e}"),
+                                            format!("Failed to delete team: {e}"),
                                         );
                                     }
 
                                     // Clean up REGIONAL name index
                                     state
                                         .team_name_index
-                                        .remove(&(*organization, team_profile.name));
+                                        .remove(&(*organization, team_record.name));
 
                                     LedgerResponse::OrganizationTeamDeleted {
                                         organization_id: *organization,
@@ -4010,18 +4007,18 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         } else {
                             ledger_error(
                                 ErrorCode::Internal,
-                                "State layer unavailable for team profile delete",
+                                "State layer unavailable for team delete",
                             )
                         }
                     },
 
                     // ── AddTeamMember (REGIONAL) ──
-                    // Adds a member to a team's profile.
+                    // Adds a member to a team.
                     SystemRequest::AddTeamMember { organization, team, user_id, role } => {
                         if let Some(state_layer) = &self.state_layer {
-                            match load_team_profile(state_layer, *organization, *team) {
-                                Ok(mut profile) => {
-                                    if profile.members.iter().any(|m| m.user_id == *user_id) {
+                            match load_team(state_layer, *organization, *team) {
+                                Ok(mut t) => {
+                                    if t.members.iter().any(|m| m.user_id == *user_id) {
                                         ledger_error(
                                             ErrorCode::AlreadyExists,
                                             format!(
@@ -4030,18 +4027,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                             ),
                                         )
                                     } else {
-                                        profile.members.push(TeamMember {
+                                        t.members.push(TeamMember {
                                             user_id: *user_id,
                                             role: *role,
                                             joined_at: block_timestamp,
                                         });
-                                        profile.updated_at = block_timestamp;
-                                        match save_team_profile(
-                                            state_layer,
-                                            *organization,
-                                            *team,
-                                            &profile,
-                                        ) {
+                                        t.updated_at = block_timestamp;
+                                        match save_team(state_layer, *organization, *team, &t) {
                                             Ok(()) => LedgerResponse::OrganizationUpdated {
                                                 organization_id: *organization,
                                             },
@@ -4060,17 +4052,17 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     },
 
                     // ── RemoveTeamMember (REGIONAL) ──
-                    // Removes a member from a team's profile.
+                    // Removes a member from a team.
                     SystemRequest::RemoveTeamMember { organization, team, user_id } => {
                         if let Some(state_layer) = &self.state_layer {
-                            match load_team_profile(state_layer, *organization, *team) {
-                                Ok(mut profile) => {
+                            match load_team(state_layer, *organization, *team) {
+                                Ok(mut t) => {
                                     use inferadb_ledger_state::system::TeamMemberRole;
 
-                                    let original_len = profile.members.len();
-                                    let is_last_manager = profile.members.iter().any(|m| {
+                                    let original_len = t.members.len();
+                                    let is_last_manager = t.members.iter().any(|m| {
                                         m.user_id == *user_id && m.role == TeamMemberRole::Manager
-                                    }) && profile
+                                    }) && t
                                         .members
                                         .iter()
                                         .filter(|m| m.role == TeamMemberRole::Manager)
@@ -4085,8 +4077,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                             ),
                                         )
                                     } else {
-                                        profile.members.retain(|m| m.user_id != *user_id);
-                                        if profile.members.len() == original_len {
+                                        t.members.retain(|m| m.user_id != *user_id);
+                                        if t.members.len() == original_len {
                                             ledger_error(
                                                 ErrorCode::NotFound,
                                                 format!(
@@ -4095,13 +4087,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                                 ),
                                             )
                                         } else {
-                                            profile.updated_at = block_timestamp;
-                                            match save_team_profile(
-                                                state_layer,
-                                                *organization,
-                                                *team,
-                                                &profile,
-                                            ) {
+                                            t.updated_at = block_timestamp;
+                                            match save_team(state_layer, *organization, *team, &t) {
                                                 Ok(()) => LedgerResponse::OrganizationUpdated {
                                                     organization_id: *organization,
                                                 },
@@ -4222,19 +4209,16 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     },
 
                     // ── PurgeOrganizationRegional (REGIONAL) ──
-                    // Deletes all team profiles, app profiles, assertion names,
+                    // Deletes all team records, app profiles, assertion names,
                     // and name indices belonging to this organization from the
                     // REGIONAL state layer.
                     SystemRequest::PurgeOrganizationRegional { organization } => {
                         if let Some(state_layer) = &self.state_layer {
                             let mut ops = Vec::new();
 
-                            // Delete all team profiles
-                            let team_prefix = format!(
-                                "{}{}:",
-                                SystemKeys::TEAM_PROFILE_PREFIX,
-                                organization.value()
-                            );
+                            // Delete all team records
+                            let team_prefix =
+                                format!("{}{}:", SystemKeys::TEAM_PREFIX, organization.value());
                             collect_all_entities_for_deletion(state_layer, &team_prefix, &mut ops);
 
                             // Delete all app profiles
@@ -4262,11 +4246,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             let profile_key = SystemKeys::organization_profile_key(*organization);
                             ops.push(Operation::DeleteEntity { key: profile_key });
 
-                            // Destroy the OrgKey — crypto-shredding: all historical
+                            // Destroy the OrgShredKey — crypto-shredding: all historical
                             // EncryptedOrgSystem entries for this organization become
                             // permanently unrecoverable.
-                            let org_key_key = SystemKeys::org_key(*organization);
-                            ops.push(Operation::DeleteEntity { key: org_key_key });
+                            let shred_key = SystemKeys::org_shred_key(*organization);
+                            ops.push(Operation::DeleteEntity { key: shred_key });
 
                             if !ops.is_empty()
                                 && let Err(e) =
@@ -5086,7 +5070,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             },
 
             LedgerRequest::EncryptedUserSystem(encrypted) => {
-                // Decrypt the SystemRequest using the user's SubjectKey.
+                // Decrypt the SystemRequest using the user's UserShredKey.
                 // If the key has been destroyed (user erased), skip the entry —
                 // the state machine already reflects the erasure.
                 let state_layer = match &self.state_layer {
@@ -5100,17 +5084,17 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     },
                 };
 
-                let key_str = SystemKeys::subject_key(encrypted.user_id);
-                let subject_key_entity = match state_layer
+                let key_str = SystemKeys::user_shred_key(encrypted.user_id);
+                let shred_key_entity = match state_layer
                     .get_entity(SYSTEM_VAULT_ID, key_str.as_bytes())
                 {
                     Ok(Some(entity)) => entity,
                     Ok(None) => {
-                        // SubjectKey destroyed — user has been erased.
+                        // UserShredKey destroyed — user has been erased.
                         // Crypto-shredding: this entry is permanently unrecoverable.
                         tracing::info!(
                             user_id = encrypted.user_id.value(),
-                            "EncryptedUserSystem: SubjectKey destroyed (user erased), skipping entry"
+                            "EncryptedUserSystem: UserShredKey destroyed (user erased), skipping entry"
                         );
                         return (LedgerResponse::Empty, None);
                     },
@@ -5118,31 +5102,31 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         tracing::error!(
                             user_id = encrypted.user_id.value(),
                             error = %e,
-                            "EncryptedUserSystem: failed to read SubjectKey"
+                            "EncryptedUserSystem: failed to read UserShredKey"
                         );
                         return (
                             LedgerResponse::Error {
                                 code: ErrorCode::Internal,
-                                message: format!("Failed to read SubjectKey: {e}"),
+                                message: format!("Failed to read UserShredKey: {e}"),
                             },
                             None,
                         );
                     },
                 };
 
-                let subject_key: inferadb_ledger_state::system::SubjectKey =
-                    match decode(&subject_key_entity.value) {
+                let shred_key: inferadb_ledger_state::system::UserShredKey =
+                    match decode(&shred_key_entity.value) {
                         Ok(sk) => sk,
                         Err(e) => {
                             tracing::error!(
                                 user_id = encrypted.user_id.value(),
                                 error = %e,
-                                "EncryptedUserSystem: failed to decode SubjectKey"
+                                "EncryptedUserSystem: failed to decode UserShredKey"
                             );
                             return (
                                 LedgerResponse::Error {
                                     code: ErrorCode::Internal,
-                                    message: format!("Failed to decode SubjectKey: {e}"),
+                                    message: format!("Failed to decode UserShredKey: {e}"),
                                 },
                                 None,
                             );
@@ -5151,7 +5135,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 let sys_request = match crate::entry_crypto::decrypt_user_system_request(
                     encrypted,
-                    &subject_key.key,
+                    &shred_key.key,
                 ) {
                     Ok(req) => req,
                     Err(e) => {
@@ -5184,7 +5168,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             },
 
             LedgerRequest::EncryptedOrgSystem(encrypted) => {
-                // Decrypt the SystemRequest using the organization's OrgKey.
+                // Decrypt the SystemRequest using the organization's OrgShredKey.
                 // If the key has been destroyed (org purged), skip the entry —
                 // the state machine already reflects the purge.
                 let state_layer = match &self.state_layer {
@@ -5198,48 +5182,49 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     },
                 };
 
-                let key_str = SystemKeys::org_key(encrypted.organization);
-                let org_key_entity =
-                    match state_layer.get_entity(SYSTEM_VAULT_ID, key_str.as_bytes()) {
-                        Ok(Some(entity)) => entity,
-                        Ok(None) => {
-                            // OrgKey destroyed — organization has been purged.
-                            // Crypto-shredding: this entry is permanently unrecoverable.
-                            tracing::info!(
-                                organization_id = encrypted.organization.value(),
-                                "EncryptedOrgSystem: OrgKey destroyed (org purged), skipping entry"
-                            );
-                            return (LedgerResponse::Empty, None);
-                        },
-                        Err(e) => {
-                            tracing::error!(
-                                organization_id = encrypted.organization.value(),
-                                error = %e,
-                                "EncryptedOrgSystem: failed to read OrgKey"
-                            );
-                            return (
-                                LedgerResponse::Error {
-                                    code: ErrorCode::Internal,
-                                    message: format!("Failed to read OrgKey: {e}"),
-                                },
-                                None,
-                            );
-                        },
-                    };
+                let key_str = SystemKeys::org_shred_key(encrypted.organization);
+                let shred_key_entity = match state_layer
+                    .get_entity(SYSTEM_VAULT_ID, key_str.as_bytes())
+                {
+                    Ok(Some(entity)) => entity,
+                    Ok(None) => {
+                        // OrgShredKey destroyed — organization has been purged.
+                        // Crypto-shredding: this entry is permanently unrecoverable.
+                        tracing::info!(
+                            organization_id = encrypted.organization.value(),
+                            "EncryptedOrgSystem: OrgShredKey destroyed (org purged), skipping entry"
+                        );
+                        return (LedgerResponse::Empty, None);
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            organization_id = encrypted.organization.value(),
+                            error = %e,
+                            "EncryptedOrgSystem: failed to read OrgShredKey"
+                        );
+                        return (
+                            LedgerResponse::Error {
+                                code: ErrorCode::Internal,
+                                message: format!("Failed to read OrgShredKey: {e}"),
+                            },
+                            None,
+                        );
+                    },
+                };
 
-                let org_key: inferadb_ledger_state::system::OrgKey =
-                    match decode(&org_key_entity.value) {
+                let shred_key: inferadb_ledger_state::system::OrgShredKey =
+                    match decode(&shred_key_entity.value) {
                         Ok(ok) => ok,
                         Err(e) => {
                             tracing::error!(
                                 organization_id = encrypted.organization.value(),
                                 error = %e,
-                                "EncryptedOrgSystem: failed to decode OrgKey"
+                                "EncryptedOrgSystem: failed to decode OrgShredKey"
                             );
                             return (
                                 LedgerResponse::Error {
                                     code: ErrorCode::Internal,
-                                    message: format!("Failed to decode OrgKey: {e}"),
+                                    message: format!("Failed to decode OrgShredKey: {e}"),
                                 },
                                 None,
                             );
@@ -5248,7 +5233,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 let sys_request = match crate::entry_crypto::decrypt_org_system_request(
                     encrypted,
-                    &org_key.key,
+                    &shred_key.key,
                 ) {
                     Ok(req) => req,
                     Err(e) => {

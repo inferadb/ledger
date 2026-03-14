@@ -8,7 +8,7 @@ use std::{
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{
     BlockArchive, StateLayer,
-    system::{AppProfile, SYSTEM_VAULT_ID, SystemKeys, TeamProfile},
+    system::{AppProfile, SYSTEM_VAULT_ID, SystemKeys, Team},
 };
 use inferadb_ledger_store::{
     Database, DatabaseConfig, FileBackend, Key, StorageBackend, Value, WriteTransaction, tables,
@@ -227,30 +227,30 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// Rebuilds in-memory secondary indices from persisted profiles.
     ///
     /// Rebuilds:
-    /// - `team_name_index`: (org_id, name) → team_id from `TeamProfile` records
+    /// - `team_name_index`: (org_id, name) → team_id from `Team` records
     /// - `app_name_index`: (org_id, name) → app_id from `AppProfile` records
-    /// - `user_org_index`: user_id → {org_ids} from `OrganizationProfile` records
+    /// - `user_org_index`: user_id → {org_ids} from `Organization` skeleton records
     ///
     /// Uses prefix scans on the state layer instead of in-memory slug indices.
     /// This correctly handles both GLOBAL and REGIONAL Raft groups:
     /// - GLOBAL: no profile keys exist → no name index entries (correct)
     /// - REGIONAL: profile keys exist → name indices populated (correct)
     fn rebuild_secondary_indices(&self, state_layer: &StateLayer<B>) {
-        // Rebuild team name index via prefix scan on _sys:team_profile:*
-        let name_entries = scan_prefix_decode::<B, TeamProfile, _>(
-            state_layer,
-            SystemKeys::TEAM_PROFILE_PREFIX,
-            |profile| ((profile.organization, profile.name), profile.team),
-        );
+        // Rebuild team name index via prefix scan on team:*
+        let name_entries =
+            scan_prefix_decode::<B, Team, _>(state_layer, SystemKeys::TEAM_PREFIX, |profile| {
+                ((profile.organization, profile.name), profile.team)
+            });
 
-        // Rebuild app name index via prefix scan on _sys:app_profile:*
+        // Rebuild app name index via prefix scan on app_profile:*
         let app_name_entries = scan_prefix_decode::<B, AppProfile, _>(
             state_layer,
             SystemKeys::APP_PROFILE_PREFIX,
             |profile| ((profile.organization, profile.name), profile.app),
         );
 
-        // Rebuild user→org index from organization profiles
+        // Rebuild user→org index from Organization skeletons (GLOBAL).
+        // Members live in the Organization skeleton, not OrganizationProfile.
         let org_ids: Vec<_> = {
             let state = self.applied_state.read();
             state.organizations.keys().copied().collect()
@@ -260,14 +260,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
             std::collections::HashSet<OrganizationId>,
         > = std::collections::HashMap::new();
         for org_id in org_ids {
-            let key = SystemKeys::organization_profile_key(org_id);
+            let key = SystemKeys::organization_key(org_id);
             match state_layer.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
                 Ok(Some(entity)) => {
-                    match decode::<inferadb_ledger_state::system::OrganizationProfile>(
-                        &entity.value,
-                    ) {
-                        Ok(profile) => {
-                            for member in &profile.members {
+                    match decode::<inferadb_ledger_state::system::Organization>(&entity.value) {
+                        Ok(org) => {
+                            for member in &org.members {
                                 user_org_entries.entry(member.user_id).or_default().insert(org_id);
                             }
                         },
@@ -275,13 +273,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             warn!(
                                 organization_id = %org_id,
                                 error = %e,
-                                "Failed to decode organization profile during index rebuild"
+                                "Failed to decode Organization skeleton during index rebuild"
                             );
                         },
                     }
                 },
                 Ok(None) => {
-                    // Profile may not exist yet for orgs still provisioning
+                    // Skeleton may not exist yet for orgs still provisioning
                 },
                 Err(e) => {
                     warn!(

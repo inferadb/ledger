@@ -21,7 +21,7 @@ pub use inferadb_ledger_types::{
     AppCredentialType, OrganizationMemberRole, SigningKeyScope, SigningKeyStatus, UserRole,
     UserStatus,
 };
-pub use keys::SystemKeys;
+pub use keys::{KeyTier, SystemKeys};
 pub use saga::{
     CreateOnboardingUserInput, CreateOnboardingUserSaga, CreateOnboardingUserSagaState,
     CreateOrganizationInput, CreateOrganizationSaga, CreateOrganizationSagaState,
@@ -42,11 +42,11 @@ pub use types::{
     App, AppCredentials, AppProfile, AppVaultConnection, ClientAssertionCredentialConfig,
     ClientAssertionEntry, ClientSecretCredential, EmailHashEntry, EmailVerificationToken,
     ErasureAuditRecord, MigrationSummary, MtlsCredential, NodeInfo, NodeRole, OnboardingAccount,
-    OrgKey, OrganizationDirectoryEntry, OrganizationDirectoryStatus, OrganizationMember,
-    OrganizationProfile, OrganizationRegistry, OrganizationStatus, OrganizationTier,
-    PendingEmailVerification, ProvisioningReservation, RefreshToken, SigningKey, SubjectKey,
-    TeamMember, TeamMemberRole, TeamProfile, User, UserDirectoryEntry, UserDirectoryStatus,
-    UserEmail, UserMigrationEntry,
+    OrgShredKey, Organization, OrganizationDirectoryEntry, OrganizationDirectoryStatus,
+    OrganizationMember, OrganizationProfile, OrganizationRegistry, OrganizationStatus,
+    OrganizationTier, PendingEmailVerification, ProvisioningReservation, RefreshToken, SigningKey,
+    Team, TeamMember, TeamMemberRole, User, UserDirectoryEntry, UserDirectoryStatus, UserEmail,
+    UserMigrationEntry, UserShredKey,
 };
 
 #[cfg(test)]

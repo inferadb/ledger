@@ -1,7 +1,7 @@
 //! Per-entry encryption for PII-bearing Raft log entries.
 //!
 //! Provides AES-256-GCM encryption of [`SystemRequest`] payloads using
-//! per-subject or per-organization key material. When a user is erased or
+//! per-user or per-organization shred key material. When a user is erased or
 //! an organization is purged, the key is destroyed — rendering all historical
 //! Raft log entries containing that entity's PII cryptographically
 //! unrecoverable (crypto-shredding).
@@ -24,7 +24,7 @@ use crate::types::SystemRequest;
 /// Encrypted form of a [`SystemRequest`] for at-rest PII protection.
 ///
 /// The plaintext `SystemRequest` is postcard-serialized, then encrypted with
-/// AES-256-GCM using the user's `SubjectKey` as the encryption key. The
+/// AES-256-GCM using the user's `UserShredKey` as the encryption key. The
 /// `user_id` is stored in plaintext so the decryption path can look up
 /// the correct key.
 ///
@@ -36,14 +36,14 @@ pub struct EncryptedUserSystemRequest {
     pub sealed: Vec<u8>,
     /// 12-byte random nonce (unique per encryption).
     pub nonce: [u8; 12],
-    /// User whose `SubjectKey` encrypts this entry.
+    /// User whose `UserShredKey` encrypts this entry.
     ///
     /// Stored in plaintext for key lookup during decryption.
     /// Not sensitive — user IDs are internal sequential identifiers.
     pub user_id: UserId,
 }
 
-/// Encrypts a [`SystemRequest`] using a user's `SubjectKey` material.
+/// Encrypts a [`SystemRequest`] using a user's `UserShredKey` material.
 ///
 /// The request is postcard-serialized, then encrypted with AES-256-GCM.
 /// The user ID is bound as AAD to prevent cross-user key substitution.
@@ -53,19 +53,19 @@ pub struct EncryptedUserSystemRequest {
 /// Returns an error if serialization or encryption fails.
 pub fn encrypt_user_system_request(
     request: &SystemRequest,
-    subject_key_bytes: &[u8; 32],
+    shred_key_bytes: &[u8; 32],
     user_id: UserId,
 ) -> Result<EncryptedUserSystemRequest, EncryptionError> {
     let plaintext = postcard::to_allocvec(request)
         .map_err(|e| EncryptionError::Serialization(e.to_string()))?;
     let aad = user_id.value().to_le_bytes();
-    let (sealed, nonce) = seal(&plaintext, subject_key_bytes, &aad)?;
+    let (sealed, nonce) = seal(&plaintext, shred_key_bytes, &aad)?;
     Ok(EncryptedUserSystemRequest { sealed, nonce, user_id })
 }
 
 /// Decrypts an [`EncryptedUserSystemRequest`] back to a [`SystemRequest`].
 ///
-/// Uses the user's `SubjectKey` material and verifies the AAD binding.
+/// Uses the user's `UserShredKey` material and verifies the AAD binding.
 ///
 /// # Errors
 ///
@@ -74,10 +74,10 @@ pub fn encrypt_user_system_request(
 /// bytes aren't a valid `SystemRequest`.
 pub fn decrypt_user_system_request(
     encrypted: &EncryptedUserSystemRequest,
-    subject_key_bytes: &[u8; 32],
+    shred_key_bytes: &[u8; 32],
 ) -> Result<SystemRequest, DecryptionError> {
     let aad = encrypted.user_id.value().to_le_bytes();
-    let plaintext = unseal(&encrypted.sealed, &encrypted.nonce, subject_key_bytes, &aad)?;
+    let plaintext = unseal(&encrypted.sealed, &encrypted.nonce, shred_key_bytes, &aad)?;
     postcard::from_bytes(&plaintext).map_err(|e| DecryptionError::Deserialization(e.to_string()))
 }
 
@@ -85,21 +85,21 @@ pub fn decrypt_user_system_request(
 ///
 /// Mirrors [`EncryptedUserSystemRequest`] but keyed on `OrganizationId` instead of
 /// `UserId`. Organization-scoped PII (org names, team names, app names) is
-/// encrypted with the organization's `OrgKey`. When the organization is purged
-/// and the `OrgKey` destroyed, historical log entries become unrecoverable.
+/// encrypted with the organization's `OrgShredKey`. When the organization is purged
+/// and the `OrgShredKey` destroyed, historical log entries become unrecoverable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptedOrgSystemRequest {
     /// AES-256-GCM sealed output: `ciphertext || auth_tag` (16-byte tag appended).
     pub sealed: Vec<u8>,
     /// 12-byte random nonce (unique per encryption).
     pub nonce: [u8; 12],
-    /// Organization whose `OrgKey` encrypts this entry.
+    /// Organization whose `OrgShredKey` encrypts this entry.
     ///
     /// Stored in plaintext for key lookup during decryption.
     pub organization: OrganizationId,
 }
 
-/// Encrypts a [`SystemRequest`] using an organization's `OrgKey` material.
+/// Encrypts a [`SystemRequest`] using an organization's `OrgShredKey` material.
 ///
 /// The request is postcard-serialized, then encrypted with AES-256-GCM.
 /// The organization ID is bound as AAD to prevent cross-org key substitution.
@@ -109,19 +109,19 @@ pub struct EncryptedOrgSystemRequest {
 /// Returns an error if serialization or encryption fails.
 pub fn encrypt_org_system_request(
     request: &SystemRequest,
-    org_key_bytes: &[u8; 32],
+    shred_key_bytes: &[u8; 32],
     organization: OrganizationId,
 ) -> Result<EncryptedOrgSystemRequest, EncryptionError> {
     let plaintext = postcard::to_allocvec(request)
         .map_err(|e| EncryptionError::Serialization(e.to_string()))?;
     let aad = organization.value().to_le_bytes();
-    let (sealed, nonce) = seal(&plaintext, org_key_bytes, &aad)?;
+    let (sealed, nonce) = seal(&plaintext, shred_key_bytes, &aad)?;
     Ok(EncryptedOrgSystemRequest { sealed, nonce, organization })
 }
 
 /// Decrypts an [`EncryptedOrgSystemRequest`] back to a [`SystemRequest`].
 ///
-/// Uses the organization's `OrgKey` material and verifies the AAD binding.
+/// Uses the organization's `OrgShredKey` material and verifies the AAD binding.
 ///
 /// # Errors
 ///
@@ -130,17 +130,17 @@ pub fn encrypt_org_system_request(
 /// bytes aren't a valid `SystemRequest`.
 pub fn decrypt_org_system_request(
     encrypted: &EncryptedOrgSystemRequest,
-    org_key_bytes: &[u8; 32],
+    shred_key_bytes: &[u8; 32],
 ) -> Result<SystemRequest, DecryptionError> {
     let aad = encrypted.organization.value().to_le_bytes();
-    let plaintext = unseal(&encrypted.sealed, &encrypted.nonce, org_key_bytes, &aad)?;
+    let plaintext = unseal(&encrypted.sealed, &encrypted.nonce, shred_key_bytes, &aad)?;
     postcard::from_bytes(&plaintext).map_err(|e| DecryptionError::Deserialization(e.to_string()))
 }
 
 /// PII fields sealed during onboarding before entering the Raft log.
 ///
 /// Serialized with postcard, then AES-256-GCM encrypted using the user's
-/// `SubjectKey`. The `SubjectKey` itself travels alongside this sealed blob
+/// `UserShredKey`. The `UserShredKey` itself travels alongside this sealed blob
 /// in the same Raft entry (bootstrapping). At-rest protection comes from
 /// the `EncryptedBackend`; per-entry sealing protects against log replay
 /// after user erasure (the apply handler checks the erasure tombstone).

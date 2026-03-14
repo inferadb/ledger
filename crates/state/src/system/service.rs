@@ -23,9 +23,9 @@ use super::{
     keys::SystemKeys,
     types::{
         EmailHashEntry, EmailVerificationToken, ErasureAuditRecord, MigrationSummary, NodeInfo,
-        OnboardingAccount, OrgKey, OrganizationDirectoryEntry, OrganizationDirectoryStatus,
-        OrganizationRegistry, OrganizationStatus, PendingEmailVerification, SubjectKey, User,
-        UserDirectoryEntry, UserDirectoryStatus, UserEmail, UserMigrationEntry,
+        OnboardingAccount, OrgShredKey, OrganizationDirectoryEntry, OrganizationDirectoryStatus,
+        OrganizationRegistry, OrganizationStatus, PendingEmailVerification, User,
+        UserDirectoryEntry, UserDirectoryStatus, UserEmail, UserMigrationEntry, UserShredKey,
     },
 };
 use crate::state::{StateError, StateLayer};
@@ -268,7 +268,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         registry: &OrganizationRegistry,
         slug: OrganizationSlug,
     ) -> Result<()> {
-        let key = SystemKeys::organization_key(registry.organization_id);
+        let key = SystemKeys::organization_registry_key(registry.organization_id);
         let value = encode(registry).context(CodecSnafu)?;
 
         // Also create the slug index
@@ -388,7 +388,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         &self,
         organization: OrganizationId,
     ) -> Result<Option<OrganizationRegistry>> {
-        let key = SystemKeys::organization_key(organization);
+        let key = SystemKeys::organization_registry_key(organization);
 
         let entity_opt =
             self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
@@ -443,7 +443,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             .state
             .list_entities(
                 SYSTEM_VAULT_ID,
-                Some(SystemKeys::ORG_PREFIX),
+                Some(SystemKeys::ORG_REGISTRY_PREFIX),
                 None,
                 MAX_LIST_ORGANIZATIONS,
             )
@@ -613,7 +613,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
     /// Registers a user directory entry in the GLOBAL control plane.
     ///
-    /// Stores the non-PII directory entry at `_sys:user:{user_id}` and
+    /// Stores the non-PII directory entry at `_dir:user:{user_id}` and
     /// the slug index at `_idx:user:slug:{user_slug}`. The slug is
     /// extracted from `entry.slug` — callers must set it before registration.
     ///
@@ -1168,7 +1168,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     /// 8. Write erasure audit record (insert-if-absent for idempotency).
     ///
     /// After erasure, the `UserDirectoryEntry` retains only `user: UserId` and
-    /// `status: Deleted`. The subject key is destroyed, rendering all
+    /// `status: Deleted`. The user shred key is destroyed, rendering all
     /// subject-encrypted PII cryptographically unrecoverable.
     ///
     /// # Errors
@@ -1264,11 +1264,11 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
                 .context(StateSnafu)?;
         }
 
-        // Step 6: Delete per-subject encryption key.
+        // Step 6: Delete per-user crypto-shredding key.
         // B-tree delete removes the logical entry; underlying bytes are encrypted
         // ciphertext (via EncryptedBackend), rendered unrecoverable.
-        let subject_key_key = SystemKeys::subject_key(user_id);
-        let delete_key_ops = vec![Operation::DeleteEntity { key: subject_key_key }];
+        let shred_key = SystemKeys::user_shred_key(user_id);
+        let delete_key_ops = vec![Operation::DeleteEntity { key: shred_key }];
         self.state.apply_operations(SYSTEM_VAULT_ID, &delete_key_ops, 0).context(StateSnafu)?;
 
         // Step 7: Delete the User record (contains plaintext name — PII).
@@ -1313,7 +1313,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         }
     }
 
-    /// Stores a per-subject encryption key for a user.
+    /// Stores a per-user crypto-shredding key.
     ///
     /// The key is stored in the system vault, encrypted at rest by the
     /// region's RMK via `EncryptedBackend`.
@@ -1322,10 +1322,10 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// Returns [`SystemError::Codec`] or [`SystemError::State`] if the
     /// write fails.
-    pub fn store_subject_key(&self, user_id: UserId, key_bytes: &[u8; 32]) -> Result<()> {
-        let subject_key = SubjectKey { user_id, key: *key_bytes, created_at: Utc::now() };
-        let storage_key = SystemKeys::subject_key(user_id);
-        let value = encode(&subject_key).context(CodecSnafu)?;
+    pub fn store_user_shred_key(&self, user_id: UserId, key_bytes: &[u8; 32]) -> Result<()> {
+        let shred_key = UserShredKey { user_id, key: *key_bytes, created_at: Utc::now() };
+        let storage_key = SystemKeys::user_shred_key(user_id);
+        let value = encode(&shred_key).context(CodecSnafu)?;
 
         let ops = vec![Operation::SetEntity {
             key: storage_key,
@@ -1338,7 +1338,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         Ok(())
     }
 
-    /// Returns a per-subject encryption key for a user, if one exists.
+    /// Returns a per-user crypto-shredding key, if one exists.
     ///
     /// Returns `None` if the key has been erased (crypto-shredding).
     ///
@@ -1346,20 +1346,20 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// Returns [`SystemError::State`] if the read fails, or
     /// [`SystemError::Codec`] if deserialization fails.
-    pub fn get_subject_key(&self, user_id: UserId) -> Result<Option<SubjectKey>> {
-        let key = SystemKeys::subject_key(user_id);
+    pub fn get_user_shred_key(&self, user_id: UserId) -> Result<Option<UserShredKey>> {
+        let key = SystemKeys::user_shred_key(user_id);
         let entity_opt =
             self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
         match entity_opt {
             Some(entity) => {
-                let subject_key: SubjectKey = decode(&entity.value).context(CodecSnafu)?;
-                Ok(Some(subject_key))
+                let shred_key: UserShredKey = decode(&entity.value).context(CodecSnafu)?;
+                Ok(Some(shred_key))
             },
             None => Ok(None),
         }
     }
 
-    /// Stores a per-organization encryption key.
+    /// Stores a per-organization crypto-shredding key.
     ///
     /// The key is stored in the system vault, encrypted at rest by the
     /// region's RMK via `EncryptedBackend`. Used for crypto-shredding of
@@ -1369,10 +1369,14 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// Returns [`SystemError::Codec`] or [`SystemError::State`] if the
     /// write fails.
-    pub fn store_org_key(&self, organization: OrganizationId, key_bytes: &[u8; 32]) -> Result<()> {
-        let org_key = OrgKey { organization, key: *key_bytes, created_at: Utc::now() };
-        let storage_key = SystemKeys::org_key(organization);
-        let value = encode(&org_key).context(CodecSnafu)?;
+    pub fn store_org_shred_key(
+        &self,
+        organization: OrganizationId,
+        key_bytes: &[u8; 32],
+    ) -> Result<()> {
+        let shred_key = OrgShredKey { organization, key: *key_bytes, created_at: Utc::now() };
+        let storage_key = SystemKeys::org_shred_key(organization);
+        let value = encode(&shred_key).context(CodecSnafu)?;
 
         let ops = vec![Operation::SetEntity {
             key: storage_key,
@@ -1385,7 +1389,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         Ok(())
     }
 
-    /// Returns a per-organization encryption key, if one exists.
+    /// Returns a per-organization crypto-shredding key, if one exists.
     ///
     /// Returns `None` if the key has been destroyed (organization purged).
     ///
@@ -1393,14 +1397,14 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// Returns [`SystemError::State`] if the read fails, or
     /// [`SystemError::Codec`] if deserialization fails.
-    pub fn get_org_key(&self, organization: OrganizationId) -> Result<Option<OrgKey>> {
-        let key = SystemKeys::org_key(organization);
+    pub fn get_org_shred_key(&self, organization: OrganizationId) -> Result<Option<OrgShredKey>> {
+        let key = SystemKeys::org_shred_key(organization);
         let entity_opt =
             self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
         match entity_opt {
             Some(entity) => {
-                let org_key: OrgKey = decode(&entity.value).context(CodecSnafu)?;
-                Ok(Some(org_key))
+                let shred_key: OrgShredKey = decode(&entity.value).context(CodecSnafu)?;
+                Ok(Some(shred_key))
             },
             None => Ok(None),
         }
@@ -1443,14 +1447,14 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     /// regional directory structure.
     ///
     /// For each entry in `entries`:
-    /// 1. Creates `UserDirectoryEntry` in GLOBAL (`_sys:user:{id}`).
+    /// 1. Creates `UserDirectoryEntry` in GLOBAL (`_dir:user:{id}`).
     /// 2. Creates slug index (`_idx:user:slug:{slug}`).
     /// 3. Creates email hash index (`_idx:email_hash:{hmac}`).
-    /// 4. Stores per-subject encryption key (`_key:user:{id}`).
+    /// 4. Stores per-user crypto-shredding key (`_shred:user:{id}`).
     /// 5. Removes old plaintext email index (`_idx:email:{email}`) for email records belonging to
     ///    this user.
     ///
-    /// The caller (admin handler) pre-computes HMACs and subject keys so the
+    /// The caller (admin handler) pre-computes HMACs and shred keys so the
     /// blinding key never enters the Raft log.
     ///
     /// Returns a [`MigrationSummary`] counting total, migrated, skipped, errors.
@@ -1502,7 +1506,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             }
 
             // Step 4: Store per-subject encryption key.
-            if self.store_subject_key(entry.user, &entry.bytes).is_err() {
+            if self.store_user_shred_key(entry.user, &entry.bytes).is_err() {
                 errors += 1;
                 continue;
             }
@@ -2673,7 +2677,7 @@ mod tests {
 
     #[test]
     fn test_user_directory_does_not_collide_with_user_records() {
-        // Directory entries use _sys:user: prefix, user records use user: prefix
+        // Directory entries use _dir:user: prefix, user records use user: prefix
         // Both can coexist in the same B-tree
         let svc = create_test_service();
 
@@ -2897,27 +2901,27 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_store_and_get_subject_key() {
+    fn test_store_and_get_user_shred_key() {
         let svc = create_test_service();
         let user_id = UserId::new(42);
         let key_bytes = [0xABu8; 32];
 
-        svc.store_subject_key(user_id, &key_bytes).unwrap();
+        svc.store_user_shred_key(user_id, &key_bytes).unwrap();
 
-        let retrieved = svc.get_subject_key(user_id).unwrap().unwrap();
+        let retrieved = svc.get_user_shred_key(user_id).unwrap().unwrap();
         assert_eq!(retrieved.user_id, user_id);
         assert_eq!(retrieved.key, key_bytes);
     }
 
     #[test]
-    fn test_subject_key_not_found_after_erasure() {
+    fn test_user_shred_key_not_found_after_erasure() {
         let svc = create_test_service();
         let user_id = UserId::new(42);
         let key_bytes = [0xCDu8; 32];
 
-        // Store a subject key
-        svc.store_subject_key(user_id, &key_bytes).unwrap();
-        assert!(svc.get_subject_key(user_id).unwrap().is_some());
+        // Store a user shred key
+        svc.store_user_shred_key(user_id, &key_bytes).unwrap();
+        assert!(svc.get_user_shred_key(user_id).unwrap().is_some());
 
         // Register directory entry (erase_user needs it)
         let entry = make_directory_entry(42, 10042, Region::US_EAST_VA);
@@ -2926,8 +2930,8 @@ mod tests {
         // Erase user
         svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
 
-        // Subject key is destroyed
-        assert!(svc.get_subject_key(user_id).unwrap().is_none());
+        // User shred key is destroyed
+        assert!(svc.get_user_shred_key(user_id).unwrap().is_none());
     }
 
     #[test]
@@ -2999,7 +3003,7 @@ mod tests {
 
         let entry = make_directory_entry(99, 10099, Region::US_EAST_VA);
         svc.register_user_directory(&entry).unwrap();
-        svc.store_subject_key(user_id, &[0x11u8; 32]).unwrap();
+        svc.store_user_shred_key(user_id, &[0x11u8; 32]).unwrap();
         svc.register_email_hash("idempotent_hash", user_id).unwrap();
 
         // First erasure
@@ -3009,7 +3013,7 @@ mod tests {
         svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
 
         // State is the same after both calls
-        assert!(svc.get_subject_key(user_id).unwrap().is_none());
+        assert!(svc.get_user_shred_key(user_id).unwrap().is_none());
         assert!(svc.get_email_hash("idempotent_hash").unwrap().is_none());
 
         let tombstone = svc.get_user_directory(user_id).unwrap().unwrap();
@@ -3040,8 +3044,8 @@ mod tests {
         svc.register_user_directory(&entry1).unwrap();
         svc.register_user_directory(&entry2).unwrap();
 
-        svc.store_subject_key(UserId::new(1), &[0xAAu8; 32]).unwrap();
-        svc.store_subject_key(UserId::new(2), &[0xBBu8; 32]).unwrap();
+        svc.store_user_shred_key(UserId::new(1), &[0xAAu8; 32]).unwrap();
+        svc.store_user_shred_key(UserId::new(2), &[0xBBu8; 32]).unwrap();
 
         svc.register_email_hash("user1_hash", UserId::new(1)).unwrap();
         svc.register_email_hash("user2_hash", UserId::new(2)).unwrap();
@@ -3052,7 +3056,7 @@ mod tests {
         // User 2 is completely unaffected
         let user2 = svc.get_user_directory(UserId::new(2)).unwrap().unwrap();
         assert_eq!(user2.status, UserDirectoryStatus::Active);
-        assert!(svc.get_subject_key(UserId::new(2)).unwrap().is_some());
+        assert!(svc.get_user_shred_key(UserId::new(2)).unwrap().is_some());
         assert!(svc.get_email_hash("user2_hash").unwrap().is_some());
     }
 
@@ -3089,9 +3093,9 @@ mod tests {
         let entry = make_directory_entry(42, 10042, Region::US_EAST_VA);
         svc.register_user_directory(&entry).unwrap();
 
-        // Store subject key
+        // Store user shred key
         let key_bytes = [0xFFu8; 32];
-        svc.store_subject_key(user_id, &key_bytes).unwrap();
+        svc.store_user_shred_key(user_id, &key_bytes).unwrap();
 
         // Register email hash
         svc.register_email_hash("user42_email_hash", user_id).unwrap();
@@ -3102,7 +3106,7 @@ mod tests {
 
         // Verify everything exists pre-erasure
         assert!(svc.get_user_directory(user_id).unwrap().is_some());
-        assert!(svc.get_subject_key(user_id).unwrap().is_some());
+        assert!(svc.get_user_shred_key(user_id).unwrap().is_some());
         assert!(svc.get_email_hash("user42_email_hash").unwrap().is_some());
         assert!(
             svc.get_user_id_by_slug(inferadb_ledger_types::UserSlug::new(10042)).unwrap().is_some()
@@ -3121,7 +3125,7 @@ mod tests {
         assert!(tombstone.region.is_none());
         assert!(tombstone.updated_at.is_none());
 
-        assert!(svc.get_subject_key(user_id).unwrap().is_none());
+        assert!(svc.get_user_shred_key(user_id).unwrap().is_none());
         assert!(svc.get_email_hash("user42_email_hash").unwrap().is_none());
         assert!(
             svc.get_user_id_by_slug(inferadb_ledger_types::UserSlug::new(10042)).unwrap().is_none()
@@ -3396,9 +3400,9 @@ mod tests {
         let email_hash_user = svc.get_email_hash("abc123def456").unwrap();
         assert_eq!(email_hash_user, Some(EmailHashEntry::Active(UserId::new(1))));
 
-        // Verify subject key stored.
-        let subject_key = svc.get_subject_key(UserId::new(1)).unwrap().unwrap();
-        assert_eq!(subject_key.key, [0xAAu8; 32]);
+        // Verify user shred key stored.
+        let shred_key = svc.get_user_shred_key(UserId::new(1)).unwrap().unwrap();
+        assert_eq!(shred_key.key, [0xAAu8; 32]);
     }
 
     #[test]

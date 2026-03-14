@@ -19,7 +19,7 @@ GLOBAL Raft entries achieve pseudonymization through three mechanisms:
 
 2. **Dual-ID architecture** — internal sequential IDs (`OrganizationId(i64)`, `UserId(i64)`) are used in storage. External Snowflake slugs (`OrganizationSlug(u64)`, `UserSlug(u64)`) are used in APIs. Neither is PII.
 
-3. **Name stripping** — organization, team, and app names are stripped from GLOBAL `LedgerRequest` variants. Names are written to REGIONAL state via `WriteOrganizationProfile`, `WriteTeamProfile`, and `WriteAppProfile` system requests.
+3. **Name stripping** — organization, team, and app names are stripped from GLOBAL `LedgerRequest` variants. Names are written to REGIONAL state via `WriteOrganizationProfile`, `WriteTeam`, and `WriteAppProfile` system requests.
 
 Under GDPR Art. 4(1) / Recital 26, data that cannot be attributed to a specific person without additional information (the blinding key) is pseudonymous. The blinding key is held separately from the Raft log, meeting the "kept separately" requirement.
 
@@ -36,7 +36,7 @@ Exhaustive list of data stored in the GLOBAL Raft log:
 | Regions         | `Region` enum (e.g., `EU_WEST_DUBLIN`)                             | Not PII                              |
 | Tiers           | `OrganizationTier`                                                 | Not PII                              |
 | Timestamps      | `created_at`, `updated_at`                                         | Not PII                              |
-| Crypto material | `SubjectKey` (per-user encryption key), signing key envelopes      | Not PII (key material)               |
+| Crypto material | `UserShredKey` (per-user encryption key), signing key envelopes      | Not PII (key material)               |
 | Token metadata  | `RefreshTokenId`, `TokenVersion`, token hashes                     | Not PII                              |
 
 Zero plaintext PII appears in any GLOBAL Raft entry.
@@ -72,9 +72,9 @@ Making US regions optionally protected is a large architectural change (`require
 
 ### Crypto-Shredding
 
-User-scoped REGIONAL Raft entries are encrypted with the user's `SubjectKey` (256-bit AES key). When `erase_user()` is called:
+User-scoped REGIONAL Raft entries are encrypted with the user's `UserShredKey` (256-bit AES key). When `erase_user()` is called:
 
-1. The `SubjectKey` is destroyed from the state layer
+1. The `UserShredKey` is destroyed from the state layer
 2. All encrypted Raft log entries for that user become cryptographically unrecoverable
 3. No log rewriting is required — the ciphertext remains but is permanently unreadable
 
@@ -120,6 +120,6 @@ Ledger is responsible only for its own data residency guarantees. The Control pl
 | --------------------------------- | ----------------------------------------------------------------------------- |
 | No cross-border PII replication   | Independent GLOBAL Raft per region; REGIONAL data stays in-region             |
 | Pseudonymization (GDPR Art. 4(1)) | HMAC-blinded emails, stripped names, numeric IDs only in GLOBAL               |
-| Right to erasure (GDPR Art. 17)   | `erase_user()` + crypto-shredding via SubjectKey destruction                  |
+| Right to erasure (GDPR Art. 17)   | `erase_user()` + crypto-shredding via UserShredKey destruction                  |
 | Data minimization                 | GLOBAL log contains only the minimum needed for control-plane coordination    |
-| Key separation                    | Blinding key held separately from Raft; RMKs per-region; SubjectKeys per-user |
+| Key separation                    | Blinding key held separately from Raft; RMKs per-region; UserShredKeys per-user |

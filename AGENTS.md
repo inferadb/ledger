@@ -165,6 +165,30 @@ inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors, tok
 
 Other newtypes: `SigningKeyId(i64)`, `RefreshTokenId(i64)`, `UserEmailId(i64)`, `EmailVerifyTokenId(i64)`, `ClientAssertionId(i64)`, `TokenVersion(u64)`. All defined in `types/src/types.rs` via `define_id!`/`define_slug!` macros.
 
+**Storage key conventions:**
+
+Underscore-prefixed keys (`_xxx:`) are system infrastructure; bare keys are domain entities.
+
+| Prefix    | Purpose                                               | Tier     |
+| --------- | ----------------------------------------------------- | -------- |
+| _(bare)_  | Primary record (domain entity)                        | varies   |
+| `_dir:`   | Directory routing (ID → region/slug/status)           | GLOBAL   |
+| `_idx:`   | Secondary index (attribute → primary key)             | varies   |
+| `_meta:`  | Bookkeeping (sequences, saga state, node membership)  | GLOBAL   |
+| `_shred:` | Crypto-shredding keys (AES-256, destroyed on erasure) | REGIONAL |
+| `_tmp:`   | Ephemeral state (TTL-bound onboarding records)        | REGIONAL |
+| `_audit:` | Compliance trail (erasure records)                    | GLOBAL   |
+
+**Data residency patterns:**
+
+- **Pattern 1 (REGIONAL-only)**: Full record in REGIONAL under bare key. No GLOBAL counterpart. Examples: `user:`, `team:`, `user_email:`.
+- **Pattern 2 (skeleton+overlay)**: GLOBAL skeleton under bare key (PII fields empty), REGIONAL PII under `{entity}_profile:` key. Service layer merges on read. Examples: `app:` + `app_profile:`, `org:` + `org_profile:`.
+- **Pattern 3 (GLOBAL-only)**: No PII, no regional presence. Examples: `signing_key:`, `refresh_token:`.
+
+**Prefix collision safety**: `:` (0x3A) < `_` (0x5F) in ASCII, so `app:{org}:` scans never match `app_profile:` keys.
+
+**Tier-key safeguards**: `SystemKeys::validate_key_tier(key, expected_tier)` catches cross-tier write bugs. `KeyTier` enum in `state/src/system/keys.rs`.
+
 ## Error Handling
 
 **Server crates** (`types`, `store`, `proto`, `state`, `raft`, `services`, `server`): Use `snafu` with implicit location tracking. Never use `thiserror` or `anyhow`.

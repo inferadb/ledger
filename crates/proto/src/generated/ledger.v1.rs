@@ -128,7 +128,7 @@ pub struct UserEmail {
     pub verified_at: ::core::option::Option<::prost_types::Timestamp>,
 }
 /// Email verification token (stored in \_system organization with TTL)
-/// Key: "email_verify:{id}", Index: "\_idx:email_verify:token:{token}" → token_id
+/// Key: "email_verify:{id}", Index: "\_idx:email_verify_hash:{hex}" → token_id
 /// Tokens expire after 24 hours via Ledger's TTL mechanism.
 /// ID assigned by Ledger leader from sequence counter "\_meta:seq:email_verify"
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

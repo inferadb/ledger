@@ -14,7 +14,7 @@
 //!
 //! ## Storage
 //!
-//! Sagas are stored in `_system` organization under `saga:{saga_id}` keys.
+//! Sagas are stored in `_system` organization under `_meta:saga:{saga_id}` keys.
 //! The leader polls for incomplete sagas every 30 seconds.
 
 use std::time::Duration;
@@ -638,11 +638,11 @@ impl std::fmt::Display for SagaLockKey {
 ///
 /// Coordinates writes across GLOBAL + regional Raft groups:
 /// 1. GLOBAL: allocate UserId/UserSlug, CAS email HMAC (reserves uniqueness)
-/// 2. Regional: create User, UserEmail, SubjectKey
+/// 2. Regional: create User, UserEmail, UserShredKey
 /// 3. GLOBAL: create UserDirectoryEntry + slug index
 ///
 /// Compensation in reverse: step 3 → delete directory/slug index,
-/// step 2 → delete User/UserEmail/SubjectKey from regional store,
+/// step 2 → delete User/UserEmail/UserShredKey from regional store,
 /// step 1 → delete email HMAC from GLOBAL (releases reservation).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CreateUserSagaState {
@@ -657,7 +657,7 @@ pub enum CreateUserSagaState {
         /// Hex-encoded HMAC used for email uniqueness.
         hmac_hex: String,
     },
-    /// Step 2 complete: User, UserEmail, SubjectKey created in regional store.
+    /// Step 2 complete: User, UserEmail, UserShredKey created in regional store.
     RegionalDataWritten {
         /// The user's internal ID.
         user_id: UserId,
@@ -1191,7 +1191,7 @@ impl CreateSigningKeySaga {
 ///
 /// A 3-step saga modeled on `CreateUserSaga` and `CreateOrganizationSaga`:
 /// 1. GLOBAL (step 0): Allocate IDs, reserve HMAC as `Provisioning`, create directory entries
-/// 2. Regional (step 1): Write all PII, `UserEmail`, `SubjectKey`, `RefreshToken`, org profile
+/// 2. Regional (step 1): Write all PII, `UserEmail`, `UserShredKey`, `RefreshToken`, org profile
 /// 3. GLOBAL (step 2): Activate directories, update HMAC from `Provisioning` to `Active`
 ///
 /// PII is NOT stored in the saga state — it is passed in-memory via

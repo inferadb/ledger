@@ -6,7 +6,7 @@
 //!
 //! ## Saga Storage
 //!
-//! Sagas are stored in `_system` organization under `saga:{saga_id}` keys.
+//! Sagas are stored in `_system` organization under `_meta:saga:{saga_id}` keys.
 //! The orchestrator polls every 30 seconds for incomplete sagas.
 //!
 //! ## Execution Model
@@ -51,7 +51,7 @@ use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
 use crate::{
-    error::{DeserializationSnafu, SagaError, SerializationSnafu, StateReadSnafu},
+    error::{SagaError, SerializationSnafu, StateReadSnafu},
     event_writer::{EventHandle, HandlerPhaseEmitter},
     metrics::{
         record_background_job_duration, record_background_job_items, record_background_job_run,
@@ -62,7 +62,7 @@ use crate::{
 };
 
 /// Key prefix for saga records in _system organization.
-const SAGA_KEY_PREFIX: &str = "saga:";
+const SAGA_KEY_PREFIX: &str = "_meta:saga:";
 
 /// Actor identifier for saga operations.
 const SAGA_ACTOR: &str = "system:saga";
@@ -343,7 +343,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     fn load_pending_sagas(&self) -> Vec<Saga> {
         // StateLayer is internally thread-safe via inferadb-ledger-store MVCC
 
-        // List all entities with saga: prefix in _system (vault=0)
+        // List all entities with _meta:saga: prefix in _system (vault=0)
         let entities =
             match self.state.list_entities(SYSTEM_VAULT_ID, Some(SAGA_KEY_PREFIX), None, 1000) {
                 Ok(e) => e,
@@ -433,43 +433,37 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     async fn execute_delete_user_step(&self, saga: &mut DeleteUserSaga) -> Result<(), SagaError> {
         match &saga.state.clone() {
             DeleteUserSagaState::Pending => {
-                // Step 1: Mark user as deleting
-                let user_key = format!("user:{}", saga.input.user.value());
+                // Step 1: Soft-delete user via SystemRequest (proper postcard encoding).
+                let request =
+                    LedgerRequest::System(SystemRequest::DeleteUser { user_id: saga.input.user });
+                let result = self.raft.client_write(RaftPayload::new(request)).await;
 
-                // Read current user value (StateLayer is internally thread-safe)
-                let user_entity = self
-                    .state
-                    .get_entity(SYSTEM_VAULT_ID, user_key.as_bytes())
-                    .context(StateReadSnafu { entity_type: "User".to_string() })?;
-
-                if let Some(entity) = user_entity {
-                    let mut user_data: serde_json::Value = serde_json::from_slice(&entity.value)
-                        .context(DeserializationSnafu { entity_type: "User".to_string() })?;
-
-                    // Set deleted_at timestamp
-                    user_data["deleted_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
-                    user_data["status"] = serde_json::json!("DELETING");
-
-                    self.write_entity(
-                        SYSTEM_ORGANIZATION_ID,
-                        SYSTEM_VAULT_ID,
-                        &user_key,
-                        &user_data,
-                    )
-                    .await?;
-
-                    saga.transition(DeleteUserSagaState::MarkingDeleted {
-                        user_id: saga.input.user,
-                        remaining_organizations: saga.input.organization_ids.clone(),
-                    });
-                    info!(
-                        saga_id = %saga.id,
-                        user_id = saga.input.user.value(),
-                        "DeleteUser: marked as deleting"
-                    );
-                } else {
-                    // User already doesn't exist - skip to completed
-                    saga.transition(DeleteUserSagaState::Completed { user_id: saga.input.user });
+                match result {
+                    Ok(_) => {
+                        saga.transition(DeleteUserSagaState::MarkingDeleted {
+                            user_id: saga.input.user,
+                            remaining_organizations: saga.input.organization_ids.clone(),
+                        });
+                        info!(
+                            saga_id = %saga.id,
+                            user_id = saga.input.user.value(),
+                            "DeleteUser: marked as deleting"
+                        );
+                    },
+                    Err(e) => {
+                        // If the user doesn't exist, skip to completed.
+                        let err_msg = format!("{e:?}");
+                        if err_msg.contains("NotFound") {
+                            saga.transition(DeleteUserSagaState::Completed {
+                                user_id: saga.input.user,
+                            });
+                        } else {
+                            return Err(SagaError::SagaRaftWrite {
+                                message: err_msg,
+                                backtrace: snafu::Backtrace::generate(),
+                            });
+                        }
+                    },
                 }
                 Ok(())
             },
@@ -601,26 +595,6 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         })?;
 
         Ok(current)
-    }
-
-    /// Writes an entity to storage through Raft.
-    async fn write_entity(
-        &self,
-        organization: OrganizationId,
-        vault: VaultId,
-        key: &str,
-        value: &serde_json::Value,
-    ) -> Result<(), SagaError> {
-        let value_bytes = serde_json::to_vec(value).context(SerializationSnafu)?;
-
-        let operation = Operation::SetEntity {
-            key: key.to_string(),
-            value: value_bytes,
-            expires_at: None,
-            condition: None,
-        };
-
-        self.propose_write(organization, vault, vec![operation]).await
     }
 
     /// Deletes an entity from storage through Raft.
@@ -809,7 +783,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     ///
     /// Steps: mark directory as migrating → read user data from source → write to
     /// target → update directory (region = target, status = Active) → delete source.
-    /// Subject key re-encryption is deferred to the encryption-at-rest tasks (16-20).
+    /// Shred key re-encryption is deferred to the encryption-at-rest tasks (16-20).
     async fn execute_migrate_user_step(&self, saga: &mut MigrateUserSaga) -> Result<(), SagaError> {
         // Check timeout before each step (default 5 minutes for user migration)
         let timeout = Duration::from_secs(self.migration_config.timeout_secs.min(300));
@@ -904,7 +878,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     ///
     /// Multi-group saga coordinating GLOBAL + regional writes:
     /// Step 0 (GLOBAL): allocate UserId/UserSlug, CAS email HMAC
-    /// Step 1 (Regional): create User, UserEmail, SubjectKey
+    /// Step 1 (Regional): create User, UserEmail, UserShredKey
     /// Step 2 (GLOBAL): create UserDirectoryEntry + slug index
     #[allow(clippy::disallowed_methods)]
     async fn execute_create_user_step(&self, saga: &mut CreateUserSaga) -> Result<(), SagaError> {
@@ -1104,6 +1078,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     slug: saga.input.slug,
                     region: saga.input.region,
                     tier: saga.input.tier,
+                    admin: saga.input.admin,
                 });
                 let result =
                     self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
@@ -1160,12 +1135,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 };
 
                 // Generate per-organization key for crypto-shredding.
-                let org_key_bytes: [u8; 32] = rand::random();
+                let shred_key_bytes: [u8; 32] = rand::random();
 
-                // Seal the org name with the OrgKey before entering the Raft log.
+                // Seal the org name with the OrgShredKey before entering the Raft log.
                 let aad = organization_id.value().to_le_bytes();
                 let (sealed_name, name_nonce) =
-                    crate::entry_crypto::seal(name.as_bytes(), &org_key_bytes, &aad).map_err(
+                    crate::entry_crypto::seal(name.as_bytes(), &shred_key_bytes, &aad).map_err(
                         |e| SagaError::KeyEncryption {
                             message: format!("Failed to seal organization name: {e}"),
                         },
@@ -1175,8 +1150,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     organization: organization_id,
                     sealed_name,
                     name_nonce,
-                    admin: saga.input.admin,
-                    org_key_bytes,
+                    shred_key_bytes,
                 });
                 self.propose_to_region(saga.input.region, request).await?;
 
@@ -1698,8 +1672,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 };
 
                 // Generate crypto material for session bootstrap
-                let mut subject_key_bytes = [0u8; 32];
-                rand::RngExt::fill(&mut rand::rng(), &mut subject_key_bytes);
+                let mut shred_key_bytes = [0u8; 32];
+                rand::RngExt::fill(&mut rand::rng(), &mut shred_key_bytes);
 
                 let mut refresh_family_id = [0u8; 16];
                 rand::RngExt::fill(&mut rand::rng(), &mut refresh_family_id);
@@ -1734,7 +1708,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 })?;
                 let aad = user_id.value().to_le_bytes();
                 let (sealed_pii, pii_nonce) =
-                    crate::entry_crypto::seal(&pii_plaintext, &subject_key_bytes, &aad).map_err(
+                    crate::entry_crypto::seal(&pii_plaintext, &shred_key_bytes, &aad).map_err(
                         |e| SagaError::UnexpectedSagaResponse {
                             code: inferadb_ledger_types::ErrorCode::Internal,
                             description: format!("Failed to seal onboarding PII: {e}"),
@@ -1749,7 +1723,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     email_hmac: saga.input.email_hmac.clone(),
                     sealed_pii,
                     pii_nonce,
-                    subject_key_bytes,
+                    shred_key_bytes,
                     refresh_token_hash,
                     refresh_family_id,
                     refresh_expires_at,

@@ -265,7 +265,7 @@ impl proto::user_service_server::UserService for UserService {
                 default_org_tier,
             },
         );
-        let saga_key = format!("saga:{saga_id}");
+        let saga_key = format!("_meta:saga:{saga_id}");
         let saga_wrapped = Saga::CreateUser(saga);
         let saga_bytes = serde_json::to_vec(&saga_wrapped)
             .map_err(|e| Status::internal(format!("Failed to serialize saga: {e}")))?;
@@ -1167,7 +1167,7 @@ impl proto::user_service_server::UserService for UserService {
             MigrateUserInput { user: user_id, source_region, target_region },
         );
 
-        let saga_key = format!("saga:{}", saga.id);
+        let saga_key = format!("_meta:saga:{}", saga.id);
         let saga_wrapped = Saga::MigrateUser(saga);
         let saga_bytes = serde_json::to_vec(&saga_wrapped).map_err(|e| {
             Status::internal(format!("Failed to serialize user migration saga: {e}"))

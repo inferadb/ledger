@@ -18,6 +18,23 @@ fn encode_hex(bytes: &[u8]) -> String {
     s
 }
 
+/// The state layer tier a storage key belongs to.
+///
+/// Every key in the system organization targets exactly one tier:
+/// - **Global**: structural data, routing, cross-region indexes, bookkeeping.
+/// - **Regional**: PII, crypto-shredding material, ephemeral state, per-user records.
+///
+/// Writing a key to the wrong tier is a data residency bug: PII leaks to GLOBAL,
+/// or structural data becomes region-isolated. [`SystemKeys::validate_key_tier`]
+/// catches these at write time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyTier {
+    /// Key must only be written to the GLOBAL state layer.
+    Global,
+    /// Key must only be written to a REGIONAL state layer.
+    Regional,
+}
+
 /// Key pattern generators for `_system` organization entities.
 ///
 /// All keys follow the convention `{entity_type}:{id}` for primary keys
@@ -101,17 +118,17 @@ impl SystemKeys {
 
     /// Primary key for a user directory entry in the GLOBAL control plane.
     ///
-    /// Pattern: `_sys:user:{id}` → postcard-serialized `UserDirectoryEntry`
+    /// Pattern: `_dir:user:{id}` → postcard-serialized `UserDirectoryEntry`
     ///
     /// Directory entries contain no PII — only opaque identifiers, region,
     /// status, and timestamp. Enables cross-region user resolution from any node.
     pub fn user_directory_key(user_id: UserId) -> String {
-        format!("_sys:user:{}", user_id.value())
+        format!("_dir:user:{}", user_id.value())
     }
 
     /// Parses a user ID from a user directory key.
     ///
-    /// Returns `None` if the key doesn't match `_sys:user:{id}`.
+    /// Returns `None` if the key doesn't match `_dir:user:{id}`.
     pub fn parse_user_directory_key(key: &str) -> Option<UserId> {
         key.strip_prefix(Self::USER_DIRECTORY_PREFIX).and_then(|id| id.parse().ok())
     }
@@ -129,18 +146,34 @@ impl SystemKeys {
     // Organization Keys
     // ========================================================================
 
-    /// Primary key for an organization registry entry.
+    /// Primary key for an `Organization` skeleton in the GLOBAL state layer.
     ///
-    /// * `organization` - Internal organization identifier (`OrganizationId`).
+    /// The skeleton holds all structural fields (`slug`, `region`, `tier`,
+    /// `status`, `members`, `created_at`) with `name: ""`. PII is overlaid
+    /// from the REGIONAL `OrganizationProfile` via `overlay_org_profile()`.
     ///
     /// Pattern: `org:{organization_id}`
     pub fn organization_key(organization: OrganizationId) -> String {
         format!("org:{}", organization.value())
     }
 
-    /// Parses an organization ID from an organization key.
+    /// Parses an organization ID from an `Organization` skeleton key.
     pub fn parse_organization_key(key: &str) -> Option<OrganizationId> {
-        key.strip_prefix("org:").and_then(|id| id.parse().ok())
+        key.strip_prefix(Self::ORG_PREFIX).and_then(|id| id.parse().ok())
+    }
+
+    /// Primary key for an `OrganizationRegistry` (cluster topology / routing).
+    ///
+    /// This is internal routing infrastructure, not a domain entity.
+    ///
+    /// Pattern: `_dir:org_registry:{organization_id}`
+    pub fn organization_registry_key(organization: OrganizationId) -> String {
+        format!("_dir:org_registry:{}", organization.value())
+    }
+
+    /// Parses an organization ID from an `OrganizationRegistry` key.
+    pub fn parse_organization_registry_key(key: &str) -> Option<OrganizationId> {
+        key.strip_prefix(Self::ORG_REGISTRY_PREFIX).and_then(|id| id.parse().ok())
     }
 
     /// Index key for organization slug lookup.
@@ -152,29 +185,29 @@ impl SystemKeys {
 
     /// Primary key for an organization directory entry in the GLOBAL control plane.
     ///
-    /// Pattern: `_sys:org:{id}` → postcard-serialized `OrganizationDirectoryEntry`
+    /// Pattern: `_dir:org:{id}` → postcard-serialized `OrganizationDirectoryEntry`
     ///
     /// Directory entries contain no PII — only opaque identifiers, region,
     /// status, tier, and timestamp. Enables cross-region organization resolution
     /// from any node.
     pub fn organization_directory_key(organization: OrganizationId) -> String {
-        format!("_sys:org:{}", organization.value())
+        format!("_dir:org:{}", organization.value())
     }
 
     /// Parses an organization ID from an organization directory key.
     ///
-    /// Returns `None` if the key doesn't match `_sys:org:{id}`.
+    /// Returns `None` if the key doesn't match `_dir:org:{id}`.
     pub fn parse_organization_directory_key(key: &str) -> Option<OrganizationId> {
         key.strip_prefix(Self::ORG_DIRECTORY_PREFIX).and_then(|id| id.parse().ok())
     }
 
     /// Primary key for an organization profile record in the regional store.
     ///
-    /// Pattern: `_sys:org_profile:{organization_id}` → postcard-serialized `OrganizationProfile`
+    /// Pattern: `org_profile:{organization_id}` → postcard-serialized `OrganizationProfile`
     ///
     /// Contains PII (organization name). Stored in the region declared at creation.
     pub fn organization_profile_key(organization: OrganizationId) -> String {
-        format!("_sys:org_profile:{}", organization.value())
+        format!("org_profile:{}", organization.value())
     }
 
     // ========================================================================
@@ -192,11 +225,13 @@ impl SystemKeys {
     // Team Keys
     // ========================================================================
 
-    /// Primary key for a team profile record in the system vault.
+    /// Primary key for a team record in the system vault (REGIONAL).
     ///
-    /// Pattern: `_sys:team_profile:{organization_id}:{team_id}` → postcard-serialized `TeamProfile`
-    pub fn team_profile_key(organization: OrganizationId, team: TeamId) -> String {
-        format!("_sys:team_profile:{}:{}", organization.value(), team.value())
+    /// Teams are REGIONAL-only (Pattern 1) — no GLOBAL skeleton exists.
+    ///
+    /// Pattern: `team:{organization_id}:{team_id}` → postcard-serialized `Team`
+    pub fn team_key(organization: OrganizationId, team: TeamId) -> String {
+        format!("team:{}:{}", organization.value(), team.value())
     }
 
     /// Index key for team slug lookup.
@@ -206,25 +241,37 @@ impl SystemKeys {
         format!("_idx:team:slug:{}", slug.value())
     }
 
-    /// Prefix for team profile keys.
-    pub const TEAM_PROFILE_PREFIX: &'static str = "_sys:team_profile:";
+    /// Prefix for team keys (REGIONAL-only domain entities).
+    pub const TEAM_PREFIX: &'static str = "team:";
 
     // ========================================================================
     // App Keys
     // ========================================================================
 
-    /// Primary key for an application record in the system vault.
+    /// Primary key for an application record in the system vault (GLOBAL skeleton).
     ///
-    /// Pattern: `_sys:app:{organization_id}:{app_id}` → postcard-serialized `App`
+    /// The bare `app:` prefix is safe from collisions with `app_profile:`,
+    /// `app_assertion:`, and `app_vault:` because `:` (0x3A) sorts before
+    /// `_` (0x5F) in ASCII — a prefix scan on `app:{org}:` never matches
+    /// keys from those other families.
+    ///
+    /// Pattern: `app:{organization_id}:{app_id}` → postcard-serialized `App`
     pub fn app_key(organization: OrganizationId, app: AppId) -> String {
-        format!("_sys:app:{}:{}", organization.value(), app.value())
+        format!("app:{}:{}", organization.value(), app.value())
     }
 
     /// Prefix for listing all apps in an organization.
     ///
-    /// Pattern: `_sys:app:{organization_id}:`
+    /// Pattern: `app:{organization_id}:`
+    ///
+    /// # Prefix collision safety
+    ///
+    /// Because `:` (0x3A) sorts before `_` (0x5F) in ASCII, a B-tree
+    /// prefix scan on `app:{org}:` will never match keys from the
+    /// `app_profile:`, `app_assertion:`, or `app_vault:` families.
+    /// This invariant holds for all bare-prefix key families.
     pub fn app_prefix(organization: OrganizationId) -> String {
-        format!("_sys:app:{}:", organization.value())
+        format!("app:{}:", organization.value())
     }
 
     /// Index key for app slug lookup.
@@ -248,80 +295,79 @@ impl SystemKeys {
         format!("_idx:app:name:{}:", organization.value())
     }
 
-    /// Primary key for a client assertion entry.
+    /// Primary key for a client assertion entry (GLOBAL).
     ///
-    /// Pattern: `_sys:app_assertion:{org_id}:{app_id}:{assertion_id}`
+    /// Pattern: `app_assertion:{org_id}:{app_id}:{assertion_id}`
     pub fn app_assertion_key(
         organization: OrganizationId,
         app: AppId,
         assertion: ClientAssertionId,
     ) -> String {
-        format!("_sys:app_assertion:{}:{}:{}", organization.value(), app.value(), assertion.value())
+        format!("app_assertion:{}:{}:{}", organization.value(), app.value(), assertion.value())
     }
 
     /// Prefix for listing all client assertion entries for an app.
     ///
-    /// Pattern: `_sys:app_assertion:{org_id}:{app_id}:`
+    /// Pattern: `app_assertion:{org_id}:{app_id}:`
     pub fn app_assertion_prefix(organization: OrganizationId, app: AppId) -> String {
-        format!("_sys:app_assertion:{}:{}:", organization.value(), app.value())
+        format!("app_assertion:{}:{}:", organization.value(), app.value())
     }
 
-    /// Key for a client assertion's user-provided name (REGIONAL state).
+    /// Key for a client assertion's user-provided name (REGIONAL PII overlay).
     ///
-    /// Pattern: `_sys:assertion_name:{org_id}:{app_id}:{assertion_id}`
+    /// This is a Pattern 2 PII overlay keyed by the assertion's primary key,
+    /// not a secondary index. The name is user-provided PII separated from the
+    /// GLOBAL `ClientAssertionEntry` for data residency.
+    ///
+    /// Pattern: `assertion_name:{org_id}:{app_id}:{assertion_id}`
     pub fn assertion_name_key(
         organization: OrganizationId,
         app: AppId,
         assertion: ClientAssertionId,
     ) -> String {
-        format!(
-            "_sys:assertion_name:{}:{}:{}",
-            organization.value(),
-            app.value(),
-            assertion.value()
-        )
+        format!("assertion_name:{}:{}:{}", organization.value(), app.value(), assertion.value())
     }
 
     /// Prefix for listing all assertion names for an app (REGIONAL state).
     ///
-    /// Pattern: `_sys:assertion_name:{org_id}:{app_id}:`
+    /// Pattern: `assertion_name:{org_id}:{app_id}:`
     pub fn assertion_name_prefix(organization: OrganizationId, app: AppId) -> String {
-        format!("_sys:assertion_name:{}:{}:", organization.value(), app.value())
+        format!("assertion_name:{}:{}:", organization.value(), app.value())
     }
 
     /// Prefix for listing all assertion names for an organization (REGIONAL state).
     ///
-    /// Pattern: `_sys:assertion_name:{org_id}:`
+    /// Pattern: `assertion_name:{org_id}:`
     pub fn assertion_name_org_prefix(organization: OrganizationId) -> String {
-        format!("_sys:assertion_name:{}:", organization.value())
+        format!("assertion_name:{}:", organization.value())
     }
 
-    /// Primary key for a vault connection for an app.
+    /// Primary key for a vault connection for an app (GLOBAL).
     ///
-    /// Pattern: `_sys:app_vault:{org_id}:{app_id}:{vault_id}`
+    /// Pattern: `app_vault:{org_id}:{app_id}:{vault_id}`
     pub fn app_vault_key(organization: OrganizationId, app: AppId, vault: VaultId) -> String {
-        format!("_sys:app_vault:{}:{}:{}", organization.value(), app.value(), vault.value())
+        format!("app_vault:{}:{}:{}", organization.value(), app.value(), vault.value())
     }
 
     /// Prefix for listing all vault connections for an app.
     ///
-    /// Pattern: `_sys:app_vault:{org_id}:{app_id}:`
+    /// Pattern: `app_vault:{org_id}:{app_id}:`
     pub fn app_vault_prefix(organization: OrganizationId, app: AppId) -> String {
-        format!("_sys:app_vault:{}:{}:", organization.value(), app.value())
+        format!("app_vault:{}:{}:", organization.value(), app.value())
     }
 
-    /// Prefix for app keys.
-    pub const APP_PREFIX: &'static str = "_sys:app:";
+    /// Prefix for app keys (GLOBAL skeleton).
+    pub const APP_PREFIX: &'static str = "app:";
 
     /// Primary key for an application's PII profile in the regional state layer.
     ///
-    /// Pattern: `_sys:app_profile:{organization_id}:{app_id}` → postcard-serialized `AppProfile`
+    /// Pattern: `app_profile:{organization_id}:{app_id}` → postcard-serialized `AppProfile`
     pub fn app_profile_key(organization: OrganizationId, app: AppId) -> String {
-        format!("_sys:app_profile:{}:{}", organization.value(), app.value())
+        format!("app_profile:{}:{}", organization.value(), app.value())
     }
 
-    /// Prefix for app profile keys.
-    pub const APP_PROFILE_PREFIX: &'static str = "_sys:app_profile:";
+    /// Prefix for app profile keys (REGIONAL PII overlay).
+    pub const APP_PROFILE_PREFIX: &'static str = "app_profile:";
 
     /// Prefix for app slug index entries.
     pub const APP_SLUG_INDEX_PREFIX: &'static str = "_idx:app:slug:";
@@ -329,11 +375,14 @@ impl SystemKeys {
     /// Prefix for app name index entries.
     pub const APP_NAME_INDEX_PREFIX: &'static str = "_idx:app:name:";
 
-    /// Prefix for app assertion entries.
-    pub const APP_ASSERTION_PREFIX: &'static str = "_sys:app_assertion:";
+    /// Prefix for app assertion entries (GLOBAL).
+    pub const APP_ASSERTION_PREFIX: &'static str = "app_assertion:";
 
-    /// Prefix for app vault connection entries.
-    pub const APP_VAULT_PREFIX: &'static str = "_sys:app_vault:";
+    /// Prefix for assertion name entries (REGIONAL PII overlay).
+    pub const ASSERTION_NAME_PREFIX: &'static str = "assertion_name:";
+
+    /// Prefix for app vault connection entries (GLOBAL).
+    pub const APP_VAULT_PREFIX: &'static str = "app_vault:";
 
     /// Key for the app ID sequence counter.
     ///
@@ -351,14 +400,16 @@ impl SystemKeys {
 
     /// Primary key for a cluster node info record.
     ///
-    /// Pattern: `node:{id}`
+    /// Pattern: `_meta:node:{id}`
+    ///
+    /// Cluster membership is infrastructure, not a domain entity.
     pub fn node_key(node_id: &NodeId) -> String {
-        format!("node:{node_id}")
+        format!("_meta:node:{node_id}")
     }
 
     /// Parses a node ID from a node key.
     pub fn parse_node_key(key: &str) -> Option<NodeId> {
-        key.strip_prefix("node:").map(NodeId::new)
+        key.strip_prefix(Self::NODE_PREFIX).map(NodeId::new)
     }
 
     // ========================================================================
@@ -396,9 +447,11 @@ impl SystemKeys {
 
     /// Key for a saga state record.
     ///
-    /// Pattern: `saga:{saga_id}`
+    /// Pattern: `_meta:saga:{saga_id}`
+    ///
+    /// Internal orchestration state is bookkeeping, not a domain entity.
     pub fn saga_key(saga_id: &str) -> String {
-        format!("saga:{saga_id}")
+        format!("_meta:saga:{saga_id}")
     }
 
     // ========================================================================
@@ -451,29 +504,29 @@ impl SystemKeys {
     }
 
     // ========================================================================
-    // Subject Key Keys (regional store, per-user encryption)
+    // Crypto-Shredding Keys (regional store, per-entity encryption)
     // ========================================================================
 
-    /// Primary key for a user's per-subject encryption key.
+    /// Primary key for a user's crypto-shredding encryption key.
     ///
-    /// Pattern: `_key:user:{user_id}` → postcard-serialized `SubjectKey`
+    /// Pattern: `_shred:user:{user_id}` → postcard-serialized `UserShredKey`
     ///
     /// Stored in the regional store where the user's PII resides.
     /// Encrypted at rest by the region's RMK (via `EncryptedBackend`).
     /// Destroying this key makes the user's PII cryptographically unrecoverable.
-    pub fn subject_key(user_id: UserId) -> String {
-        format!("_key:user:{}", user_id.value())
+    pub fn user_shred_key(user_id: UserId) -> String {
+        format!("_shred:user:{}", user_id.value())
     }
 
-    /// Parses a user ID from a subject key.
+    /// Parses a user ID from a user shred key.
     ///
-    /// Returns `None` if the key doesn't match `_key:user:{id}`.
-    pub fn parse_subject_key(key: &str) -> Option<UserId> {
-        key.strip_prefix(Self::SUBJECT_KEY_PREFIX).and_then(|id| id.parse().ok())
+    /// Returns `None` if the key doesn't match `_shred:user:{id}`.
+    pub fn parse_user_shred_key(key: &str) -> Option<UserId> {
+        key.strip_prefix(Self::USER_SHRED_KEY_PREFIX).and_then(|id| id.parse().ok())
     }
 
     // ========================================================================
-    // Organization Key Functions (per-org encryption for crypto-shredding)
+    // Organization Shred Key Functions (per-org encryption for crypto-shredding)
     // ========================================================================
 
     /// Per-organization encryption key for crypto-shredding.
@@ -481,15 +534,15 @@ impl SystemKeys {
     /// Stored in the regional store where the organization's PII resides.
     /// Encrypted at rest by the region's RMK (via `EncryptedBackend`).
     /// Destroying this key makes the organization's PII cryptographically unrecoverable.
-    pub fn org_key(organization: OrganizationId) -> String {
-        format!("_key:org:{}", organization.value())
+    pub fn org_shred_key(organization: OrganizationId) -> String {
+        format!("_shred:org:{}", organization.value())
     }
 
-    /// Parses an organization ID from an org key.
+    /// Parses an organization ID from an org shred key.
     ///
-    /// Returns `None` if the key doesn't match `_key:org:{id}`.
-    pub fn parse_org_key(key: &str) -> Option<OrganizationId> {
-        key.strip_prefix(Self::ORG_KEY_PREFIX).and_then(|id| id.parse().ok())
+    /// Returns `None` if the key doesn't match `_shred:org:{id}`.
+    pub fn parse_org_shred_key(key: &str) -> Option<OrganizationId> {
+        key.strip_prefix(Self::ORG_SHRED_KEY_PREFIX).and_then(|id| id.parse().ok())
     }
 
     // ========================================================================
@@ -568,29 +621,32 @@ impl SystemKeys {
     /// Prefix for email verification hash index entries.
     pub const EMAIL_VERIFY_HASH_INDEX_PREFIX: &'static str = "_idx:email_verify_hash:";
 
-    /// Prefix for all organization keys.
+    /// Prefix for `Organization` skeleton keys (GLOBAL domain entity).
     pub const ORG_PREFIX: &'static str = "org:";
 
-    /// Prefix for all node keys.
-    pub const NODE_PREFIX: &'static str = "node:";
+    /// Prefix for `OrganizationRegistry` keys (routing infrastructure).
+    pub const ORG_REGISTRY_PREFIX: &'static str = "_dir:org_registry:";
 
-    /// Prefix for all saga keys.
-    pub const SAGA_PREFIX: &'static str = "saga:";
+    /// Prefix for all node keys (infrastructure bookkeeping).
+    pub const NODE_PREFIX: &'static str = "_meta:node:";
+
+    /// Prefix for all saga keys (infrastructure bookkeeping).
+    pub const SAGA_PREFIX: &'static str = "_meta:saga:";
 
     /// Prefix for all user directory entries in the GLOBAL control plane.
-    pub const USER_DIRECTORY_PREFIX: &'static str = "_sys:user:";
+    pub const USER_DIRECTORY_PREFIX: &'static str = "_dir:user:";
 
-    /// Prefix for all directory entries (`_sys:` namespace).
-    pub const SYS_PREFIX: &'static str = "_sys:";
+    /// Prefix for all directory entries (`_dir:` namespace).
+    pub const DIR_PREFIX: &'static str = "_dir:";
 
     /// Prefix for user slug index entries.
     pub const USER_SLUG_INDEX_PREFIX: &'static str = "_idx:user:slug:";
 
     /// Prefix for all organization directory entries in the GLOBAL control plane.
-    pub const ORG_DIRECTORY_PREFIX: &'static str = "_sys:org:";
+    pub const ORG_DIRECTORY_PREFIX: &'static str = "_dir:org:";
 
-    /// Prefix for organization profile keys.
-    pub const ORG_PROFILE_PREFIX: &'static str = "_sys:org_profile:";
+    /// Prefix for organization profile keys (REGIONAL PII overlay).
+    pub const ORG_PROFILE_PREFIX: &'static str = "org_profile:";
 
     /// Prefix for all index keys.
     pub const INDEX_PREFIX: &'static str = "_idx:";
@@ -604,11 +660,11 @@ impl SystemKeys {
     /// Prefix for blinding key rehash progress entries.
     pub const REHASH_PROGRESS_PREFIX: &'static str = "_meta:blinding_key_rehash_progress:";
 
-    /// Prefix for per-subject encryption keys.
-    pub const SUBJECT_KEY_PREFIX: &'static str = "_key:user:";
+    /// Prefix for per-user crypto-shredding keys.
+    pub const USER_SHRED_KEY_PREFIX: &'static str = "_shred:user:";
 
-    /// Prefix for per-organization encryption keys.
-    pub const ORG_KEY_PREFIX: &'static str = "_key:org:";
+    /// Prefix for per-organization crypto-shredding keys.
+    pub const ORG_SHRED_KEY_PREFIX: &'static str = "_shred:org:";
 
     /// Prefix for erasure audit records.
     pub const ERASURE_AUDIT_PREFIX: &'static str = "_audit:erasure:";
@@ -623,16 +679,16 @@ impl SystemKeys {
     // Signing Key Keys
     // ========================================================================
 
-    /// Primary key for a signing key record.
+    /// Primary key for a signing key record (GLOBAL).
     ///
-    /// Pattern: `_sys:signing_key:{id}`
+    /// Pattern: `signing_key:{id}`
     pub fn signing_key(id: SigningKeyId) -> String {
-        format!("_sys:signing_key:{}", id.value())
+        format!("signing_key:{}", id.value())
     }
 
     /// Parses a signing key ID from a signing key primary key.
     ///
-    /// Returns `None` if the key doesn't match `_sys:signing_key:{id}`.
+    /// Returns `None` if the key doesn't match `signing_key:{id}`.
     pub fn parse_signing_key(key: &str) -> Option<SigningKeyId> {
         key.strip_prefix(Self::SIGNING_KEY_PREFIX).and_then(|id| id.parse().ok())
     }
@@ -661,15 +717,23 @@ impl SystemKeys {
 
     /// Prefix for iterating all signing keys belonging to an organization.
     ///
-    /// Pattern: `_sys:signing_key:org:{org_id}:`
+    /// Pattern: `_idx:signing_key:org:{org_id}:`
     ///
+    /// This is a secondary index (org → signing key IDs), not a primary record.
     /// Used for org deletion cascade — iterates all keys for an org.
     pub fn signing_key_org_prefix(org: OrganizationId) -> String {
-        format!("_sys:signing_key:org:{}:", org.value())
+        format!("_idx:signing_key:org:{}:", org.value())
     }
 
-    /// Prefix for all signing key primary keys.
-    pub const SIGNING_KEY_PREFIX: &'static str = "_sys:signing_key:";
+    /// Index entry for a signing key within its organization index.
+    ///
+    /// Pattern: `_idx:signing_key:org:{org_id}:{key_id}`
+    pub fn signing_key_org_entry(org: OrganizationId, key_id: SigningKeyId) -> String {
+        format!("_idx:signing_key:org:{}:{}", org.value(), key_id.value())
+    }
+
+    /// Prefix for all signing key primary keys (GLOBAL).
+    pub const SIGNING_KEY_PREFIX: &'static str = "signing_key:";
 
     /// Prefix for signing key kid index entries.
     pub const SIGNING_KEY_KID_INDEX_PREFIX: &'static str = "_idx:signing_key:kid:";
@@ -677,8 +741,8 @@ impl SystemKeys {
     /// Prefix for signing key scope index entries.
     pub const SIGNING_KEY_SCOPE_INDEX_PREFIX: &'static str = "_idx:signing_key:scope:";
 
-    /// Prefix for signing key org index entries.
-    pub const SIGNING_KEY_ORG_PREFIX: &'static str = "_sys:signing_key:org:";
+    /// Prefix for signing key org index entries (secondary index).
+    pub const SIGNING_KEY_ORG_PREFIX: &'static str = "_idx:signing_key:org:";
 
     /// Key for the signing key ID sequence counter.
     ///
@@ -689,16 +753,16 @@ impl SystemKeys {
     // Refresh Token Keys
     // ========================================================================
 
-    /// Primary key for a refresh token record.
+    /// Primary key for a refresh token record (GLOBAL).
     ///
-    /// Pattern: `_sys:refresh_token:{id}`
+    /// Pattern: `refresh_token:{id}`
     pub fn refresh_token(id: RefreshTokenId) -> String {
-        format!("_sys:refresh_token:{}", id.value())
+        format!("refresh_token:{}", id.value())
     }
 
     /// Parses a refresh token ID from a refresh token primary key.
     ///
-    /// Returns `None` if the key doesn't match `_sys:refresh_token:{id}`.
+    /// Returns `None` if the key doesn't match `refresh_token:{id}`.
     pub fn parse_refresh_token(key: &str) -> Option<RefreshTokenId> {
         key.strip_prefix(Self::REFRESH_TOKEN_PREFIX).and_then(|id| id.parse().ok())
     }
@@ -800,8 +864,8 @@ impl SystemKeys {
         format!("_idx:refresh_token:org:{}:{}", org.value(), id.value())
     }
 
-    /// Prefix for all refresh token primary keys.
-    pub const REFRESH_TOKEN_PREFIX: &'static str = "_sys:refresh_token:";
+    /// Prefix for all refresh token primary keys (GLOBAL).
+    pub const REFRESH_TOKEN_PREFIX: &'static str = "refresh_token:";
 
     /// Prefix for refresh token hash index entries.
     pub const REFRESH_TOKEN_HASH_INDEX_PREFIX: &'static str = "_idx:refresh_token:hash:";
@@ -823,6 +887,99 @@ impl SystemKeys {
     ///
     /// Pattern: `_meta:seq:refresh_token` → next `RefreshTokenId`
     pub const REFRESH_TOKEN_SEQ_KEY: &'static str = "_meta:seq:refresh_token";
+
+    // ========================================================================
+    // Key Tier Classification
+    // ========================================================================
+
+    /// Classifies a storage key into its expected tier (GLOBAL or REGIONAL).
+    ///
+    /// Returns `None` only if the key doesn't match any known prefix pattern.
+    /// All production keys generated by [`SystemKeys`] methods are classified.
+    pub fn classify_key_tier(key: &str) -> Option<KeyTier> {
+        // --- GLOBAL: infrastructure, structural data, cross-region indexes ---
+
+        if key.starts_with("_dir:") || key.starts_with("_meta:") || key.starts_with("_audit:") {
+            return Some(KeyTier::Global);
+        }
+
+        // GLOBAL indexes: cross-region resolution and token infrastructure.
+        // Note: `_idx:email_hash:` must be checked before `_idx:email:` (Regional).
+        // Note: `_idx:app:name:` is Regional (contains plaintext app names) — check before
+        // `_idx:app:`.
+        // Note: `_idx:team:slug:` is GLOBAL (cross-region slug resolution) but a future
+        // `_idx:team:name:` would be Regional — use the specific prefix, not `_idx:team:`.
+        if key.starts_with("_idx:user:slug:")
+            || key.starts_with("_idx:email_hash:")
+            || key.starts_with("_idx:signing_key:")
+            || key.starts_with("_idx:refresh_token:")
+            || (key.starts_with("_idx:app:") && !key.starts_with("_idx:app:name:"))
+            || key.starts_with("_idx:org:")
+            || key.starts_with("_idx:vault:")
+            || key.starts_with("_idx:team:slug:")
+        {
+            return Some(KeyTier::Global);
+        }
+
+        // GLOBAL bare entities: skeletons (Pattern 2/3) and structural data
+        if key.starts_with("app:")
+            || key.starts_with("org:")
+            || key.starts_with("signing_key:")
+            || key.starts_with("refresh_token:")
+            || key.starts_with("app_assertion:")
+            || key.starts_with("app_vault:")
+        {
+            return Some(KeyTier::Global);
+        }
+
+        // --- REGIONAL: PII, crypto-shredding, ephemeral state ---
+
+        if key.starts_with("_shred:") || key.starts_with("_tmp:") {
+            return Some(KeyTier::Regional);
+        }
+
+        // REGIONAL indexes: per-user data and PII-containing lookups
+        if key.starts_with("_idx:user_emails:")
+            || key.starts_with("_idx:email_verify_hash:")
+            || key.starts_with("_idx:email:")
+            || key.starts_with("_idx:app:name:")
+        {
+            return Some(KeyTier::Regional);
+        }
+
+        // REGIONAL bare entities: PII (Pattern 1) and overlays (Pattern 2)
+        if key.starts_with("user:")
+            || key.starts_with("user_email:")
+            || key.starts_with("email_verify:")
+            || key.starts_with("team:")
+            || key.starts_with("app_profile:")
+            || key.starts_with("org_profile:")
+            || key.starts_with("assertion_name:")
+        {
+            return Some(KeyTier::Regional);
+        }
+
+        None
+    }
+
+    /// Validates that a key matches the expected tier.
+    ///
+    /// Returns `Ok(())` if the key's tier matches `expected`, or if the key
+    /// is unrecognized (unknown keys are not rejected — new key families may
+    /// be added before the classifier is updated).
+    ///
+    /// Returns `Err` with a descriptive message on tier mismatch.
+    pub fn validate_key_tier(key: &str, expected: KeyTier) -> std::result::Result<(), String> {
+        if let Some(actual) = Self::classify_key_tier(key)
+            && actual != expected
+        {
+            return Err(format!(
+                "tier mismatch: key \"{key}\" is {:?} but write targets {:?} state layer",
+                actual, expected,
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -841,9 +998,14 @@ mod tests {
             ),
             ("organization_key", SystemKeys::organization_key(OrganizationId::new(42)), "org:42"),
             (
+                "organization_registry_key",
+                SystemKeys::organization_registry_key(OrganizationId::new(42)),
+                "_dir:org_registry:42",
+            ),
+            (
                 "organization_profile_key",
                 SystemKeys::organization_profile_key(OrganizationId::new(42)),
-                "_sys:org_profile:42",
+                "org_profile:42",
             ),
             (
                 "organization_slug_key",
@@ -855,9 +1017,9 @@ mod tests {
                 SystemKeys::vault_slug_key(VaultSlug::new(67890)),
                 "_idx:vault:slug:67890",
             ),
-            ("node_key", SystemKeys::node_key(&NodeId::new("node-1")), "node:node-1"),
-            ("saga_key", SystemKeys::saga_key("create-org-abc123"), "saga:create-org-abc123"),
-            ("user_directory_key", SystemKeys::user_directory_key(UserId::new(42)), "_sys:user:42"),
+            ("node_key", SystemKeys::node_key(&NodeId::new("node-1")), "_meta:node:node-1"),
+            ("saga_key", SystemKeys::saga_key("create-org-abc123"), "_meta:saga:create-org-abc123"),
+            ("user_directory_key", SystemKeys::user_directory_key(UserId::new(42)), "_dir:user:42"),
             (
                 "user_slug_index_key",
                 SystemKeys::user_slug_index_key(UserSlug::new(99999)),
@@ -874,16 +1036,16 @@ mod tests {
         assert_eq!(SystemKeys::parse_user_key("user:123"), Some(UserId::new(123)));
         assert_eq!(SystemKeys::parse_user_key("invalid:123"), None);
         assert_eq!(SystemKeys::parse_organization_key("org:42"), Some(OrganizationId::new(42)));
-        assert_eq!(SystemKeys::parse_node_key("node:node-1"), Some(NodeId::new("node-1")));
-        assert_eq!(SystemKeys::parse_user_directory_key("_sys:user:42"), Some(UserId::new(42)));
+        assert_eq!(SystemKeys::parse_node_key("_meta:node:node-1"), Some(NodeId::new("node-1")));
+        assert_eq!(SystemKeys::parse_user_directory_key("_dir:user:42"), Some(UserId::new(42)));
         assert_eq!(SystemKeys::parse_user_directory_key("user:42"), None);
-        assert_eq!(SystemKeys::parse_user_directory_key("_sys:user:abc"), None);
+        assert_eq!(SystemKeys::parse_user_directory_key("_dir:user:abc"), None);
         assert_eq!(
-            SystemKeys::parse_organization_directory_key("_sys:org:42"),
+            SystemKeys::parse_organization_directory_key("_dir:org:42"),
             Some(OrganizationId::new(42))
         );
         assert_eq!(SystemKeys::parse_organization_directory_key("org:42"), None);
-        assert_eq!(SystemKeys::parse_organization_directory_key("_sys:org:abc"), None);
+        assert_eq!(SystemKeys::parse_organization_directory_key("_dir:org:abc"), None);
     }
 
     #[test]
@@ -901,21 +1063,30 @@ mod tests {
                 SystemKeys::organization_key(OrganizationId::new(1)),
                 &[SystemKeys::ORG_PREFIX],
             ),
-            ("node_key", SystemKeys::node_key(&NodeId::new("n")), &[SystemKeys::NODE_PREFIX]),
+            (
+                "organization_registry_key",
+                SystemKeys::organization_registry_key(OrganizationId::new(1)),
+                &[SystemKeys::ORG_REGISTRY_PREFIX],
+            ),
+            (
+                "node_key",
+                SystemKeys::node_key(&NodeId::new("n")),
+                &[SystemKeys::NODE_PREFIX, SystemKeys::META_PREFIX],
+            ),
             (
                 "organization_directory_key",
                 SystemKeys::organization_directory_key(OrganizationId::new(1)),
-                &[SystemKeys::ORG_DIRECTORY_PREFIX, SystemKeys::SYS_PREFIX],
+                &[SystemKeys::ORG_DIRECTORY_PREFIX, SystemKeys::DIR_PREFIX],
             ),
             (
                 "organization_profile_key",
                 SystemKeys::organization_profile_key(OrganizationId::new(1)),
-                &[SystemKeys::ORG_PROFILE_PREFIX, SystemKeys::SYS_PREFIX],
+                &[SystemKeys::ORG_PROFILE_PREFIX],
             ),
             (
                 "user_directory_key",
                 SystemKeys::user_directory_key(UserId::new(1)),
-                &[SystemKeys::USER_DIRECTORY_PREFIX, SystemKeys::SYS_PREFIX],
+                &[SystemKeys::USER_DIRECTORY_PREFIX, SystemKeys::DIR_PREFIX],
             ),
             (
                 "user_slug_index_key",
@@ -932,22 +1103,45 @@ mod tests {
 
     #[test]
     fn test_user_directory_key_does_not_collide_with_user_key() {
-        // _sys:user:42 (directory) vs user:42 (regional record) are distinct
+        // _dir:user:42 (directory) vs user:42 (regional record) are distinct
         let directory_key = SystemKeys::user_directory_key(UserId::new(42));
         let user_key = SystemKeys::user_key(UserId::new(42));
         assert_ne!(directory_key, user_key);
-        assert!(directory_key.starts_with("_sys:"));
-        assert!(!user_key.starts_with("_sys:"));
+        assert!(directory_key.starts_with("_dir:"));
+        assert!(!user_key.starts_with("_dir:"));
     }
 
     #[test]
     fn test_org_directory_key_does_not_collide_with_org_key() {
-        // _sys:org:42 (directory) vs org:42 (registry) are distinct
+        // _dir:org:42 (directory) vs org:42 (skeleton) are distinct
         let directory_key = SystemKeys::organization_directory_key(OrganizationId::new(42));
         let org_key = SystemKeys::organization_key(OrganizationId::new(42));
         assert_ne!(directory_key, org_key);
-        assert!(directory_key.starts_with("_sys:"));
-        assert!(!org_key.starts_with("_sys:"));
+        assert!(directory_key.starts_with("_dir:"));
+        assert!(!org_key.starts_with("_dir:"));
+    }
+
+    #[test]
+    fn test_org_registry_key_is_distinct_from_org_skeleton_and_directory() {
+        let skeleton_key = SystemKeys::organization_key(OrganizationId::new(42));
+        let registry_key = SystemKeys::organization_registry_key(OrganizationId::new(42));
+        let directory_key = SystemKeys::organization_directory_key(OrganizationId::new(42));
+        assert_eq!(skeleton_key, "org:42");
+        assert_eq!(registry_key, "_dir:org_registry:42");
+        assert_ne!(skeleton_key, registry_key);
+        assert_ne!(skeleton_key, directory_key);
+        assert_ne!(registry_key, directory_key);
+        assert!(registry_key.starts_with(SystemKeys::ORG_REGISTRY_PREFIX));
+    }
+
+    #[test]
+    fn test_parse_organization_registry_key() {
+        assert_eq!(
+            SystemKeys::parse_organization_registry_key("_dir:org_registry:42"),
+            Some(OrganizationId::new(42))
+        );
+        assert_eq!(SystemKeys::parse_organization_registry_key("org:42"), None);
+        assert_eq!(SystemKeys::parse_organization_registry_key("_dir:org_registry:abc"), None);
     }
 
     #[test]
@@ -1001,12 +1195,8 @@ mod tests {
     #[test]
     fn test_app_key_generation() {
         let cases: Vec<(&str, String, &str)> = vec![
-            (
-                "app_key",
-                SystemKeys::app_key(OrganizationId::new(5), AppId::new(42)),
-                "_sys:app:5:42",
-            ),
-            ("app_prefix", SystemKeys::app_prefix(OrganizationId::new(5)), "_sys:app:5:"),
+            ("app_key", SystemKeys::app_key(OrganizationId::new(5), AppId::new(42)), "app:5:42"),
+            ("app_prefix", SystemKeys::app_prefix(OrganizationId::new(5)), "app:5:"),
             ("app_slug_key", SystemKeys::app_slug_key(AppSlug::new(9999)), "_idx:app:slug:9999"),
             (
                 "app_name_index_key",
@@ -1021,7 +1211,7 @@ mod tests {
             (
                 "app_profile_key",
                 SystemKeys::app_profile_key(OrganizationId::new(5), AppId::new(42)),
-                "_sys:app_profile:5:42",
+                "app_profile:5:42",
             ),
             (
                 "app_assertion_key",
@@ -1030,22 +1220,22 @@ mod tests {
                     AppId::new(2),
                     ClientAssertionId::new(3),
                 ),
-                "_sys:app_assertion:1:2:3",
+                "app_assertion:1:2:3",
             ),
             (
                 "app_assertion_prefix",
                 SystemKeys::app_assertion_prefix(OrganizationId::new(1), AppId::new(2)),
-                "_sys:app_assertion:1:2:",
+                "app_assertion:1:2:",
             ),
             (
                 "app_vault_key",
                 SystemKeys::app_vault_key(OrganizationId::new(1), AppId::new(2), VaultId::new(3)),
-                "_sys:app_vault:1:2:3",
+                "app_vault:1:2:3",
             ),
             (
                 "app_vault_prefix",
                 SystemKeys::app_vault_prefix(OrganizationId::new(1), AppId::new(2)),
-                "_sys:app_vault:1:2:",
+                "app_vault:1:2:",
             ),
         ];
         for (label, actual, expected) in &cases {
@@ -1059,7 +1249,7 @@ mod tests {
             (
                 "app_key",
                 SystemKeys::app_key(OrganizationId::new(5), AppId::new(42)),
-                &[SystemKeys::APP_PREFIX, "_sys:app:5:"],
+                &[SystemKeys::APP_PREFIX, "app:5:"],
             ),
             (
                 "app_slug_key",
@@ -1074,7 +1264,7 @@ mod tests {
             (
                 "app_profile_key",
                 SystemKeys::app_profile_key(OrganizationId::new(5), AppId::new(42)),
-                &[SystemKeys::APP_PROFILE_PREFIX, "_sys:app_profile:5:"],
+                &[SystemKeys::APP_PROFILE_PREFIX, "app_profile:5:"],
             ),
             (
                 "app_assertion_key",
@@ -1083,12 +1273,12 @@ mod tests {
                     AppId::new(2),
                     ClientAssertionId::new(7),
                 ),
-                &[SystemKeys::APP_ASSERTION_PREFIX, "_sys:app_assertion:1:2:"],
+                &[SystemKeys::APP_ASSERTION_PREFIX, "app_assertion:1:2:"],
             ),
             (
                 "app_vault_key",
                 SystemKeys::app_vault_key(OrganizationId::new(1), AppId::new(2), VaultId::new(9)),
-                &[SystemKeys::APP_VAULT_PREFIX, "_sys:app_vault:1:2:"],
+                &[SystemKeys::APP_VAULT_PREFIX, "app_vault:1:2:"],
             ),
         ];
         for (label, key, prefixes) in &cases {
@@ -1129,7 +1319,7 @@ mod tests {
     #[test]
     fn test_signing_key_generation() {
         let cases: Vec<(&str, String, &str)> = vec![
-            ("signing_key", SystemKeys::signing_key(SigningKeyId::new(7)), "_sys:signing_key:7"),
+            ("signing_key", SystemKeys::signing_key(SigningKeyId::new(7)), "signing_key:7"),
             (
                 "signing_key_kid_index",
                 SystemKeys::signing_key_kid_index("550e8400-e29b-41d4-a716-446655440000"),
@@ -1150,7 +1340,7 @@ mod tests {
             (
                 "signing_key_org_prefix",
                 SystemKeys::signing_key_org_prefix(OrganizationId::new(42)),
-                "_sys:signing_key:org:42:",
+                "_idx:signing_key:org:42:",
             ),
         ];
         for (label, actual, expected) in &cases {
@@ -1160,8 +1350,8 @@ mod tests {
 
     #[test]
     fn test_signing_key_parse_roundtrip() {
-        assert_eq!(SystemKeys::parse_signing_key("_sys:signing_key:7"), Some(SigningKeyId::new(7)));
-        assert_eq!(SystemKeys::parse_signing_key("_sys:signing_key:abc"), None);
+        assert_eq!(SystemKeys::parse_signing_key("signing_key:7"), Some(SigningKeyId::new(7)));
+        assert_eq!(SystemKeys::parse_signing_key("signing_key:abc"), None);
         assert_eq!(SystemKeys::parse_signing_key("other:7"), None);
     }
 
@@ -1171,7 +1361,7 @@ mod tests {
             (
                 "signing_key",
                 SystemKeys::signing_key(SigningKeyId::new(1)),
-                &[SystemKeys::SIGNING_KEY_PREFIX, SystemKeys::SYS_PREFIX],
+                &[SystemKeys::SIGNING_KEY_PREFIX],
             ),
             (
                 "signing_key_kid_index",
@@ -1193,7 +1383,7 @@ mod tests {
             (
                 "signing_key_org_prefix",
                 SystemKeys::signing_key_org_prefix(OrganizationId::new(1)),
-                &[SystemKeys::SIGNING_KEY_ORG_PREFIX, SystemKeys::SYS_PREFIX],
+                &[SystemKeys::SIGNING_KEY_ORG_PREFIX, SystemKeys::INDEX_PREFIX],
             ),
         ];
         for (label, key, prefixes) in &cases {
@@ -1232,7 +1422,7 @@ mod tests {
             (
                 "refresh_token",
                 SystemKeys::refresh_token(RefreshTokenId::new(99)),
-                "_sys:refresh_token:99",
+                "refresh_token:99",
             ),
             (
                 "refresh_token_hash_index",
@@ -1303,10 +1493,10 @@ mod tests {
     #[test]
     fn test_refresh_token_parse_roundtrip() {
         assert_eq!(
-            SystemKeys::parse_refresh_token("_sys:refresh_token:99"),
+            SystemKeys::parse_refresh_token("refresh_token:99"),
             Some(RefreshTokenId::new(99))
         );
-        assert_eq!(SystemKeys::parse_refresh_token("_sys:refresh_token:abc"), None);
+        assert_eq!(SystemKeys::parse_refresh_token("refresh_token:abc"), None);
         assert_eq!(SystemKeys::parse_refresh_token("other:99"), None);
     }
 
@@ -1319,7 +1509,7 @@ mod tests {
             (
                 "refresh_token",
                 SystemKeys::refresh_token(RefreshTokenId::new(1)),
-                &[SystemKeys::REFRESH_TOKEN_PREFIX, SystemKeys::SYS_PREFIX],
+                &[SystemKeys::REFRESH_TOKEN_PREFIX],
             ),
             (
                 "refresh_token_hash_index",
@@ -1433,5 +1623,402 @@ mod tests {
         let account_key = SystemKeys::onboard_account_key(hmac);
         assert_ne!(verify_key, account_key);
         assert_ne!(SystemKeys::ONBOARD_VERIFY_PREFIX, SystemKeys::ONBOARD_ACCOUNT_PREFIX);
+    }
+
+    // ========================================================================
+    // Prefix Taxonomy Test
+    // ========================================================================
+
+    /// Enforces the full prefix naming convention across all PREFIX constants.
+    ///
+    /// This test guards the following invariants:
+    /// - `_dir:*` prefixes are exclusively directory routing entries.
+    /// - `_idx:*` prefixes are exclusively secondary indexes.
+    /// - `_meta:*` prefixes are exclusively bookkeeping/infrastructure.
+    /// - `_key:*` prefixes are exclusively crypto-shredding keys.
+    /// - `_tmp:*` prefixes are exclusively ephemeral/TTL records.
+    /// - `_audit:*` prefixes are exclusively compliance trail entries.
+    /// - No bare primary-record prefix is a proper prefix of another (guards the `:` vs `_` ASCII
+    ///   ordering collision safety invariant).
+    #[test]
+    fn test_prefix_taxonomy() {
+        // -- _dir: constants must all start with _dir: --
+        let dir_prefixes = [
+            ("DIR_PREFIX", SystemKeys::DIR_PREFIX),
+            ("USER_DIRECTORY_PREFIX", SystemKeys::USER_DIRECTORY_PREFIX),
+            ("ORG_DIRECTORY_PREFIX", SystemKeys::ORG_DIRECTORY_PREFIX),
+            ("ORG_REGISTRY_PREFIX", SystemKeys::ORG_REGISTRY_PREFIX),
+        ];
+        for (name, value) in &dir_prefixes {
+            assert!(value.starts_with("_dir:"), "{name} = \"{value}\" should start with \"_dir:\"");
+        }
+
+        // -- _idx: constants must all start with _idx: --
+        let idx_prefixes = [
+            ("INDEX_PREFIX", SystemKeys::INDEX_PREFIX),
+            ("USER_SLUG_INDEX_PREFIX", SystemKeys::USER_SLUG_INDEX_PREFIX),
+            ("EMAIL_HASH_INDEX_PREFIX", SystemKeys::EMAIL_HASH_INDEX_PREFIX),
+            ("EMAIL_VERIFY_HASH_INDEX_PREFIX", SystemKeys::EMAIL_VERIFY_HASH_INDEX_PREFIX),
+            ("APP_SLUG_INDEX_PREFIX", SystemKeys::APP_SLUG_INDEX_PREFIX),
+            ("APP_NAME_INDEX_PREFIX", SystemKeys::APP_NAME_INDEX_PREFIX),
+            ("SIGNING_KEY_KID_INDEX_PREFIX", SystemKeys::SIGNING_KEY_KID_INDEX_PREFIX),
+            ("SIGNING_KEY_SCOPE_INDEX_PREFIX", SystemKeys::SIGNING_KEY_SCOPE_INDEX_PREFIX),
+            ("SIGNING_KEY_ORG_PREFIX", SystemKeys::SIGNING_KEY_ORG_PREFIX),
+            ("REFRESH_TOKEN_HASH_INDEX_PREFIX", SystemKeys::REFRESH_TOKEN_HASH_INDEX_PREFIX),
+            ("REFRESH_TOKEN_FAMILY_PREFIX", SystemKeys::REFRESH_TOKEN_FAMILY_PREFIX),
+            (
+                "REFRESH_TOKEN_FAMILY_POISONED_PREFIX",
+                SystemKeys::REFRESH_TOKEN_FAMILY_POISONED_PREFIX,
+            ),
+            ("REFRESH_TOKEN_APP_VAULT_PREFIX", SystemKeys::REFRESH_TOKEN_APP_VAULT_PREFIX),
+            ("REFRESH_TOKEN_ORG_PREFIX", SystemKeys::REFRESH_TOKEN_ORG_PREFIX),
+        ];
+        for (name, value) in &idx_prefixes {
+            assert!(value.starts_with("_idx:"), "{name} = \"{value}\" should start with \"_idx:\"");
+        }
+
+        // -- _meta: constants must all start with _meta: --
+        let meta_prefixes = [
+            ("META_PREFIX", SystemKeys::META_PREFIX),
+            ("NODE_PREFIX", SystemKeys::NODE_PREFIX),
+            ("SAGA_PREFIX", SystemKeys::SAGA_PREFIX),
+            ("REHASH_PROGRESS_PREFIX", SystemKeys::REHASH_PROGRESS_PREFIX),
+            ("BLINDING_KEY_VERSION_KEY", SystemKeys::BLINDING_KEY_VERSION_KEY),
+        ];
+        for (name, value) in &meta_prefixes {
+            assert!(
+                value.starts_with("_meta:"),
+                "{name} = \"{value}\" should start with \"_meta:\""
+            );
+        }
+
+        // -- _shred: constants must all start with _shred: --
+        let shred_prefixes = [
+            ("USER_SHRED_KEY_PREFIX", SystemKeys::USER_SHRED_KEY_PREFIX),
+            ("ORG_SHRED_KEY_PREFIX", SystemKeys::ORG_SHRED_KEY_PREFIX),
+        ];
+        for (name, value) in &shred_prefixes {
+            assert!(
+                value.starts_with("_shred:"),
+                "{name} = \"{value}\" should start with \"_shred:\""
+            );
+        }
+
+        // -- _tmp: constants must all start with _tmp: --
+        let tmp_prefixes = [
+            ("ONBOARD_VERIFY_PREFIX", SystemKeys::ONBOARD_VERIFY_PREFIX),
+            ("ONBOARD_ACCOUNT_PREFIX", SystemKeys::ONBOARD_ACCOUNT_PREFIX),
+        ];
+        for (name, value) in &tmp_prefixes {
+            assert!(value.starts_with("_tmp:"), "{name} = \"{value}\" should start with \"_tmp:\"");
+        }
+
+        // -- _audit: constants must all start with _audit: --
+        let audit_prefixes = [("ERASURE_AUDIT_PREFIX", SystemKeys::ERASURE_AUDIT_PREFIX)];
+        for (name, value) in &audit_prefixes {
+            assert!(
+                value.starts_with("_audit:"),
+                "{name} = \"{value}\" should start with \"_audit:\""
+            );
+        }
+
+        // -- Bare primary-record prefixes: no prefix is a proper prefix of another --
+        // This guards the `:` (0x3A) < `_` (0x5F) ASCII ordering invariant.
+        // e.g., `app:5:` must never match `app_profile:5:` in a B-tree prefix scan.
+        let bare_prefixes = [
+            ("USER_PREFIX", SystemKeys::USER_PREFIX),
+            ("USER_EMAIL_PREFIX", SystemKeys::USER_EMAIL_PREFIX),
+            ("TEAM_PREFIX", SystemKeys::TEAM_PREFIX),
+            ("ORG_PREFIX", SystemKeys::ORG_PREFIX),
+            ("ORG_PROFILE_PREFIX", SystemKeys::ORG_PROFILE_PREFIX),
+            ("APP_PREFIX", SystemKeys::APP_PREFIX),
+            ("APP_PROFILE_PREFIX", SystemKeys::APP_PROFILE_PREFIX),
+            ("APP_ASSERTION_PREFIX", SystemKeys::APP_ASSERTION_PREFIX),
+            ("APP_VAULT_PREFIX", SystemKeys::APP_VAULT_PREFIX),
+            ("ASSERTION_NAME_PREFIX", SystemKeys::ASSERTION_NAME_PREFIX),
+            ("SIGNING_KEY_PREFIX", SystemKeys::SIGNING_KEY_PREFIX),
+            ("REFRESH_TOKEN_PREFIX", SystemKeys::REFRESH_TOKEN_PREFIX),
+        ];
+        for (i, (name_a, prefix_a)) in bare_prefixes.iter().enumerate() {
+            // Bare prefixes must not start with underscore (those are infrastructure)
+            assert!(
+                !prefix_a.starts_with('_'),
+                "bare prefix {name_a} = \"{prefix_a}\" must not start with '_'"
+            );
+            for (name_b, prefix_b) in &bare_prefixes[i + 1..] {
+                assert!(
+                    !prefix_a.starts_with(prefix_b) && !prefix_b.starts_with(prefix_a),
+                    "bare prefix collision: {name_a} = \"{prefix_a}\" vs {name_b} = \"{prefix_b}\""
+                );
+            }
+        }
+
+        // -- Sequence keys must all start with _meta:seq: --
+        let seq_keys = [
+            ("ORG_SEQ_KEY", SystemKeys::ORG_SEQ_KEY),
+            ("USER_SEQ_KEY", SystemKeys::USER_SEQ_KEY),
+            ("APP_SEQ_KEY", SystemKeys::APP_SEQ_KEY),
+            ("VAULT_SEQ_KEY", SystemKeys::VAULT_SEQ_KEY),
+            ("USER_EMAIL_SEQ_KEY", SystemKeys::USER_EMAIL_SEQ_KEY),
+            ("EMAIL_VERIFY_SEQ_KEY", SystemKeys::EMAIL_VERIFY_SEQ_KEY),
+            ("CLIENT_ASSERTION_SEQ_KEY", SystemKeys::CLIENT_ASSERTION_SEQ_KEY),
+            ("SIGNING_KEY_SEQ_KEY", SystemKeys::SIGNING_KEY_SEQ_KEY),
+            ("REFRESH_TOKEN_SEQ_KEY", SystemKeys::REFRESH_TOKEN_SEQ_KEY),
+        ];
+        for (name, value) in &seq_keys {
+            assert!(
+                value.starts_with("_meta:seq:"),
+                "{name} = \"{value}\" should start with \"_meta:seq:\""
+            );
+        }
+    }
+
+    /// Verifies that every PREFIX constant and SEQ_KEY constant is classified
+    /// into a tier (no `None` returns). This ensures new key families added
+    /// in the future are forced to declare their tier.
+    #[test]
+    fn test_key_tier_exhaustive() {
+        let all_constants: Vec<(&str, &str)> = vec![
+            // _dir:
+            ("DIR_PREFIX", SystemKeys::DIR_PREFIX),
+            ("USER_DIRECTORY_PREFIX", SystemKeys::USER_DIRECTORY_PREFIX),
+            ("ORG_DIRECTORY_PREFIX", SystemKeys::ORG_DIRECTORY_PREFIX),
+            ("ORG_REGISTRY_PREFIX", SystemKeys::ORG_REGISTRY_PREFIX),
+            // _meta:
+            ("META_PREFIX", SystemKeys::META_PREFIX),
+            ("NODE_PREFIX", SystemKeys::NODE_PREFIX),
+            ("SAGA_PREFIX", SystemKeys::SAGA_PREFIX),
+            ("REHASH_PROGRESS_PREFIX", SystemKeys::REHASH_PROGRESS_PREFIX),
+            ("BLINDING_KEY_VERSION_KEY", SystemKeys::BLINDING_KEY_VERSION_KEY),
+            // _idx: (INDEX_PREFIX itself is a scan prefix spanning both tiers, not classified)
+            ("USER_SLUG_INDEX_PREFIX", SystemKeys::USER_SLUG_INDEX_PREFIX),
+            ("EMAIL_HASH_INDEX_PREFIX", SystemKeys::EMAIL_HASH_INDEX_PREFIX),
+            ("EMAIL_VERIFY_HASH_INDEX_PREFIX", SystemKeys::EMAIL_VERIFY_HASH_INDEX_PREFIX),
+            ("APP_SLUG_INDEX_PREFIX", SystemKeys::APP_SLUG_INDEX_PREFIX),
+            ("APP_NAME_INDEX_PREFIX", SystemKeys::APP_NAME_INDEX_PREFIX),
+            ("SIGNING_KEY_KID_INDEX_PREFIX", SystemKeys::SIGNING_KEY_KID_INDEX_PREFIX),
+            ("SIGNING_KEY_SCOPE_INDEX_PREFIX", SystemKeys::SIGNING_KEY_SCOPE_INDEX_PREFIX),
+            ("SIGNING_KEY_ORG_PREFIX", SystemKeys::SIGNING_KEY_ORG_PREFIX),
+            ("REFRESH_TOKEN_HASH_INDEX_PREFIX", SystemKeys::REFRESH_TOKEN_HASH_INDEX_PREFIX),
+            ("REFRESH_TOKEN_FAMILY_PREFIX", SystemKeys::REFRESH_TOKEN_FAMILY_PREFIX),
+            (
+                "REFRESH_TOKEN_FAMILY_POISONED_PREFIX",
+                SystemKeys::REFRESH_TOKEN_FAMILY_POISONED_PREFIX,
+            ),
+            ("REFRESH_TOKEN_APP_VAULT_PREFIX", SystemKeys::REFRESH_TOKEN_APP_VAULT_PREFIX),
+            ("REFRESH_TOKEN_ORG_PREFIX", SystemKeys::REFRESH_TOKEN_ORG_PREFIX),
+            // _shred:
+            ("USER_SHRED_KEY_PREFIX", SystemKeys::USER_SHRED_KEY_PREFIX),
+            ("ORG_SHRED_KEY_PREFIX", SystemKeys::ORG_SHRED_KEY_PREFIX),
+            // _tmp:
+            ("ONBOARD_VERIFY_PREFIX", SystemKeys::ONBOARD_VERIFY_PREFIX),
+            ("ONBOARD_ACCOUNT_PREFIX", SystemKeys::ONBOARD_ACCOUNT_PREFIX),
+            // _audit:
+            ("ERASURE_AUDIT_PREFIX", SystemKeys::ERASURE_AUDIT_PREFIX),
+            // Bare prefixes
+            ("USER_PREFIX", SystemKeys::USER_PREFIX),
+            ("USER_EMAIL_PREFIX", SystemKeys::USER_EMAIL_PREFIX),
+            ("TEAM_PREFIX", SystemKeys::TEAM_PREFIX),
+            ("ORG_PREFIX", SystemKeys::ORG_PREFIX),
+            ("ORG_PROFILE_PREFIX", SystemKeys::ORG_PROFILE_PREFIX),
+            ("APP_PREFIX", SystemKeys::APP_PREFIX),
+            ("APP_PROFILE_PREFIX", SystemKeys::APP_PROFILE_PREFIX),
+            ("APP_ASSERTION_PREFIX", SystemKeys::APP_ASSERTION_PREFIX),
+            ("APP_VAULT_PREFIX", SystemKeys::APP_VAULT_PREFIX),
+            ("ASSERTION_NAME_PREFIX", SystemKeys::ASSERTION_NAME_PREFIX),
+            ("SIGNING_KEY_PREFIX", SystemKeys::SIGNING_KEY_PREFIX),
+            ("REFRESH_TOKEN_PREFIX", SystemKeys::REFRESH_TOKEN_PREFIX),
+            // Sequence keys
+            ("ORG_SEQ_KEY", SystemKeys::ORG_SEQ_KEY),
+            ("USER_SEQ_KEY", SystemKeys::USER_SEQ_KEY),
+            ("APP_SEQ_KEY", SystemKeys::APP_SEQ_KEY),
+            ("VAULT_SEQ_KEY", SystemKeys::VAULT_SEQ_KEY),
+            ("USER_EMAIL_SEQ_KEY", SystemKeys::USER_EMAIL_SEQ_KEY),
+            ("EMAIL_VERIFY_SEQ_KEY", SystemKeys::EMAIL_VERIFY_SEQ_KEY),
+            ("CLIENT_ASSERTION_SEQ_KEY", SystemKeys::CLIENT_ASSERTION_SEQ_KEY),
+            ("SIGNING_KEY_SEQ_KEY", SystemKeys::SIGNING_KEY_SEQ_KEY),
+            ("REFRESH_TOKEN_SEQ_KEY", SystemKeys::REFRESH_TOKEN_SEQ_KEY),
+        ];
+
+        for (name, prefix) in &all_constants {
+            assert!(
+                SystemKeys::classify_key_tier(prefix).is_some(),
+                "constant {name} = \"{prefix}\" returned None from classify_key_tier — \
+                 add it to the classifier"
+            );
+        }
+    }
+
+    /// Verifies the tier classification for every PREFIX constant matches the
+    /// expected tier from the data residency model.
+    #[test]
+    fn test_key_tier_classification() {
+        let global_constants: Vec<(&str, &str)> = vec![
+            // _dir: infrastructure
+            ("DIR_PREFIX", SystemKeys::DIR_PREFIX),
+            ("USER_DIRECTORY_PREFIX", SystemKeys::USER_DIRECTORY_PREFIX),
+            ("ORG_DIRECTORY_PREFIX", SystemKeys::ORG_DIRECTORY_PREFIX),
+            ("ORG_REGISTRY_PREFIX", SystemKeys::ORG_REGISTRY_PREFIX),
+            // _meta: bookkeeping
+            ("META_PREFIX", SystemKeys::META_PREFIX),
+            ("NODE_PREFIX", SystemKeys::NODE_PREFIX),
+            ("SAGA_PREFIX", SystemKeys::SAGA_PREFIX),
+            ("REHASH_PROGRESS_PREFIX", SystemKeys::REHASH_PROGRESS_PREFIX),
+            ("BLINDING_KEY_VERSION_KEY", SystemKeys::BLINDING_KEY_VERSION_KEY),
+            // _audit: compliance
+            ("ERASURE_AUDIT_PREFIX", SystemKeys::ERASURE_AUDIT_PREFIX),
+            // _idx: cross-region resolution and token infrastructure
+            ("USER_SLUG_INDEX_PREFIX", SystemKeys::USER_SLUG_INDEX_PREFIX),
+            ("EMAIL_HASH_INDEX_PREFIX", SystemKeys::EMAIL_HASH_INDEX_PREFIX),
+            ("APP_SLUG_INDEX_PREFIX", SystemKeys::APP_SLUG_INDEX_PREFIX),
+            ("SIGNING_KEY_KID_INDEX_PREFIX", SystemKeys::SIGNING_KEY_KID_INDEX_PREFIX),
+            ("SIGNING_KEY_SCOPE_INDEX_PREFIX", SystemKeys::SIGNING_KEY_SCOPE_INDEX_PREFIX),
+            ("SIGNING_KEY_ORG_PREFIX", SystemKeys::SIGNING_KEY_ORG_PREFIX),
+            ("REFRESH_TOKEN_HASH_INDEX_PREFIX", SystemKeys::REFRESH_TOKEN_HASH_INDEX_PREFIX),
+            ("REFRESH_TOKEN_FAMILY_PREFIX", SystemKeys::REFRESH_TOKEN_FAMILY_PREFIX),
+            (
+                "REFRESH_TOKEN_FAMILY_POISONED_PREFIX",
+                SystemKeys::REFRESH_TOKEN_FAMILY_POISONED_PREFIX,
+            ),
+            ("REFRESH_TOKEN_APP_VAULT_PREFIX", SystemKeys::REFRESH_TOKEN_APP_VAULT_PREFIX),
+            ("REFRESH_TOKEN_ORG_PREFIX", SystemKeys::REFRESH_TOKEN_ORG_PREFIX),
+            // Bare GLOBAL entities
+            ("APP_PREFIX", SystemKeys::APP_PREFIX),
+            ("ORG_PREFIX", SystemKeys::ORG_PREFIX),
+            ("SIGNING_KEY_PREFIX", SystemKeys::SIGNING_KEY_PREFIX),
+            ("REFRESH_TOKEN_PREFIX", SystemKeys::REFRESH_TOKEN_PREFIX),
+            ("APP_ASSERTION_PREFIX", SystemKeys::APP_ASSERTION_PREFIX),
+            ("APP_VAULT_PREFIX", SystemKeys::APP_VAULT_PREFIX),
+            // Sequence keys (all _meta:)
+            ("ORG_SEQ_KEY", SystemKeys::ORG_SEQ_KEY),
+            ("USER_SEQ_KEY", SystemKeys::USER_SEQ_KEY),
+            ("APP_SEQ_KEY", SystemKeys::APP_SEQ_KEY),
+            ("VAULT_SEQ_KEY", SystemKeys::VAULT_SEQ_KEY),
+            ("USER_EMAIL_SEQ_KEY", SystemKeys::USER_EMAIL_SEQ_KEY),
+            ("EMAIL_VERIFY_SEQ_KEY", SystemKeys::EMAIL_VERIFY_SEQ_KEY),
+            ("CLIENT_ASSERTION_SEQ_KEY", SystemKeys::CLIENT_ASSERTION_SEQ_KEY),
+            ("SIGNING_KEY_SEQ_KEY", SystemKeys::SIGNING_KEY_SEQ_KEY),
+            ("REFRESH_TOKEN_SEQ_KEY", SystemKeys::REFRESH_TOKEN_SEQ_KEY),
+        ];
+
+        for (name, prefix) in &global_constants {
+            assert_eq!(
+                SystemKeys::classify_key_tier(prefix),
+                Some(KeyTier::Global),
+                "{name} = \"{prefix}\" should be Global"
+            );
+        }
+
+        let regional_constants: Vec<(&str, &str)> = vec![
+            // _shred: crypto-shredding
+            ("USER_SHRED_KEY_PREFIX", SystemKeys::USER_SHRED_KEY_PREFIX),
+            ("ORG_SHRED_KEY_PREFIX", SystemKeys::ORG_SHRED_KEY_PREFIX),
+            // _tmp: ephemeral
+            ("ONBOARD_VERIFY_PREFIX", SystemKeys::ONBOARD_VERIFY_PREFIX),
+            ("ONBOARD_ACCOUNT_PREFIX", SystemKeys::ONBOARD_ACCOUNT_PREFIX),
+            // _idx: per-user REGIONAL indexes and PII-containing lookups
+            ("EMAIL_VERIFY_HASH_INDEX_PREFIX", SystemKeys::EMAIL_VERIFY_HASH_INDEX_PREFIX),
+            ("APP_NAME_INDEX_PREFIX", SystemKeys::APP_NAME_INDEX_PREFIX),
+            // Bare REGIONAL entities
+            ("USER_PREFIX", SystemKeys::USER_PREFIX),
+            ("USER_EMAIL_PREFIX", SystemKeys::USER_EMAIL_PREFIX),
+            ("TEAM_PREFIX", SystemKeys::TEAM_PREFIX),
+            ("APP_PROFILE_PREFIX", SystemKeys::APP_PROFILE_PREFIX),
+            ("ORG_PROFILE_PREFIX", SystemKeys::ORG_PROFILE_PREFIX),
+            ("ASSERTION_NAME_PREFIX", SystemKeys::ASSERTION_NAME_PREFIX),
+        ];
+
+        for (name, prefix) in &regional_constants {
+            assert_eq!(
+                SystemKeys::classify_key_tier(prefix),
+                Some(KeyTier::Regional),
+                "{name} = \"{prefix}\" should be Regional"
+            );
+        }
+    }
+
+    /// Verifies classification of concrete keys (not just PREFIX constants).
+    /// Tests keys generated by `SystemKeys::*` functions to catch any
+    /// prefix-matching edge cases.
+    #[test]
+    fn test_key_tier_concrete_keys() {
+        // GLOBAL concrete keys
+        let global_keys = [
+            SystemKeys::organization_directory_key(OrganizationId::new(1)),
+            SystemKeys::user_directory_key(UserId::new(1)),
+            SystemKeys::organization_registry_key(OrganizationId::new(1)),
+            SystemKeys::organization_key(OrganizationId::new(1)),
+            SystemKeys::app_key(OrganizationId::new(1), AppId::new(1)),
+            SystemKeys::signing_key(SigningKeyId::new(1)),
+            SystemKeys::user_slug_index_key(UserSlug::new(99)),
+            SystemKeys::organization_slug_key(OrganizationSlug::new(99)),
+            SystemKeys::app_slug_key(AppSlug::new(99)),
+            SystemKeys::app_assertion_key(
+                OrganizationId::new(1),
+                AppId::new(1),
+                ClientAssertionId::new(1),
+            ),
+            SystemKeys::app_vault_key(OrganizationId::new(1), AppId::new(1), VaultId::new(1)),
+            SystemKeys::email_hash_index_key("abc123"),
+            SystemKeys::team_slug_key(TeamSlug::new(99)),
+        ];
+        for key in &global_keys {
+            assert_eq!(
+                SystemKeys::classify_key_tier(key),
+                Some(KeyTier::Global),
+                "concrete key \"{key}\" should be Global"
+            );
+        }
+
+        // REGIONAL concrete keys
+        let regional_keys = [
+            SystemKeys::user_key(UserId::new(1)),
+            SystemKeys::user_email_key(UserEmailId::new(1)),
+            SystemKeys::email_verify_key(EmailVerifyTokenId::new(1)),
+            SystemKeys::team_key(OrganizationId::new(1), TeamId::new(1)),
+            SystemKeys::app_profile_key(OrganizationId::new(1), AppId::new(1)),
+            SystemKeys::organization_profile_key(OrganizationId::new(1)),
+            SystemKeys::assertion_name_key(
+                OrganizationId::new(1),
+                AppId::new(1),
+                ClientAssertionId::new(1),
+            ),
+            SystemKeys::user_shred_key(UserId::new(1)),
+            SystemKeys::org_shred_key(OrganizationId::new(1)),
+            SystemKeys::email_index_key("test@example.com"),
+            SystemKeys::user_emails_index_key(UserId::new(1)),
+            SystemKeys::email_verify_hash_index_key("abc123"),
+            SystemKeys::app_name_index_key(OrganizationId::new(1), "my-app"),
+        ];
+        for key in &regional_keys {
+            assert_eq!(
+                SystemKeys::classify_key_tier(key),
+                Some(KeyTier::Regional),
+                "concrete key \"{key}\" should be Regional"
+            );
+        }
+    }
+
+    /// Negative tests: `validate_key_tier` returns an error on tier mismatch.
+    #[test]
+    fn test_validate_key_tier_mismatch() {
+        // Writing a _dir: key to REGIONAL should fail
+        let dir_key = SystemKeys::user_directory_key(UserId::new(42));
+        let result = SystemKeys::validate_key_tier(&dir_key, KeyTier::Regional);
+        assert!(result.is_err(), "_dir: key should not be written to Regional");
+        assert!(result.unwrap_err().contains("tier mismatch"));
+
+        // Writing a user: key to GLOBAL should fail
+        let user_key = SystemKeys::user_key(UserId::new(42));
+        let result = SystemKeys::validate_key_tier(&user_key, KeyTier::Global);
+        assert!(result.is_err(), "user: key should not be written to Global");
+
+        // Writing to the correct tier should succeed
+        assert!(SystemKeys::validate_key_tier(&dir_key, KeyTier::Global).is_ok());
+        assert!(SystemKeys::validate_key_tier(&user_key, KeyTier::Regional).is_ok());
+
+        // Unknown keys pass validation (no false positives)
+        assert!(SystemKeys::validate_key_tier("unknown:42", KeyTier::Global).is_ok());
+        assert!(SystemKeys::validate_key_tier("unknown:42", KeyTier::Regional).is_ok());
     }
 }

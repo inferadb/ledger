@@ -2322,16 +2322,16 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 },
             };
 
-            // Generate random per-subject encryption key.
-            let mut subject_key_bytes = [0u8; 32];
-            rand::Rng::fill_bytes(&mut rand::rng(), &mut subject_key_bytes);
+            // Generate random per-user crypto-shredding key.
+            let mut shred_key_bytes = [0u8; 32];
+            rand::Rng::fill_bytes(&mut rand::rng(), &mut shred_key_bytes);
 
             entries.push(inferadb_ledger_state::system::UserMigrationEntry {
                 user: user.id,
                 slug: user.slug,
                 region: target_region,
                 hmac: email_hmac_hex,
-                bytes: subject_key_bytes,
+                bytes: shred_key_bytes,
             });
         }
 

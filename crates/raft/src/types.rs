@@ -300,7 +300,7 @@ pub enum LedgerRequest {
     ///
     /// Allocates the team ID and slug mapping. Does NOT include the team name —
     /// plaintext names are PII and must be written via the regional
-    /// [`SystemRequest::WriteTeamProfile`] to avoid leaking into the GLOBAL
+    /// [`SystemRequest::WriteTeam`] to avoid leaking into the GLOBAL
     /// Raft log.
     CreateOrganizationTeam {
         /// Organization to create the team in.
@@ -312,7 +312,7 @@ pub enum LedgerRequest {
     /// Deletes a team's GLOBAL directory entry (slug index + in-memory maps).
     ///
     /// Profile deletion and member migration are handled by the REGIONAL
-    /// [`SystemRequest::DeleteTeamProfile`] (proposed first by the service handler).
+    /// [`SystemRequest::DeleteTeam`] (proposed first by the service handler).
     DeleteOrganizationTeam {
         /// Organization containing the team.
         organization: OrganizationId,
@@ -567,11 +567,11 @@ pub enum LedgerRequest {
     /// Encrypted form of a [`SystemRequest`] for PII crypto-shredding.
     ///
     /// User-scoped REGIONAL requests (profile writes, email operations) are
-    /// encrypted with the user's `SubjectKey` before entering the Raft log.
-    /// When the user is erased and their `SubjectKey` is destroyed, all
+    /// encrypted with the user's `UserShredKey` before entering the Raft log.
+    /// When the user is erased and their `UserShredKey` is destroyed, all
     /// historical log entries become cryptographically unrecoverable.
     ///
-    /// The apply handler decrypts using the `SubjectKey` from state. If the
+    /// The apply handler decrypts using the `UserShredKey` from state. If the
     /// key has been destroyed (user erased), the entry is skipped — the state
     /// machine already reflects the erasure.
     EncryptedUserSystem(crate::entry_crypto::EncryptedUserSystemRequest),
@@ -579,11 +579,11 @@ pub enum LedgerRequest {
     /// Organization-scoped encrypted form of a [`SystemRequest`].
     ///
     /// Organization-scoped REGIONAL requests (org/team/app profile writes) are
-    /// encrypted with the organization's `OrgKey` before entering the Raft log.
-    /// When the organization is purged and the `OrgKey` destroyed, all
+    /// encrypted with the organization's `OrgShredKey` before entering the Raft log.
+    /// When the organization is purged and the `OrgShredKey` destroyed, all
     /// historical log entries become cryptographically unrecoverable.
     ///
-    /// The apply handler decrypts using the `OrgKey` from state. If the
+    /// The apply handler decrypts using the `OrgShredKey` from state. If the
     /// key has been destroyed (org purged), the entry is skipped.
     EncryptedOrgSystem(crate::entry_crypto::EncryptedOrgSystemRequest),
 }
@@ -604,12 +604,12 @@ pub enum LedgerRequest {
 /// log lines and wide events (local, non-replicated), not in Raft entries.
 ///
 /// Variants that carry PII and are proposed to REGIONAL:
-/// - [`CreateUserEmail`](SystemRequest::CreateUserEmail) — encrypted via SubjectKey
-/// - [`UpdateUserProfile`](SystemRequest::UpdateUserProfile) — encrypted via SubjectKey
+/// - [`CreateUserEmail`](SystemRequest::CreateUserEmail) — encrypted via UserShredKey
+/// - [`UpdateUserProfile`](SystemRequest::UpdateUserProfile) — encrypted via UserShredKey
 /// - [`WriteOnboardingUserProfile`](SystemRequest::WriteOnboardingUserProfile) — PII sealed with
-///   SubjectKey (bootstrap entry, key also in entry for cross-replica provisioning)
+///   UserShredKey (bootstrap entry, key also in entry for cross-replica provisioning)
 /// - [`WriteOrganizationProfile`](SystemRequest::WriteOrganizationProfile) — organization name
-/// - [`WriteTeamProfile`](SystemRequest::WriteTeamProfile) — team name
+/// - [`WriteTeam`](SystemRequest::WriteTeam) — team name
 /// - [`WriteAppProfile`](SystemRequest::WriteAppProfile) — app name, description
 /// - [`CleanupExpiredOnboarding`](SystemRequest::CleanupExpiredOnboarding) — regional GC
 ///
@@ -786,17 +786,19 @@ pub enum SystemRequest {
         region: Region,
         /// Billing tier.
         tier: inferadb_ledger_state::system::OrganizationTier,
+        /// Initial administrator for this organization.
+        admin: inferadb_ledger_types::UserId,
     },
 
     /// Writes the organization profile to the REGIONAL system vault.
     ///
     /// Creates an `OrganizationProfile` keyed as
-    /// `_sys:org_profile:{organization}` with the provided name and admin.
+    /// `org_profile:{organization}` with the provided name.
     ///
-    /// The name is AES-256-GCM sealed with `org_key_bytes` before entering
-    /// the Raft log (crypto-shredding). The apply handler stores the OrgKey
+    /// The name is AES-256-GCM sealed with `shred_key_bytes` before entering
+    /// the Raft log (crypto-shredding). The apply handler stores the OrgShredKey
     /// first, then decrypts the name and writes the profile. On replay after
-    /// org purge, the OrgKey is absent and the entry is skipped.
+    /// org purge, the OrgShredKey is absent and the entry is skipped.
     WriteOrganizationProfile {
         /// Organization whose profile to write.
         organization: OrganizationId,
@@ -804,11 +806,9 @@ pub enum SystemRequest {
         sealed_name: Vec<u8>,
         /// Nonce for sealed_name decryption.
         name_nonce: [u8; 12],
-        /// Initial administrator for this organization.
-        admin: UserId,
         /// Per-organization 256-bit AES key for crypto-shredding.
         /// Stored by the apply handler for future profile writes.
-        org_key_bytes: [u8; 32],
+        shred_key_bytes: [u8; 32],
     },
 
     /// Updates the organization profile name in the REGIONAL Raft log.
@@ -915,7 +915,7 @@ pub enum SystemRequest {
     /// Saga step 1 (REGIONAL): Write all PII and user/org profile data.
     ///
     /// PII fields (email, name, org_name) are AES-256-GCM sealed with the
-    /// `subject_key_bytes` before entering the Raft log. On log replay after
+    /// `shred_key_bytes` before entering the Raft log. On log replay after
     /// user erasure, the apply handler detects the erasure tombstone and
     /// skips the entry — the sealed PII is unrecoverable without re-provisioning
     /// the key, which the tombstone prevents.
@@ -937,8 +937,8 @@ pub enum SystemRequest {
         sealed_pii: Vec<u8>,
         /// Nonce for `sealed_pii` decryption.
         pii_nonce: [u8; 12],
-        /// Per-subject encryption key (generated by orchestrator).
-        subject_key_bytes: [u8; 32],
+        /// Per-user crypto-shredding key (generated by orchestrator).
+        shred_key_bytes: [u8; 32],
         /// Refresh token hash.
         refresh_token_hash: [u8; 32],
         /// Refresh token family ID (16-byte random, poison detection).
@@ -966,18 +966,18 @@ pub enum SystemRequest {
         email_hmac: String,
     },
 
-    /// Writes a team's display name to the regional store (PII).
+    /// Writes a team record to the regional store (REGIONAL-only, Pattern 1).
     ///
     /// Proposed to the REGIONAL Raft group via `propose_regional()`.
     /// The team directory entry (ID, slug) is created separately via the
     /// GLOBAL `LedgerRequest::CreateOrganizationTeam`. This separation
     /// ensures plaintext team names never enter the GLOBAL Raft log.
-    WriteTeamProfile {
+    WriteTeam {
         /// Organization containing the team.
         organization: OrganizationId,
-        /// Team to write the profile for.
+        /// Team to write the record for.
         team: TeamId,
-        /// External Snowflake slug (needed to create profile from scratch
+        /// External Snowflake slug (needed to create the team record from scratch
         /// in REGIONAL state where GLOBAL slug indices are unavailable).
         slug: TeamSlug,
         /// Team display name (PII — regional only).
@@ -1001,21 +1001,21 @@ pub enum SystemRequest {
         description: Option<String>,
     },
 
-    /// Deletes a team's profile and name index from the REGIONAL state layer.
+    /// Deletes a team record and name index from the REGIONAL state layer.
     ///
     /// Handles member migration if `move_members_to` is specified (both source
-    /// and target profiles are in REGIONAL state). Must be proposed before the
+    /// and target records are in REGIONAL state). Must be proposed before the
     /// GLOBAL `DeleteOrganizationTeam` which cleans up slug indices.
-    DeleteTeamProfile {
+    DeleteTeam {
         /// Organization containing the team.
         organization: OrganizationId,
-        /// Team whose profile is being deleted.
+        /// Team being deleted.
         team: TeamId,
         /// If set, move members to this team before deleting.
         move_members_to: Option<TeamId>,
     },
 
-    /// Adds a member to a team's profile in REGIONAL state.
+    /// Adds a member to a team record in REGIONAL state.
     ///
     /// Proposed to the REGIONAL Raft group via `propose_regional_org_encrypted()`.
     /// Requires the team profile to exist and the user to not already be a member.
@@ -1772,6 +1772,7 @@ mod tests {
             slug: OrganizationSlug::new(12345),
             region: Region::US_EAST_VA,
             tier: Default::default(),
+            admin: UserId::new(1),
         });
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
@@ -1946,6 +1947,7 @@ mod tests {
                 slug: OrganizationSlug::new(999),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
+                admin: UserId::new(1),
             }),
             proposed_at: Utc.with_ymd_and_hms(2099, 6, 15, 12, 30, 0).unwrap(),
             state_root_commitments: vec![],
@@ -2081,6 +2083,7 @@ mod tests {
                 slug: OrganizationSlug::new(1),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
+                admin: UserId::new(1),
             }),
             proposed_at: Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap(),
             state_root_commitments: vec![],
@@ -2552,7 +2555,7 @@ mod tests {
     // ============================================
 
     mod proptest_raft_log {
-        use inferadb_ledger_types::{OrganizationId, VaultId, VaultSlug};
+        use inferadb_ledger_types::{OrganizationId, UserId, VaultId, VaultSlug};
         use openraft::{CommittedLeaderId, LogId};
         use proptest::prelude::*;
 
@@ -2701,6 +2704,7 @@ mod tests {
                         slug: inferadb_ledger_types::OrganizationSlug::new(42),
                         region,
                         tier: Default::default(),
+                        admin: UserId::new(1),
                     }),
                     1 => LedgerRequest::CreateVault {
                         organization,
@@ -2765,7 +2769,7 @@ mod tests {
             SystemRequest::CreateUserEmail { .. } => RaftScope::Regional,
             SystemRequest::DeleteAppProfile { .. } => RaftScope::Regional,
             SystemRequest::DeleteClientAssertionName { .. } => RaftScope::Regional,
-            SystemRequest::DeleteTeamProfile { .. } => RaftScope::Regional,
+            SystemRequest::DeleteTeam { .. } => RaftScope::Regional,
             SystemRequest::PurgeOrganizationRegional { .. } => RaftScope::Regional,
             SystemRequest::RemoveTeamMember { .. } => RaftScope::Regional,
             SystemRequest::UpdateOrganizationProfile { .. } => RaftScope::Regional,
@@ -2775,7 +2779,7 @@ mod tests {
             SystemRequest::WriteClientAssertionName { .. } => RaftScope::Regional,
             SystemRequest::WriteOnboardingUserProfile { .. } => RaftScope::Regional,
             SystemRequest::WriteOrganizationProfile { .. } => RaftScope::Regional,
-            SystemRequest::WriteTeamProfile { .. } => RaftScope::Regional,
+            SystemRequest::WriteTeam { .. } => RaftScope::Regional,
         }
     }
 
@@ -2841,8 +2845,7 @@ mod tests {
             organization: OrganizationId::new(1),
             sealed_name: vec![0; 48],
             name_nonce: [0; 12],
-            admin: UserId::new(1),
-            org_key_bytes: [0xAA; 32],
+            shred_key_bytes: [0xAA; 32],
         };
         assert_eq!(classify_system_request(&write_profile), RaftScope::Regional);
 
@@ -2853,8 +2856,8 @@ mod tests {
         };
         assert_eq!(classify_system_request(&update_profile), RaftScope::Regional);
 
-        // WriteTeamProfile — carries team name (PII), classified as regional
-        let write_team = SystemRequest::WriteTeamProfile {
+        // WriteTeam — carries team name (PII), classified as regional
+        let write_team = SystemRequest::WriteTeam {
             organization: OrganizationId::new(1),
             team: TeamId::new(1),
             slug: TeamSlug::new(100),
@@ -2871,8 +2874,8 @@ mod tests {
         };
         assert_eq!(classify_system_request(&write_app), RaftScope::Regional);
 
-        // DeleteTeamProfile — REGIONAL cleanup (profile + name index)
-        let delete_team = SystemRequest::DeleteTeamProfile {
+        // DeleteTeam — REGIONAL cleanup (team record + name index)
+        let delete_team = SystemRequest::DeleteTeam {
             organization: OrganizationId::new(1),
             team: TeamId::new(1),
             move_members_to: None,
@@ -2931,7 +2934,7 @@ mod tests {
     /// All `LedgerRequest` variants are "global" — they contain only numeric
     /// IDs, slugs, hashes, and enums. Plaintext PII (names, descriptions)
     /// has been moved to [`SystemRequest`] regional variants:
-    /// - Team names → [`SystemRequest::WriteTeamProfile`]
+    /// - Team names → [`SystemRequest::WriteTeam`]
     /// - App names/descriptions → [`SystemRequest::WriteAppProfile`]
     ///
     /// This exhaustive match ensures new variants are reviewed for PII before
