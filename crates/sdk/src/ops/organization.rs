@@ -1088,6 +1088,7 @@ impl LedgerClient {
                 &retry_policy,
                 &self.cancellation,
                 Some(&pool),
+                "erase_user",
                 || async {
                     let mut client = crate::connected_client!(pool, create_user_client);
 
