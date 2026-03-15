@@ -52,7 +52,7 @@ base64 = "0.22"
 aes-gcm = "0.10"
 aes-kw = "0.2"
 zeroize = { version = "1", features = ["derive"] }
-bcrypt = "0.17"
+bcrypt = "0.19"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core", "zeroize"] }
 # JWT: rust_crypto backend provides CryptoProvider auto-registration; ed25519-dalek for EdDSA
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
