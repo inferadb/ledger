@@ -779,7 +779,7 @@ pub enum SystemRequest {
     /// Allocates an `OrganizationId` from the sequence counter, inserts
     /// `OrganizationMeta` into Raft state, writes the `OrganizationRegistry`
     /// to the StateLayer, and registers the slug index.
-    CreateOrganizationDirectory {
+    CreateOrganization {
         /// External Snowflake slug (generated before Raft proposal).
         slug: OrganizationSlug,
         /// Target data residency region.
@@ -822,12 +822,15 @@ pub enum SystemRequest {
         name: String,
     },
 
-    /// Updates the organization directory status in the GLOBAL control plane.
-    UpdateOrganizationDirectoryStatus {
+    /// Updates the organization status in the GLOBAL control plane.
+    ///
+    /// Syncs both `OrganizationMeta` (in-memory + B+ tree) and
+    /// `OrganizationRegistry` (state layer) to the new status.
+    UpdateOrganizationStatus {
         /// Organization to update.
         organization: OrganizationId,
-        /// New directory status.
-        status: inferadb_ledger_state::system::OrganizationDirectoryStatus,
+        /// New organization status.
+        status: inferadb_ledger_state::system::OrganizationStatus,
     },
 
     /// Updates a user's display name in the REGIONAL Raft log.
@@ -1115,7 +1118,7 @@ pub enum LedgerResponse {
     },
 
     /// Organization directory entry created in GLOBAL control plane.
-    OrganizationDirectoryCreated {
+    OrganizationCreated {
         /// Allocated internal organization ID.
         organization_id: OrganizationId,
         /// External Snowflake slug.
@@ -1129,7 +1132,7 @@ pub enum LedgerResponse {
     },
 
     /// Organization directory status updated.
-    OrganizationDirectoryStatusUpdated {
+    OrganizationStatusUpdated {
         /// Organization ID.
         organization_id: OrganizationId,
     },
@@ -1547,18 +1550,14 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::Write { block_height, .. } => {
                 write!(f, "Write(height={})", block_height)
             },
-            LedgerResponse::OrganizationDirectoryCreated { organization_id, organization_slug } => {
-                write!(
-                    f,
-                    "OrganizationDirectoryCreated(id={}, slug={})",
-                    organization_id, organization_slug
-                )
+            LedgerResponse::OrganizationCreated { organization_id, organization_slug } => {
+                write!(f, "OrganizationCreated(id={}, slug={})", organization_id, organization_slug)
             },
             LedgerResponse::OrganizationProfileWritten { organization_id } => {
                 write!(f, "OrganizationProfileWritten(id={})", organization_id)
             },
-            LedgerResponse::OrganizationDirectoryStatusUpdated { organization_id } => {
-                write!(f, "OrganizationDirectoryStatusUpdated(id={})", organization_id)
+            LedgerResponse::OrganizationStatusUpdated { organization_id } => {
+                write!(f, "OrganizationStatusUpdated(id={})", organization_id)
             },
             LedgerResponse::VaultCreated { vault, slug } => {
                 write!(f, "VaultCreated(id={}, slug={})", vault, slug)
@@ -1768,7 +1767,7 @@ mod tests {
 
     #[test]
     fn test_ledger_request_serialization() {
-        let request = LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+        let request = LedgerRequest::System(SystemRequest::CreateOrganization {
             slug: OrganizationSlug::new(12345),
             region: Region::US_EAST_VA,
             tier: Default::default(),
@@ -1779,11 +1778,7 @@ mod tests {
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
-                slug,
-                region,
-                ..
-            }) => {
+            LedgerRequest::System(SystemRequest::CreateOrganization { slug, region, .. }) => {
                 assert_eq!(slug, OrganizationSlug::new(12345));
                 assert_eq!(region, Region::US_EAST_VA);
             },
@@ -1943,7 +1938,7 @@ mod tests {
         use chrono::TimeZone;
 
         let payload = RaftPayload {
-            request: LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+            request: LedgerRequest::System(SystemRequest::CreateOrganization {
                 slug: OrganizationSlug::new(999),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
@@ -1959,7 +1954,7 @@ mod tests {
         assert_eq!(payload, deserialized);
         assert_eq!(deserialized.proposed_at, Utc.with_ymd_and_hms(2099, 6, 15, 12, 30, 0).unwrap());
         match &deserialized.request {
-            LedgerRequest::System(SystemRequest::CreateOrganizationDirectory { slug, .. }) => {
+            LedgerRequest::System(SystemRequest::CreateOrganization { slug, .. }) => {
                 assert_eq!(*slug, OrganizationSlug::new(999));
             },
             _ => panic!("unexpected variant"),
@@ -2079,7 +2074,7 @@ mod tests {
         use chrono::TimeZone;
 
         let payload_without = RaftPayload {
-            request: LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+            request: LedgerRequest::System(SystemRequest::CreateOrganization {
                 slug: OrganizationSlug::new(1),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
@@ -2700,7 +2695,7 @@ mod tests {
             ) {
                 let region = inferadb_ledger_types::ALL_REGIONS[region_idx];
                 let request = match variant_idx {
-                    0 => LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+                    0 => LedgerRequest::System(SystemRequest::CreateOrganization {
                         slug: inferadb_ledger_types::OrganizationSlug::new(42),
                         region,
                         tier: Default::default(),
@@ -2745,7 +2740,7 @@ mod tests {
             SystemRequest::AddNode { .. } => RaftScope::Global,
             SystemRequest::ClearRehashProgress { .. } => RaftScope::Global,
             SystemRequest::CreateOnboardingUser { .. } => RaftScope::Global,
-            SystemRequest::CreateOrganizationDirectory { .. } => RaftScope::Global,
+            SystemRequest::CreateOrganization { .. } => RaftScope::Global,
             SystemRequest::CreateUser { .. } => RaftScope::Global,
             SystemRequest::DeleteUser { .. } => RaftScope::Global,
             SystemRequest::DeleteUserEmail { .. } => RaftScope::Global,
@@ -2755,7 +2750,7 @@ mod tests {
             SystemRequest::RemoveEmailHash { .. } => RaftScope::Global,
             SystemRequest::RemoveNode { .. } => RaftScope::Global,
             SystemRequest::SetBlindingKeyVersion { .. } => RaftScope::Global,
-            SystemRequest::UpdateOrganizationDirectoryStatus { .. } => RaftScope::Global,
+            SystemRequest::UpdateOrganizationStatus { .. } => RaftScope::Global,
             SystemRequest::UpdateOrganizationRouting { .. } => RaftScope::Global,
             SystemRequest::UpdateRehashProgress { .. } => RaftScope::Global,
             SystemRequest::UpdateUser { .. } => RaftScope::Global,

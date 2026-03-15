@@ -29,7 +29,8 @@ use inferadb_ledger_state::{
         CreateOrganizationSaga, CreateOrganizationSagaState, CreateSigningKeyInput,
         CreateSigningKeySaga, CreateSigningKeySagaState, CreateUserSaga, CreateUserSagaState,
         DeleteUserSaga, DeleteUserSagaState, MigrateOrgSaga, MigrateOrgSagaState, MigrateUserSaga,
-        MigrateUserSagaState, SAGA_POLL_INTERVAL, Saga, SagaId, SagaLockKey, SigningKeyScope,
+        MigrateUserSagaState, OrganizationStatus, SAGA_POLL_INTERVAL, Saga, SagaId, SagaLockKey,
+        SigningKeyScope,
     },
 };
 use inferadb_ledger_store::{
@@ -1060,11 +1061,10 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             if let CreateOrganizationSagaState::DirectoryCreated { organization_id, .. }
             | CreateOrganizationSagaState::ProfileWritten { organization_id, .. } = &saga.state
             {
-                let request =
-                    LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
-                        organization: *organization_id,
-                        status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Deleted,
-                    });
+                let request = LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+                    organization: *organization_id,
+                    status: OrganizationStatus::Deleted,
+                });
                 let _ = self.raft.client_write(RaftPayload::new(request)).await;
             }
             saga.transition(CreateOrganizationSagaState::TimedOut);
@@ -1074,7 +1074,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         match saga.state.clone() {
             CreateOrganizationSagaState::Pending => {
                 // Step 0 (GLOBAL): Create directory entry with pre-generated slug
-                let request = LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+                let request = LedgerRequest::System(SystemRequest::CreateOrganization {
                     slug: saga.input.slug,
                     region: saga.input.region,
                     tier: saga.input.tier,
@@ -1090,7 +1090,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
                 let response = result.data;
                 match response {
-                    crate::types::LedgerResponse::OrganizationDirectoryCreated {
+                    crate::types::LedgerResponse::OrganizationCreated {
                         organization_id,
                         organization_slug,
                     } => {
@@ -1111,7 +1111,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     },
                     other => Err(SagaError::UnexpectedSagaResponse {
                         code: inferadb_ledger_types::ErrorCode::Internal,
-                        description: format!("expected OrganizationDirectoryCreated, got {other}"),
+                        description: format!("expected OrganizationCreated, got {other}"),
                     }),
                 }
             },
@@ -1169,11 +1169,10 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
             CreateOrganizationSagaState::ProfileWritten { organization_id, organization_slug } => {
                 // Step 2 (GLOBAL): Update directory status to Active
-                let request =
-                    LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
-                        organization: organization_id,
-                        status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Active,
-                    });
+                let request = LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+                    organization: organization_id,
+                    status: OrganizationStatus::Active,
+                });
                 self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
                     SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
@@ -1270,12 +1269,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
                     // Mark directory entry as Deleted if step 0 completed
                     if let Some(organization_id) = org_id_for_compensation {
-                        let request = LedgerRequest::System(
-                            SystemRequest::UpdateOrganizationDirectoryStatus {
+                        let request =
+                            LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
                                 organization: organization_id,
-                                status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Deleted,
-                            },
-                        );
+                                status: OrganizationStatus::Deleted,
+                            });
                         let _ = self.raft.client_write(RaftPayload::new(request)).await;
                         cleanup.push("directory_marked_deleted");
                     }
@@ -1317,13 +1315,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                         let _ = self.raft.client_write(RaftPayload::new(user_dir_request)).await;
                         cleanup.push("user_directory_marked_deleted");
 
-                        let org_dir_request = LedgerRequest::System(
-                            SystemRequest::UpdateOrganizationDirectoryStatus {
+                        let org_dir_request =
+                            LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
                                 organization: organization_id,
-                                status:
-                                    inferadb_ledger_state::system::OrganizationDirectoryStatus::Deleted,
-                            },
-                        );
+                                status: OrganizationStatus::Deleted,
+                            });
                         let _ = self.raft.client_write(RaftPayload::new(org_dir_request)).await;
                         cleanup.push("org_directory_marked_deleted");
                     }

@@ -23,9 +23,9 @@ use super::{
     keys::{KeyTier, SystemKeys},
     types::{
         EmailHashEntry, EmailVerificationToken, ErasureAuditRecord, MigrationSummary, NodeInfo,
-        OnboardingAccount, OrgShredKey, OrganizationDirectoryEntry, OrganizationDirectoryStatus,
-        OrganizationRegistry, OrganizationStatus, PendingEmailVerification, User,
-        UserDirectoryEntry, UserDirectoryStatus, UserEmail, UserMigrationEntry, UserShredKey,
+        OnboardingAccount, OrgShredKey, OrganizationRegistry, OrganizationStatus,
+        PendingEmailVerification, User, UserDirectoryEntry, UserDirectoryStatus, UserEmail,
+        UserMigrationEntry, UserShredKey,
     },
 };
 use crate::state::{StateError, StateLayer};
@@ -303,92 +303,6 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             },
         ];
 
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
-
-        Ok(())
-    }
-
-    /// Writes an organization directory entry to the GLOBAL control plane.
-    ///
-    /// Directory entries contain no PII — only opaque identifiers, region,
-    /// status, tier, and timestamp. Used for cross-region organization resolution.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SystemError::Codec`] if serialization fails, or
-    /// [`SystemError::State`] if the write fails.
-    pub fn register_organization_directory(
-        &self,
-        entry: &OrganizationDirectoryEntry,
-    ) -> Result<()> {
-        let key = SystemKeys::organization_directory_key(entry.organization);
-        let value = encode(entry).context(CodecSnafu)?;
-
-        let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
-
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
-
-        Ok(())
-    }
-
-    /// Returns an organization directory entry from the GLOBAL control plane.
-    ///
-    /// Returns `None` if no directory entry exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SystemError::State`] if the read fails, or
-    /// [`SystemError::Codec`] if deserialization fails.
-    pub fn get_organization_directory(
-        &self,
-        organization: OrganizationId,
-    ) -> Result<Option<OrganizationDirectoryEntry>> {
-        let key = SystemKeys::organization_directory_key(organization);
-
-        let entity_opt =
-            self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).context(StateSnafu)?;
-        match entity_opt {
-            Some(entity) => {
-                let entry: OrganizationDirectoryEntry =
-                    decode(&entity.value).context(CodecSnafu)?;
-                Ok(Some(entry))
-            },
-            None => Ok(None),
-        }
-    }
-
-    /// Updates the status of an organization directory entry.
-    ///
-    /// Rejected if the current status is `Deleted` (permanent tombstone).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SystemError::NotFound`] if the entry doesn't exist,
-    /// [`SystemError::AlreadyExists`] if the entry is already deleted,
-    /// or [`SystemError::State`]/[`SystemError::Codec`] on I/O failure.
-    pub fn update_organization_directory_status(
-        &self,
-        organization: OrganizationId,
-        status: OrganizationDirectoryStatus,
-        block_timestamp: DateTime<Utc>,
-    ) -> Result<()> {
-        let mut entry = self.get_organization_directory(organization)?.ok_or_else(|| {
-            SystemError::NotFound { entity: format!("org_directory:{organization}") }
-        })?;
-
-        if entry.status == OrganizationDirectoryStatus::Deleted {
-            return Err(SystemError::AlreadyExists {
-                entity: format!("org_directory:{organization} is deleted (permanent tombstone)"),
-            });
-        }
-
-        entry.status = status;
-        entry.updated_at = Some(block_timestamp);
-
-        let key = SystemKeys::organization_directory_key(organization);
-        let value = encode(&entry).context(CodecSnafu)?;
-
-        let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
         self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(())
@@ -2187,7 +2101,7 @@ mod tests {
     use inferadb_ledger_types::{Region, UserRole, UserSlug, UserStatus};
 
     use super::*;
-    use crate::system::{OrganizationTier, ProvisioningReservation};
+    use crate::system::ProvisioningReservation;
 
     fn create_test_service() -> SystemOrganizationService<inferadb_ledger_store::InMemoryBackend> {
         crate::system::create_test_service()
@@ -4198,95 +4112,5 @@ mod tests {
                 organization_id: OrganizationId::new(2),
             })
         );
-    }
-
-    // ── Organization Directory Tests ──
-
-    fn make_org_directory_entry(
-        org_id: i64,
-        slug: u64,
-        region: Region,
-    ) -> OrganizationDirectoryEntry {
-        use inferadb_ledger_types::OrganizationSlug;
-        OrganizationDirectoryEntry {
-            organization: OrganizationId::new(org_id),
-            slug: Some(OrganizationSlug::new(slug)),
-            region: Some(region),
-            tier: OrganizationTier::default(),
-            status: OrganizationDirectoryStatus::Provisioning,
-            updated_at: Some(Utc::now()),
-        }
-    }
-
-    #[test]
-    fn test_register_and_get_organization_directory() {
-        let svc = create_test_service();
-        let entry = make_org_directory_entry(1, 50001, Region::US_EAST_VA);
-
-        svc.register_organization_directory(&entry).unwrap();
-
-        let retrieved = svc.get_organization_directory(OrganizationId::new(1)).unwrap();
-        assert!(retrieved.is_some());
-        let retrieved = retrieved.unwrap();
-        assert_eq!(retrieved.organization, OrganizationId::new(1));
-        assert_eq!(retrieved.status, OrganizationDirectoryStatus::Provisioning);
-    }
-
-    #[test]
-    fn test_get_organization_directory_not_found() {
-        let svc = create_test_service();
-        let result = svc.get_organization_directory(OrganizationId::new(999)).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_update_organization_directory_status_to_active() {
-        let svc = create_test_service();
-        let entry = make_org_directory_entry(2, 50002, Region::IE_EAST_DUBLIN);
-
-        svc.register_organization_directory(&entry).unwrap();
-        svc.update_organization_directory_status(
-            OrganizationId::new(2),
-            OrganizationDirectoryStatus::Active,
-            Utc::now(),
-        )
-        .unwrap();
-
-        let updated = svc.get_organization_directory(OrganizationId::new(2)).unwrap().unwrap();
-        assert_eq!(updated.status, OrganizationDirectoryStatus::Active);
-    }
-
-    #[test]
-    fn test_update_organization_directory_status_deleted_tombstone_rejects() {
-        let svc = create_test_service();
-        let entry = make_org_directory_entry(3, 50003, Region::US_EAST_VA);
-
-        svc.register_organization_directory(&entry).unwrap();
-        svc.update_organization_directory_status(
-            OrganizationId::new(3),
-            OrganizationDirectoryStatus::Deleted,
-            Utc::now(),
-        )
-        .unwrap();
-
-        // Attempting to change status of a deleted entry fails
-        let result = svc.update_organization_directory_status(
-            OrganizationId::new(3),
-            OrganizationDirectoryStatus::Active,
-            Utc::now(),
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_update_organization_directory_status_not_found() {
-        let svc = create_test_service();
-
-        let result = svc.update_organization_directory_status(
-            OrganizationId::new(999),
-            OrganizationDirectoryStatus::Active,
-            Utc::now(),
-        );
-        assert!(result.is_err());
     }
 }

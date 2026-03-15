@@ -237,8 +237,7 @@ pub enum UserDirectoryStatus {
     /// User has been erased. Permanent tombstone.
     Deleted,
     /// User is being provisioned by the onboarding saga.
-    /// Analogous to [`OrganizationDirectoryStatus::Provisioning`] but at a
-    /// different variant index (appended here for postcard compat).
+    /// Appended here (after `Deleted`) for postcard variant index compat.
     Provisioning,
 }
 
@@ -293,54 +292,6 @@ pub struct OrganizationRegistry {
     /// When this organization was soft-deleted.
     #[serde(default)]
     pub deleted_at: Option<DateTime<Utc>>,
-}
-
-// ============================================================================
-// Organization Directory Types (GLOBAL control plane)
-// ============================================================================
-
-/// Organization lifecycle status at the GLOBAL directory level.
-///
-/// Distinct from [`OrganizationStatus`] which tracks richer regional-level
-/// lifecycle (e.g. `Suspended`, `Deleting`). The directory only needs to
-/// route and gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OrganizationDirectoryStatus {
-    /// Organization is active and accepting requests.
-    Active,
-    /// Organization is being provisioned (saga in progress).
-    #[default]
-    Provisioning,
-    /// Organization is being migrated to another region.
-    Migrating,
-    /// Organization has been deleted (tombstone).
-    Deleted,
-}
-
-/// Non-PII organization directory record in the GLOBAL control plane.
-///
-/// Enables any node to resolve an [`OrganizationId`] to its data region
-/// without touching regional stores. Contains no personally identifiable
-/// information — only opaque identifiers, enums, and timestamps.
-///
-/// Key pattern: `_dir:org:{organization_id}` → postcard-serialized entry.
-///
-/// Mirrors [`UserDirectoryEntry`] for users.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OrganizationDirectoryEntry {
-    /// Internal organization identifier. Always present, even after deletion.
-    pub organization: OrganizationId,
-    /// External Snowflake identifier. `None` after deletion.
-    pub slug: Option<OrganizationSlug>,
-    /// Region where organization data is stored. `None` after deletion.
-    pub region: Option<Region>,
-    /// Billing tier.
-    pub tier: OrganizationTier,
-    /// Lifecycle status visible at the global level.
-    pub status: OrganizationDirectoryStatus,
-    /// Last modification timestamp. `None` after deletion.
-    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// Organization skeleton stored in the GLOBAL state layer.
@@ -1176,50 +1127,6 @@ mod tests {
     }
 
     #[test]
-    fn test_organization_directory_entry_serialization() {
-        let entry = OrganizationDirectoryEntry {
-            organization: OrganizationId::new(42),
-            slug: Some(OrganizationSlug::new(9999)),
-            region: Some(Region::IE_EAST_DUBLIN),
-            tier: OrganizationTier::Free,
-            status: OrganizationDirectoryStatus::Active,
-            updated_at: Some(Utc::now()),
-        };
-        let bytes = postcard::to_allocvec(&entry).unwrap();
-        let deserialized: OrganizationDirectoryEntry = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(deserialized.organization, OrganizationId::new(42));
-        assert_eq!(deserialized.slug, Some(OrganizationSlug::new(9999)));
-        assert_eq!(deserialized.region, Some(Region::IE_EAST_DUBLIN));
-        assert_eq!(deserialized.tier, OrganizationTier::Free);
-        assert_eq!(deserialized.status, OrganizationDirectoryStatus::Active);
-    }
-
-    #[test]
-    fn test_organization_directory_entry_tombstone() {
-        let tombstone = OrganizationDirectoryEntry {
-            organization: OrganizationId::new(42),
-            slug: None,
-            region: None,
-            tier: OrganizationTier::Free,
-            status: OrganizationDirectoryStatus::Deleted,
-            updated_at: None,
-        };
-        let bytes = postcard::to_allocvec(&tombstone).unwrap();
-        let deserialized: OrganizationDirectoryEntry = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(deserialized.slug, None);
-        assert_eq!(deserialized.region, None);
-        assert_eq!(deserialized.status, OrganizationDirectoryStatus::Deleted);
-    }
-
-    #[test]
-    fn test_organization_directory_status_default() {
-        assert_eq!(
-            OrganizationDirectoryStatus::default(),
-            OrganizationDirectoryStatus::Provisioning
-        );
-    }
-
-    #[test]
     fn test_organization_skeleton_serialization() {
         let now = Utc::now();
         let org = Organization {
@@ -1257,16 +1164,6 @@ mod tests {
         let deserialized: OrganizationProfile = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(deserialized.name, "Evan's Organization");
         assert_eq!(deserialized.updated_at, now);
-    }
-
-    #[test]
-    fn test_organization_directory_status_serde_json() {
-        let json = serde_json::to_string(&OrganizationDirectoryStatus::Provisioning).unwrap();
-        assert_eq!(json, r#""provisioning""#);
-
-        let deserialized: OrganizationDirectoryStatus =
-            serde_json::from_str(r#""active""#).unwrap();
-        assert_eq!(deserialized, OrganizationDirectoryStatus::Active);
     }
 
     #[test]

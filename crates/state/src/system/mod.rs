@@ -42,11 +42,10 @@ pub use types::{
     App, AppCredentials, AppProfile, AppVaultConnection, ClientAssertionCredentialConfig,
     ClientAssertionEntry, ClientSecretCredential, EmailHashEntry, EmailVerificationToken,
     ErasureAuditRecord, MigrationSummary, MtlsCredential, NodeInfo, NodeRole, OnboardingAccount,
-    OrgShredKey, Organization, OrganizationDirectoryEntry, OrganizationDirectoryStatus,
-    OrganizationMember, OrganizationProfile, OrganizationRegistry, OrganizationStatus,
-    OrganizationTier, PendingEmailVerification, ProvisioningReservation, RefreshToken, SigningKey,
-    Team, TeamMember, TeamMemberRole, User, UserDirectoryEntry, UserDirectoryStatus, UserEmail,
-    UserMigrationEntry, UserShredKey,
+    OrgShredKey, Organization, OrganizationMember, OrganizationProfile, OrganizationRegistry,
+    OrganizationStatus, OrganizationTier, PendingEmailVerification, ProvisioningReservation,
+    RefreshToken, SigningKey, Team, TeamMember, TeamMemberRole, User, UserDirectoryEntry,
+    UserDirectoryStatus, UserEmail, UserMigrationEntry, UserShredKey,
 };
 
 #[cfg(test)]

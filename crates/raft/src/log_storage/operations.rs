@@ -9,8 +9,7 @@ use inferadb_ledger_state::{
     StateError, StateLayer,
     system::{
         App, AppCredentialType, AppCredentials, AppProfile, AppVaultConnection,
-        ClientAssertionEntry, EmailHashEntry, KeyTier, OnboardingAccount,
-        OrganizationDirectoryEntry, OrganizationDirectoryStatus, OrganizationMember,
+        ClientAssertionEntry, EmailHashEntry, KeyTier, OnboardingAccount, OrganizationMember,
         OrganizationMemberRole, OrganizationProfile, OrganizationRegistry, OrganizationStatus,
         OrganizationTier, PendingEmailVerification, ProvisioningReservation, RefreshToken,
         RevocationResult, SYSTEM_VAULT_ID, SigningKey, SigningKeyStatus, SystemError, SystemKeys,
@@ -2774,7 +2773,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             LedgerResponse::Empty
                         }
                     },
-                    SystemRequest::CreateOrganizationDirectory { slug, region, tier, admin } => {
+                    SystemRequest::CreateOrganization { slug, region, tier, admin } => {
                         let organization_id = state.sequences.next_organization();
                         let org_meta = OrganizationMeta {
                             organization: organization_id,
@@ -2866,7 +2865,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         // Update user→org index for initial admin member
                         state.user_org_index.entry(*admin).or_default().insert(organization_id);
 
-                        LedgerResponse::OrganizationDirectoryCreated {
+                        LedgerResponse::OrganizationCreated {
                             organization_id,
                             organization_slug: *slug,
                         }
@@ -2945,7 +2944,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                             // Step 3: Write slimmed OrganizationProfile (PII) to REGIONAL.
                             // The Organization skeleton (with admin member) was already
-                            // created by CreateOrganizationDirectory (GLOBAL). The
+                            // created by CreateOrganization (GLOBAL). The
                             // user_org_index was also updated there. We only write PII here.
                             let profile = OrganizationProfile { name, updated_at: block_timestamp };
                             if let Err(e) = save_org_profile(state_layer, *organization, &profile) {
@@ -2974,27 +2973,34 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             )
                         }
                     },
-                    SystemRequest::UpdateOrganizationDirectoryStatus { organization, status } => {
+                    SystemRequest::UpdateOrganizationStatus { organization, status } => {
                         if let Some(org_meta) = state.organizations.get_mut(organization) {
-                            let new_status = match status {
-                                inferadb_ledger_state::system::OrganizationDirectoryStatus::Active => {
-                                    OrganizationStatus::Active
-                                },
-                                inferadb_ledger_state::system::OrganizationDirectoryStatus::Provisioning => {
-                                    OrganizationStatus::Provisioning
-                                },
-                                inferadb_ledger_state::system::OrganizationDirectoryStatus::Migrating => {
-                                    OrganizationStatus::Migrating
-                                },
-                                inferadb_ledger_state::system::OrganizationDirectoryStatus::Deleted => {
-                                    OrganizationStatus::Deleted
-                                },
-                            };
-                            org_meta.status = new_status;
+                            org_meta.status = *status;
+                            let slug = org_meta.slug;
                             if let Some(blob) = try_encode(org_meta, "org_meta") {
                                 pending.organizations.push((*organization, blob));
                             }
-                            LedgerResponse::OrganizationDirectoryStatusUpdated {
+
+                            // Sync OrganizationRegistry so RegionRouter and PurgeJob
+                            // see the updated status.
+                            if let Some(sys) = &sys_service
+                                && let Ok(Some(mut registry)) = sys.get_organization(*organization)
+                            {
+                                registry.status = *status;
+                                registry.config_version += 1;
+                                if *status == OrganizationStatus::Deleted {
+                                    registry.deleted_at = Some(block_timestamp);
+                                }
+                                if let Err(e) = sys.register_organization(&registry, slug) {
+                                    tracing::error!(
+                                        organization_id = organization.value(),
+                                        error = %e,
+                                        "Failed to sync org registry status"
+                                    );
+                                }
+                            }
+
+                            LedgerResponse::OrganizationStatusUpdated {
                                 organization_id: *organization,
                             }
                         } else {
@@ -3397,25 +3403,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 return (e, None);
                             }
 
-                            // Write org directory entry to state layer
-                            let org_dir = OrganizationDirectoryEntry {
-                                organization: organization_id,
-                                slug: Some(*organization_slug),
-                                region: Some(*region),
-                                tier: OrganizationTier::default(),
-                                status: OrganizationDirectoryStatus::Provisioning,
-                                updated_at: Some(block_timestamp),
-                            };
-                            if let Err(e) = sys.register_organization_directory(&org_dir) {
-                                // Log but continue — same rationale as user directory
-                                // write above.
-                                tracing::error!(
-                                    organization_id = organization_id.value(),
-                                    error = %e,
-                                    "Failed to persist org directory entry"
-                                );
-                            }
-
                             LedgerResponse::OnboardingUserCreated { user_id, organization_id }
                         } else {
                             LedgerResponse::Error {
@@ -3655,22 +3642,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 );
                             }
 
-                            // 2. Activate org directory (Provisioning → Active)
-                            if let Err(e) = sys.update_organization_directory_status(
-                                *organization_id,
-                                OrganizationDirectoryStatus::Active,
-                                block_timestamp,
-                            ) {
-                                return (
-                                    LedgerResponse::Error {
-                                        code: ErrorCode::Internal,
-                                        message: format!("Failed to activate org directory: {e}"),
-                                    },
-                                    None,
-                                );
-                            }
-
-                            // 3. Update HMAC index: Provisioning → Active(user_id)
+                            // 2. Update HMAC index: Provisioning → Active(user_id)
                             let hmac_key = SystemKeys::email_hash_index_key(email_hmac);
                             let active_entry = EmailHashEntry::Active(*user_id);
                             let hmac_value = match encode(&active_entry) {
@@ -3706,12 +3678,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 );
                             }
 
-                            // 4. Update in-memory org meta status
+                            // 3. Update in-memory org meta status + persist to B+ tree
                             if let Some(meta) = state.organizations.get_mut(organization_id) {
                                 meta.status = OrganizationStatus::Active;
+                                if let Some(blob) = try_encode(meta, "org_meta") {
+                                    pending.organizations.push((*organization_id, blob));
+                                }
                             }
 
-                            // 5. Update org registry status
+                            // 4. Update org registry status
                             if let Ok(Some(mut registry)) = sys.get_organization(*organization_id) {
                                 registry.status = OrganizationStatus::Active;
                                 if let Err(e) =
@@ -4474,11 +4449,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         *op_index += 1;
                     },
                     (
-                        LedgerResponse::OrganizationDirectoryCreated {
-                            organization_id,
-                            organization_slug,
-                        },
-                        SystemRequest::CreateOrganizationDirectory { region, .. },
+                        LedgerResponse::OrganizationCreated { organization_id, organization_slug },
+                        SystemRequest::CreateOrganization { region, .. },
                     ) => {
                         events.push(
                             ApplyPhaseEmitter::for_system(EventAction::OrganizationCreated)

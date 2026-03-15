@@ -263,7 +263,7 @@ pub(crate) fn user_info_from_proto(user: &proto::User) -> UserInfo {
     UserInfo {
         slug: UserSlug::new(user.slug.as_ref().map_or(0, |s| s.slug)),
         name: user.name.clone(),
-        primary_email_id: UserEmailId::new(user.email.as_ref().map_or(0, |e| e.id)),
+        email: UserEmailId::new(user.email.as_ref().map_or(0, |e| e.id)),
         status: user_status_from_proto_i32(user.status),
         role: user_role_from_proto_i32(user.role),
         created_at: user.created_at.as_ref().and_then(proto_timestamp_to_system_time),
@@ -304,8 +304,8 @@ pub struct UserInfo {
     pub slug: UserSlug,
     /// Display name.
     pub name: String,
-    /// Primary email ID.
-    pub primary_email_id: UserEmailId,
+    /// Primary email.
+    pub email: UserEmailId,
     /// Current status.
     pub status: UserStatus,
     /// Authorization role.
@@ -4894,7 +4894,7 @@ impl LedgerClient {
         user: UserSlug,
         name: Option<String>,
         role: Option<UserRole>,
-        primary_email_id: Option<UserEmailId>,
+        email: Option<UserEmailId>,
     ) -> Result<UserInfo> {
         self.check_shutdown(None)?;
 
@@ -4920,7 +4920,7 @@ impl LedgerClient {
                         slug: Some(proto::UserSlug { slug: user.value() }),
                         name: name.clone(),
                         role: proto_role,
-                        primary_email: primary_email_id
+                        primary_email: email
                             .map(|id| proto::UserEmailId { id: id.value() }),
                     };
 
@@ -4971,7 +4971,7 @@ impl LedgerClient {
                     Ok(UserInfo {
                         slug: UserSlug::new(slug_val),
                         name: String::new(),
-                        primary_email_id: UserEmailId::new(0),
+                        email: UserEmailId::new(0),
                         status: UserStatus::Deleted,
                         role: UserRole::User,
                         created_at: None,

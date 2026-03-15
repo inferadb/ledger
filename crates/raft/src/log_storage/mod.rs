@@ -101,9 +101,9 @@ mod tests {
 
     /// Creates an organization directory and immediately activates it.
     ///
-    /// `CreateOrganizationDirectory` sets status to `Provisioning`. Tests that
+    /// `CreateOrganization` sets status to `Provisioning`. Tests that
     /// need the org to accept writes must activate it via
-    /// `UpdateOrganizationDirectoryStatus`.
+    /// `UpdateOrganizationStatus`.
     fn create_active_organization(
         store: &RaftLogStore<FileBackend>,
         state: &mut AppliedState,
@@ -111,7 +111,7 @@ mod tests {
         region: Region,
     ) -> OrganizationId {
         let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+            &LedgerRequest::System(SystemRequest::CreateOrganization {
                 slug,
                 region,
                 tier: Default::default(),
@@ -120,13 +120,13 @@ mod tests {
             state,
         );
         let org_id = match response {
-            LedgerResponse::OrganizationDirectoryCreated { organization_id, .. } => organization_id,
-            _ => panic!("expected OrganizationDirectoryCreated"),
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            _ => panic!("expected OrganizationCreated"),
         };
         store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
+            &LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
                 organization: org_id,
-                status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Active,
+                status: OrganizationStatus::Active,
             }),
             state,
         );
@@ -185,7 +185,7 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
         let mut state = store.applied_state.write();
 
-        let request = LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+        let request = LedgerRequest::System(SystemRequest::CreateOrganization {
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
             region: Region::US_EAST_VA,
             tier: Default::default(),
@@ -195,7 +195,7 @@ mod tests {
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::OrganizationDirectoryCreated { organization_id, .. } => {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => {
                 assert_eq!(organization_id, OrganizationId::new(1));
 
                 // Bare directory creation starts in Provisioning (saga will activate later)
@@ -221,7 +221,7 @@ mod tests {
         drop(state);
 
         let mut state = store.applied_state.write();
-        let request = LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+        let request = LedgerRequest::System(SystemRequest::CreateOrganization {
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
             region: Region::US_EAST_VA,
             tier: Default::default(),
@@ -231,7 +231,7 @@ mod tests {
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::OrganizationDirectoryCreated { organization_id, .. } => {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => {
                 assert_eq!(organization_id, OrganizationId::new(1));
                 let meta = state.organizations.get(&organization_id).expect("org exists");
                 assert_eq!(meta.region, Region::US_EAST_VA, "Should use provided region");
@@ -264,7 +264,7 @@ mod tests {
         state.sequences.organization = OrganizationId::new(2);
 
         // Create organization with explicit IE_EAST_DUBLIN region
-        let request = LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+        let request = LedgerRequest::System(SystemRequest::CreateOrganization {
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
             region: Region::IE_EAST_DUBLIN,
             tier: Default::default(),
@@ -274,7 +274,7 @@ mod tests {
         let (response, _vault_entry) = store.apply_request(&request, &mut state);
 
         match response {
-            LedgerResponse::OrganizationDirectoryCreated { organization_id, .. } => {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => {
                 assert_eq!(organization_id, OrganizationId::new(2));
                 // Explicit region should override load balancing
                 let meta = state.organizations.get(&organization_id).expect("org exists");
@@ -1879,25 +1879,25 @@ mod tests {
 
         // Same sequence of requests to apply
         let requests = vec![
-            LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+            LedgerRequest::System(SystemRequest::CreateOrganization {
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
                 admin: UserId::new(1),
             }),
-            LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
+            LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
                 organization: OrganizationId::new(1),
-                status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Active,
+                status: OrganizationStatus::Active,
             }),
-            LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+            LedgerRequest::System(SystemRequest::CreateOrganization {
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
                 admin: UserId::new(1),
             }),
-            LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
+            LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
                 organization: OrganizationId::new(2),
-                status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Active,
+                status: OrganizationStatus::Active,
             }),
             LedgerRequest::CreateVault {
                 organization: OrganizationId::new(1),
@@ -2116,15 +2116,15 @@ mod tests {
 
         // Create organization and vaults
         let requests: Vec<LedgerRequest> = vec![
-            LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+            LedgerRequest::System(SystemRequest::CreateOrganization {
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
                 admin: UserId::new(1),
             }),
-            LedgerRequest::System(SystemRequest::UpdateOrganizationDirectoryStatus {
+            LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
                 organization: OrganizationId::new(1),
-                status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Active,
+                status: OrganizationStatus::Active,
             }),
             LedgerRequest::CreateVault {
                 organization: OrganizationId::new(1),
@@ -2550,7 +2550,7 @@ mod tests {
             .map(|i| Entry {
                 log_id: make_log_id(1, i),
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
-                    SystemRequest::CreateOrganizationDirectory {
+                    SystemRequest::CreateOrganization {
                         slug: inferadb_ledger_types::OrganizationSlug::new(0),
                         region: Region::US_EAST_VA,
                         tier: Default::default(),
@@ -4051,7 +4051,7 @@ mod tests {
 
         let ts = fixed_timestamp();
 
-        // Apply identical sequences to both: CreateOrganizationDirectory + Write
+        // Apply identical write request to both stores
         let write_request = simple_write_request(org_id_a, vault_id_a);
 
         let mut events_a: Vec<EventEntry> = Vec::new();
@@ -4211,7 +4211,7 @@ mod tests {
         let store = store_with_events(dir.path());
         let mut state = store.applied_state.write();
 
-        let request = LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+        let request = LedgerRequest::System(SystemRequest::CreateOrganization {
             slug: inferadb_ledger_types::OrganizationSlug::new(42_000),
             region: Region::US_EAST_VA,
             tier: Default::default(),
@@ -4477,8 +4477,8 @@ mod tests {
         let mut state = store.applied_state.write();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
-        // Emit a system event (OrganizationDirectoryCreated via CreateOrganizationDirectory)
-        let create_org = LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+        // Emit a system event (OrganizationCreated via CreateOrganization)
+        let create_org = LedgerRequest::System(SystemRequest::CreateOrganization {
             slug: inferadb_ledger_types::OrganizationSlug::new(9999),
             region: Region::US_EAST_VA,
             tier: Default::default(),
@@ -5606,7 +5606,7 @@ mod tests {
             Entry {
                 log_id: make_log_id(1, 1),
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
-                    SystemRequest::CreateOrganizationDirectory {
+                    SystemRequest::CreateOrganization {
                         slug: inferadb_ledger_types::OrganizationSlug::new(1000),
                         region: Region::US_EAST_VA,
                         tier: Default::default(),
@@ -5618,9 +5618,9 @@ mod tests {
             Entry {
                 log_id: make_log_id(1, 2),
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
-                    SystemRequest::UpdateOrganizationDirectoryStatus {
+                    SystemRequest::UpdateOrganizationStatus {
                         organization: OrganizationId::new(1),
-                        status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Active,
+                        status: OrganizationStatus::Active,
                     },
                 ))),
             },
@@ -5649,7 +5649,7 @@ mod tests {
             Entry {
                 log_id: make_log_id(1, 5),
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
-                    SystemRequest::CreateOrganizationDirectory {
+                    SystemRequest::CreateOrganization {
                         slug: inferadb_ledger_types::OrganizationSlug::new(2000),
                         region: Region::US_EAST_VA,
                         tier: Default::default(),
@@ -5661,9 +5661,9 @@ mod tests {
             Entry {
                 log_id: make_log_id(1, 6),
                 payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
-                    SystemRequest::UpdateOrganizationDirectoryStatus {
+                    SystemRequest::UpdateOrganizationStatus {
                         organization: OrganizationId::new(2),
-                        status: inferadb_ledger_state::system::OrganizationDirectoryStatus::Active,
+                        status: OrganizationStatus::Active,
                     },
                 ))),
             },
@@ -5919,7 +5919,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_apply_no_commitments_for_non_write_entries() {
-        // CreateOrganizationDirectory / CreateVault don't produce vault entries,
+        // CreateOrganization / CreateVault don't produce vault entries,
         // so no commitments should be buffered.
         use openraft::RaftStorage;
 
@@ -5929,7 +5929,7 @@ mod tests {
         let entry = Entry {
             log_id: make_log_id(1, 1),
             payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
-                SystemRequest::CreateOrganizationDirectory {
+                SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(999),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
@@ -6055,7 +6055,7 @@ mod tests {
         let second_entry = Entry {
             log_id: make_log_id(1, 2),
             payload: EntryPayload::Normal(RaftPayload {
-                request: LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+                request: LedgerRequest::System(SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(9999),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
@@ -6108,7 +6108,7 @@ mod tests {
         let verify_entry = Entry {
             log_id: make_log_id(1, 2),
             payload: EntryPayload::Normal(RaftPayload {
-                request: LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+                request: LedgerRequest::System(SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(8888),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
@@ -6150,7 +6150,7 @@ mod tests {
         let entry = Entry {
             log_id: make_log_id(1, 1),
             payload: EntryPayload::Normal(RaftPayload {
-                request: LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+                request: LedgerRequest::System(SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(7777),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
@@ -6192,7 +6192,7 @@ mod tests {
         let entry = Entry {
             log_id: make_log_id(1, 1),
             payload: EntryPayload::Normal(RaftPayload {
-                request: LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+                request: LedgerRequest::System(SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(6666),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
@@ -6283,7 +6283,7 @@ mod tests {
         let verify_entry = Entry {
             log_id: make_log_id(1, 2),
             payload: EntryPayload::Normal(RaftPayload {
-                request: LedgerRequest::System(SystemRequest::CreateOrganizationDirectory {
+                request: LedgerRequest::System(SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(5555),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
@@ -6348,5 +6348,250 @@ mod tests {
         let commitments_from_batch2 = store.drain_state_root_commitments();
         assert_eq!(commitments_from_batch2.len(), 1);
         assert_eq!(commitments_from_batch2[0].vault_height, 2);
+    }
+
+    #[test]
+    fn test_activate_onboarding_user_persists_org_meta_to_btree() {
+        let dir = tempdir().expect("create temp dir");
+
+        // Build store with state layer so sys_service is available
+        let state_db = Arc::new(
+            inferadb_ledger_store::Database::create(dir.path().join("state.db"))
+                .expect("create state db"),
+        );
+        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db));
+        let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
+            .expect("open store")
+            .with_state_layer(state_layer);
+        let mut state = store.applied_state.write();
+
+        let org_slug = inferadb_ledger_types::OrganizationSlug::new(5000);
+        let user_slug = UserSlug::new(6000);
+        let email_hmac = "test-hmac-activate".to_string();
+
+        // Step 0: CreateOnboardingUser — allocates user+org in Provisioning
+        let create_request = LedgerRequest::System(SystemRequest::CreateOnboardingUser {
+            email_hmac: email_hmac.clone(),
+            user_slug,
+            organization_slug: org_slug,
+            region: Region::US_EAST_VA,
+        });
+        let (response, _) = store.apply_request(&create_request, &mut state);
+        let (user_id, organization_id) = match response {
+            LedgerResponse::OnboardingUserCreated { user_id, organization_id } => {
+                (user_id, organization_id)
+            },
+            other => panic!("expected OnboardingUserCreated, got {other:?}"),
+        };
+
+        // Verify org starts in Provisioning
+        assert_eq!(
+            state.organizations.get(&organization_id).expect("org meta exists").status,
+            OrganizationStatus::Provisioning,
+        );
+
+        // Step 2: ActivateOnboardingUser — should persist Active to B+ tree
+        let activate_request = LedgerRequest::System(SystemRequest::ActivateOnboardingUser {
+            user_id,
+            user_slug,
+            organization_id,
+            organization_slug: org_slug,
+            email_hmac,
+        });
+        let mut pending = PendingExternalWrites::default();
+        let mut events = Vec::new();
+        let mut op_index = 0u32;
+        let (response, _) = store.apply_request_with_events(
+            &activate_request,
+            &mut state,
+            fixed_timestamp(),
+            &mut op_index,
+            &mut events,
+            0,
+            &mut pending,
+        );
+        assert!(
+            matches!(response, LedgerResponse::OnboardingUserActivated),
+            "expected OnboardingUserActivated, got {response:?}",
+        );
+
+        // Verify in-memory status is Active
+        assert_eq!(
+            state.organizations.get(&organization_id).expect("org meta exists").status,
+            OrganizationStatus::Active,
+        );
+
+        // Verify pending.organizations contains the persistence entry (the bug fix)
+        let org_entry = pending.organizations.iter().find(|(id, _)| *id == organization_id);
+        assert!(
+            org_entry.is_some(),
+            "ActivateOnboardingUser must push org_meta to pending.organizations for B+ tree persistence",
+        );
+
+        // Decode the blob and verify the persisted status is Active
+        let (_, blob) = org_entry.expect("checked above");
+        let persisted_meta: super::types::OrganizationMeta =
+            postcard::from_bytes(blob).expect("decode org_meta blob");
+        assert_eq!(persisted_meta.status, OrganizationStatus::Active);
+        assert_eq!(persisted_meta.organization, organization_id);
+    }
+
+    #[test]
+    fn test_update_organization_status_syncs_registry() {
+        let dir = tempdir().expect("create temp dir");
+
+        let state_db = Arc::new(
+            inferadb_ledger_store::Database::create(dir.path().join("state.db"))
+                .expect("create state db"),
+        );
+        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db));
+        let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
+            .expect("open store")
+            .with_state_layer(state_layer.clone());
+        let mut state = store.applied_state.write();
+
+        let org_slug = inferadb_ledger_types::OrganizationSlug::new(7000);
+
+        // Create org — starts in Provisioning
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateOrganization {
+                slug: org_slug,
+                region: Region::GLOBAL,
+                tier: Default::default(),
+                admin: UserId::new(1),
+            }),
+            &mut state,
+        );
+        let org_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            other => panic!("expected OrganizationCreated, got {other:?}"),
+        };
+
+        // Verify registry starts at Provisioning
+        let sys =
+            inferadb_ledger_state::system::SystemOrganizationService::new(state_layer.clone());
+        let registry =
+            sys.get_organization(org_id).expect("read registry").expect("registry exists");
+        assert_eq!(registry.status, OrganizationStatus::Provisioning);
+        let initial_config_version = registry.config_version;
+
+        // UpdateOrganizationStatus(Active) — should sync registry
+        store.apply_request(
+            &LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+                organization: org_id,
+                status: OrganizationStatus::Active,
+            }),
+            &mut state,
+        );
+
+        let registry =
+            sys.get_organization(org_id).expect("read registry").expect("registry exists");
+        assert_eq!(
+            registry.status,
+            OrganizationStatus::Active,
+            "registry status should be Active after UpdateOrganizationStatus"
+        );
+        assert_eq!(
+            registry.config_version,
+            initial_config_version + 1,
+            "config_version should increment"
+        );
+        assert!(registry.deleted_at.is_none(), "deleted_at should not be set for Active");
+
+        // UpdateOrganizationStatus(Deleted) — should sync registry + set deleted_at
+        store.apply_request(
+            &LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+                organization: org_id,
+                status: OrganizationStatus::Deleted,
+            }),
+            &mut state,
+        );
+
+        let registry =
+            sys.get_organization(org_id).expect("read registry").expect("registry exists");
+        assert_eq!(
+            registry.status,
+            OrganizationStatus::Deleted,
+            "registry status should be Deleted"
+        );
+        assert_eq!(
+            registry.config_version,
+            initial_config_version + 2,
+            "config_version should increment again"
+        );
+        assert!(registry.deleted_at.is_some(), "deleted_at should be set for Deleted status");
+    }
+
+    #[test]
+    fn test_saga_compensation_marks_org_deleted_in_meta_and_registry() {
+        let dir = tempdir().expect("create temp dir");
+
+        let state_db = Arc::new(
+            inferadb_ledger_store::Database::create(dir.path().join("state.db"))
+                .expect("create state db"),
+        );
+        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db));
+        let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
+            .expect("open store")
+            .with_state_layer(state_layer.clone());
+        let mut state = store.applied_state.write();
+
+        let org_slug = inferadb_ledger_types::OrganizationSlug::new(8000);
+
+        // Simulate saga step 0: CreateOrganization (org starts in Provisioning)
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateOrganization {
+                slug: org_slug,
+                region: Region::GLOBAL,
+                tier: Default::default(),
+                admin: UserId::new(1),
+            }),
+            &mut state,
+        );
+        let org_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            other => panic!("expected OrganizationCreated, got {other:?}"),
+        };
+
+        // Verify both meta and registry start at Provisioning
+        assert_eq!(
+            state.organizations.get(&org_id).expect("org meta exists").status,
+            OrganizationStatus::Provisioning,
+        );
+        let sys =
+            inferadb_ledger_state::system::SystemOrganizationService::new(state_layer.clone());
+        let registry =
+            sys.get_organization(org_id).expect("read registry").expect("registry exists");
+        assert_eq!(registry.status, OrganizationStatus::Provisioning);
+
+        // Simulate saga compensation: UpdateOrganizationStatus(Deleted)
+        // This is what the saga orchestrator sends on permanent failure.
+        store.apply_request(
+            &LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+                organization: org_id,
+                status: OrganizationStatus::Deleted,
+            }),
+            &mut state,
+        );
+
+        // Verify meta is Deleted
+        assert_eq!(
+            state.organizations.get(&org_id).expect("org meta exists").status,
+            OrganizationStatus::Deleted,
+            "OrganizationMeta should be Deleted after compensation"
+        );
+
+        // Verify registry is Deleted with deleted_at (enables PurgeJob discovery)
+        let registry =
+            sys.get_organization(org_id).expect("read registry").expect("registry exists");
+        assert_eq!(
+            registry.status,
+            OrganizationStatus::Deleted,
+            "OrganizationRegistry should be Deleted after compensation (fixes zombie org bug)"
+        );
+        assert!(
+            registry.deleted_at.is_some(),
+            "deleted_at must be set so PurgeJob can compute retention window"
+        );
     }
 }

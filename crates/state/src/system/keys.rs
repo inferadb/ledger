@@ -119,7 +119,6 @@ impl SystemKeys {
         // -- _dir: Directory routing (GLOBAL) --
         key_entry!(DIR_PREFIX, Global, Directory),
         key_entry!(USER_DIRECTORY_PREFIX, Global, Directory),
-        key_entry!(ORG_DIRECTORY_PREFIX, Global, Directory),
         key_entry!(ORG_REGISTRY_PREFIX, Global, Directory),
         // -- _idx: Secondary indexes (GLOBAL) --
         key_entry!(USER_SLUG_INDEX_PREFIX, Global, Index),
@@ -324,24 +323,6 @@ impl SystemKeys {
     /// Pattern: `_idx:org:slug:{slug}` → organization_id
     pub fn organization_slug_key(slug: OrganizationSlug) -> String {
         format!("_idx:org:slug:{}", slug.value())
-    }
-
-    /// Primary key for an organization directory entry in the GLOBAL control plane.
-    ///
-    /// Pattern: `_dir:org:{id}` → postcard-serialized `OrganizationDirectoryEntry`
-    ///
-    /// Directory entries contain no PII — only opaque identifiers, region,
-    /// status, tier, and timestamp. Enables cross-region organization resolution
-    /// from any node.
-    pub fn organization_directory_key(organization: OrganizationId) -> String {
-        format!("_dir:org:{}", organization.value())
-    }
-
-    /// Parses an organization ID from an organization directory key.
-    ///
-    /// Returns `None` if the key doesn't match `_dir:org:{id}`.
-    pub fn parse_organization_directory_key(key: &str) -> Option<OrganizationId> {
-        key.strip_prefix(Self::ORG_DIRECTORY_PREFIX).and_then(|id| id.parse().ok())
     }
 
     /// Primary key for an organization profile record in the regional store.
@@ -788,9 +769,6 @@ impl SystemKeys {
     /// Prefix for user slug index entries.
     pub const USER_SLUG_INDEX_PREFIX: &'static str = "_idx:user:slug:";
 
-    /// Prefix for all organization directory entries in the GLOBAL control plane.
-    pub const ORG_DIRECTORY_PREFIX: &'static str = "_dir:org:";
-
     /// Prefix for organization profile keys (REGIONAL PII overlay).
     pub const ORG_PROFILE_PREFIX: &'static str = "org_profile:";
 
@@ -1186,12 +1164,6 @@ mod tests {
         assert_eq!(SystemKeys::parse_user_directory_key("_dir:user:42"), Some(UserId::new(42)));
         assert_eq!(SystemKeys::parse_user_directory_key("user:42"), None);
         assert_eq!(SystemKeys::parse_user_directory_key("_dir:user:abc"), None);
-        assert_eq!(
-            SystemKeys::parse_organization_directory_key("_dir:org:42"),
-            Some(OrganizationId::new(42))
-        );
-        assert_eq!(SystemKeys::parse_organization_directory_key("org:42"), None);
-        assert_eq!(SystemKeys::parse_organization_directory_key("_dir:org:abc"), None);
     }
 
     #[test]
@@ -1218,11 +1190,6 @@ mod tests {
                 "node_key",
                 SystemKeys::node_key(&NodeId::new("n")),
                 &[SystemKeys::NODE_PREFIX, SystemKeys::META_PREFIX],
-            ),
-            (
-                "organization_directory_key",
-                SystemKeys::organization_directory_key(OrganizationId::new(1)),
-                &[SystemKeys::ORG_DIRECTORY_PREFIX, SystemKeys::DIR_PREFIX],
             ),
             (
                 "organization_profile_key",
@@ -1258,25 +1225,12 @@ mod tests {
     }
 
     #[test]
-    fn test_org_directory_key_does_not_collide_with_org_key() {
-        // _dir:org:42 (directory) vs org:42 (skeleton) are distinct
-        let directory_key = SystemKeys::organization_directory_key(OrganizationId::new(42));
-        let org_key = SystemKeys::organization_key(OrganizationId::new(42));
-        assert_ne!(directory_key, org_key);
-        assert!(directory_key.starts_with("_dir:"));
-        assert!(!org_key.starts_with("_dir:"));
-    }
-
-    #[test]
-    fn test_org_registry_key_is_distinct_from_org_skeleton_and_directory() {
+    fn test_org_registry_key_is_distinct_from_org_skeleton() {
         let skeleton_key = SystemKeys::organization_key(OrganizationId::new(42));
         let registry_key = SystemKeys::organization_registry_key(OrganizationId::new(42));
-        let directory_key = SystemKeys::organization_directory_key(OrganizationId::new(42));
         assert_eq!(skeleton_key, "org:42");
         assert_eq!(registry_key, "_dir:org_registry:42");
         assert_ne!(skeleton_key, registry_key);
-        assert_ne!(skeleton_key, directory_key);
-        assert_ne!(registry_key, directory_key);
         assert!(registry_key.starts_with(SystemKeys::ORG_REGISTRY_PREFIX));
     }
 
@@ -1788,7 +1742,7 @@ mod tests {
     /// a new constant, preventing silent omissions.
     #[test]
     fn test_key_registry_completeness() {
-        const EXPECTED_COUNT: usize = 51;
+        const EXPECTED_COUNT: usize = 50;
         assert_eq!(
             SystemKeys::KEY_REGISTRY.len(),
             EXPECTED_COUNT,
@@ -1895,7 +1849,6 @@ mod tests {
     fn test_key_tier_concrete_keys() {
         // GLOBAL concrete keys
         let global_keys = [
-            SystemKeys::organization_directory_key(OrganizationId::new(1)),
             SystemKeys::user_directory_key(UserId::new(1)),
             SystemKeys::organization_registry_key(OrganizationId::new(1)),
             SystemKeys::organization_key(OrganizationId::new(1)),
