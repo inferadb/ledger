@@ -68,7 +68,7 @@ postcard = { version = "1", features = ["alloc"] }
 schemars = "1"
 
 # Error handling
-snafu = { version = "0.8", features = ["backtrace"] }
+snafu = { version = "0.9", features = ["backtrace"] }
 thiserror = "2"
 
 # Concurrency
