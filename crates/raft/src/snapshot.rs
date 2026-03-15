@@ -528,7 +528,7 @@ fn sync_read_exact_or_truncated<R: std::io::Read>(
                 reason: format!("Unexpected EOF reading {context} ({} bytes)", buf.len()),
             }
         } else {
-            SnapshotError::Io { source: e, location: snafu::Location::new(file!(), line!(), 0) }
+            SnapshotError::Io { source: e, location: snafu::location!() }
         }
     })
 }
@@ -543,26 +543,23 @@ impl SyncSnapshotReader {
         }
 
         let mut version_buf = [0u8; 1];
-        reader.read_exact(&mut version_buf).map_err(|e| SnapshotError::Io {
-            source: e,
-            location: snafu::Location::new(file!(), line!(), 0),
-        })?;
+        reader
+            .read_exact(&mut version_buf)
+            .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
         if version_buf[0] > SNAPSHOT_VERSION {
             return Err(SnapshotError::UnsupportedVersion { version: version_buf[0] });
         }
 
         // Flags (reserved, skip)
         let mut flags_buf = [0u8; 1];
-        reader.read_exact(&mut flags_buf).map_err(|e| SnapshotError::Io {
-            source: e,
-            location: snafu::Location::new(file!(), line!(), 0),
-        })?;
+        reader
+            .read_exact(&mut flags_buf)
+            .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
 
         let mut core_len_buf = [0u8; 4];
-        reader.read_exact(&mut core_len_buf).map_err(|e| SnapshotError::Io {
-            source: e,
-            location: snafu::Location::new(file!(), line!(), 0),
-        })?;
+        reader
+            .read_exact(&mut core_len_buf)
+            .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
         let core_len = u32::from_le_bytes(core_len_buf) as usize;
 
         let mut core_bytes = vec![0u8; core_len];
@@ -574,30 +571,27 @@ impl SyncSnapshotReader {
     /// Reads a u32le from the stream.
     pub fn read_u32<R: std::io::Read>(reader: &mut R) -> Result<u32, SnapshotError> {
         let mut buf = [0u8; 4];
-        reader.read_exact(&mut buf).map_err(|e| SnapshotError::Io {
-            source: e,
-            location: snafu::Location::new(file!(), line!(), 0),
-        })?;
+        reader
+            .read_exact(&mut buf)
+            .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
         Ok(u32::from_le_bytes(buf))
     }
 
     /// Reads a u64le from the stream.
     pub fn read_u64<R: std::io::Read>(reader: &mut R) -> Result<u64, SnapshotError> {
         let mut buf = [0u8; 8];
-        reader.read_exact(&mut buf).map_err(|e| SnapshotError::Io {
-            source: e,
-            location: snafu::Location::new(file!(), line!(), 0),
-        })?;
+        reader
+            .read_exact(&mut buf)
+            .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
         Ok(u64::from_le_bytes(buf))
     }
 
     /// Reads a table section header (table_id, entry_count).
     pub fn read_table_header<R: std::io::Read>(reader: &mut R) -> Result<(u8, u32), SnapshotError> {
         let mut table_id_buf = [0u8; 1];
-        reader.read_exact(&mut table_id_buf).map_err(|e| SnapshotError::Io {
-            source: e,
-            location: snafu::Location::new(file!(), line!(), 0),
-        })?;
+        reader
+            .read_exact(&mut table_id_buf)
+            .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
         let count = Self::read_u32(reader)?;
         Ok((table_id_buf[0], count))
     }
@@ -697,7 +691,7 @@ async fn read_exact_or_truncated<R: AsyncRead + Unpin>(
                 reason: format!("Truncated reading {context} ({} bytes expected)", buf.len()),
             }
         } else {
-            SnapshotError::Io { source: e, location: snafu::Location::new(file!(), line!(), 0) }
+            SnapshotError::Io { source: e, location: snafu::location!() }
         }
     })
 }

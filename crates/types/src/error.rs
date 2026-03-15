@@ -702,11 +702,7 @@ impl StorageError {
 impl From<StorageError> for LedgerError {
     #[track_caller]
     fn from(err: StorageError) -> Self {
-        let loc = std::panic::Location::caller();
-        LedgerError::Storage {
-            message: err.to_string(),
-            location: snafu::Location::new(loc.file(), loc.line(), loc.column()),
-        }
+        LedgerError::Storage { message: err.to_string(), location: std::panic::Location::caller() }
     }
 }
 
@@ -793,10 +789,9 @@ impl ConsensusError {
 impl From<ConsensusError> for LedgerError {
     #[track_caller]
     fn from(err: ConsensusError) -> Self {
-        let loc = std::panic::Location::caller();
         LedgerError::Consensus {
             message: err.to_string(),
-            location: snafu::Location::new(loc.file(), loc.line(), loc.column()),
+            location: std::panic::Location::caller(),
         }
     }
 }
@@ -991,17 +986,14 @@ mod tests {
     fn test_ledger_error_code_and_retryability() {
         let cases: Vec<(LedgerError, DiagnosticCode, bool)> = vec![
             (
-                LedgerError::Storage {
-                    message: "disk full".into(),
-                    location: snafu::Location::new("test.rs", 1, 1),
-                },
+                LedgerError::Storage { message: "disk full".into(), location: snafu::location!() },
                 DiagnosticCode::AppStorage,
                 false,
             ),
             (
                 LedgerError::Consensus {
                     message: "leader lost".into(),
-                    location: snafu::Location::new("test.rs", 1, 1),
+                    location: snafu::location!(),
                 },
                 DiagnosticCode::AppConsensus,
                 true,
@@ -1058,14 +1050,8 @@ mod tests {
         // Verify every LedgerError variant maps to a code (compile-time exhaustiveness
         // is enforced by the match, but this tests runtime correctness).
         let variants: Vec<LedgerError> = vec![
-            LedgerError::Storage {
-                message: String::new(),
-                location: snafu::Location::new("", 0, 0),
-            },
-            LedgerError::Consensus {
-                message: String::new(),
-                location: snafu::Location::new("", 0, 0),
-            },
+            LedgerError::Storage { message: String::new(), location: snafu::location!() },
+            LedgerError::Consensus { message: String::new(), location: snafu::location!() },
             LedgerError::HashMismatch { expected: Hash::default(), actual: Hash::default() },
             LedgerError::VaultDiverged { vault: VaultId::new(0), height: 0 },
             LedgerError::VaultUnavailable { vault: VaultId::new(0), reason: String::new() },
@@ -1083,20 +1069,11 @@ mod tests {
             LedgerError::PreconditionFailed { key: String::new(), reason: String::new() },
             LedgerError::AlreadyCommitted { client_id: String::new(), sequence: 0 },
             LedgerError::SequenceViolation { client_id: String::new(), expected: 0, got: 0 },
-            LedgerError::Serialization {
-                message: String::new(),
-                location: snafu::Location::new("", 0, 0),
-            },
+            LedgerError::Serialization { message: String::new(), location: snafu::location!() },
             LedgerError::Config { message: String::new() },
-            LedgerError::Io {
-                source: std::io::Error::other("test"),
-                location: snafu::Location::new("", 0, 0),
-            },
+            LedgerError::Io { source: std::io::Error::other("test"), location: snafu::location!() },
             LedgerError::InvalidArgument { message: String::new() },
-            LedgerError::Internal {
-                message: String::new(),
-                location: snafu::Location::new("", 0, 0),
-            },
+            LedgerError::Internal { message: String::new(), location: snafu::location!() },
         ];
         for err in &variants {
             let code = err.code();

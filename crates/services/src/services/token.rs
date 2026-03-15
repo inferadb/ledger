@@ -1114,10 +1114,7 @@ mod tests {
 
         use crate::jwt::JwtError;
 
-        let err = JwtError::Token {
-            source: TokenError::Expired,
-            location: snafu::Location::new("", 0, 0),
-        };
+        let err = JwtError::Token { source: TokenError::Expired, location: snafu::location!() };
         let status = TokenServiceImpl::jwt_error_to_status(err);
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
     }
@@ -1130,7 +1127,7 @@ mod tests {
 
         let err = JwtError::Token {
             source: TokenError::InvalidAudience { expected: "test".to_string() },
-            location: snafu::Location::new("", 0, 0),
+            location: snafu::location!(),
         };
         let status = TokenServiceImpl::jwt_error_to_status(err);
         assert_eq!(status.code(), tonic::Code::PermissionDenied);
@@ -1144,7 +1141,7 @@ mod tests {
 
         let err = JwtError::Token {
             source: TokenError::MissingClaim { claim: "sub".to_string() },
-            location: snafu::Location::new("", 0, 0),
+            location: snafu::location!(),
         };
         let status = TokenServiceImpl::jwt_error_to_status(err);
         assert_eq!(status.code(), tonic::Code::InvalidArgument);

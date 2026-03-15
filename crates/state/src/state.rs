@@ -1630,12 +1630,10 @@ mod tests {
         let codec_result: std::result::Result<u64, inferadb_ledger_types::CodecError> =
             inferadb_ledger_types::decode(malformed);
         let codec_err = codec_result.expect_err("should fail");
-        let index_err =
-            IndexError::Codec { source: codec_err, location: snafu::Location::default() };
+        let index_err = IndexError::Codec { source: codec_err, location: snafu::location!() };
 
         // Convert IndexError -> StateError via context selector
-        let state_err =
-            StateError::Index { source: index_err, location: snafu::Location::default() };
+        let state_err = StateError::Index { source: index_err, location: snafu::location!() };
 
         let display = format!("{state_err}");
         assert!(

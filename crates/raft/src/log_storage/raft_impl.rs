@@ -312,10 +312,8 @@ async fn write_snapshot_to_file(
 
     // --- Async phase: write all collected data to the snapshot file ---
 
-    let std_file = tempfile::tempfile().map_err(|e| SnapshotError::Io {
-        source: e,
-        location: snafu::Location::new(file!(), line!(), 0),
-    })?;
+    let std_file = tempfile::tempfile()
+        .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
     let file = tokio::fs::File::from_std(std_file);
     let mut writer = SnapshotWriter::new(file);
 
@@ -348,10 +346,9 @@ async fn write_snapshot_to_file(
 
     // Seek to start for reading
     use tokio::io::AsyncSeekExt;
-    file.seek(std::io::SeekFrom::Start(0)).await.map_err(|e| SnapshotError::Io {
-        source: e,
-        location: snafu::Location::new(file!(), line!(), 0),
-    })?;
+    file.seek(std::io::SeekFrom::Start(0))
+        .await
+        .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
 
     let meta = SnapshotMeta { last_log_id: last_applied, last_membership: membership, snapshot_id };
 

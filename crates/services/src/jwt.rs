@@ -745,8 +745,7 @@ mod tests {
     #[test]
     fn jwt_error_token_wraps_domain_error() {
         let token_err = TokenError::Expired;
-        let jwt_err =
-            JwtError::Token { source: token_err, location: snafu::Location::new("test", 0, 0) };
+        let jwt_err = JwtError::Token { source: token_err, location: snafu::location!() };
         assert_eq!(jwt_err.to_string(), "Token expired");
     }
 
