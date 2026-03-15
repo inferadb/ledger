@@ -39,8 +39,11 @@ use inferadb_ledger_types::OrganizationSlug;
 
 use crate::{
     LedgerClient, VaultSlug,
-    client::{Operation, SetCondition, WriteSuccess},
     error::Result,
+    types::{
+        query::{Operation, SetCondition},
+        read::WriteSuccess,
+    },
 };
 
 /// Type-state marker: builder has no operations yet.

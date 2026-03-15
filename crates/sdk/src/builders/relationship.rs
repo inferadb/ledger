@@ -39,8 +39,11 @@ use inferadb_ledger_types::OrganizationSlug;
 
 use crate::{
     LedgerClient, VaultSlug,
-    client::{ListRelationshipsOpts, PagedResult, ReadConsistency, Relationship},
     error::Result,
+    types::{
+        query::{ListRelationshipsOpts, PagedResult, Relationship},
+        read::ReadConsistency,
+    },
 };
 
 /// Fluent builder for relationship list queries.

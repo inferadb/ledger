@@ -72,28 +72,20 @@ mod discovery;
 mod error;
 mod metrics;
 pub mod mock;
+mod ops;
+pub(crate) mod proto_util;
 mod retry;
 pub mod server;
 mod streaming;
 pub mod token;
 mod tracing;
+mod types;
 
-// Public API exports
+// Public API exports — LedgerClient
+// Public API exports — builders, config, etc.
 pub use builders::{BatchReadBuilder, RelationshipQueryBuilder, WriteBuilder};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
-pub use client::{
-    AppClientAssertionInfo, AppClientSecretStatus, AppCredentialType, AppCredentialsInfo, AppInfo,
-    AppVaultConnectionInfo, BlindingKeyRehashStatus, BlindingKeyRotationStatus, BlockAnnouncement,
-    BlockHeader, ChainProof, CreateAppClientAssertionResult, Direction, EmailVerificationCode,
-    EmailVerificationResult, Entity, EventEmissionPath, EventFilter, EventOutcome, EventPage,
-    EventScope, EventSource, HealthCheckResult, HealthStatus, IngestRejection, IngestResult,
-    LedgerClient, ListEntitiesOpts, ListRelationshipsOpts, ListResourcesOpts, MerkleProof,
-    MerkleSibling, MigrationInfo, Operation, OrganizationDeleteInfo, OrganizationInfo,
-    OrganizationMemberInfo, OrganizationMemberRole, OrganizationStatus, OrganizationTier,
-    PagedResult, ReadConsistency, RegistrationResult, Relationship, SdkEventEntry,
-    SdkIngestEventEntry, SetCondition, UserEmailInfo, UserInfo, UserMigrationInfo, VaultInfo,
-    VaultStatus, VerifiedValue, VerifyOpts, WriteSuccess,
-};
+pub use client::LedgerClient;
 pub use config::{
     CertificateData, ClientConfig, ClientConfigBuilder, DiscoveryConfig, RetryPolicy, TlsConfig,
     TlsConfigBuilder,
@@ -114,3 +106,28 @@ pub use server::{
 pub use streaming::HeightTracker;
 pub use token::{PublicKeyInfo, TokenPair, ValidatedToken};
 pub use tracing::TraceConfig;
+// Public API exports — domain types (from types/ modules)
+pub use types::{
+    admin::{
+        BlindingKeyRehashStatus, BlindingKeyRotationStatus, EmailVerificationCode,
+        EmailVerificationResult, HealthCheckResult, HealthStatus, MigrationInfo,
+        OrganizationDeleteInfo, OrganizationInfo, OrganizationMemberInfo, OrganizationMemberRole,
+        OrganizationStatus, OrganizationTier, RegistrationResult, TeamInfo, TeamMemberInfo,
+        TeamMemberRole, UserEmailInfo, UserInfo, UserMigrationInfo, VaultInfo, VaultStatus,
+    },
+    app::{
+        AppClientAssertionInfo, AppClientSecretStatus, AppCredentialType, AppCredentialsInfo,
+        AppInfo, AppVaultConnectionInfo, CreateAppClientAssertionResult,
+    },
+    events::{
+        EventEmissionPath, EventFilter, EventOutcome, EventPage, EventScope, EventSource,
+        IngestRejection, IngestResult, SdkEventEntry, SdkIngestEventEntry,
+    },
+    query::{
+        Entity, ListEntitiesOpts, ListRelationshipsOpts, ListResourcesOpts, Operation, PagedResult,
+        Relationship, SetCondition, VerifiedValue,
+    },
+    read::{ReadConsistency, WriteSuccess},
+    streaming::BlockAnnouncement,
+    verified_read::{BlockHeader, ChainProof, Direction, MerkleProof, MerkleSibling, VerifyOpts},
+};

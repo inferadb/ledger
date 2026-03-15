@@ -36,7 +36,7 @@
 //!     let client = LedgerClient::new(config).await.unwrap();
 //!
 //!     // Test read operation
-//!     let value = client.read(organization, Some(vault), "user:123").await.unwrap();
+//!     let value = client.read(organization, Some(vault), "user:123", None, None).await.unwrap();
 //!     assert_eq!(value, Some(b"test-value".to_vec()));
 //! }
 //! ```
@@ -1200,7 +1200,7 @@ impl OrganizationServiceTrait for MockOrganizationService {
         let organization =
             OrganizationSlug::new(self.state.next_organization.fetch_add(1, Ordering::SeqCst));
 
-        let region = crate::client::region_from_proto_i32(req.region).unwrap_or(Region::GLOBAL);
+        let region = crate::proto_util::region_from_proto_i32(req.region).unwrap_or(Region::GLOBAL);
         let admin_slug = req.admin.map_or(0, |u| u.slug);
         let members = vec![MockMember {
             slug: admin_slug,
@@ -1225,7 +1225,7 @@ impl OrganizationServiceTrait for MockOrganizationService {
         Ok(Response::new(proto::CreateOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: organization.value() }),
             name: req.name,
-            region: crate::client::region_to_proto_i32(region),
+            region: crate::proto_util::region_to_proto_i32(region),
             member_nodes: vec![],
             status: proto::OrganizationStatus::Active as i32,
             config_version: 1,
@@ -1302,7 +1302,7 @@ impl OrganizationServiceTrait for MockOrganizationService {
         Ok(Response::new(proto::GetOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: organization.value() }),
             name: data.name.clone(),
-            region: crate::client::region_to_proto_i32(data.region),
+            region: crate::proto_util::region_to_proto_i32(data.region),
             member_nodes: vec![],
             status: data.status,
             config_version: 1,
@@ -1326,7 +1326,7 @@ impl OrganizationServiceTrait for MockOrganizationService {
             .map(|(slug, data)| proto::GetOrganizationResponse {
                 slug: Some(proto::OrganizationSlug { slug: slug.value() }),
                 name: data.name.clone(),
-                region: crate::client::region_to_proto_i32(data.region),
+                region: crate::proto_util::region_to_proto_i32(data.region),
                 member_nodes: vec![],
                 status: data.status,
                 config_version: 1,
@@ -1378,7 +1378,7 @@ impl OrganizationServiceTrait for MockOrganizationService {
                 return Err(Status::permission_denied("Initiator is not an admin"));
             }
 
-            crate::client::region_to_proto_i32(data.region)
+            crate::proto_util::region_to_proto_i32(data.region)
         };
 
         // Update status to Migrating
@@ -1430,7 +1430,7 @@ impl OrganizationServiceTrait for MockOrganizationService {
         Ok(Response::new(proto::UpdateOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: slug_val }),
             name: data.name.clone(),
-            region: crate::client::region_to_proto_i32(data.region),
+            region: crate::proto_util::region_to_proto_i32(data.region),
             member_nodes: vec![],
             status: data.status,
             config_version: 1,

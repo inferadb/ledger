@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{AppSlug, UserSlug, VaultSlug};
 
-use crate::client::proto_timestamp_to_system_time;
+use crate::proto_util::proto_timestamp_to_system_time;
 
 /// An access + refresh token pair returned by session/vault token creation.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -30,7 +30,7 @@ use std::marker::PhantomData;
 
 use inferadb_ledger_types::OrganizationSlug;
 
-use crate::{LedgerClient, VaultSlug, client::ReadConsistency, error::Result};
+use crate::{LedgerClient, VaultSlug, error::Result, types::read::ReadConsistency};
 
 /// Type-state marker: builder has no keys yet.
 pub struct NoKeys(());
