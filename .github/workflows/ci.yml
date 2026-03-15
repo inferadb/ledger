@@ -261,6 +261,7 @@ jobs:
         run: cargo nextest run --workspace --lib
 
       - name: Run doc tests
+        if: matrix.name == 'Linux AMD64'
         run: cargo test --workspace --doc
 
   # Code coverage (nightly only to reduce CI costs)
