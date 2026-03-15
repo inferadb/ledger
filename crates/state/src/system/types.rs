@@ -10,6 +10,7 @@ use inferadb_ledger_types::{
     UserEmailId, UserId, UserRole, UserSlug, UserStatus, VaultId, VaultSlug,
 };
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // ============================================================================
 // User Types
@@ -110,13 +111,15 @@ pub struct EmailVerificationToken {
 /// intentional: the key must be destroyable via a single Raft write.
 ///
 /// Key pattern: `_shred:user:{user_id}` in the regional store.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct UserShredKey {
     /// User this key belongs to.
+    #[zeroize(skip)]
     pub user_id: UserId,
     /// 256-bit AES key material (encrypted at rest by EncryptedBackend).
     pub key: [u8; 32],
     /// When this key was generated.
+    #[zeroize(skip)]
     pub created_at: DateTime<Utc>,
 }
 
@@ -134,13 +137,15 @@ pub struct UserShredKey {
 /// store, encrypted at rest under the region's RMK (via `EncryptedBackend`).
 ///
 /// Key pattern: `_shred:org:{org_id}` in the regional store.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct OrgShredKey {
     /// Organization this key belongs to.
+    #[zeroize(skip)]
     pub organization: OrganizationId,
     /// 256-bit AES key material (encrypted at rest by EncryptedBackend).
     pub key: [u8; 32],
     /// When this key was generated.
+    #[zeroize(skip)]
     pub created_at: DateTime<Utc>,
 }
 
@@ -174,15 +179,19 @@ pub struct ErasureAuditRecord {
 /// the blinding key, which stays out of Raft log), generates per-subject
 /// encryption keys, and packages everything into this struct. The Raft state
 /// machine then applies directory entries, indexes, and keys atomically.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct UserMigrationEntry {
     /// Internal user identifier.
+    #[zeroize(skip)]
     pub user: UserId,
     /// External Snowflake slug.
+    #[zeroize(skip)]
     pub slug: UserSlug,
     /// Target data residency region.
+    #[zeroize(skip)]
     pub region: Region,
     /// Pre-computed `HMAC-SHA256(blinding_key, normalize(email))` hex string.
+    #[zeroize(skip)]
     pub hmac: String,
     /// Random 256-bit per-subject encryption key.
     pub bytes: [u8; 32],
@@ -1586,5 +1595,43 @@ mod tests {
         // Only structural fields — no email, no name, no organization_name
         assert_eq!(account.token_hash, [0; 32]);
         assert_eq!(account.region, Region::US_EAST_VA);
+    }
+
+    #[test]
+    fn test_user_shred_key_zeroize() {
+        let mut key =
+            UserShredKey { user_id: UserId::from(1), key: [0xFF; 32], created_at: Utc::now() };
+        key.zeroize();
+        assert_eq!(key.key, [0u8; 32]);
+        // Non-key fields are untouched — only the secret material is zeroed
+        assert_eq!(key.user_id, UserId::from(1));
+    }
+
+    #[test]
+    fn test_org_shred_key_zeroize() {
+        let mut key = OrgShredKey {
+            organization: OrganizationId::from(1),
+            key: [0xFF; 32],
+            created_at: Utc::now(),
+        };
+        key.zeroize();
+        assert_eq!(key.key, [0u8; 32]);
+        assert_eq!(key.organization, OrganizationId::from(1));
+    }
+
+    #[test]
+    fn test_user_migration_entry_zeroize() {
+        let mut entry = UserMigrationEntry {
+            user: UserId::from(1),
+            slug: UserSlug::from(100),
+            region: Region::US_EAST_VA,
+            hmac: String::from("abc123"),
+            bytes: [0xFF; 32],
+        };
+        entry.zeroize();
+        assert_eq!(entry.bytes, [0u8; 32]);
+        // Non-secret fields are untouched
+        assert_eq!(entry.user, UserId::from(1));
+        assert_eq!(entry.hmac, "abc123");
     }
 }

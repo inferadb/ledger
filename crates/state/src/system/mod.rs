@@ -21,7 +21,7 @@ pub use inferadb_ledger_types::{
     AppCredentialType, OrganizationMemberRole, SigningKeyScope, SigningKeyStatus, UserRole,
     UserStatus,
 };
-pub use keys::{KeyTier, SystemKeys};
+pub use keys::{KeyFamily, KeyRegistryEntry, KeyTier, SystemKeys};
 pub use saga::{
     CreateOnboardingUserInput, CreateOnboardingUserSaga, CreateOnboardingUserSagaState,
     CreateOrganizationInput, CreateOrganizationSaga, CreateOrganizationSagaState,

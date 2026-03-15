@@ -651,7 +651,7 @@ pub fn record_btree_compaction(pages_merged: u64, pages_freed: u64) {
 
 /// Snapshots triggered by the post-erasure compaction job.
 ///
-/// Labels: `region` = region name, `trigger` = time_based | erasure_detected
+/// Labels: `region` = region name
 const POST_ERASURE_COMPACTION_TRIGGERED_TOTAL: &str =
     "ledger_post_erasure_compaction_triggered_total";
 

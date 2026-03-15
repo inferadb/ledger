@@ -285,10 +285,10 @@ The onboarding saga creates a user, organization, and initial session in three s
 
 **Step 1 — REGIONAL** (`WriteOnboardingUserProfile`):
 
-1. Seal `OnboardingPii { email, name, organization_name }` with UserShredKey via AES-256-GCM
-2. Generate 32-byte UserShredKey and 32-byte OrgShredKey
+1. Generate 32-byte UserShredKey and 32-byte OrgShredKey (client-side, before Raft proposal)
+2. Seal `OnboardingPii { email, name, organization_name }` with UserShredKey via AES-256-GCM
 3. Raft entry carries: sealed PII, PII nonce, UserShredKey bytes, OrgShredKey bytes, refresh token hash, refresh family ID, KID
-4. Apply handler unseals PII using UserShredKey and user_id AAD
+4. Apply handler unseals PII using the UserShredKey from the entry and user_id AAD
 5. Creates `User` record (name from sealed PII)
 6. Creates `UserEmail` record (email from sealed PII)
 7. Stores `UserShredKey` at `_shred:user:{user_id}`

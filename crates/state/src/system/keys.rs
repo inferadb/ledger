@@ -35,13 +35,150 @@ pub enum KeyTier {
     Regional,
 }
 
+/// Prefix family classification for system keys.
+///
+/// Groups key constants by their prefix convention. Used by [`SystemKeys::KEY_REGISTRY`]
+/// to enforce naming invariants: e.g., all `Directory` entries must start
+/// with `_dir:`, all `Index` entries with `_idx:`, etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyFamily {
+    /// `_dir:` — Directory routing (ID to region/slug/status).
+    Directory,
+    /// `_idx:` — Secondary indexes.
+    Index,
+    /// `_meta:` — Bookkeeping (sequences, saga state, node membership).
+    Meta,
+    /// `_shred:` — Crypto-shredding keys.
+    Shred,
+    /// `_tmp:` — Ephemeral state (TTL-bound onboarding).
+    Temporary,
+    /// `_audit:` — Compliance trail.
+    Audit,
+    /// Bare entity keys (no underscore prefix).
+    Entity,
+    /// `_meta:seq:` — Sequence counters (subset of Meta).
+    Sequence,
+}
+
+/// Metadata about a single key constant in the system organization.
+///
+/// Every `PREFIX` or `SEQ_KEY` constant defined on [`SystemKeys`] has a
+/// corresponding entry. The registry is the single source of truth for:
+/// - Tier classification (Global vs Regional)
+/// - Prefix family (`_dir:`, `_idx:`, `_meta:`, `_shred:`, `_tmp:`, `_audit:`, bare, seq)
+/// - Constant name (for diagnostic messages)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyRegistryEntry {
+    /// The constant name (e.g., `"USER_DIRECTORY_PREFIX"`).
+    pub name: &'static str,
+    /// The constant value (e.g., `"_dir:user:"`).
+    pub value: &'static str,
+    /// The expected tier for keys matching this prefix.
+    pub tier: KeyTier,
+    /// The prefix family this constant belongs to.
+    pub family: KeyFamily,
+}
+
 /// Key pattern generators for `_system` organization entities.
 ///
 /// All keys follow the convention `{entity_type}:{id}` for primary keys
 /// and `_idx:{index_name}:{value}` for secondary indexes.
 pub struct SystemKeys;
 
+/// Constructs a `KeyRegistryEntry` from a constant name, tier, and family.
+///
+/// Stringifies the constant name for diagnostic messages and references
+/// `SystemKeys::$name` for the value. Used exclusively by
+/// [`SystemKeys::KEY_REGISTRY`].
+macro_rules! key_entry {
+    ($name:ident, $tier:ident, $family:ident) => {
+        KeyRegistryEntry {
+            name: stringify!($name),
+            value: SystemKeys::$name,
+            tier: KeyTier::$tier,
+            family: KeyFamily::$family,
+        }
+    };
+}
+
 impl SystemKeys {
+    // ========================================================================
+    // Key Registry — single source of truth for key constant metadata
+    // ========================================================================
+
+    /// Registry of all key constants with their metadata.
+    ///
+    /// This is the single source of truth for key classification. When
+    /// adding a new key constant, add an entry here — the count guard
+    /// in tests will fail if forgotten.
+    ///
+    /// `INDEX_PREFIX` (`_idx:`) is excluded because it spans both tiers
+    /// (some indexes are GLOBAL, some REGIONAL). It is validated separately
+    /// in the taxonomy test.
+    pub const KEY_REGISTRY: &[KeyRegistryEntry] = &[
+        // -- _dir: Directory routing (GLOBAL) --
+        key_entry!(DIR_PREFIX, Global, Directory),
+        key_entry!(USER_DIRECTORY_PREFIX, Global, Directory),
+        key_entry!(ORG_DIRECTORY_PREFIX, Global, Directory),
+        key_entry!(ORG_REGISTRY_PREFIX, Global, Directory),
+        // -- _idx: Secondary indexes (GLOBAL) --
+        key_entry!(USER_SLUG_INDEX_PREFIX, Global, Index),
+        key_entry!(EMAIL_HASH_INDEX_PREFIX, Global, Index),
+        key_entry!(APP_SLUG_INDEX_PREFIX, Global, Index),
+        key_entry!(SIGNING_KEY_KID_INDEX_PREFIX, Global, Index),
+        key_entry!(SIGNING_KEY_SCOPE_INDEX_PREFIX, Global, Index),
+        key_entry!(SIGNING_KEY_ORG_PREFIX, Global, Index),
+        key_entry!(REFRESH_TOKEN_HASH_INDEX_PREFIX, Global, Index),
+        key_entry!(REFRESH_TOKEN_FAMILY_PREFIX, Global, Index),
+        key_entry!(REFRESH_TOKEN_FAMILY_POISONED_PREFIX, Global, Index),
+        key_entry!(REFRESH_TOKEN_APP_VAULT_PREFIX, Global, Index),
+        key_entry!(REFRESH_TOKEN_ORG_PREFIX, Global, Index),
+        key_entry!(TEAM_SLUG_INDEX_PREFIX, Global, Index),
+        // -- _idx: Secondary indexes (REGIONAL) --
+        key_entry!(EMAIL_VERIFY_HASH_INDEX_PREFIX, Regional, Index),
+        key_entry!(APP_NAME_INDEX_PREFIX, Regional, Index),
+        key_entry!(USER_EMAILS_INDEX_PREFIX, Regional, Index),
+        // -- _meta: Bookkeeping (GLOBAL) --
+        key_entry!(META_PREFIX, Global, Meta),
+        key_entry!(NODE_PREFIX, Global, Meta),
+        key_entry!(SAGA_PREFIX, Global, Meta),
+        key_entry!(REHASH_PROGRESS_PREFIX, Global, Meta),
+        key_entry!(BLINDING_KEY_VERSION_KEY, Global, Meta),
+        // -- _shred: Crypto-shredding (REGIONAL) --
+        key_entry!(USER_SHRED_KEY_PREFIX, Regional, Shred),
+        key_entry!(ORG_SHRED_KEY_PREFIX, Regional, Shred),
+        // -- _tmp: Ephemeral (REGIONAL) --
+        key_entry!(ONBOARD_VERIFY_PREFIX, Regional, Temporary),
+        key_entry!(ONBOARD_ACCOUNT_PREFIX, Regional, Temporary),
+        // -- _audit: Compliance (GLOBAL) --
+        key_entry!(ERASURE_AUDIT_PREFIX, Global, Audit),
+        // -- Bare entity prefixes (GLOBAL) --
+        key_entry!(APP_PREFIX, Global, Entity),
+        key_entry!(ORG_PREFIX, Global, Entity),
+        key_entry!(SIGNING_KEY_PREFIX, Global, Entity),
+        key_entry!(REFRESH_TOKEN_PREFIX, Global, Entity),
+        key_entry!(APP_ASSERTION_PREFIX, Global, Entity),
+        key_entry!(APP_VAULT_PREFIX, Global, Entity),
+        // -- Bare entity prefixes (REGIONAL) --
+        key_entry!(USER_PREFIX, Regional, Entity),
+        key_entry!(USER_EMAIL_PREFIX, Regional, Entity),
+        key_entry!(TEAM_PREFIX, Regional, Entity),
+        key_entry!(APP_PROFILE_PREFIX, Regional, Entity),
+        key_entry!(ORG_PROFILE_PREFIX, Regional, Entity),
+        key_entry!(ASSERTION_NAME_PREFIX, Regional, Entity),
+        key_entry!(EMAIL_VERIFY_PREFIX, Regional, Entity),
+        // -- _meta:seq: Sequence counters (GLOBAL) --
+        key_entry!(ORG_SEQ_KEY, Global, Sequence),
+        key_entry!(USER_SEQ_KEY, Global, Sequence),
+        key_entry!(APP_SEQ_KEY, Global, Sequence),
+        key_entry!(VAULT_SEQ_KEY, Global, Sequence),
+        key_entry!(USER_EMAIL_SEQ_KEY, Global, Sequence),
+        key_entry!(EMAIL_VERIFY_SEQ_KEY, Global, Sequence),
+        key_entry!(CLIENT_ASSERTION_SEQ_KEY, Global, Sequence),
+        key_entry!(SIGNING_KEY_SEQ_KEY, Global, Sequence),
+        key_entry!(REFRESH_TOKEN_SEQ_KEY, Global, Sequence),
+    ];
+
     // ========================================================================
     // User Keys
     // ========================================================================
@@ -93,6 +230,12 @@ impl SystemKeys {
     pub fn user_emails_index_key(user_id: UserId) -> String {
         format!("_idx:user_emails:{}", user_id.value())
     }
+
+    /// Prefix for user-to-emails index keys (REGIONAL per-user lookup).
+    pub const USER_EMAILS_INDEX_PREFIX: &'static str = "_idx:user_emails:";
+
+    /// Prefix for email verification token keys (REGIONAL).
+    pub const EMAIL_VERIFY_PREFIX: &'static str = "email_verify:";
 
     /// Primary key for an email verification token.
     ///
@@ -240,6 +383,9 @@ impl SystemKeys {
     pub fn team_slug_key(slug: TeamSlug) -> String {
         format!("_idx:team:slug:{}", slug.value())
     }
+
+    /// Prefix for team slug index keys (GLOBAL cross-region resolution).
+    pub const TEAM_SLUG_INDEX_PREFIX: &'static str = "_idx:team:slug:";
 
     /// Prefix for team keys (REGIONAL-only domain entities).
     pub const TEAM_PREFIX: &'static str = "team:";
@@ -1626,314 +1772,119 @@ mod tests {
     }
 
     // ========================================================================
-    // Prefix Taxonomy Test
+    // Key Registry Tests
     // ========================================================================
 
-    /// Enforces the full prefix naming convention across all PREFIX constants.
+    /// Replaces `test_key_tier_exhaustive` + `test_key_tier_classification`.
     ///
-    /// This test guards the following invariants:
-    /// - `_dir:*` prefixes are exclusively directory routing entries.
-    /// - `_idx:*` prefixes are exclusively secondary indexes.
-    /// - `_meta:*` prefixes are exclusively bookkeeping/infrastructure.
-    /// - `_key:*` prefixes are exclusively crypto-shredding keys.
-    /// - `_tmp:*` prefixes are exclusively ephemeral/TTL records.
-    /// - `_audit:*` prefixes are exclusively compliance trail entries.
-    /// - No bare primary-record prefix is a proper prefix of another (guards the `:` vs `_` ASCII
-    ///   ordering collision safety invariant).
+    /// Every entry in `KEY_REGISTRY` must:
+    /// 1. Be classified by `classify_key_tier` (not `None`).
+    /// 2. Classify to the expected tier declared in the registry.
+    ///
+    /// Value correctness is enforced at compile time — registry entries
+    /// reference `Self::*` constants directly (e.g., `Self::DIR_PREFIX`).
+    ///
+    /// The count guard ensures a developer bumps `EXPECTED_COUNT` when adding
+    /// a new constant, preventing silent omissions.
     #[test]
-    fn test_prefix_taxonomy() {
-        // -- _dir: constants must all start with _dir: --
-        let dir_prefixes = [
-            ("DIR_PREFIX", SystemKeys::DIR_PREFIX),
-            ("USER_DIRECTORY_PREFIX", SystemKeys::USER_DIRECTORY_PREFIX),
-            ("ORG_DIRECTORY_PREFIX", SystemKeys::ORG_DIRECTORY_PREFIX),
-            ("ORG_REGISTRY_PREFIX", SystemKeys::ORG_REGISTRY_PREFIX),
-        ];
-        for (name, value) in &dir_prefixes {
-            assert!(value.starts_with("_dir:"), "{name} = \"{value}\" should start with \"_dir:\"");
-        }
+    fn test_key_registry_completeness() {
+        const EXPECTED_COUNT: usize = 51;
+        assert_eq!(
+            SystemKeys::KEY_REGISTRY.len(),
+            EXPECTED_COUNT,
+            "KEY_REGISTRY has {} entries, expected {EXPECTED_COUNT} — \
+             did you add a new constant without updating the registry?",
+            SystemKeys::KEY_REGISTRY.len(),
+        );
 
-        // -- _idx: constants must all start with _idx: --
-        let idx_prefixes = [
-            ("INDEX_PREFIX", SystemKeys::INDEX_PREFIX),
-            ("USER_SLUG_INDEX_PREFIX", SystemKeys::USER_SLUG_INDEX_PREFIX),
-            ("EMAIL_HASH_INDEX_PREFIX", SystemKeys::EMAIL_HASH_INDEX_PREFIX),
-            ("EMAIL_VERIFY_HASH_INDEX_PREFIX", SystemKeys::EMAIL_VERIFY_HASH_INDEX_PREFIX),
-            ("APP_SLUG_INDEX_PREFIX", SystemKeys::APP_SLUG_INDEX_PREFIX),
-            ("APP_NAME_INDEX_PREFIX", SystemKeys::APP_NAME_INDEX_PREFIX),
-            ("SIGNING_KEY_KID_INDEX_PREFIX", SystemKeys::SIGNING_KEY_KID_INDEX_PREFIX),
-            ("SIGNING_KEY_SCOPE_INDEX_PREFIX", SystemKeys::SIGNING_KEY_SCOPE_INDEX_PREFIX),
-            ("SIGNING_KEY_ORG_PREFIX", SystemKeys::SIGNING_KEY_ORG_PREFIX),
-            ("REFRESH_TOKEN_HASH_INDEX_PREFIX", SystemKeys::REFRESH_TOKEN_HASH_INDEX_PREFIX),
-            ("REFRESH_TOKEN_FAMILY_PREFIX", SystemKeys::REFRESH_TOKEN_FAMILY_PREFIX),
-            (
-                "REFRESH_TOKEN_FAMILY_POISONED_PREFIX",
-                SystemKeys::REFRESH_TOKEN_FAMILY_POISONED_PREFIX,
-            ),
-            ("REFRESH_TOKEN_APP_VAULT_PREFIX", SystemKeys::REFRESH_TOKEN_APP_VAULT_PREFIX),
-            ("REFRESH_TOKEN_ORG_PREFIX", SystemKeys::REFRESH_TOKEN_ORG_PREFIX),
-        ];
-        for (name, value) in &idx_prefixes {
-            assert!(value.starts_with("_idx:"), "{name} = \"{value}\" should start with \"_idx:\"");
-        }
-
-        // -- _meta: constants must all start with _meta: --
-        let meta_prefixes = [
-            ("META_PREFIX", SystemKeys::META_PREFIX),
-            ("NODE_PREFIX", SystemKeys::NODE_PREFIX),
-            ("SAGA_PREFIX", SystemKeys::SAGA_PREFIX),
-            ("REHASH_PROGRESS_PREFIX", SystemKeys::REHASH_PROGRESS_PREFIX),
-            ("BLINDING_KEY_VERSION_KEY", SystemKeys::BLINDING_KEY_VERSION_KEY),
-        ];
-        for (name, value) in &meta_prefixes {
+        for entry in SystemKeys::KEY_REGISTRY {
+            // Every registered constant must be classifiable
+            let actual = SystemKeys::classify_key_tier(entry.value);
             assert!(
-                value.starts_with("_meta:"),
-                "{name} = \"{value}\" should start with \"_meta:\""
+                actual.is_some(),
+                "{} = \"{}\" returned None from classify_key_tier — add it to the classifier",
+                entry.name,
+                entry.value,
+            );
+
+            // Classification must match the declared tier
+            assert_eq!(
+                actual,
+                Some(entry.tier),
+                "{} = \"{}\" classified as {:?} but registry declares {:?}",
+                entry.name,
+                entry.value,
+                actual,
+                entry.tier,
             );
         }
+    }
 
-        // -- _shred: constants must all start with _shred: --
-        let shred_prefixes = [
-            ("USER_SHRED_KEY_PREFIX", SystemKeys::USER_SHRED_KEY_PREFIX),
-            ("ORG_SHRED_KEY_PREFIX", SystemKeys::ORG_SHRED_KEY_PREFIX),
-        ];
-        for (name, value) in &shred_prefixes {
-            assert!(
-                value.starts_with("_shred:"),
-                "{name} = \"{value}\" should start with \"_shred:\""
-            );
+    /// Replaces `test_prefix_taxonomy`. Iterates `KEY_REGISTRY` grouped by
+    /// `family` and asserts naming invariants.
+    ///
+    /// Also validates `INDEX_PREFIX` (`_idx:`) separately since it spans both
+    /// tiers and is excluded from the registry.
+    #[test]
+    fn test_key_registry_taxonomy() {
+        /// Returns the expected prefix for a key family, or `None` for Entity
+        /// (which asserts the *absence* of an underscore prefix).
+        fn expected_prefix(family: KeyFamily) -> Option<&'static str> {
+            match family {
+                KeyFamily::Directory => Some("_dir:"),
+                KeyFamily::Index => Some("_idx:"),
+                KeyFamily::Meta => Some("_meta:"),
+                KeyFamily::Shred => Some("_shred:"),
+                KeyFamily::Temporary => Some("_tmp:"),
+                KeyFamily::Audit => Some("_audit:"),
+                KeyFamily::Entity => None,
+                KeyFamily::Sequence => Some("_meta:seq:"),
+            }
         }
 
-        // -- _tmp: constants must all start with _tmp: --
-        let tmp_prefixes = [
-            ("ONBOARD_VERIFY_PREFIX", SystemKeys::ONBOARD_VERIFY_PREFIX),
-            ("ONBOARD_ACCOUNT_PREFIX", SystemKeys::ONBOARD_ACCOUNT_PREFIX),
-        ];
-        for (name, value) in &tmp_prefixes {
-            assert!(value.starts_with("_tmp:"), "{name} = \"{value}\" should start with \"_tmp:\"");
-        }
-
-        // -- _audit: constants must all start with _audit: --
-        let audit_prefixes = [("ERASURE_AUDIT_PREFIX", SystemKeys::ERASURE_AUDIT_PREFIX)];
-        for (name, value) in &audit_prefixes {
-            assert!(
-                value.starts_with("_audit:"),
-                "{name} = \"{value}\" should start with \"_audit:\""
-            );
-        }
-
-        // -- Bare primary-record prefixes: no prefix is a proper prefix of another --
-        // This guards the `:` (0x3A) < `_` (0x5F) ASCII ordering invariant.
-        // e.g., `app:5:` must never match `app_profile:5:` in a B-tree prefix scan.
-        let bare_prefixes = [
-            ("USER_PREFIX", SystemKeys::USER_PREFIX),
-            ("USER_EMAIL_PREFIX", SystemKeys::USER_EMAIL_PREFIX),
-            ("TEAM_PREFIX", SystemKeys::TEAM_PREFIX),
-            ("ORG_PREFIX", SystemKeys::ORG_PREFIX),
-            ("ORG_PROFILE_PREFIX", SystemKeys::ORG_PROFILE_PREFIX),
-            ("APP_PREFIX", SystemKeys::APP_PREFIX),
-            ("APP_PROFILE_PREFIX", SystemKeys::APP_PROFILE_PREFIX),
-            ("APP_ASSERTION_PREFIX", SystemKeys::APP_ASSERTION_PREFIX),
-            ("APP_VAULT_PREFIX", SystemKeys::APP_VAULT_PREFIX),
-            ("ASSERTION_NAME_PREFIX", SystemKeys::ASSERTION_NAME_PREFIX),
-            ("SIGNING_KEY_PREFIX", SystemKeys::SIGNING_KEY_PREFIX),
-            ("REFRESH_TOKEN_PREFIX", SystemKeys::REFRESH_TOKEN_PREFIX),
-        ];
-        for (i, (name_a, prefix_a)) in bare_prefixes.iter().enumerate() {
-            // Bare prefixes must not start with underscore (those are infrastructure)
-            assert!(
-                !prefix_a.starts_with('_'),
-                "bare prefix {name_a} = \"{prefix_a}\" must not start with '_'"
-            );
-            for (name_b, prefix_b) in &bare_prefixes[i + 1..] {
+        for entry in SystemKeys::KEY_REGISTRY {
+            if let Some(prefix) = expected_prefix(entry.family) {
                 assert!(
-                    !prefix_a.starts_with(prefix_b) && !prefix_b.starts_with(prefix_a),
-                    "bare prefix collision: {name_a} = \"{prefix_a}\" vs {name_b} = \"{prefix_b}\""
+                    entry.value.starts_with(prefix),
+                    "{} = \"{}\" is {:?} but doesn't start with \"{prefix}\"",
+                    entry.name,
+                    entry.value,
+                    entry.family,
+                );
+            } else {
+                assert!(
+                    !entry.value.starts_with('_'),
+                    "{} = \"{}\" is Entity but starts with '_'",
+                    entry.name,
+                    entry.value,
                 );
             }
         }
 
-        // -- Sequence keys must all start with _meta:seq: --
-        let seq_keys = [
-            ("ORG_SEQ_KEY", SystemKeys::ORG_SEQ_KEY),
-            ("USER_SEQ_KEY", SystemKeys::USER_SEQ_KEY),
-            ("APP_SEQ_KEY", SystemKeys::APP_SEQ_KEY),
-            ("VAULT_SEQ_KEY", SystemKeys::VAULT_SEQ_KEY),
-            ("USER_EMAIL_SEQ_KEY", SystemKeys::USER_EMAIL_SEQ_KEY),
-            ("EMAIL_VERIFY_SEQ_KEY", SystemKeys::EMAIL_VERIFY_SEQ_KEY),
-            ("CLIENT_ASSERTION_SEQ_KEY", SystemKeys::CLIENT_ASSERTION_SEQ_KEY),
-            ("SIGNING_KEY_SEQ_KEY", SystemKeys::SIGNING_KEY_SEQ_KEY),
-            ("REFRESH_TOKEN_SEQ_KEY", SystemKeys::REFRESH_TOKEN_SEQ_KEY),
-        ];
-        for (name, value) in &seq_keys {
-            assert!(
-                value.starts_with("_meta:seq:"),
-                "{name} = \"{value}\" should start with \"_meta:seq:\""
-            );
-        }
-    }
+        // INDEX_PREFIX spans both tiers — validate it starts with _idx: but
+        // is not in the registry (no single tier applies).
+        assert!(
+            SystemKeys::INDEX_PREFIX.starts_with("_idx:"),
+            "INDEX_PREFIX should start with \"_idx:\""
+        );
 
-    /// Verifies that every PREFIX constant and SEQ_KEY constant is classified
-    /// into a tier (no `None` returns). This ensures new key families added
-    /// in the future are forced to declare their tier.
-    #[test]
-    fn test_key_tier_exhaustive() {
-        let all_constants: Vec<(&str, &str)> = vec![
-            // _dir:
-            ("DIR_PREFIX", SystemKeys::DIR_PREFIX),
-            ("USER_DIRECTORY_PREFIX", SystemKeys::USER_DIRECTORY_PREFIX),
-            ("ORG_DIRECTORY_PREFIX", SystemKeys::ORG_DIRECTORY_PREFIX),
-            ("ORG_REGISTRY_PREFIX", SystemKeys::ORG_REGISTRY_PREFIX),
-            // _meta:
-            ("META_PREFIX", SystemKeys::META_PREFIX),
-            ("NODE_PREFIX", SystemKeys::NODE_PREFIX),
-            ("SAGA_PREFIX", SystemKeys::SAGA_PREFIX),
-            ("REHASH_PROGRESS_PREFIX", SystemKeys::REHASH_PROGRESS_PREFIX),
-            ("BLINDING_KEY_VERSION_KEY", SystemKeys::BLINDING_KEY_VERSION_KEY),
-            // _idx: (INDEX_PREFIX itself is a scan prefix spanning both tiers, not classified)
-            ("USER_SLUG_INDEX_PREFIX", SystemKeys::USER_SLUG_INDEX_PREFIX),
-            ("EMAIL_HASH_INDEX_PREFIX", SystemKeys::EMAIL_HASH_INDEX_PREFIX),
-            ("EMAIL_VERIFY_HASH_INDEX_PREFIX", SystemKeys::EMAIL_VERIFY_HASH_INDEX_PREFIX),
-            ("APP_SLUG_INDEX_PREFIX", SystemKeys::APP_SLUG_INDEX_PREFIX),
-            ("APP_NAME_INDEX_PREFIX", SystemKeys::APP_NAME_INDEX_PREFIX),
-            ("SIGNING_KEY_KID_INDEX_PREFIX", SystemKeys::SIGNING_KEY_KID_INDEX_PREFIX),
-            ("SIGNING_KEY_SCOPE_INDEX_PREFIX", SystemKeys::SIGNING_KEY_SCOPE_INDEX_PREFIX),
-            ("SIGNING_KEY_ORG_PREFIX", SystemKeys::SIGNING_KEY_ORG_PREFIX),
-            ("REFRESH_TOKEN_HASH_INDEX_PREFIX", SystemKeys::REFRESH_TOKEN_HASH_INDEX_PREFIX),
-            ("REFRESH_TOKEN_FAMILY_PREFIX", SystemKeys::REFRESH_TOKEN_FAMILY_PREFIX),
-            (
-                "REFRESH_TOKEN_FAMILY_POISONED_PREFIX",
-                SystemKeys::REFRESH_TOKEN_FAMILY_POISONED_PREFIX,
-            ),
-            ("REFRESH_TOKEN_APP_VAULT_PREFIX", SystemKeys::REFRESH_TOKEN_APP_VAULT_PREFIX),
-            ("REFRESH_TOKEN_ORG_PREFIX", SystemKeys::REFRESH_TOKEN_ORG_PREFIX),
-            // _shred:
-            ("USER_SHRED_KEY_PREFIX", SystemKeys::USER_SHRED_KEY_PREFIX),
-            ("ORG_SHRED_KEY_PREFIX", SystemKeys::ORG_SHRED_KEY_PREFIX),
-            // _tmp:
-            ("ONBOARD_VERIFY_PREFIX", SystemKeys::ONBOARD_VERIFY_PREFIX),
-            ("ONBOARD_ACCOUNT_PREFIX", SystemKeys::ONBOARD_ACCOUNT_PREFIX),
-            // _audit:
-            ("ERASURE_AUDIT_PREFIX", SystemKeys::ERASURE_AUDIT_PREFIX),
-            // Bare prefixes
-            ("USER_PREFIX", SystemKeys::USER_PREFIX),
-            ("USER_EMAIL_PREFIX", SystemKeys::USER_EMAIL_PREFIX),
-            ("TEAM_PREFIX", SystemKeys::TEAM_PREFIX),
-            ("ORG_PREFIX", SystemKeys::ORG_PREFIX),
-            ("ORG_PROFILE_PREFIX", SystemKeys::ORG_PROFILE_PREFIX),
-            ("APP_PREFIX", SystemKeys::APP_PREFIX),
-            ("APP_PROFILE_PREFIX", SystemKeys::APP_PROFILE_PREFIX),
-            ("APP_ASSERTION_PREFIX", SystemKeys::APP_ASSERTION_PREFIX),
-            ("APP_VAULT_PREFIX", SystemKeys::APP_VAULT_PREFIX),
-            ("ASSERTION_NAME_PREFIX", SystemKeys::ASSERTION_NAME_PREFIX),
-            ("SIGNING_KEY_PREFIX", SystemKeys::SIGNING_KEY_PREFIX),
-            ("REFRESH_TOKEN_PREFIX", SystemKeys::REFRESH_TOKEN_PREFIX),
-            // Sequence keys
-            ("ORG_SEQ_KEY", SystemKeys::ORG_SEQ_KEY),
-            ("USER_SEQ_KEY", SystemKeys::USER_SEQ_KEY),
-            ("APP_SEQ_KEY", SystemKeys::APP_SEQ_KEY),
-            ("VAULT_SEQ_KEY", SystemKeys::VAULT_SEQ_KEY),
-            ("USER_EMAIL_SEQ_KEY", SystemKeys::USER_EMAIL_SEQ_KEY),
-            ("EMAIL_VERIFY_SEQ_KEY", SystemKeys::EMAIL_VERIFY_SEQ_KEY),
-            ("CLIENT_ASSERTION_SEQ_KEY", SystemKeys::CLIENT_ASSERTION_SEQ_KEY),
-            ("SIGNING_KEY_SEQ_KEY", SystemKeys::SIGNING_KEY_SEQ_KEY),
-            ("REFRESH_TOKEN_SEQ_KEY", SystemKeys::REFRESH_TOKEN_SEQ_KEY),
-        ];
-
-        for (name, prefix) in &all_constants {
-            assert!(
-                SystemKeys::classify_key_tier(prefix).is_some(),
-                "constant {name} = \"{prefix}\" returned None from classify_key_tier — \
-                 add it to the classifier"
-            );
-        }
-    }
-
-    /// Verifies the tier classification for every PREFIX constant matches the
-    /// expected tier from the data residency model.
-    #[test]
-    fn test_key_tier_classification() {
-        let global_constants: Vec<(&str, &str)> = vec![
-            // _dir: infrastructure
-            ("DIR_PREFIX", SystemKeys::DIR_PREFIX),
-            ("USER_DIRECTORY_PREFIX", SystemKeys::USER_DIRECTORY_PREFIX),
-            ("ORG_DIRECTORY_PREFIX", SystemKeys::ORG_DIRECTORY_PREFIX),
-            ("ORG_REGISTRY_PREFIX", SystemKeys::ORG_REGISTRY_PREFIX),
-            // _meta: bookkeeping
-            ("META_PREFIX", SystemKeys::META_PREFIX),
-            ("NODE_PREFIX", SystemKeys::NODE_PREFIX),
-            ("SAGA_PREFIX", SystemKeys::SAGA_PREFIX),
-            ("REHASH_PROGRESS_PREFIX", SystemKeys::REHASH_PROGRESS_PREFIX),
-            ("BLINDING_KEY_VERSION_KEY", SystemKeys::BLINDING_KEY_VERSION_KEY),
-            // _audit: compliance
-            ("ERASURE_AUDIT_PREFIX", SystemKeys::ERASURE_AUDIT_PREFIX),
-            // _idx: cross-region resolution and token infrastructure
-            ("USER_SLUG_INDEX_PREFIX", SystemKeys::USER_SLUG_INDEX_PREFIX),
-            ("EMAIL_HASH_INDEX_PREFIX", SystemKeys::EMAIL_HASH_INDEX_PREFIX),
-            ("APP_SLUG_INDEX_PREFIX", SystemKeys::APP_SLUG_INDEX_PREFIX),
-            ("SIGNING_KEY_KID_INDEX_PREFIX", SystemKeys::SIGNING_KEY_KID_INDEX_PREFIX),
-            ("SIGNING_KEY_SCOPE_INDEX_PREFIX", SystemKeys::SIGNING_KEY_SCOPE_INDEX_PREFIX),
-            ("SIGNING_KEY_ORG_PREFIX", SystemKeys::SIGNING_KEY_ORG_PREFIX),
-            ("REFRESH_TOKEN_HASH_INDEX_PREFIX", SystemKeys::REFRESH_TOKEN_HASH_INDEX_PREFIX),
-            ("REFRESH_TOKEN_FAMILY_PREFIX", SystemKeys::REFRESH_TOKEN_FAMILY_PREFIX),
-            (
-                "REFRESH_TOKEN_FAMILY_POISONED_PREFIX",
-                SystemKeys::REFRESH_TOKEN_FAMILY_POISONED_PREFIX,
-            ),
-            ("REFRESH_TOKEN_APP_VAULT_PREFIX", SystemKeys::REFRESH_TOKEN_APP_VAULT_PREFIX),
-            ("REFRESH_TOKEN_ORG_PREFIX", SystemKeys::REFRESH_TOKEN_ORG_PREFIX),
-            // Bare GLOBAL entities
-            ("APP_PREFIX", SystemKeys::APP_PREFIX),
-            ("ORG_PREFIX", SystemKeys::ORG_PREFIX),
-            ("SIGNING_KEY_PREFIX", SystemKeys::SIGNING_KEY_PREFIX),
-            ("REFRESH_TOKEN_PREFIX", SystemKeys::REFRESH_TOKEN_PREFIX),
-            ("APP_ASSERTION_PREFIX", SystemKeys::APP_ASSERTION_PREFIX),
-            ("APP_VAULT_PREFIX", SystemKeys::APP_VAULT_PREFIX),
-            // Sequence keys (all _meta:)
-            ("ORG_SEQ_KEY", SystemKeys::ORG_SEQ_KEY),
-            ("USER_SEQ_KEY", SystemKeys::USER_SEQ_KEY),
-            ("APP_SEQ_KEY", SystemKeys::APP_SEQ_KEY),
-            ("VAULT_SEQ_KEY", SystemKeys::VAULT_SEQ_KEY),
-            ("USER_EMAIL_SEQ_KEY", SystemKeys::USER_EMAIL_SEQ_KEY),
-            ("EMAIL_VERIFY_SEQ_KEY", SystemKeys::EMAIL_VERIFY_SEQ_KEY),
-            ("CLIENT_ASSERTION_SEQ_KEY", SystemKeys::CLIENT_ASSERTION_SEQ_KEY),
-            ("SIGNING_KEY_SEQ_KEY", SystemKeys::SIGNING_KEY_SEQ_KEY),
-            ("REFRESH_TOKEN_SEQ_KEY", SystemKeys::REFRESH_TOKEN_SEQ_KEY),
-        ];
-
-        for (name, prefix) in &global_constants {
-            assert_eq!(
-                SystemKeys::classify_key_tier(prefix),
-                Some(KeyTier::Global),
-                "{name} = \"{prefix}\" should be Global"
-            );
-        }
-
-        let regional_constants: Vec<(&str, &str)> = vec![
-            // _shred: crypto-shredding
-            ("USER_SHRED_KEY_PREFIX", SystemKeys::USER_SHRED_KEY_PREFIX),
-            ("ORG_SHRED_KEY_PREFIX", SystemKeys::ORG_SHRED_KEY_PREFIX),
-            // _tmp: ephemeral
-            ("ONBOARD_VERIFY_PREFIX", SystemKeys::ONBOARD_VERIFY_PREFIX),
-            ("ONBOARD_ACCOUNT_PREFIX", SystemKeys::ONBOARD_ACCOUNT_PREFIX),
-            // _idx: per-user REGIONAL indexes and PII-containing lookups
-            ("EMAIL_VERIFY_HASH_INDEX_PREFIX", SystemKeys::EMAIL_VERIFY_HASH_INDEX_PREFIX),
-            ("APP_NAME_INDEX_PREFIX", SystemKeys::APP_NAME_INDEX_PREFIX),
-            // Bare REGIONAL entities
-            ("USER_PREFIX", SystemKeys::USER_PREFIX),
-            ("USER_EMAIL_PREFIX", SystemKeys::USER_EMAIL_PREFIX),
-            ("TEAM_PREFIX", SystemKeys::TEAM_PREFIX),
-            ("APP_PROFILE_PREFIX", SystemKeys::APP_PROFILE_PREFIX),
-            ("ORG_PROFILE_PREFIX", SystemKeys::ORG_PROFILE_PREFIX),
-            ("ASSERTION_NAME_PREFIX", SystemKeys::ASSERTION_NAME_PREFIX),
-        ];
-
-        for (name, prefix) in &regional_constants {
-            assert_eq!(
-                SystemKeys::classify_key_tier(prefix),
-                Some(KeyTier::Regional),
-                "{name} = \"{prefix}\" should be Regional"
-            );
+        // Bare entity prefixes: no prefix is a proper prefix of another.
+        // Guards the `:` (0x3A) < `_` (0x5F) ASCII ordering collision safety.
+        let entity_entries: Vec<&KeyRegistryEntry> = SystemKeys::KEY_REGISTRY
+            .iter()
+            .filter(|e| matches!(e.family, KeyFamily::Entity))
+            .collect();
+        for (i, a) in entity_entries.iter().enumerate() {
+            for b in &entity_entries[i + 1..] {
+                assert!(
+                    !a.value.starts_with(b.value) && !b.value.starts_with(a.value),
+                    "bare prefix collision: {} = \"{}\" vs {} = \"{}\"",
+                    a.name,
+                    a.value,
+                    b.name,
+                    b.value,
+                );
+            }
         }
     }
 

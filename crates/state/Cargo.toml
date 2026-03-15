@@ -41,6 +41,7 @@ snafu.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
 
 # Async (for snapshot operations)
 tokio.workspace = true

@@ -13,8 +13,10 @@ use snafu::ResultExt;
 use tracing::warn;
 
 use super::{
-    keys::SystemKeys,
-    service::{CodecSnafu, Result, SYSTEM_VAULT_ID, StateSnafu, SystemOrganizationService},
+    keys::{KeyTier, SystemKeys},
+    service::{
+        CodecSnafu, Result, SYSTEM_VAULT_ID, StateSnafu, SystemOrganizationService, require_tier,
+    },
     types::{App, RefreshToken, SigningKey, User},
 };
 
@@ -100,22 +102,25 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     /// Writes: primary entity, kid index, scope index, and org prefix index
     /// (for organization-scoped keys).
     pub fn store_signing_key(&self, key: &SigningKey) -> Result<()> {
+        let primary_key = SystemKeys::signing_key(key.id);
+        let kid_key = SystemKeys::signing_key_kid_index(&key.kid);
+        let scope_key = SystemKeys::signing_key_scope_index(&key.scope);
+
+        require_tier(&primary_key, KeyTier::Global)?;
+        require_tier(&kid_key, KeyTier::Global)?;
+        require_tier(&scope_key, KeyTier::Global)?;
+
         let mut ops = vec![
-            set_entity(SystemKeys::signing_key(key.id), encode(key).context(CodecSnafu)?),
-            set_entity(
-                SystemKeys::signing_key_kid_index(&key.kid),
-                encode(&key.id).context(CodecSnafu)?,
-            ),
-            set_entity(
-                SystemKeys::signing_key_scope_index(&key.scope),
-                key.kid.as_bytes().to_vec(),
-            ),
+            set_entity(primary_key, encode(key).context(CodecSnafu)?),
+            set_entity(kid_key, encode(&key.id).context(CodecSnafu)?),
+            set_entity(scope_key, key.kid.as_bytes().to_vec()),
         ];
 
         // For organization-scoped keys, add an org prefix index entry
         // so org deletion can find all signing keys for a given org.
         if let SigningKeyScope::Organization(org_id) = key.scope {
             let org_index_key = SystemKeys::signing_key_org_entry(org_id, key.id);
+            require_tier(&org_index_key, KeyTier::Global)?;
             ops.push(set_entity(org_index_key, encode(&key.id).context(CodecSnafu)?));
         }
 
@@ -300,6 +305,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         }
 
         let primary_key = SystemKeys::signing_key(key.id);
+        require_tier(&primary_key, KeyTier::Global)?;
         let value = encode(&key).context(CodecSnafu)?;
 
         let mut ops = vec![set_entity(primary_key, value)];
@@ -309,6 +315,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         // successor, so deleting the index here would break active key lookup.
         if new_status == SigningKeyStatus::Revoked && previous_status == SigningKeyStatus::Active {
             let scope_key = SystemKeys::signing_key_scope_index(&key.scope);
+            require_tier(&scope_key, KeyTier::Global)?;
             ops.push(Operation::DeleteEntity { key: scope_key });
         }
 
@@ -357,33 +364,35 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     pub fn store_refresh_token(&self, token: &RefreshToken) -> Result<()> {
         let id_value = encode(&token.id).context(CodecSnafu)?;
 
+        let primary_key = SystemKeys::refresh_token(token.id);
+        let hash_key = SystemKeys::refresh_token_hash_index(&token.token_hash);
+        let family_key = SystemKeys::refresh_token_family_entry(&token.family, token.id);
+        let subject_key = SystemKeys::refresh_token_subject_entry(&token.subject, token.id);
+
+        require_tier(&primary_key, KeyTier::Global)?;
+        require_tier(&hash_key, KeyTier::Global)?;
+        require_tier(&family_key, KeyTier::Global)?;
+        require_tier(&subject_key, KeyTier::Global)?;
+
         let mut ops = vec![
-            set_entity(SystemKeys::refresh_token(token.id), encode(token).context(CodecSnafu)?),
-            set_entity(SystemKeys::refresh_token_hash_index(&token.token_hash), id_value.clone()),
-            set_entity(
-                SystemKeys::refresh_token_family_entry(&token.family, token.id),
-                id_value.clone(),
-            ),
-            set_entity(
-                SystemKeys::refresh_token_subject_entry(&token.subject, token.id),
-                id_value.clone(),
-            ),
+            set_entity(primary_key, encode(token).context(CodecSnafu)?),
+            set_entity(hash_key, id_value.clone()),
+            set_entity(family_key, id_value.clone()),
+            set_entity(subject_key, id_value.clone()),
         ];
 
         // Add org index entry for org-scoped tokens
         if let Some(org) = token.organization {
-            ops.push(set_entity(
-                SystemKeys::refresh_token_org_entry(org, token.id),
-                id_value.clone(),
-            ));
+            let org_key = SystemKeys::refresh_token_org_entry(org, token.id);
+            require_tier(&org_key, KeyTier::Global)?;
+            ops.push(set_entity(org_key, id_value.clone()));
         }
 
         // Add app_vault index entry for vault tokens
         if let (Some(vault), TokenSubject::App(app_slug)) = (token.vault, &token.subject) {
-            ops.push(set_entity(
-                SystemKeys::refresh_token_app_vault_entry(*app_slug, vault, token.id),
-                id_value,
-            ));
+            let av_key = SystemKeys::refresh_token_app_vault_entry(*app_slug, vault, token.id);
+            require_tier(&av_key, KeyTier::Global)?;
+            ops.push(set_entity(av_key, id_value));
         }
 
         self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
@@ -423,6 +432,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         used_at: DateTime<Utc>,
     ) -> Result<bool> {
         let primary_key = SystemKeys::refresh_token(id);
+        require_tier(&primary_key, KeyTier::Global)?;
         let entity_opt =
             self.state.get_entity(SYSTEM_VAULT_ID, primary_key.as_bytes()).context(StateSnafu)?;
 
@@ -445,6 +455,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     /// Background `TokenMaintenanceJob` garbage-collects poisoned families.
     pub fn poison_token_family(&self, family: &[u8; 16]) -> Result<()> {
         let key = SystemKeys::refresh_token_family_poisoned(family);
+        require_tier(&key, KeyTier::Global)?;
         let ops = vec![set_entity(key, vec![1])];
         self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
@@ -699,6 +710,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         now: DateTime<Utc>,
     ) -> Result<TokenVersion> {
         let user_key = SystemKeys::user_key(user_id);
+        require_tier(&user_key, KeyTier::Regional)?;
         let entity_opt =
             self.state.get_entity(SYSTEM_VAULT_ID, user_key.as_bytes()).context(StateSnafu)?;
 
@@ -803,6 +815,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         now: DateTime<Utc>,
     ) -> Result<TokenVersion> {
         let app_key = SystemKeys::app_key(organization, app_id);
+        require_tier(&app_key, KeyTier::Global)?;
         let entity_opt =
             self.state.get_entity(SYSTEM_VAULT_ID, app_key.as_bytes()).context(StateSnafu)?;
 

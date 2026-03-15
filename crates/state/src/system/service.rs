@@ -20,7 +20,7 @@ use snafu::{ResultExt, Snafu};
 use tracing::warn;
 
 use super::{
-    keys::SystemKeys,
+    keys::{KeyTier, SystemKeys},
     types::{
         EmailHashEntry, EmailVerificationToken, ErasureAuditRecord, MigrationSummary, NodeInfo,
         OnboardingAccount, OrgShredKey, OrganizationDirectoryEntry, OrganizationDirectoryStatus,
@@ -96,10 +96,28 @@ pub enum SystemError {
         /// Number of tokens successfully revoked before truncation.
         revoked: u64,
     },
+
+    /// A storage key was written to the wrong tier (GLOBAL vs REGIONAL).
+    ///
+    /// This indicates a data residency bug — the key would land in the
+    /// wrong state layer, potentially leaking PII to GLOBAL or breaking
+    /// cross-region resolution.
+    #[snafu(display("Key tier mismatch: {message}"))]
+    TierMismatch {
+        /// Descriptive message from `validate_key_tier`.
+        message: String,
+    },
 }
 
 /// Result type for system organization operations.
 pub type Result<T> = std::result::Result<T, SystemError>;
+
+/// Validates that a key belongs to the expected tier, returning a
+/// [`SystemError::TierMismatch`] on violation.
+pub(super) fn require_tier(key: &str, expected: KeyTier) -> Result<()> {
+    SystemKeys::validate_key_tier(key, expected)
+        .map_err(|message| SystemError::TierMismatch { message })
+}
 
 /// Service for reading from and writing to the `_system` organization.
 ///
@@ -1043,6 +1061,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         record: &PendingEmailVerification,
     ) -> Result<()> {
         let key = SystemKeys::onboard_verify_key(email_hmac);
+        require_tier(&key, KeyTier::Regional)?;
         let value = encode(record).context(CodecSnafu)?;
 
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
@@ -1105,6 +1124,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         account: &OnboardingAccount,
     ) -> Result<()> {
         let key = SystemKeys::onboard_account_key(email_hmac);
+        require_tier(&key, KeyTier::Regional)?;
         let value = encode(account).context(CodecSnafu)?;
 
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
@@ -1233,6 +1253,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             };
             if belongs_to_user {
                 let key = String::from_utf8_lossy(&entity.key).to_string();
+                require_tier(&key, KeyTier::Global)?;
                 delete_ops.push(Operation::DeleteEntity { key });
             }
         }
@@ -1251,14 +1272,17 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
                 // to avoid silently leaving PII index entries behind.
                 if let Some(email_record) = self.get_user_email(*email_id)? {
                     let idx_key = SystemKeys::email_index_key(&email_record.email);
+                    require_tier(&idx_key, KeyTier::Regional)?;
                     email_delete_ops.push(Operation::DeleteEntity { key: idx_key });
                 }
-                email_delete_ops
-                    .push(Operation::DeleteEntity { key: SystemKeys::user_email_key(*email_id) });
+                let ue_key = SystemKeys::user_email_key(*email_id);
+                require_tier(&ue_key, KeyTier::Regional)?;
+                email_delete_ops.push(Operation::DeleteEntity { key: ue_key });
             }
             // Clear the user-to-emails index in the same batch.
-            email_delete_ops
-                .push(Operation::DeleteEntity { key: SystemKeys::user_emails_index_key(user_id) });
+            let ue_idx_key = SystemKeys::user_emails_index_key(user_id);
+            require_tier(&ue_idx_key, KeyTier::Regional)?;
+            email_delete_ops.push(Operation::DeleteEntity { key: ue_idx_key });
             self.state
                 .apply_operations(SYSTEM_VAULT_ID, &email_delete_ops, 0)
                 .context(StateSnafu)?;
@@ -1268,17 +1292,20 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         // B-tree delete removes the logical entry; underlying bytes are encrypted
         // ciphertext (via EncryptedBackend), rendered unrecoverable.
         let shred_key = SystemKeys::user_shred_key(user_id);
+        require_tier(&shred_key, KeyTier::Regional)?;
         let delete_key_ops = vec![Operation::DeleteEntity { key: shred_key }];
         self.state.apply_operations(SYSTEM_VAULT_ID, &delete_key_ops, 0).context(StateSnafu)?;
 
         // Step 7: Delete the User record (contains plaintext name — PII).
         let user_key = SystemKeys::user_key(user_id);
+        require_tier(&user_key, KeyTier::Regional)?;
         let delete_user_ops = vec![Operation::DeleteEntity { key: user_key }];
         self.state.apply_operations(SYSTEM_VAULT_ID, &delete_user_ops, 0).context(StateSnafu)?;
 
         // Step 8: Write erasure audit record (insert-if-absent for idempotency).
         let audit_record = ErasureAuditRecord { user_id, erased_at: block_timestamp, region };
         let audit_key = SystemKeys::erasure_audit_key(user_id);
+        require_tier(&audit_key, KeyTier::Global)?;
         let audit_value = encode(&audit_record).context(CodecSnafu)?;
 
         // Use SetEntity without condition — overwrites are idempotent since
@@ -1325,6 +1352,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     pub fn store_user_shred_key(&self, user_id: UserId, key_bytes: &[u8; 32]) -> Result<()> {
         let shred_key = UserShredKey { user_id, key: *key_bytes, created_at: Utc::now() };
         let storage_key = SystemKeys::user_shred_key(user_id);
+        require_tier(&storage_key, KeyTier::Regional)?;
         let value = encode(&shred_key).context(CodecSnafu)?;
 
         let ops = vec![Operation::SetEntity {
@@ -1376,6 +1404,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ) -> Result<()> {
         let shred_key = OrgShredKey { organization, key: *key_bytes, created_at: Utc::now() };
         let storage_key = SystemKeys::org_shred_key(organization);
+        require_tier(&storage_key, KeyTier::Regional)?;
         let value = encode(&shred_key).context(CodecSnafu)?;
 
         let ops = vec![Operation::SetEntity {
@@ -1658,6 +1687,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             version: TokenVersion::default(),
         };
         let user_key = SystemKeys::user_key(user_id);
+        require_tier(&user_key, KeyTier::Regional)?;
         let user_value = encode(&user).context(CodecSnafu)?;
 
         let email_lower = email.to_lowercase();
@@ -1669,13 +1699,16 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             verified_at: None,
         };
         let email_key = SystemKeys::user_email_key(email_id);
+        require_tier(&email_key, KeyTier::Regional)?;
         let email_value = encode(&user_email).context(CodecSnafu)?;
 
         let emails_index_key = SystemKeys::user_emails_index_key(user_id);
+        require_tier(&emails_index_key, KeyTier::Regional)?;
         let email_ids: Vec<UserEmailId> = vec![email_id];
         let emails_index_value = encode(&email_ids).context(CodecSnafu)?;
 
         let email_idx_key = SystemKeys::email_index_key(&email_lower);
+        require_tier(&email_idx_key, KeyTier::Regional)?;
         let email_idx_value = email_id.value().to_string().into_bytes();
 
         let ops = vec![

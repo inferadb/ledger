@@ -1460,7 +1460,7 @@ impl proto::user_service_server::UserService for UserService {
                 let user = regional_sys
                     .get_user(user_id)
                     .map_err(|e| Status::internal(format!("Failed to read user: {e}")))?
-                    .ok_or_else(|| Status::not_found("User not found in region"))?;
+                    .ok_or_else(|| Status::permission_denied("Invalid verification code"))?;
 
                 // Check status — non-Active users get the same error as invalid code
                 // to prevent information leakage about account state (PRD #6)

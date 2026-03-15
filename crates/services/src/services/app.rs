@@ -946,7 +946,8 @@ impl proto::app_service_server::AppService for AppService {
                         assertion: assertion_id,
                         name: name.clone(),
                     };
-                self.ctx
+                let name_response = self
+                    .ctx
                     .propose_regional_org_encrypted(
                         org_meta.region,
                         name_request,
@@ -955,6 +956,9 @@ impl proto::app_service_server::AppService for AppService {
                         &mut ctx,
                     )
                     .await?;
+                if let LedgerResponse::Error { code, message } = name_response {
+                    return Err(super::helpers::error_code_to_status(code, message));
+                }
 
                 self.emit_event(
                     EventAction::AppAssertionCreated,

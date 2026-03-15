@@ -91,6 +91,14 @@ fn error_result(
     (ledger_error(code, message), None)
 }
 
+/// Validates a key's tier, returning a `LedgerResponse` error on mismatch.
+///
+/// Used in helper functions that return `Result<_, LedgerResponse>`.
+fn check_tier(key: &str, expected: KeyTier) -> Result<(), LedgerResponse> {
+    SystemKeys::validate_key_tier(key, expected)
+        .map_err(|msg| ledger_error(ErrorCode::Internal, msg))
+}
+
 /// Loads and decodes an `Organization` skeleton from the GLOBAL state layer.
 fn load_organization<B: StorageBackend>(
     state_layer: &inferadb_ledger_state::StateLayer<B>,
@@ -119,14 +127,17 @@ fn save_organization<B: StorageBackend>(
     organization: OrganizationId,
     org: &inferadb_ledger_state::system::Organization,
 ) -> Result<(), LedgerResponse> {
-    debug_assert!(
-        org.name.is_empty(),
-        "BUG: Organization skeleton must not carry a name to GLOBAL (org={})",
-        organization
-    );
+    if !org.name.is_empty() {
+        return Err(ledger_error(
+            ErrorCode::Internal,
+            format!(
+                "BUG: Organization skeleton must not carry a name to GLOBAL (org={})",
+                organization
+            ),
+        ));
+    }
     let key = SystemKeys::organization_key(organization);
-    SystemKeys::validate_key_tier(&key, KeyTier::Global)
-        .map_err(|msg| ledger_error(ErrorCode::Internal, msg))?;
+    check_tier(&key, KeyTier::Global)?;
     let bytes = encode(org).map_err(|e| {
         ledger_error(ErrorCode::Internal, format!("Failed to encode organization: {e}"))
     })?;
@@ -143,8 +154,7 @@ fn save_org_profile<B: StorageBackend>(
     profile: &OrganizationProfile,
 ) -> Result<(), LedgerResponse> {
     let key = SystemKeys::organization_profile_key(organization);
-    SystemKeys::validate_key_tier(&key, KeyTier::Regional)
-        .map_err(|msg| ledger_error(ErrorCode::Internal, msg))?;
+    check_tier(&key, KeyTier::Regional)?;
     let bytes = encode(profile).map_err(|e| {
         ledger_error(ErrorCode::Internal, format!("Failed to encode organization profile: {e}"))
     })?;
@@ -198,8 +208,7 @@ fn save_app<B: StorageBackend>(
     app: &App,
 ) -> Result<(), LedgerResponse> {
     let key = SystemKeys::app_key(organization, app.id);
-    SystemKeys::validate_key_tier(&key, KeyTier::Global)
-        .map_err(|msg| ledger_error(ErrorCode::Internal, msg))?;
+    check_tier(&key, KeyTier::Global)?;
     let bytes = encode(app)
         .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to encode app: {e}")))?;
     let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
@@ -309,8 +318,7 @@ fn save_team<B: StorageBackend>(
     record: &Team,
 ) -> Result<(), LedgerResponse> {
     let key = SystemKeys::team_key(organization, team);
-    SystemKeys::validate_key_tier(&key, KeyTier::Regional)
-        .map_err(|msg| ledger_error(ErrorCode::Internal, msg))?;
+    check_tier(&key, KeyTier::Regional)?;
     let bytes = encode(record)
         .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to encode team: {e}")))?;
     let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
@@ -3298,6 +3306,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 updated_at: Some(block_timestamp),
                             };
                             if let Err(e) = sys.register_user_directory(&user_dir) {
+                                // Log but continue — the HMAC CAS has already claimed
+                                // this email. Returning an error here would leave the
+                                // HMAC in Provisioning state with no directory entry,
+                                // and saga retries would permanently fail with
+                                // AlreadyExists (the idempotency check requires the
+                                // directory to exist). The saga's later steps will
+                                // fill in missing state.
                                 tracing::error!(
                                     user_id = user_id.value(),
                                     error = %e,
@@ -3345,6 +3360,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             };
                             if let Err(e) = sys.register_organization(&registry, *organization_slug)
                             {
+                                // Log but continue — same rationale as user directory
+                                // write above. The HMAC CAS claim is irrevocable within
+                                // this step; returning an error would strand the saga.
                                 tracing::error!(
                                     organization_id = organization_id.value(),
                                     error = %e,
@@ -3389,6 +3407,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 updated_at: Some(block_timestamp),
                             };
                             if let Err(e) = sys.register_organization_directory(&org_dir) {
+                                // Log but continue — same rationale as user directory
+                                // write above.
                                 tracing::error!(
                                     organization_id = organization_id.value(),
                                     error = %e,
@@ -3826,7 +3846,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         existing.updated_at = block_timestamp;
                                         (existing, Some(old))
                                     },
-                                    Err(_) => {
+                                    Err(LedgerResponse::Error {
+                                        code: ErrorCode::NotFound,
+                                        ..
+                                    }) => {
                                         // First write — create from scratch
                                         let fresh = Team {
                                             team: *team,
@@ -3839,6 +3862,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         };
                                         (fresh, None)
                                     },
+                                    Err(e) => return (e, None),
                                 };
 
                             match save_team(state_layer, *organization, *team, &profile) {
@@ -3893,7 +3917,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         existing.updated_at = block_timestamp;
                                         (existing, Some(old))
                                     },
-                                    Err(_) => {
+                                    Err(LedgerResponse::Error {
+                                        code: ErrorCode::NotFound,
+                                        ..
+                                    }) => {
                                         let fresh = AppProfile {
                                             app: *app,
                                             organization: *organization,
@@ -3903,10 +3930,16 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         };
                                         (fresh, None)
                                     },
+                                    Err(e) => return (e, None),
                                 };
 
                             // Batch profile write + name index ops atomically
                             let profile_key = SystemKeys::app_profile_key(*organization, *app);
+                            if let Err(msg) =
+                                SystemKeys::validate_key_tier(&profile_key, KeyTier::Regional)
+                            {
+                                return (ledger_error(ErrorCode::Internal, msg), None);
+                            }
                             let encoded = match encode(&profile) {
                                 Ok(bytes) => bytes,
                                 Err(e) => {
@@ -3996,13 +4029,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         organization_id: *organization,
                                     }
                                 },
-                                Err(_) => {
-                                    // Profile doesn't exist in REGIONAL state — not an error,
-                                    // proceed with GLOBAL cleanup
+                                Err(LedgerResponse::Error {
+                                    code: ErrorCode::NotFound, ..
+                                }) => {
+                                    // Team doesn't exist in REGIONAL state — succeed idempotently
                                     LedgerResponse::OrganizationTeamDeleted {
                                         organization_id: *organization,
                                     }
                                 },
+                                Err(e) => return (e, None),
                             }
                         } else {
                             ledger_error(
