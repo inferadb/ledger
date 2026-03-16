@@ -221,6 +221,11 @@ pub enum EmailVerificationResult {
         /// Opaque onboarding token (single-use, 12-hour TTL).
         onboarding_token: String,
     },
+    /// The user has TOTP enabled; second-factor verification is required.
+    TotpRequired {
+        /// 32-byte challenge nonce for the TOTP verification step.
+        challenge_nonce: Vec<u8>,
+    },
 }
 
 impl std::fmt::Debug for EmailVerificationResult {
@@ -233,6 +238,9 @@ impl std::fmt::Debug for EmailVerificationResult {
                 .finish(),
             Self::NewUser { .. } => {
                 f.debug_struct("NewUser").field("onboarding_token", &"<redacted>").finish()
+            },
+            Self::TotpRequired { .. } => {
+                f.debug_struct("TotpRequired").field("challenge_nonce", &"<redacted>").finish()
             },
         }
     }

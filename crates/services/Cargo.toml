@@ -38,8 +38,10 @@ arc-swap.workspace = true
 bon.workspace = true
 
 # Crypto
+sha1.workspace = true
 sha2.workspace = true
 seahash.workspace = true
+hmac.workspace = true
 rand.workspace = true
 bcrypt.workspace = true
 ed25519-dalek.workspace = true
@@ -48,6 +50,7 @@ jsonwebtoken.workspace = true
 
 # Memory safety
 zeroize.workspace = true
+subtle.workspace = true
 
 # Utilities
 chrono.workspace = true

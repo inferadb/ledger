@@ -130,8 +130,9 @@ Not recommended for production. Single-node provides no fault tolerance.
 
 - **Entity**: Key-value pair with optional TTL and versioning. Used for arbitrary data storage.
 - **Relationship**: Authorization tuple (resource, relation, subject). Used for access control.
+- **Credential**: User authentication factor (passkey, TOTP, recovery code). Stored in the system organization, encrypted via `EncryptedUserSystemRequest`.
 
-Both are stored in the same vault and included in the same blockchain.
+Entities and relationships are stored in vaults and included in the blockchain. Credentials are stored in the system organization's REGIONAL state layer.
 
 ### Can I query historical state?
 

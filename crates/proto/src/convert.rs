@@ -31,8 +31,10 @@
 
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
-    AppSlug as DomainAppSlug, BlockRetentionMode, BlockRetentionPolicy, EmailVerifyTokenId,
-    LedgerNodeId, OrganizationId, OrganizationSlug, UserEmailId, UserSlug, VaultSlug,
+    AppSlug as DomainAppSlug, BlockRetentionMode, BlockRetentionPolicy, CredentialType,
+    EmailVerifyTokenId, LedgerNodeId, OrganizationId, OrganizationSlug, PasskeyCredential,
+    RecoveryCodeCredential, TotpAlgorithm, TotpCredential, UserCredential, UserEmailId, UserSlug,
+    VaultSlug,
     events::{EventAction, EventEmission, EventEntry, EventOutcome, EventScope},
     merkle::MerkleProof as InternalMerkleProof,
     token::{
@@ -1114,6 +1116,293 @@ pub fn validate_signing_key_status(status: &str) -> Result<&str, Status> {
 /// Converts epoch seconds to a [`prost_types::Timestamp`].
 fn datetime_from_epoch_secs(epoch_secs: i64) -> prost_types::Timestamp {
     prost_types::Timestamp { seconds: epoch_secs, nanos: 0 }
+}
+
+// =============================================================================
+// CredentialType conversions (domain <-> proto)
+// =============================================================================
+
+/// Converts a domain [`CredentialType`] to the proto enum value.
+impl From<CredentialType> for proto::CredentialType {
+    fn from(ct: CredentialType) -> Self {
+        match ct {
+            CredentialType::Passkey => proto::CredentialType::Passkey,
+            CredentialType::Totp => proto::CredentialType::Totp,
+            CredentialType::RecoveryCode => proto::CredentialType::RecoveryCode,
+        }
+    }
+}
+
+/// Converts a proto [`CredentialType`](proto::CredentialType) to the domain type.
+impl TryFrom<proto::CredentialType> for CredentialType {
+    type Error = Status;
+
+    fn try_from(proto_ct: proto::CredentialType) -> Result<Self, Self::Error> {
+        match proto_ct {
+            proto::CredentialType::Passkey => Ok(CredentialType::Passkey),
+            proto::CredentialType::Totp => Ok(CredentialType::Totp),
+            proto::CredentialType::RecoveryCode => Ok(CredentialType::RecoveryCode),
+            proto::CredentialType::Unspecified => {
+                Err(Status::invalid_argument("credential type must be specified"))
+            },
+        }
+    }
+}
+
+/// Validates and converts an `i32` wire value to a proto [`CredentialType`](proto::CredentialType).
+/// Rejects `UNSPECIFIED` and unknown values.
+pub fn credential_type_from_i32(value: i32) -> Result<proto::CredentialType, Status> {
+    let ct = proto::CredentialType::try_from(value)
+        .map_err(|_| Status::invalid_argument(format!("unknown credential type value: {value}")))?;
+    match ct {
+        proto::CredentialType::Unspecified => {
+            Err(Status::invalid_argument("credential type must be specified"))
+        },
+        _ => Ok(ct),
+    }
+}
+
+// =============================================================================
+// TotpAlgorithm conversions (domain <-> proto)
+// =============================================================================
+
+/// Converts a domain [`TotpAlgorithm`] to the proto enum value.
+impl From<TotpAlgorithm> for proto::TotpAlgorithm {
+    fn from(alg: TotpAlgorithm) -> Self {
+        match alg {
+            TotpAlgorithm::Sha1 => proto::TotpAlgorithm::Sha1,
+            TotpAlgorithm::Sha256 => proto::TotpAlgorithm::Sha256,
+            TotpAlgorithm::Sha512 => proto::TotpAlgorithm::Sha512,
+        }
+    }
+}
+
+/// Converts a proto [`TotpAlgorithm`](proto::TotpAlgorithm) to the domain type.
+impl From<proto::TotpAlgorithm> for TotpAlgorithm {
+    fn from(proto_alg: proto::TotpAlgorithm) -> Self {
+        match proto_alg {
+            proto::TotpAlgorithm::Sha1 => TotpAlgorithm::Sha1,
+            proto::TotpAlgorithm::Sha256 => TotpAlgorithm::Sha256,
+            proto::TotpAlgorithm::Sha512 => TotpAlgorithm::Sha512,
+        }
+    }
+}
+
+/// Validates and converts an `i32` wire value to a proto [`TotpAlgorithm`](proto::TotpAlgorithm).
+///
+/// Unlike [`credential_type_from_i32`], there is no `UNSPECIFIED` sentinel — value 0 maps to
+/// `SHA1` (widest authenticator compatibility). An omitted field on the wire is therefore
+/// treated as SHA-1, which is the intended default.
+pub fn totp_algorithm_from_i32(value: i32) -> Result<proto::TotpAlgorithm, Status> {
+    proto::TotpAlgorithm::try_from(value)
+        .map_err(|_| Status::invalid_argument(format!("unknown TOTP algorithm value: {value}")))
+}
+
+// =============================================================================
+// PasskeyCredential conversions (domain <-> proto)
+// =============================================================================
+
+/// Converts a domain [`PasskeyCredential`] to proto
+/// [`PasskeyCredentialData`](proto::PasskeyCredentialData).
+impl From<&PasskeyCredential> for proto::PasskeyCredentialData {
+    fn from(pk: &PasskeyCredential) -> Self {
+        proto::PasskeyCredentialData {
+            credential_id: pk.credential_id.clone(),
+            public_key: pk.public_key.clone(),
+            sign_count: pk.sign_count,
+            transports: pk.transports.clone(),
+            backup_eligible: pk.backup_eligible,
+            backup_state: pk.backup_state,
+            attestation_format: pk.attestation_format.clone(),
+            aaguid: pk.aaguid.map(|a| a.to_vec()),
+        }
+    }
+}
+
+/// Converts proto [`PasskeyCredentialData`](proto::PasskeyCredentialData) to a domain
+/// [`PasskeyCredential`].
+impl TryFrom<&proto::PasskeyCredentialData> for PasskeyCredential {
+    type Error = Status;
+
+    fn try_from(proto_pk: &proto::PasskeyCredentialData) -> Result<Self, Self::Error> {
+        if proto_pk.credential_id.is_empty() {
+            return Err(Status::invalid_argument("passkey credential_id must not be empty"));
+        }
+        if proto_pk.public_key.is_empty() {
+            return Err(Status::invalid_argument("passkey public_key must not be empty"));
+        }
+        let aaguid = if let Some(ref bytes) = proto_pk.aaguid {
+            let arr: [u8; 16] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| Status::invalid_argument("aaguid must be exactly 16 bytes"))?;
+            Some(arr)
+        } else {
+            None
+        };
+        Ok(PasskeyCredential {
+            credential_id: proto_pk.credential_id.clone(),
+            public_key: proto_pk.public_key.clone(),
+            sign_count: proto_pk.sign_count,
+            transports: proto_pk.transports.clone(),
+            backup_eligible: proto_pk.backup_eligible,
+            backup_state: proto_pk.backup_state,
+            attestation_format: proto_pk.attestation_format.clone(),
+            aaguid,
+        })
+    }
+}
+
+// =============================================================================
+// TotpCredential conversions (domain <-> proto)
+// =============================================================================
+
+/// Converts a domain [`TotpCredential`] to proto [`TotpCredentialData`](proto::TotpCredentialData).
+impl From<&TotpCredential> for proto::TotpCredentialData {
+    fn from(totp: &TotpCredential) -> Self {
+        proto::TotpCredentialData {
+            secret: totp.secret.to_vec(),
+            algorithm: proto::TotpAlgorithm::from(totp.algorithm).into(),
+            digits: u32::from(totp.digits),
+            period: totp.period,
+        }
+    }
+}
+
+/// Converts proto [`TotpCredentialData`](proto::TotpCredentialData) to a domain [`TotpCredential`].
+impl TryFrom<&proto::TotpCredentialData> for TotpCredential {
+    type Error = Status;
+
+    fn try_from(proto_totp: &proto::TotpCredentialData) -> Result<Self, Self::Error> {
+        if proto_totp.secret.is_empty() {
+            return Err(Status::invalid_argument("TOTP secret must not be empty"));
+        }
+        let algorithm = totp_algorithm_from_i32(proto_totp.algorithm)?;
+        let digits = u8::try_from(proto_totp.digits)
+            .map_err(|_| Status::invalid_argument("TOTP digits out of range"))?;
+        if digits != 6 && digits != 8 {
+            return Err(Status::invalid_argument("TOTP digits must be 6 or 8"));
+        }
+        if proto_totp.period == 0 {
+            return Err(Status::invalid_argument("TOTP period must be non-zero"));
+        }
+        Ok(TotpCredential {
+            secret: zeroize::Zeroizing::new(proto_totp.secret.clone()),
+            algorithm: algorithm.into(),
+            digits,
+            period: proto_totp.period,
+        })
+    }
+}
+
+// =============================================================================
+// RecoveryCodeCredential conversions (domain <-> proto)
+// =============================================================================
+
+/// Converts a domain [`RecoveryCodeCredential`] to proto
+/// [`RecoveryCodeCredentialData`](proto::RecoveryCodeCredentialData).
+impl From<&RecoveryCodeCredential> for proto::RecoveryCodeCredentialData {
+    fn from(rc: &RecoveryCodeCredential) -> Self {
+        proto::RecoveryCodeCredentialData {
+            code_hashes: rc.code_hashes.iter().map(|h| h.to_vec()).collect(),
+            total_generated: u32::from(rc.total_generated),
+        }
+    }
+}
+
+/// Converts proto [`RecoveryCodeCredentialData`](proto::RecoveryCodeCredentialData) to a domain
+/// [`RecoveryCodeCredential`].
+impl TryFrom<&proto::RecoveryCodeCredentialData> for RecoveryCodeCredential {
+    type Error = Status;
+
+    fn try_from(proto_rc: &proto::RecoveryCodeCredentialData) -> Result<Self, Self::Error> {
+        if proto_rc.code_hashes.is_empty() {
+            return Err(Status::invalid_argument(
+                "recovery code credential must contain at least one code hash",
+            ));
+        }
+        let code_hashes = proto_rc
+            .code_hashes
+            .iter()
+            .map(|h| {
+                let arr: [u8; 32] = h.as_slice().try_into().map_err(|_| {
+                    Status::invalid_argument("recovery code hash must be exactly 32 bytes")
+                })?;
+                Ok(arr)
+            })
+            .collect::<Result<Vec<[u8; 32]>, Status>>()?;
+        Ok(RecoveryCodeCredential {
+            code_hashes,
+            total_generated: u8::try_from(proto_rc.total_generated)
+                .map_err(|_| Status::invalid_argument("total_generated must be 0-255"))?,
+        })
+    }
+}
+
+// =============================================================================
+// UserCredential conversions (domain <-> proto)
+// =============================================================================
+
+/// Converts a domain [`UserCredential`] to a proto [`UserCredential`](proto::UserCredential).
+///
+/// The `user` field is set to `None` because `UserId` → `UserSlug` resolution
+/// happens in the service layer via `SlugResolver`. Callers must set the
+/// `user` field on the returned proto message.
+pub fn user_credential_to_proto(
+    cred: &UserCredential,
+    user_slug: UserSlug,
+) -> proto::UserCredential {
+    use inferadb_ledger_types::CredentialData;
+
+    let data = match &cred.credential_data {
+        CredentialData::Passkey(pk) => Some(proto::user_credential::Data::Passkey(pk.into())),
+        CredentialData::Totp(totp) => Some(proto::user_credential::Data::Totp(totp.into())),
+        CredentialData::RecoveryCode(rc) => {
+            Some(proto::user_credential::Data::RecoveryCode(rc.into()))
+        },
+    };
+
+    proto::UserCredential {
+        id: cred.id.value(),
+        user: Some(proto::UserSlug::from(user_slug)),
+        credential_type: proto::CredentialType::from(cred.credential_type).into(),
+        name: cred.name.clone(),
+        enabled: cred.enabled,
+        created_at: Some(datetime_to_proto_timestamp(&cred.created_at)),
+        last_used_at: cred.last_used_at.as_ref().map(datetime_to_proto_timestamp),
+        data,
+    }
+}
+
+/// Strips the TOTP secret from a proto [`UserCredential`](proto::UserCredential) for safe
+/// return to API consumers. The secret is write-once and never returned after creation.
+pub fn strip_totp_secret(cred: &mut proto::UserCredential) {
+    if let Some(proto::user_credential::Data::Totp(ref mut totp)) = cred.data {
+        totp.secret.clear();
+    }
+}
+
+/// Strips recovery code hashes from a proto [`UserCredential`](proto::UserCredential).
+/// Hashes are SHA-256 of short alphanumeric codes and must not be exposed to API
+/// consumers (offline brute-force risk). The remaining count is preserved via the
+/// vector length before clearing.
+pub fn strip_recovery_code_hashes(cred: &mut proto::UserCredential) {
+    if let Some(proto::user_credential::Data::RecoveryCode(ref mut rc)) = cred.data {
+        rc.code_hashes.clear();
+    }
+}
+
+// =============================================================================
+// CredentialInfo conversions (domain string <-> proto)
+// =============================================================================
+
+/// Validates a [`CredentialInfo`](proto::CredentialInfo) primary method string.
+/// Valid values: `"passkey"`, `"email_code"`, `"recovery_code"`.
+pub fn validate_credential_info_type(credential_type: &str) -> Result<&str, Status> {
+    match credential_type {
+        "passkey" | "email_code" | "recovery_code" => Ok(credential_type),
+        _ => Err(Status::invalid_argument("invalid credential type in CredentialInfo")),
+    }
 }
 
 #[cfg(test)]
@@ -2657,5 +2946,387 @@ mod tests {
         assert!(validate_signing_key_status("unknown").is_err());
         assert!(validate_signing_key_status("").is_err());
         assert!(validate_signing_key_status("Active").is_err()); // case-sensitive
+    }
+
+    // -------------------------------------------------------------------------
+    // CredentialType conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn credential_type_domain_to_proto_roundtrip() {
+        for (domain, expected_proto) in [
+            (CredentialType::Passkey, proto::CredentialType::Passkey),
+            (CredentialType::Totp, proto::CredentialType::Totp),
+            (CredentialType::RecoveryCode, proto::CredentialType::RecoveryCode),
+        ] {
+            let proto_ct: proto::CredentialType = domain.into();
+            assert_eq!(proto_ct, expected_proto);
+            let roundtrip: CredentialType = proto_ct.try_into().unwrap();
+            assert_eq!(roundtrip, domain);
+        }
+    }
+
+    #[test]
+    fn credential_type_unspecified_rejected() {
+        let result: Result<CredentialType, Status> = proto::CredentialType::Unspecified.try_into();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn credential_type_from_i32_valid() {
+        assert_eq!(credential_type_from_i32(1).unwrap(), proto::CredentialType::Passkey);
+        assert_eq!(credential_type_from_i32(2).unwrap(), proto::CredentialType::Totp);
+        assert_eq!(credential_type_from_i32(3).unwrap(), proto::CredentialType::RecoveryCode);
+    }
+
+    #[test]
+    fn credential_type_from_i32_unspecified_rejected() {
+        let result = credential_type_from_i32(0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn credential_type_from_i32_unknown_rejected() {
+        assert!(credential_type_from_i32(99).is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // TotpAlgorithm conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn totp_algorithm_domain_to_proto_roundtrip() {
+        for (domain, expected_proto) in [
+            (TotpAlgorithm::Sha1, proto::TotpAlgorithm::Sha1),
+            (TotpAlgorithm::Sha256, proto::TotpAlgorithm::Sha256),
+            (TotpAlgorithm::Sha512, proto::TotpAlgorithm::Sha512),
+        ] {
+            let proto_alg: proto::TotpAlgorithm = domain.into();
+            assert_eq!(proto_alg, expected_proto);
+            let roundtrip: TotpAlgorithm = proto_alg.into();
+            assert_eq!(roundtrip, domain);
+        }
+    }
+
+    #[test]
+    fn totp_algorithm_from_i32_valid() {
+        assert_eq!(totp_algorithm_from_i32(0).unwrap(), proto::TotpAlgorithm::Sha1);
+        assert_eq!(totp_algorithm_from_i32(1).unwrap(), proto::TotpAlgorithm::Sha256);
+        assert_eq!(totp_algorithm_from_i32(2).unwrap(), proto::TotpAlgorithm::Sha512);
+    }
+
+    #[test]
+    fn totp_algorithm_from_i32_unknown_rejected() {
+        assert!(totp_algorithm_from_i32(99).is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // PasskeyCredential conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn passkey_credential_roundtrip() {
+        let domain = PasskeyCredential {
+            credential_id: vec![1, 2, 3],
+            public_key: vec![4, 5, 6],
+            sign_count: 42,
+            transports: vec!["internal".to_string(), "usb".to_string()],
+            backup_eligible: true,
+            backup_state: false,
+            attestation_format: Some("packed".to_string()),
+            aaguid: Some([0u8; 16]),
+        };
+
+        let proto_pk: proto::PasskeyCredentialData = (&domain).into();
+        assert_eq!(proto_pk.credential_id, vec![1, 2, 3]);
+        assert_eq!(proto_pk.public_key, vec![4, 5, 6]);
+        assert_eq!(proto_pk.sign_count, 42);
+        assert_eq!(proto_pk.transports, vec!["internal", "usb"]);
+        assert!(proto_pk.backup_eligible);
+        assert!(!proto_pk.backup_state);
+        assert_eq!(proto_pk.attestation_format, Some("packed".to_string()));
+        assert_eq!(proto_pk.aaguid, Some(vec![0u8; 16]));
+
+        let roundtrip = PasskeyCredential::try_from(&proto_pk).unwrap();
+        assert_eq!(roundtrip, domain);
+    }
+
+    #[test]
+    fn passkey_credential_empty_credential_id_rejected() {
+        let proto_pk = proto::PasskeyCredentialData {
+            credential_id: vec![],
+            public_key: vec![1],
+            ..Default::default()
+        };
+        assert!(PasskeyCredential::try_from(&proto_pk).is_err());
+    }
+
+    #[test]
+    fn passkey_credential_empty_public_key_rejected() {
+        let proto_pk = proto::PasskeyCredentialData {
+            credential_id: vec![1],
+            public_key: vec![],
+            ..Default::default()
+        };
+        assert!(PasskeyCredential::try_from(&proto_pk).is_err());
+    }
+
+    #[test]
+    fn passkey_credential_bad_aaguid_rejected() {
+        let proto_pk = proto::PasskeyCredentialData {
+            credential_id: vec![1],
+            public_key: vec![2],
+            aaguid: Some(vec![0; 8]), // wrong length
+            ..Default::default()
+        };
+        assert!(PasskeyCredential::try_from(&proto_pk).is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // TotpCredential conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn totp_credential_roundtrip() {
+        let domain = TotpCredential {
+            secret: zeroize::Zeroizing::new(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+            algorithm: TotpAlgorithm::Sha1,
+            digits: 6,
+            period: 30,
+        };
+
+        let proto_totp: proto::TotpCredentialData = (&domain).into();
+        assert_eq!(proto_totp.secret, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(proto_totp.algorithm, proto::TotpAlgorithm::Sha1 as i32);
+        assert_eq!(proto_totp.digits, 6);
+        assert_eq!(proto_totp.period, 30);
+
+        let roundtrip = TotpCredential::try_from(&proto_totp).unwrap();
+        assert_eq!(roundtrip, domain);
+    }
+
+    #[test]
+    fn totp_credential_empty_secret_rejected() {
+        let proto_totp = proto::TotpCredentialData { secret: vec![], ..Default::default() };
+        assert!(TotpCredential::try_from(&proto_totp).is_err());
+    }
+
+    #[test]
+    fn totp_credential_invalid_digits_rejected() {
+        let proto_totp = proto::TotpCredentialData {
+            secret: vec![1; 20],
+            algorithm: 0,
+            digits: 4, // Only 6 or 8 are valid per RFC 6238
+            period: 30,
+        };
+        assert!(TotpCredential::try_from(&proto_totp).is_err());
+    }
+
+    #[test]
+    fn totp_credential_8_digits_accepted() {
+        let proto_totp =
+            proto::TotpCredentialData { secret: vec![1; 20], algorithm: 0, digits: 8, period: 30 };
+        let result = TotpCredential::try_from(&proto_totp).unwrap();
+        assert_eq!(result.digits, 8);
+    }
+
+    #[test]
+    fn totp_credential_zero_period_rejected() {
+        let proto_totp =
+            proto::TotpCredentialData { secret: vec![1; 20], algorithm: 0, digits: 6, period: 0 };
+        assert!(TotpCredential::try_from(&proto_totp).is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // RecoveryCodeCredential conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn recovery_code_credential_roundtrip() {
+        let hash1 = [1u8; 32];
+        let hash2 = [2u8; 32];
+        let domain =
+            RecoveryCodeCredential { code_hashes: vec![hash1, hash2], total_generated: 10 };
+
+        let proto_rc: proto::RecoveryCodeCredentialData = (&domain).into();
+        assert_eq!(proto_rc.code_hashes.len(), 2);
+        assert_eq!(proto_rc.code_hashes[0], hash1.to_vec());
+        assert_eq!(proto_rc.code_hashes[1], hash2.to_vec());
+        assert_eq!(proto_rc.total_generated, 10);
+
+        let roundtrip = RecoveryCodeCredential::try_from(&proto_rc).unwrap();
+        assert_eq!(roundtrip, domain);
+    }
+
+    #[test]
+    fn recovery_code_bad_hash_length_rejected() {
+        let proto_rc = proto::RecoveryCodeCredentialData {
+            code_hashes: vec![vec![0; 16]], // wrong length
+            total_generated: 1,
+        };
+        assert!(RecoveryCodeCredential::try_from(&proto_rc).is_err());
+    }
+
+    #[test]
+    fn recovery_code_empty_hashes_rejected() {
+        let proto_rc =
+            proto::RecoveryCodeCredentialData { code_hashes: vec![], total_generated: 0 };
+        assert!(RecoveryCodeCredential::try_from(&proto_rc).is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // UserCredential conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn user_credential_to_proto_passkey() {
+        use inferadb_ledger_types::{CredentialData, UserId};
+
+        let cred = UserCredential {
+            id: inferadb_ledger_types::UserCredentialId::new(42),
+            user: UserId::new(7),
+            credential_type: CredentialType::Passkey,
+            credential_data: CredentialData::Passkey(PasskeyCredential {
+                credential_id: vec![1, 2],
+                public_key: vec![3, 4],
+                sign_count: 5,
+                transports: vec!["internal".to_string()],
+                backup_eligible: false,
+                backup_state: false,
+                attestation_format: None,
+                aaguid: None,
+            }),
+            name: "MacBook Touch ID".to_string(),
+            enabled: true,
+            created_at: chrono::Utc::now(),
+            last_used_at: None,
+        };
+
+        let user_slug = UserSlug::new(999);
+        let proto_cred = user_credential_to_proto(&cred, user_slug);
+
+        assert_eq!(proto_cred.id, 42);
+        assert_eq!(proto_cred.user.as_ref().unwrap().slug, 999);
+        assert_eq!(proto_cred.credential_type, proto::CredentialType::Passkey as i32);
+        assert_eq!(proto_cred.name, "MacBook Touch ID");
+        assert!(proto_cred.enabled);
+        assert!(proto_cred.created_at.is_some());
+        assert!(proto_cred.last_used_at.is_none());
+        assert!(matches!(proto_cred.data, Some(proto::user_credential::Data::Passkey(_))));
+    }
+
+    #[test]
+    fn user_credential_to_proto_totp() {
+        use inferadb_ledger_types::{CredentialData, UserId};
+
+        let cred = UserCredential {
+            id: inferadb_ledger_types::UserCredentialId::new(10),
+            user: UserId::new(3),
+            credential_type: CredentialType::Totp,
+            credential_data: CredentialData::Totp(TotpCredential {
+                secret: zeroize::Zeroizing::new(vec![42; 20]),
+                algorithm: TotpAlgorithm::Sha1,
+                digits: 6,
+                period: 30,
+            }),
+            name: "Authenticator app".to_string(),
+            enabled: true,
+            created_at: chrono::Utc::now(),
+            last_used_at: Some(chrono::Utc::now()),
+        };
+
+        let proto_cred = user_credential_to_proto(&cred, UserSlug::new(555));
+        assert!(proto_cred.last_used_at.is_some());
+        assert!(matches!(proto_cred.data, Some(proto::user_credential::Data::Totp(_))));
+    }
+
+    // -------------------------------------------------------------------------
+    // strip_totp_secret tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn strip_totp_secret_clears_totp() {
+        let mut cred = proto::UserCredential {
+            data: Some(proto::user_credential::Data::Totp(proto::TotpCredentialData {
+                secret: vec![1, 2, 3],
+                algorithm: 0,
+                digits: 6,
+                period: 30,
+            })),
+            ..Default::default()
+        };
+        strip_totp_secret(&mut cred);
+        if let Some(proto::user_credential::Data::Totp(ref totp)) = cred.data {
+            assert!(totp.secret.is_empty());
+        } else {
+            unreachable!("expected TOTP data");
+        }
+    }
+
+    #[test]
+    fn strip_totp_secret_noop_for_passkey() {
+        let mut cred = proto::UserCredential {
+            data: Some(proto::user_credential::Data::Passkey(proto::PasskeyCredentialData {
+                credential_id: vec![1],
+                public_key: vec![2],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        strip_totp_secret(&mut cred);
+        assert!(matches!(cred.data, Some(proto::user_credential::Data::Passkey(_))));
+    }
+
+    #[test]
+    fn strip_recovery_code_hashes_clears_hashes() {
+        let mut cred = proto::UserCredential {
+            data: Some(proto::user_credential::Data::RecoveryCode(
+                proto::RecoveryCodeCredentialData {
+                    code_hashes: vec![vec![1; 32], vec![2; 32]],
+                    total_generated: 10,
+                },
+            )),
+            ..Default::default()
+        };
+        strip_recovery_code_hashes(&mut cred);
+        if let Some(proto::user_credential::Data::RecoveryCode(ref rc)) = cred.data {
+            assert!(rc.code_hashes.is_empty());
+            assert_eq!(rc.total_generated, 10);
+        } else {
+            unreachable!("expected recovery code data");
+        }
+    }
+
+    #[test]
+    fn strip_recovery_code_hashes_noop_for_passkey() {
+        let mut cred = proto::UserCredential {
+            data: Some(proto::user_credential::Data::Passkey(proto::PasskeyCredentialData {
+                credential_id: vec![1],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        strip_recovery_code_hashes(&mut cred);
+        assert!(matches!(cred.data, Some(proto::user_credential::Data::Passkey(_))));
+    }
+
+    // -------------------------------------------------------------------------
+    // CredentialInfo validation tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn validate_credential_info_type_valid() {
+        assert_eq!(validate_credential_info_type("passkey").unwrap(), "passkey");
+        assert_eq!(validate_credential_info_type("email_code").unwrap(), "email_code");
+        assert_eq!(validate_credential_info_type("recovery_code").unwrap(), "recovery_code");
+    }
+
+    #[test]
+    fn validate_credential_info_type_invalid() {
+        assert!(validate_credential_info_type("unknown").is_err());
+        assert!(validate_credential_info_type("").is_err());
+        assert!(validate_credential_info_type("Passkey").is_err()); // case-sensitive
     }
 }

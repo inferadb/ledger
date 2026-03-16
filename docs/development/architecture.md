@@ -138,13 +138,21 @@ Binary entry point and configuration.
 
 ### `inferadb-ledger-sdk`
 
-Client SDK for Rust applications.
+Client SDK for Rust applications. Organized into domain-specific modules:
+
+**Structure:**
+
+- `ops/` — `impl LedgerClient` method groups: `data`, `organization`, `user`, `vault`, `app`, `credential`, `token`, `events`, `health`, `list`, `onboarding`, `verified_read`
+- `types/` — Domain types: `admin`, `app`, `credential`, `events`, `query`, `read`, `streaming`, `verified_read`
+- `proto_util.rs` — Shared proto conversion helpers
+- `client.rs` — Struct definition, lifecycle, gRPC client factories
 
 **Key types:**
 
-- `LedgerClient` - High-level client
-- `ConnectionPool` - Connection management
-- `RetryPolicy` - Automatic retry with backoff
+- `LedgerClient` — High-level client with methods from all `ops/` modules
+- `ConnectionPool` — Connection management with circuit breaker
+- `RetryPolicy` — Automatic retry with backoff
+- `UserCredentialInfo`, `CredentialType` — Credential management types
 
 ### `inferadb-ledger-test-utils`
 

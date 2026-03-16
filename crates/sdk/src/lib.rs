@@ -96,7 +96,7 @@ pub use error::{Result, SdkError};
 // Re-export commonly used types from inferadb-ledger-types
 pub use inferadb_ledger_types::{
     AppId, AppSlug, ClientAssertionId, OrganizationId, OrganizationSlug, Region, TeamId, TeamSlug,
-    UserEmailId, UserRole, UserSlug, UserStatus, VaultId, VaultSlug,
+    UserCredentialId, UserEmailId, UserRole, UserSlug, UserStatus, VaultId, VaultSlug,
 };
 pub use metrics::{ConnectionEvent, MetricsSdkMetrics, NoopSdkMetrics, SdkMetrics};
 pub use retry::{with_retry, with_retry_cancellable};
@@ -118,6 +118,10 @@ pub use types::{
     app::{
         AppClientAssertionInfo, AppClientSecretStatus, AppCredentialType, AppCredentialsInfo,
         AppInfo, AppVaultConnectionInfo, CreateAppClientAssertionResult,
+    },
+    credential::{
+        CredentialData, CredentialType, PasskeyCredentialInfo, RecoveryCodeCredentialInfo,
+        RecoveryCodeResult, TotpAlgorithm, TotpCredentialInfo, UserCredentialInfo,
     },
     events::{
         EventEmissionPath, EventFilter, EventOutcome, EventPage, EventScope, EventSource,

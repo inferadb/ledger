@@ -64,6 +64,9 @@ fn extract_onboarding_token(resp: &proto::VerifyEmailCodeResponse) -> &str {
         proto::verify_email_code_response::Result::ExistingUser(_) => {
             panic!("expected NewUser result, got ExistingUser")
         },
+        proto::verify_email_code_response::Result::TotpRequired(_) => {
+            panic!("expected NewUser result, got TotpRequired")
+        },
     }
 }
 

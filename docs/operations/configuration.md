@@ -179,15 +179,14 @@ Data is lost when the process exits.
 
 Controls write request batching for throughput vs latency trade-off.
 
-```bash
-# High throughput (batch up to 500 requests, wait up to 50ms)
-INFERADB__LEDGER__BATCH_SIZE=500
-INFERADB__LEDGER__BATCH_DELAY=0.05
+Batching is configured via `RuntimeConfig` (the `UpdateConfig` admin RPC), not environment variables. Default values:
 
-# Low latency (smaller batches, shorter wait)
-INFERADB__LEDGER__BATCH_SIZE=10
-INFERADB__LEDGER__BATCH_DELAY=0.001
-```
+| Parameter        | Default | Description                         |
+| ---------------- | ------- | ----------------------------------- |
+| `max_batch_size` | 100     | Maximum writes per batch            |
+| `batch_timeout`  | 2ms     | Max wait before flushing            |
+| `tick_interval`  | 500µs   | Check interval for batch timeout    |
+| `eager_commit`   | true    | Flush immediately when queue drains |
 
 ### Eager vs Timeout Commits
 

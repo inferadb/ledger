@@ -21,6 +21,10 @@ Ledger is InferaDB's storage layer—a blockchain database for cryptographically
 | **`_system`**     | Special organization for global data: user accounts, organization routing, signing keys, and refresh tokens. Replicated to all nodes.    |
 | **Signing Key**   | Ed25519 key pair for JWT signing. Private key stored envelope-encrypted (RMK→DEK→key). Scoped globally or per-organization.              |
 | **Refresh Token** | Long-lived opaque token for obtaining new JWT access tokens. Family-tracked for theft detection.                                         |
+| **Credential**    | User authentication factor (passkey, TOTP, recovery code). Stored REGIONAL, encrypted in Raft log via `EncryptedUserSystemRequest`.      |
+| **Passkey**       | WebAuthn credential storing a COSE public key and replay-protection counter. Verified by the calling service (e.g., Control).            |
+| **TOTP**          | Time-based One-Time Password (RFC 6238). Secret stored encrypted; Ledger verifies codes in the service layer (not Raft apply).           |
+| **Recovery Code** | One-time backup codes (SHA-256 hashed) generated during TOTP setup. Bypass TOTP when device is lost.                                     |
 
 ## Hierarchy
 
@@ -151,20 +155,24 @@ _meta:seq:refresh_token   → next RefreshTokenId
 
 ### In `_system` (organization_slug = 0)
 
-| Entity Type          | Key Pattern                  | Example                         |
-| -------------------- | ---------------------------- | ------------------------------- |
-| User                 | `user:{id}`                  | `user:1`                        |
-| User email           | `user_email:{id}`            | `user_email:1`                  |
-| Email index          | `_idx:email:{email}`         | `_idx:email:alice@example.com`  |
-| User emails index    | `_idx:user_emails:{user_id}` | `_idx:user_emails:1`            |
-| Organization routing | `ns:{organization_slug}`     | `ns:1`                          |
-| Node info            | `_meta:node:{id}`            | `_meta:node:A`                  |
-| Signing key          | `signing_key:{id}`           | `signing_key:1`                 |
-| Signing key index    | `_idx:signing_key:kid:{kid}` | `_idx:signing_key:kid:{uuid}`   |
-| Signing key scope    | `_idx:signing_key:scope:...` | `_idx:signing_key:scope:global` |
-| Refresh token        | `refresh_token:{id}`         | `refresh_token:1`               |
-| Refresh token hash   | `_idx:refresh_token:hash:..` | `_idx:refresh_token:hash:{hex}` |
-| Sequence counter     | `_meta:seq:{entity_type}`    | `_meta:seq:user`                |
+| Entity Type          | Key Pattern                               | Example                                |
+| -------------------- | ----------------------------------------- | -------------------------------------- |
+| User                 | `user:{id}`                               | `user:1`                               |
+| User email           | `user_email:{id}`                         | `user_email:1`                         |
+| Email index          | `_idx:email:{email}`                      | `_idx:email:alice@example.com`         |
+| User emails index    | `_idx:user_emails:{user_id}`              | `_idx:user_emails:1`                   |
+| Organization         | `org:{id}`                                | `org:1`                                |
+| Organization routing | `_dir:org_registry:{id}`                  | `_dir:org_registry:1`                  |
+| Node info            | `_meta:node:{id}`                         | `_meta:node:A`                         |
+| Signing key          | `signing_key:{id}`                        | `signing_key:1`                        |
+| Signing key index    | `_idx:signing_key:kid:{kid}`              | `_idx:signing_key:kid:{uuid}`          |
+| Signing key scope    | `_idx:signing_key:scope:...`              | `_idx:signing_key:scope:global`        |
+| Refresh token        | `refresh_token:{id}`                      | `refresh_token:1`                      |
+| Refresh token hash   | `_idx:refresh_token:hash:..`              | `_idx:refresh_token:hash:{hex}`        |
+| User credential      | `user_credential:{uid}:{id}`              | `user_credential:1:1`                  |
+| Credential type idx  | `_idx:user_credential:type:{uid}:{type}:` | `_idx:user_credential:type:1:passkey:` |
+| TOTP challenge       | `_tmp:totp_challenge:{uid}:{nonce}`       | `_tmp:totp_challenge:1:a1b2...`        |
+| Sequence counter     | `_meta:seq:{entity_type}`                 | `_meta:seq:user`                       |
 
 ### In an Organization
 

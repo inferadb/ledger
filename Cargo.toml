@@ -43,6 +43,7 @@ openraft = { version = "0.9", features = ["serde", "tracing-log", "loosen-follow
 validit = "0.2"
 
 # Crypto
+sha1 = "0.10"
 sha2 = "0.10"
 seahash = "4"
 hmac = "0.12"

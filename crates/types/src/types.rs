@@ -360,6 +360,24 @@ impl Default for RefreshTokenId {
     }
 }
 
+define_id!(
+    /// Internal sequential identifier for a user credential.
+    ///
+    /// Wraps an `i64` assigned by the Raft leader from the
+    /// `_meta:seq:user_credential` REGIONAL sequence counter.
+    ///
+    /// # Display
+    ///
+    /// Formats with `ucred:` prefix: `ucred:1`.
+    UserCredentialId, i64, "ucred"
+);
+
+impl Default for UserCredentialId {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
 // ============================================================================
 // TokenVersion
 // ============================================================================
@@ -1371,6 +1389,251 @@ impl Default for BlockRetentionPolicy {
 }
 
 // ============================================================================
+// User Credentials
+// ============================================================================
+
+/// Discriminator for credential types stored in Ledger.
+///
+/// Each variant corresponds to a distinct authentication mechanism.
+/// Email-code authentication is not a credential type — it's the
+/// built-in primary auth method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialType {
+    /// WebAuthn passkey (FIDO2). Stores public key material.
+    Passkey,
+    /// Time-based One-Time Password (RFC 6238). At most one per user.
+    Totp,
+    /// One-time recovery codes for TOTP bypass. At most one set per user.
+    RecoveryCode,
+}
+
+impl fmt::Display for CredentialType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Passkey => write!(f, "passkey"),
+            Self::Totp => write!(f, "totp"),
+            Self::RecoveryCode => write!(f, "recovery_code"),
+        }
+    }
+}
+
+/// TOTP hash algorithm (RFC 6238 §5.2).
+///
+/// SHA1 has the widest authenticator compatibility and is the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TotpAlgorithm {
+    /// HMAC-SHA1 (default, widest authenticator compatibility).
+    #[default]
+    Sha1,
+    /// HMAC-SHA256.
+    Sha256,
+    /// HMAC-SHA512.
+    Sha512,
+}
+
+impl fmt::Display for TotpAlgorithm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Sha1 => write!(f, "sha1"),
+            Self::Sha256 => write!(f, "sha256"),
+            Self::Sha512 => write!(f, "sha512"),
+        }
+    }
+}
+
+/// WebAuthn passkey credential data.
+///
+/// Stores the public key material and metadata from a WebAuthn
+/// registration ceremony. The private key never leaves the
+/// authenticator device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasskeyCredential {
+    /// WebAuthn credential ID (opaque, authenticator-generated).
+    pub credential_id: Vec<u8>,
+    /// COSE-encoded public key for signature verification.
+    pub public_key: Vec<u8>,
+    /// Monotonic counter for replay protection (updated on each use).
+    pub sign_count: u32,
+    /// Transport hints from the authenticator (e.g., "internal", "usb", "ble", "nfc").
+    pub transports: Vec<String>,
+    /// Whether the credential is eligible for multi-device sync.
+    pub backup_eligible: bool,
+    /// Whether the credential is currently synced across devices.
+    pub backup_state: bool,
+    /// Attestation statement format (e.g., "packed", "tpm"), if provided.
+    pub attestation_format: Option<String>,
+    /// Authenticator Attestation GUID identifying the authenticator model
+    /// (e.g., YubiKey 5, Touch ID). Used for policy enforcement and admin
+    /// visibility. `None` if the authenticator did not provide an AAGUID.
+    pub aaguid: Option<[u8; 16]>,
+}
+
+/// TOTP credential data (RFC 6238).
+///
+/// The `secret` field is the shared HMAC key used to generate time-based
+/// codes. It derives `Zeroize` and `ZeroizeOnDrop` to clear memory after use.
+/// Secrets are write-once — never returned after initial creation.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TotpCredential {
+    /// 20-byte HMAC secret (RFC 6238). Zeroed from memory on drop.
+    #[serde(with = "zeroize_vec_serde")]
+    pub secret: zeroize::Zeroizing<Vec<u8>>,
+    /// Hash algorithm for TOTP computation.
+    #[serde(default)]
+    pub algorithm: TotpAlgorithm,
+    /// Number of digits in the generated code (standard: 6).
+    #[serde(default = "default_totp_digits")]
+    pub digits: u8,
+    /// Time step in seconds (standard: 30).
+    #[serde(default = "default_totp_period")]
+    pub period: u32,
+}
+
+impl fmt::Debug for TotpCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TotpCredential")
+            .field("secret", &"[REDACTED]")
+            .field("algorithm", &self.algorithm)
+            .field("digits", &self.digits)
+            .field("period", &self.period)
+            .finish()
+    }
+}
+
+const fn default_totp_digits() -> u8 {
+    6
+}
+
+const fn default_totp_period() -> u32 {
+    30
+}
+
+/// Recovery code credential data.
+///
+/// Stores SHA-256 hashes of one-time use recovery codes. Each code
+/// is consumed atomically — its hash is removed from the list on use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryCodeCredential {
+    /// SHA-256 hashes of unused recovery codes.
+    pub code_hashes: Vec<[u8; 32]>,
+    /// Original number of codes generated (e.g., 10).
+    pub total_generated: u8,
+}
+
+/// Type-specific credential data stored alongside a [`UserCredential`].
+///
+/// Uses serde's default externally-tagged representation for postcard
+/// compatibility (internally-tagged enums are not supported by postcard).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialData {
+    /// WebAuthn passkey data.
+    Passkey(PasskeyCredential),
+    /// TOTP shared secret and parameters.
+    Totp(TotpCredential),
+    /// Recovery code hashes.
+    RecoveryCode(RecoveryCodeCredential),
+}
+
+impl CredentialData {
+    /// Returns the [`CredentialType`] discriminator for this data variant.
+    pub fn credential_type(&self) -> CredentialType {
+        match self {
+            Self::Passkey(_) => CredentialType::Passkey,
+            Self::Totp(_) => CredentialType::Totp,
+            Self::RecoveryCode(_) => CredentialType::RecoveryCode,
+        }
+    }
+}
+
+/// A user authentication credential stored in Ledger.
+///
+/// Each credential has an independent lifecycle — passkeys track
+/// `sign_count`, recovery codes are consumed individually, and TOTP
+/// credentials are immutable after creation (delete and re-create
+/// to change).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserCredential {
+    /// Unique credential identifier.
+    pub id: UserCredentialId,
+    /// Owning user.
+    pub user: UserId,
+    /// High-level credential type discriminator.
+    pub credential_type: CredentialType,
+    /// Type-specific credential data.
+    pub credential_data: CredentialData,
+    /// Human-readable label (e.g., "MacBook Touch ID", "Authenticator app").
+    pub name: String,
+    /// Whether this credential is active. Disabled credentials are skipped
+    /// during authentication but preserved for audit.
+    pub enabled: bool,
+    /// When this credential was registered.
+    pub created_at: DateTime<Utc>,
+    /// Last successful authentication using this credential.
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Primary authentication method that preceded a TOTP challenge.
+///
+/// Distinct from [`CredentialType`] because email-code authentication
+/// is not a stored credential — it's the built-in primary auth method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimaryAuthMethod {
+    /// Passwordless email-code verification (built-in, no stored credential).
+    EmailCode,
+    /// WebAuthn passkey authentication.
+    Passkey,
+}
+
+impl fmt::Display for PrimaryAuthMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmailCode => write!(f, "email_code"),
+            Self::Passkey => write!(f, "passkey"),
+        }
+    }
+}
+
+/// Ephemeral challenge created after primary authentication for a
+/// TOTP-enabled user.
+///
+/// Stored under `_tmp:totp_challenge:{user_id}:{nonce_hex}` with a
+/// 5-minute TTL. Consumed atomically by `VerifyTotp` or
+/// `ConsumeRecoveryCode` to create a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingTotpChallenge {
+    /// Random one-time-use nonce (32 bytes).
+    pub nonce: [u8; 32],
+    /// User who completed primary authentication.
+    pub user: UserId,
+    /// User slug for session creation after TOTP verification.
+    pub user_slug: UserSlug,
+    /// Absolute expiry time (5-minute TTL from creation).
+    pub expires_at: DateTime<Utc>,
+    /// Failed TOTP attempts against this challenge (max 3, Raft-persisted).
+    pub attempts: u8,
+    /// Primary auth method that preceded this challenge.
+    pub primary_method: PrimaryAuthMethod,
+}
+
+/// Serde helper for `Zeroizing<Vec<u8>>` — serializes as a plain `Vec<u8>`.
+mod zeroize_vec_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use zeroize::Zeroizing;
+
+    pub fn serialize<S: Serializer>(value: &Zeroizing<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        value.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<Vec<u8>>, D::Error> {
+        Vec::<u8>::deserialize(d).map(Zeroizing::new)
+    }
+}
+
+// ============================================================================
 // Resource Accounting
 // ============================================================================
 
@@ -1988,5 +2251,310 @@ mod tests {
             let decoded: Region = crate::decode(&bytes).unwrap();
             proptest::prop_assert_eq!(decoded, region);
         }
+    }
+
+    // ====================================================================
+    // UserCredentialId tests
+    // ====================================================================
+
+    #[test]
+    fn user_credential_id_display_prefix() {
+        assert_eq!(UserCredentialId::new(42).to_string(), "ucred:42");
+    }
+
+    #[test]
+    fn user_credential_id_from_i64_roundtrip() {
+        let id = UserCredentialId::new(99);
+        let raw: i64 = id.into();
+        assert_eq!(raw, 99);
+        assert_eq!(UserCredentialId::from(raw), id);
+    }
+
+    #[test]
+    fn user_credential_id_default_is_zero() {
+        assert_eq!(UserCredentialId::default().value(), 0);
+    }
+
+    #[test]
+    fn user_credential_id_parse_from_str() {
+        let id: UserCredentialId = "7".parse().unwrap();
+        assert_eq!(id.value(), 7);
+    }
+
+    // ====================================================================
+    // CredentialType tests
+    // ====================================================================
+
+    #[test]
+    fn credential_type_display() {
+        assert_eq!(CredentialType::Passkey.to_string(), "passkey");
+        assert_eq!(CredentialType::Totp.to_string(), "totp");
+        assert_eq!(CredentialType::RecoveryCode.to_string(), "recovery_code");
+    }
+
+    #[test]
+    fn credential_type_serde_roundtrip() {
+        for ct in [CredentialType::Passkey, CredentialType::Totp, CredentialType::RecoveryCode] {
+            let json = serde_json::to_string(&ct).unwrap();
+            let decoded: CredentialType = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, ct);
+        }
+    }
+
+    #[test]
+    fn credential_type_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&CredentialType::RecoveryCode).unwrap(),
+            "\"recovery_code\""
+        );
+    }
+
+    // ====================================================================
+    // TotpAlgorithm tests
+    // ====================================================================
+
+    #[test]
+    fn totp_algorithm_default_is_sha1() {
+        assert_eq!(TotpAlgorithm::default(), TotpAlgorithm::Sha1);
+    }
+
+    #[test]
+    fn totp_algorithm_display() {
+        assert_eq!(TotpAlgorithm::Sha1.to_string(), "sha1");
+        assert_eq!(TotpAlgorithm::Sha256.to_string(), "sha256");
+        assert_eq!(TotpAlgorithm::Sha512.to_string(), "sha512");
+    }
+
+    #[test]
+    fn totp_algorithm_serde_roundtrip() {
+        for alg in [TotpAlgorithm::Sha1, TotpAlgorithm::Sha256, TotpAlgorithm::Sha512] {
+            let json = serde_json::to_string(&alg).unwrap();
+            let decoded: TotpAlgorithm = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, alg);
+        }
+    }
+
+    // ====================================================================
+    // CredentialData tests
+    // ====================================================================
+
+    #[test]
+    fn credential_data_type_discriminator() {
+        let passkey = CredentialData::Passkey(PasskeyCredential {
+            credential_id: vec![1, 2, 3],
+            public_key: vec![4, 5, 6],
+            sign_count: 0,
+            transports: vec!["internal".to_string()],
+            backup_eligible: true,
+            backup_state: false,
+            attestation_format: None,
+            aaguid: None,
+        });
+        assert_eq!(passkey.credential_type(), CredentialType::Passkey);
+
+        let totp = CredentialData::Totp(TotpCredential {
+            secret: zeroize::Zeroizing::new(vec![0u8; 20]),
+            algorithm: TotpAlgorithm::Sha1,
+            digits: 6,
+            period: 30,
+        });
+        assert_eq!(totp.credential_type(), CredentialType::Totp);
+
+        let recovery = CredentialData::RecoveryCode(RecoveryCodeCredential {
+            code_hashes: vec![[0u8; 32]],
+            total_generated: 10,
+        });
+        assert_eq!(recovery.credential_type(), CredentialType::RecoveryCode);
+    }
+
+    #[test]
+    fn credential_data_serde_externally_tagged() {
+        let data = CredentialData::Passkey(PasskeyCredential {
+            credential_id: vec![1],
+            public_key: vec![2],
+            sign_count: 5,
+            transports: vec![],
+            backup_eligible: false,
+            backup_state: false,
+            attestation_format: Some("packed".to_string()),
+            aaguid: None,
+        });
+        let json = serde_json::to_string(&data).unwrap();
+        // Externally-tagged: {"passkey": {...}}
+        assert!(json.contains("\"passkey\""));
+        let decoded: CredentialData = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn credential_data_postcard_roundtrip() {
+        let data = CredentialData::Passkey(PasskeyCredential {
+            credential_id: vec![1, 2],
+            public_key: vec![3, 4],
+            sign_count: 10,
+            transports: vec!["internal".to_string()],
+            backup_eligible: true,
+            backup_state: false,
+            attestation_format: None,
+            aaguid: None,
+        });
+        let bytes = crate::encode(&data).unwrap();
+        let decoded: CredentialData = crate::decode(&bytes).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    // ====================================================================
+    // TotpCredential zeroize tests
+    // ====================================================================
+
+    #[test]
+    fn totp_credential_serde_roundtrip() {
+        let cred = TotpCredential {
+            secret: zeroize::Zeroizing::new(vec![0xAB; 20]),
+            algorithm: TotpAlgorithm::Sha256,
+            digits: 8,
+            period: 60,
+        };
+        let json = serde_json::to_string(&cred).unwrap();
+        let decoded: TotpCredential = serde_json::from_str(&json).unwrap();
+        assert_eq!(&*decoded.secret, &*cred.secret);
+        assert_eq!(decoded.algorithm, TotpAlgorithm::Sha256);
+        assert_eq!(decoded.digits, 8);
+        assert_eq!(decoded.period, 60);
+    }
+
+    #[test]
+    fn totp_credential_debug_redacts_secret() {
+        let cred = TotpCredential {
+            secret: zeroize::Zeroizing::new(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            algorithm: TotpAlgorithm::Sha1,
+            digits: 6,
+            period: 30,
+        };
+        let debug_output = format!("{cred:?}");
+        assert!(debug_output.contains("[REDACTED]"));
+        assert!(!debug_output.contains("222")); // 0xDE = 222
+        assert!(!debug_output.contains("173")); // 0xAD = 173
+        assert!(!debug_output.contains("0xde"));
+        assert!(debug_output.contains("algorithm: Sha1"));
+    }
+
+    #[test]
+    fn totp_credential_defaults() {
+        let json = r#"{"secret":[1,2,3]}"#;
+        let cred: TotpCredential = serde_json::from_str(json).unwrap();
+        assert_eq!(cred.algorithm, TotpAlgorithm::Sha1);
+        assert_eq!(cred.digits, 6);
+        assert_eq!(cred.period, 30);
+    }
+
+    // ====================================================================
+    // RecoveryCodeCredential tests
+    // ====================================================================
+
+    #[test]
+    fn recovery_code_credential_serde_roundtrip() {
+        let hash = [0xFFu8; 32];
+        let cred = RecoveryCodeCredential { code_hashes: vec![hash], total_generated: 10 };
+        let json = serde_json::to_string(&cred).unwrap();
+        let decoded: RecoveryCodeCredential = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.code_hashes, vec![hash]);
+        assert_eq!(decoded.total_generated, 10);
+    }
+
+    // ====================================================================
+    // UserCredential tests
+    // ====================================================================
+
+    #[test]
+    fn user_credential_serde_roundtrip() {
+        let cred = UserCredential {
+            id: UserCredentialId::new(1),
+            user: UserId::new(42),
+            credential_type: CredentialType::Passkey,
+            credential_data: CredentialData::Passkey(PasskeyCredential {
+                credential_id: vec![10, 20],
+                public_key: vec![30, 40],
+                sign_count: 0,
+                transports: vec!["usb".to_string()],
+                backup_eligible: false,
+                backup_state: false,
+                attestation_format: None,
+                aaguid: None,
+            }),
+            name: "YubiKey".to_string(),
+            enabled: true,
+            created_at: Utc::now(),
+            last_used_at: None,
+        };
+        let json = serde_json::to_string(&cred).unwrap();
+        let decoded: UserCredential = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.id, cred.id);
+        assert_eq!(decoded.user, cred.user);
+        assert_eq!(decoded.credential_type, CredentialType::Passkey);
+        assert_eq!(decoded.name, "YubiKey");
+        assert!(decoded.enabled);
+        assert!(decoded.last_used_at.is_none());
+    }
+
+    // ====================================================================
+    // PendingTotpChallenge tests
+    // ====================================================================
+
+    #[test]
+    fn pending_totp_challenge_serde_roundtrip() {
+        let challenge = PendingTotpChallenge {
+            nonce: [0xAA; 32],
+            user: UserId::new(1),
+            user_slug: UserSlug::new(12345),
+            expires_at: Utc::now(),
+            attempts: 0,
+            primary_method: PrimaryAuthMethod::EmailCode,
+        };
+        let json = serde_json::to_string(&challenge).unwrap();
+        let decoded: PendingTotpChallenge = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.nonce, [0xAA; 32]);
+        assert_eq!(decoded.user, UserId::new(1));
+        assert_eq!(decoded.user_slug, UserSlug::new(12345));
+        assert_eq!(decoded.attempts, 0);
+        assert_eq!(decoded.primary_method, PrimaryAuthMethod::EmailCode);
+    }
+
+    #[test]
+    fn pending_totp_challenge_postcard_roundtrip() {
+        let challenge = PendingTotpChallenge {
+            nonce: [0xBB; 32],
+            user: UserId::new(5),
+            user_slug: UserSlug::new(99999),
+            expires_at: Utc::now(),
+            attempts: 2,
+            primary_method: PrimaryAuthMethod::Passkey,
+        };
+        let bytes = crate::encode(&challenge).unwrap();
+        let decoded: PendingTotpChallenge = crate::decode(&bytes).unwrap();
+        assert_eq!(decoded.nonce, challenge.nonce);
+        assert_eq!(decoded.user, challenge.user);
+        assert_eq!(decoded.attempts, 2);
+    }
+
+    // ====================================================================
+    // PasskeyCredential tests
+    // ====================================================================
+
+    #[test]
+    fn passkey_credential_serde_roundtrip() {
+        let cred = PasskeyCredential {
+            credential_id: vec![1, 2, 3, 4],
+            public_key: vec![5, 6, 7, 8],
+            sign_count: 42,
+            transports: vec!["internal".to_string(), "ble".to_string()],
+            backup_eligible: true,
+            backup_state: true,
+            attestation_format: Some("packed".to_string()),
+            aaguid: Some([0x01; 16]),
+        };
+        let json = serde_json::to_string(&cred).unwrap();
+        let decoded: PasskeyCredential = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, cred);
     }
 }

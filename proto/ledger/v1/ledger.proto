@@ -1617,12 +1617,14 @@ message VerifyEmailCodeRequest {
   Region region = 3;              // Same region used in initiation
 }
 
-// Result is either a session for an existing user or an onboarding token
-// for a new user who must complete registration.
+// Result is either a session for an existing user, an onboarding token
+// for a new user who must complete registration, or a TOTP challenge
+// if the existing user has TOTP enabled.
 message VerifyEmailCodeResponse {
   oneof result {
     ExistingUserSession existing_user = 1;
     OnboardingSession new_user = 2;
+    TotpRequired totp_required = 3;
   }
 }
 
@@ -1651,6 +1653,162 @@ message CompleteRegistrationResponse {
   User user = 1;
   TokenPair session = 2;          // Reuses existing TokenPair message
   OrganizationSlug organization = 3;  // The auto-created organization
+}
+
+// -----------------------------------------------------------------------------
+// User Credential Messages
+// -----------------------------------------------------------------------------
+
+// Credential type discriminator.
+enum CredentialType {
+  CREDENTIAL_TYPE_UNSPECIFIED = 0;
+  CREDENTIAL_TYPE_PASSKEY = 1;
+  CREDENTIAL_TYPE_TOTP = 2;
+  CREDENTIAL_TYPE_RECOVERY_CODE = 3;
+}
+
+// TOTP hash algorithm (RFC 6238).
+enum TotpAlgorithm {
+  TOTP_ALGORITHM_SHA1 = 0;     // Default, widest authenticator compatibility
+  TOTP_ALGORITHM_SHA256 = 1;
+  TOTP_ALGORITHM_SHA512 = 2;
+}
+
+// A user authentication credential (passkey, TOTP, or recovery codes).
+message UserCredential {
+  int64 id = 1;                               // UserCredentialId
+  UserSlug user = 2;
+  CredentialType credential_type = 3;
+  string name = 4;
+  bool enabled = 5;
+  google.protobuf.Timestamp created_at = 6;
+  optional google.protobuf.Timestamp last_used_at = 7;
+  oneof data {
+    PasskeyCredentialData passkey = 10;
+    TotpCredentialData totp = 11;
+    RecoveryCodeCredentialData recovery_code = 12;
+  }
+}
+
+// WebAuthn passkey credential data.
+message PasskeyCredentialData {
+  bytes credential_id = 1;                    // WebAuthn credential ID
+  bytes public_key = 2;                       // COSE-encoded public key
+  uint32 sign_count = 3;                      // Replay protection counter
+  repeated string transports = 4;             // "internal", "usb", "ble", "nfc"
+  bool backup_eligible = 5;
+  bool backup_state = 6;
+  optional string attestation_format = 7;
+  optional bytes aaguid = 8;                  // 16-byte authenticator model ID
+}
+
+// TOTP credential data (RFC 6238).
+// The secret field is stripped from gRPC responses by the handler layer.
+message TotpCredentialData {
+  bytes secret = 1;                           // 20-byte HMAC secret
+  TotpAlgorithm algorithm = 2;
+  uint32 digits = 3;                          // Standard: 6
+  uint32 period = 4;                          // Standard: 30 seconds
+}
+
+// Recovery code credential data.
+message RecoveryCodeCredentialData {
+  repeated bytes code_hashes = 1;             // SHA-256 hashes of unused codes
+  uint32 total_generated = 2;                 // Original count (e.g., 10)
+}
+
+// Audit trail metadata for primary authentication method.
+message CredentialInfo {
+  string credential_type = 1;                 // "passkey", "email_code", "recovery_code"
+  optional int64 credential_id = 2;           // UserCredentialId, if credential-based
+}
+
+// Returned when a TOTP-enabled user must complete second-factor verification.
+message TotpRequired {
+  bytes challenge_nonce = 1;                  // 32-byte one-time challenge nonce
+}
+
+// ── Credential CRUD ──
+
+message CreateUserCredentialRequest {
+  UserSlug user = 1;
+  CredentialType credential_type = 2;
+  string name = 3;
+  oneof data {
+    PasskeyCredentialData passkey = 10;
+    TotpCredentialData totp = 11;
+    RecoveryCodeCredentialData recovery_code = 12;
+  }
+}
+
+message CreateUserCredentialResponse {
+  UserCredential credential = 1;
+}
+
+message ListUserCredentialsRequest {
+  UserSlug user = 1;
+  optional CredentialType credential_type = 2;
+}
+
+message ListUserCredentialsResponse {
+  repeated UserCredential credentials = 1;    // TOTP secrets stripped
+}
+
+message UpdateUserCredentialRequest {
+  UserSlug user = 1;
+  int64 credential_id = 2;
+  optional string name = 3;
+  optional bool enabled = 4;
+  // Only passkey updates are allowed (sign_count, backup_state).
+  // TOTP and recovery code credentials are immutable after creation.
+  optional PasskeyCredentialData passkey = 10;
+}
+
+message UpdateUserCredentialResponse {
+  UserCredential credential = 1;
+}
+
+message DeleteUserCredentialRequest {
+  UserSlug user = 1;
+  int64 credential_id = 2;
+}
+
+message DeleteUserCredentialResponse {}
+
+// ── TOTP Challenge / Verification ──
+
+message CreateTotpChallengeRequest {
+  UserSlug user = 1;
+  string primary_method = 2;                  // "passkey" — audit trail
+}
+
+message CreateTotpChallengeResponse {
+  bytes challenge_nonce = 1;                  // 32-byte one-time nonce
+}
+
+message VerifyTotpRequest {
+  UserSlug user = 1;
+  string totp_code = 2;                       // 6-digit TOTP code
+  bytes challenge_nonce = 3;                  // Nonce from CreateTotpChallenge or VerifyEmailCode
+  optional CredentialInfo credential_used = 4; // Audit trail for created session
+}
+
+message VerifyTotpResponse {
+  TokenPair tokens = 1;                       // Session created directly
+}
+
+// ── Recovery Code ──
+
+message ConsumeRecoveryCodeRequest {
+  UserSlug user = 1;
+  string code = 2;                            // 8-char alphanumeric recovery code
+  bytes challenge_nonce = 3;                  // Nonce from the TOTP challenge
+  optional CredentialInfo credential_used = 4; // Audit trail for created session
+}
+
+message ConsumeRecoveryCodeResponse {
+  TokenPair tokens = 1;                       // Session created directly
+  uint32 remaining_codes = 2;                 // Remaining unused recovery codes
 }
 
 // -----------------------------------------------------------------------------
@@ -1912,6 +2070,45 @@ service UserService {
   // and returns a session. Requires a valid onboarding token from VerifyEmailCode.
   rpc CompleteRegistration(CompleteRegistrationRequest)
       returns (CompleteRegistrationResponse);
+
+  // ── Credential Management ──
+
+  // Create a new credential (passkey, TOTP, or recovery codes) for a user.
+  // Enforces: one TOTP per user, one recovery code set per user, passkey ID uniqueness.
+  rpc CreateUserCredential(CreateUserCredentialRequest)
+      returns (CreateUserCredentialResponse);
+
+  // List credentials for a user, optionally filtered by type.
+  // TOTP secrets are stripped from responses.
+  rpc ListUserCredentials(ListUserCredentialsRequest)
+      returns (ListUserCredentialsResponse);
+
+  // Update credential metadata (name, enabled) or passkey-specific fields.
+  // TOTP and recovery code credentials are immutable after creation.
+  rpc UpdateUserCredential(UpdateUserCredentialRequest)
+      returns (UpdateUserCredentialResponse);
+
+  // Delete a credential. Rejects if it's the user's last credential.
+  rpc DeleteUserCredential(DeleteUserCredentialRequest)
+      returns (DeleteUserCredentialResponse);
+
+  // ── TOTP Verification ──
+
+  // Create a TOTP challenge after passkey authentication.
+  // Called by trusted services (e.g., Control) that verified passkey auth.
+  rpc CreateTotpChallenge(CreateTotpChallengeRequest)
+      returns (CreateTotpChallengeResponse);
+
+  // Verify a TOTP code against a pending challenge.
+  // On success, atomically consumes the challenge and creates a session.
+  rpc VerifyTotp(VerifyTotpRequest) returns (VerifyTotpResponse);
+
+  // ── Recovery Code ──
+
+  // Consume a recovery code to bypass TOTP verification.
+  // Atomically removes the code hash and creates a session.
+  rpc ConsumeRecoveryCode(ConsumeRecoveryCodeRequest)
+      returns (ConsumeRecoveryCodeResponse);
 }
 
 // =============================================================================
@@ -2272,6 +2469,9 @@ message TokenPair {
 
 message CreateUserSessionRequest {
   UserSlug user = 1;
+  // Audit trail: which credential was used for primary authentication.
+  // Required for passkey logins; omitted for email-code (implicit).
+  optional CredentialInfo credential_used = 2;
 }
 
 message CreateUserSessionResponse {

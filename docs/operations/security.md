@@ -270,6 +270,26 @@ Private key material is zeroized on drop (`Zeroizing<Vec<u8>>`). `EncodingKey` i
 
 See [INTEGRATION.md](../INTEGRATION.md) for key rotation runbook and [ADR: Network Trust Model](../adr/network-trust-model.md) for the trust boundary design.
 
+### User Credential Protection
+
+User credentials (passkeys, TOTP secrets, recovery code hashes) are stored REGIONAL and encrypted in the Raft log via `EncryptedUserSystemRequest`:
+
+1. The service layer fetches the user's `UserShredKey` from REGIONAL state
+2. The `SystemRequest` payload is encrypted with AES-256-GCM using the shred key
+3. The sealed payload is proposed to the REGIONAL Raft group as `LedgerRequest::EncryptedUserSystem`
+4. On apply, all nodes decrypt with the stored `UserShredKey`
+
+**TOTP secrets** receive additional protection:
+
+- The `TotpCredential.secret` field derives `Zeroize` — cleared from memory after use
+- TOTP secrets are write-once: never returned via any API path after initial creation
+- The gRPC handler strips the secret from all `ListUserCredentials` responses
+- TOTP code verification happens in the service layer (not the state machine) to avoid `SystemTime::now()` non-determinism across Raft nodes
+
+**Crypto-shredding on user erasure**: When `erase_user()` is called, the `UserShredKey` is destroyed, making all credential data in the Raft log permanently unrecoverable. The `erase_user()` saga also explicitly deletes credential records and TOTP challenges from the state layer.
+
+**Challenge/consumption variants** (`CreateTotpChallenge`, `ConsumeTotpAndCreateSession`, `IncrementTotpAttempt`) carry only IDs and nonces (no PII) and are proposed as plain `LedgerRequest::System` — no encryption overhead.
+
 ### Email Blinding Key
 
 Ledger uses HMAC-SHA256 with a 32-byte `EmailBlindingKey` to create privacy-preserving email uniqueness indices. The HMAC output (hex-encoded) is stored in the GLOBAL Raft log; the plaintext email stays in REGIONAL storage only.

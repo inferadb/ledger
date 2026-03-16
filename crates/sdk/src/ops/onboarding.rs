@@ -112,6 +112,11 @@ impl LedgerClient {
                                 onboarding_token: onboarding.onboarding_token,
                             })
                         },
+                        Some(proto::verify_email_code_response::Result::TotpRequired(
+                            challenge,
+                        )) => Ok(EmailVerificationResult::TotpRequired {
+                            challenge_nonce: challenge.challenge_nonce,
+                        }),
                         None => Err(error::SdkError::Rpc {
                             code: tonic::Code::Internal,
                             message: "Empty verify_email_code response".to_string(),

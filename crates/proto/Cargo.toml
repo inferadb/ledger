@@ -31,6 +31,9 @@ snafu.workspace = true
 # DateTime<Utc> <-> prost_types::Timestamp conversion
 chrono.workspace = true
 
+# TotpCredential secret wrapping
+zeroize.workspace = true
+
 [build-dependencies]
 tonic-build.workspace = true
 tonic-prost-build.workspace = true

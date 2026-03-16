@@ -10,9 +10,10 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
-    AppId, AppSlug, ClientAssertionId, Hash, OrganizationId, OrganizationSlug, RefreshTokenId,
-    Region, SetCondition, SigningKeyId, TeamId, TeamSlug, TokenSubject, TokenType, TokenVersion,
-    Transaction, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
+    AppId, AppSlug, ClientAssertionId, CredentialData, CredentialType, Hash, OrganizationId,
+    OrganizationSlug, PasskeyCredential, PrimaryAuthMethod, RefreshTokenId, Region, SetCondition,
+    SigningKeyId, TeamId, TeamSlug, TokenSubject, TokenType, TokenVersion, Transaction,
+    UserCredentialId, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
 // Re-export domain types that originated here but now live in types crate.
 pub use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId};
@@ -867,7 +868,9 @@ pub enum SystemRequest {
     ///
     /// Proposed to REGIONAL Raft group (verification region).
     /// The apply handler validates the code and branches on `existing_user_hmac_hit`:
-    /// - `true`: Returns `ExistingUser` signal (no session created here).
+    /// - `true` + `totp: None`: Returns `ExistingUser` signal (no session created here).
+    /// - `true` + `totp: Some(_)`: Atomically consumes code + creates `PendingTotpChallenge`.
+    ///   Returns `TotpRequired { nonce }`.
     /// - `false`: Creates `OnboardingAccount` at `_tmp:onboard_account:{email_hmac}`.
     ///
     /// Session creation for existing users happens at the SERVICE LAYER after
@@ -889,13 +892,18 @@ pub enum SystemRequest {
         /// Onboarding account expiration.
         /// Ignored when `existing_user_hmac_hit` is `true`.
         onboarding_expires_at: DateTime<Utc>,
+        /// Pre-resolved TOTP data. `Some` = user has TOTP enabled, challenge data
+        /// pre-generated. `None` = no TOTP. Only meaningful when
+        /// `existing_user_hmac_hit` is `true`.
+        totp: Option<TotpPreResolve>,
     },
 
-    /// GC expired verification codes and onboarding accounts.
+    /// GC expired verification codes, onboarding accounts, and TOTP challenges.
     ///
     /// Proposed to REGIONAL Raft group. Has no fields — the region is
-    /// implicit from the target Raft group. Scans `_tmp:onboard_verify:*`
-    /// and `_tmp:onboard_account:*` up to `MAX_ONBOARDING_SCAN` limit.
+    /// implicit from the target Raft group. Scans `_tmp:onboard_verify:*`,
+    /// `_tmp:onboard_account:*`, and `_tmp:totp_challenge:*` up to
+    /// `MAX_ONBOARDING_SCAN` limit per prefix.
     CleanupExpiredOnboarding,
 
     // ── Onboarding Saga Requests ──
@@ -1095,6 +1103,132 @@ pub enum SystemRequest {
     PurgeOrganizationRegional {
         /// Organization being purged.
         organization: OrganizationId,
+    },
+
+    // ── User Credential Management ──
+    /// Creates a new user credential (passkey, TOTP, or recovery code).
+    ///
+    /// Proposed via [`EncryptedUserSystemRequest`] — credential data is
+    /// encrypted with the user's `UserShredKey` before entering the Raft log.
+    ///
+    /// The state machine allocates a `UserCredentialId` from the REGIONAL
+    /// sequence counter, enforces uniqueness invariants (one TOTP, one
+    /// recovery code set, passkey `credential_id` uniqueness per user),
+    /// and stores both the entity and the type index entry.
+    CreateUserCredential {
+        /// User who owns the credential.
+        user_id: UserId,
+        /// Credential type discriminant.
+        credential_type: CredentialType,
+        /// Type-specific credential data.
+        credential_data: CredentialData,
+        /// Human-readable display name (e.g., "MacBook Touch ID").
+        name: String,
+    },
+
+    /// Updates an existing user credential.
+    ///
+    /// Proposed via [`EncryptedUserSystemRequest`].
+    /// Only passkey-specific fields (`sign_count`, `backup_state`) and
+    /// common fields (`name`, `enabled`) can be updated. TOTP credentials
+    /// are immutable after creation.
+    UpdateUserCredential {
+        /// Owning user.
+        user_id: UserId,
+        /// Credential to update.
+        credential_id: UserCredentialId,
+        /// New display name (if provided).
+        name: Option<String>,
+        /// New enabled state (if provided).
+        enabled: Option<bool>,
+        /// Passkey-specific updates (if provided and credential is a passkey).
+        passkey_update: Option<PasskeyCredential>,
+    },
+
+    /// Deletes a user credential.
+    ///
+    /// Proposed via [`EncryptedUserSystemRequest`].
+    /// The last-credential guard in the state machine prevents deleting
+    /// the only remaining credential for a user.
+    DeleteUserCredential {
+        /// Owning user.
+        user_id: UserId,
+        /// Credential to delete.
+        credential_id: UserCredentialId,
+    },
+
+    // ── TOTP Challenge Management ──
+    /// Creates a pending TOTP challenge after primary authentication.
+    ///
+    /// Proposed as plain `LedgerRequest::System` (no PII — only IDs and
+    /// nonces). Rate-limited to 3 active challenges per user.
+    CreateTotpChallenge {
+        /// User who must complete TOTP.
+        user_id: UserId,
+        /// External slug for session creation after TOTP verification.
+        user_slug: UserSlug,
+        /// Random 32-byte nonce (one-time use).
+        nonce: [u8; 32],
+        /// Challenge expiration.
+        expires_at: DateTime<Utc>,
+        /// Which primary method was used (audit trail).
+        primary_method: PrimaryAuthMethod,
+    },
+
+    /// Consumes a TOTP challenge and creates a session.
+    ///
+    /// TOTP code verification happens in the service layer (non-deterministic
+    /// `SystemTime::now()`). The state machine only performs deterministic
+    /// operations: expiry check via `proposed_at`, challenge deletion, and
+    /// refresh token creation.
+    ConsumeTotpAndCreateSession {
+        /// User whose challenge to consume.
+        user_id: UserId,
+        /// Challenge nonce to consume.
+        nonce: [u8; 32],
+        /// SHA-256 hash of the new refresh token string.
+        token_hash: [u8; 32],
+        /// Token family UUID for theft detection.
+        family: [u8; 16],
+        /// Signing key kid for the associated access token.
+        kid: String,
+        /// Refresh token TTL in seconds.
+        ttl_secs: u64,
+    },
+
+    /// Consumes a recovery code and creates a session.
+    ///
+    /// The service layer pre-hashes the raw recovery code. The state machine
+    /// verifies the hash against stored hashes, atomically removes it, deletes
+    /// the challenge, and creates a refresh token.
+    ConsumeRecoveryAndCreateSession {
+        /// User whose recovery code to consume.
+        user_id: UserId,
+        /// Challenge nonce to consume.
+        nonce: [u8; 32],
+        /// SHA-256 hash of the raw recovery code (pre-hashed by service layer).
+        code_hash: [u8; 32],
+        /// Recovery code credential ID.
+        credential_id: UserCredentialId,
+        /// SHA-256 hash of the new refresh token string.
+        token_hash: [u8; 32],
+        /// Token family UUID for theft detection.
+        family: [u8; 16],
+        /// Signing key kid for the associated access token.
+        kid: String,
+        /// Refresh token TTL in seconds.
+        ttl_secs: u64,
+    },
+
+    /// Increments the TOTP attempt counter on a challenge.
+    ///
+    /// Raft-persisted counter survives leader failover. Rejects if
+    /// `attempts >= 3` at apply time.
+    IncrementTotpAttempt {
+        /// User whose challenge to update.
+        user_id: UserId,
+        /// Challenge nonce.
+        nonce: [u8; 32],
     },
 }
 
@@ -1520,25 +1654,98 @@ pub enum LedgerResponse {
     /// Saga step 2 completed: directories activated, HMAC index updated.
     OnboardingUserActivated,
 
-    /// Expired onboarding records cleaned up.
+    /// Expired onboarding records and TOTP challenges cleaned up.
     OnboardingCleanedUp {
         /// Number of expired verification codes deleted.
         verification_codes_deleted: u32,
         /// Number of expired onboarding accounts deleted.
         onboarding_accounts_deleted: u32,
+        /// Number of expired TOTP challenges deleted.
+        totp_challenges_deleted: u32,
     },
+
+    // ── User Credential Responses ──
+    /// User credential created.
+    UserCredentialCreated {
+        /// Allocated credential ID (from REGIONAL sequence).
+        credential_id: UserCredentialId,
+    },
+
+    /// User credential updated.
+    UserCredentialUpdated {
+        /// Updated credential ID.
+        credential_id: UserCredentialId,
+    },
+
+    /// User credential deleted.
+    UserCredentialDeleted {
+        /// Deleted credential ID.
+        credential_id: UserCredentialId,
+    },
+
+    /// TOTP challenge created after primary auth.
+    TotpChallengeCreated {
+        /// Challenge nonce (returned to caller for `VerifyTotp`).
+        nonce: [u8; 32],
+    },
+
+    /// TOTP verified, session created directly.
+    TotpVerified {
+        /// Allocated refresh token ID.
+        refresh_token_id: RefreshTokenId,
+    },
+
+    /// Recovery code consumed, session created directly.
+    RecoveryCodeConsumed {
+        /// Allocated refresh token ID.
+        refresh_token_id: RefreshTokenId,
+        /// Number of remaining unused recovery codes.
+        remaining_codes: u32,
+    },
+
+    /// TOTP attempt counter incremented.
+    TotpAttemptIncremented {
+        /// Updated attempt count.
+        attempts: u8,
+    },
+}
+
+/// TOTP pre-resolved data embedded in [`SystemRequest::VerifyEmailCode`].
+///
+/// The service layer reads GLOBAL indices to determine TOTP status and pre-generates
+/// challenge data before proposing to the REGIONAL Raft group. Bundled as a struct
+/// so `Some` vs `None` replaces `user_has_totp: bool` + 4 optional fields — making
+/// invalid states unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TotpPreResolve {
+    /// Pre-generated challenge nonce (32 random bytes).
+    pub nonce: [u8; 32],
+    /// Absolute expiry for the TOTP challenge (5-minute TTL from proposal).
+    pub expires_at: DateTime<Utc>,
+    /// User ID, pre-resolved from GLOBAL email hash index.
+    pub user_id: UserId,
+    /// User slug for session creation after TOTP verification.
+    pub user_slug: UserSlug,
 }
 
 /// Result of email code verification.
 ///
-/// Both variants carry no fields — they are signals. The service handler
-/// has all context needed (HMAC, token hash, region) in local scope.
+/// Three variants — signals to the service handler:
+/// - `ExistingUser`: email belongs to an existing user without TOTP, create session.
+/// - `TotpRequired`: email belongs to an existing user WITH TOTP, challenge created.
+/// - `NewUser`: new email, `OnboardingAccount` created in regional store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EmailCodeVerifiedResult {
-    /// Code verified, email belongs to an existing user.
+    /// Code verified, email belongs to an existing user without TOTP.
     /// No session data — session creation is handled by the service handler
     /// (which proposes `CreateRefreshToken` to the user's actual region).
     ExistingUser,
+    /// Code verified, existing user has TOTP enabled. `PendingTotpChallenge`
+    /// created atomically. Service handler returns `TotpRequired` to caller.
+    TotpRequired {
+        /// Challenge nonce for the `VerifyTotp` RPC.
+        nonce: [u8; 32],
+    },
     /// Code verified, new email. `OnboardingAccount` created in regional store.
     NewUser,
 }
@@ -1736,12 +1943,40 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::OnboardingCleanedUp {
                 verification_codes_deleted,
                 onboarding_accounts_deleted,
+                totp_challenges_deleted,
             } => {
                 write!(
                     f,
-                    "OnboardingCleanedUp(codes={}, accounts={})",
-                    verification_codes_deleted, onboarding_accounts_deleted
+                    "OnboardingCleanedUp(codes={}, accounts={}, totp_challenges={})",
+                    verification_codes_deleted,
+                    onboarding_accounts_deleted,
+                    totp_challenges_deleted
                 )
+            },
+            LedgerResponse::UserCredentialCreated { credential_id } => {
+                write!(f, "UserCredentialCreated(id={})", credential_id)
+            },
+            LedgerResponse::UserCredentialUpdated { credential_id } => {
+                write!(f, "UserCredentialUpdated(id={})", credential_id)
+            },
+            LedgerResponse::UserCredentialDeleted { credential_id } => {
+                write!(f, "UserCredentialDeleted(id={})", credential_id)
+            },
+            LedgerResponse::TotpChallengeCreated { .. } => {
+                write!(f, "TotpChallengeCreated")
+            },
+            LedgerResponse::TotpVerified { refresh_token_id } => {
+                write!(f, "TotpVerified(refresh={})", refresh_token_id)
+            },
+            LedgerResponse::RecoveryCodeConsumed { refresh_token_id, remaining_codes } => {
+                write!(
+                    f,
+                    "RecoveryCodeConsumed(refresh={}, remaining={})",
+                    refresh_token_id, remaining_codes
+                )
+            },
+            LedgerResponse::TotpAttemptIncremented { attempts } => {
+                write!(f, "TotpAttemptIncremented(attempts={})", attempts)
             },
         }
     }
@@ -2546,6 +2781,347 @@ mod tests {
     }
 
     // ============================================
+    // User Credential SystemRequest serialization tests
+    // ============================================
+
+    #[test]
+    fn test_create_user_credential_serialization() {
+        let request = SystemRequest::CreateUserCredential {
+            user_id: UserId::new(42),
+            credential_type: CredentialType::Passkey,
+            credential_data: CredentialData::Passkey(PasskeyCredential {
+                credential_id: vec![1, 2, 3],
+                public_key: vec![4, 5, 6],
+                sign_count: 0,
+                transports: vec!["internal".to_string()],
+                backup_eligible: true,
+                backup_state: false,
+                attestation_format: Some("packed".to_string()),
+                aaguid: Some([0xAA; 16]),
+            }),
+            name: "YubiKey 5".to_string(),
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_create_user_credential_totp_serialization() {
+        let request = SystemRequest::CreateUserCredential {
+            user_id: UserId::new(7),
+            credential_type: CredentialType::Totp,
+            credential_data: CredentialData::Totp(inferadb_ledger_types::TotpCredential {
+                secret: zeroize::Zeroizing::new(vec![0xBB; 20]),
+                algorithm: inferadb_ledger_types::TotpAlgorithm::Sha1,
+                digits: 6,
+                period: 30,
+            }),
+            name: "Authenticator app".to_string(),
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_create_user_credential_recovery_code_serialization() {
+        let request = SystemRequest::CreateUserCredential {
+            user_id: UserId::new(3),
+            credential_type: CredentialType::RecoveryCode,
+            credential_data: CredentialData::RecoveryCode(
+                inferadb_ledger_types::RecoveryCodeCredential {
+                    code_hashes: vec![[0xCC; 32], [0xDD; 32]],
+                    total_generated: 10,
+                },
+            ),
+            name: "Recovery codes".to_string(),
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_update_user_credential_serialization() {
+        let request = SystemRequest::UpdateUserCredential {
+            user_id: UserId::new(42),
+            credential_id: inferadb_ledger_types::UserCredentialId::new(5),
+            name: Some("Renamed key".to_string()),
+            enabled: Some(false),
+            passkey_update: Some(PasskeyCredential {
+                credential_id: vec![],
+                public_key: vec![],
+                sign_count: 100,
+                transports: vec![],
+                backup_eligible: false,
+                backup_state: true,
+                attestation_format: None,
+                aaguid: None,
+            }),
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_delete_user_credential_serialization() {
+        let request = SystemRequest::DeleteUserCredential {
+            user_id: UserId::new(42),
+            credential_id: inferadb_ledger_types::UserCredentialId::new(5),
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_create_totp_challenge_serialization() {
+        let request = SystemRequest::CreateTotpChallenge {
+            user_id: UserId::new(42),
+            user_slug: UserSlug::new(12345),
+            nonce: [0xAA; 32],
+            expires_at: chrono::Utc::now(),
+            primary_method: PrimaryAuthMethod::EmailCode,
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_consume_totp_and_create_session_serialization() {
+        let request = SystemRequest::ConsumeTotpAndCreateSession {
+            user_id: UserId::new(42),
+            nonce: [0xBB; 32],
+            token_hash: [0xCC; 32],
+            family: [0xDD; 16],
+            kid: "key-001".to_string(),
+            ttl_secs: 3600,
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_consume_recovery_and_create_session_serialization() {
+        let request = SystemRequest::ConsumeRecoveryAndCreateSession {
+            user_id: UserId::new(42),
+            nonce: [0xBB; 32],
+            code_hash: [0xEE; 32],
+            credential_id: inferadb_ledger_types::UserCredentialId::new(3),
+            token_hash: [0xCC; 32],
+            family: [0xDD; 16],
+            kid: "key-002".to_string(),
+            ttl_secs: 7200,
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_increment_totp_attempt_serialization() {
+        let request =
+            SystemRequest::IncrementTotpAttempt { user_id: UserId::new(42), nonce: [0xFF; 32] };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    // ============================================
+    // User Credential LedgerResponse serialization tests
+    // ============================================
+
+    #[test]
+    fn test_user_credential_created_response_serialization() {
+        let response = LedgerResponse::UserCredentialCreated {
+            credential_id: inferadb_ledger_types::UserCredentialId::new(7),
+        };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "UserCredentialCreated(id=ucred:7)");
+    }
+
+    #[test]
+    fn test_user_credential_updated_response_serialization() {
+        let response = LedgerResponse::UserCredentialUpdated {
+            credential_id: inferadb_ledger_types::UserCredentialId::new(7),
+        };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "UserCredentialUpdated(id=ucred:7)");
+    }
+
+    #[test]
+    fn test_user_credential_deleted_response_serialization() {
+        let response = LedgerResponse::UserCredentialDeleted {
+            credential_id: inferadb_ledger_types::UserCredentialId::new(7),
+        };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "UserCredentialDeleted(id=ucred:7)");
+    }
+
+    #[test]
+    fn test_totp_challenge_created_response_serialization() {
+        let response = LedgerResponse::TotpChallengeCreated { nonce: [0xAA; 32] };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "TotpChallengeCreated");
+    }
+
+    #[test]
+    fn test_totp_verified_response_serialization() {
+        let response = LedgerResponse::TotpVerified { refresh_token_id: RefreshTokenId::new(99) };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "TotpVerified(refresh=rtoken:99)");
+    }
+
+    #[test]
+    fn test_recovery_code_consumed_response_serialization() {
+        let response = LedgerResponse::RecoveryCodeConsumed {
+            refresh_token_id: RefreshTokenId::new(88),
+            remaining_codes: 9,
+        };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "RecoveryCodeConsumed(refresh=rtoken:88, remaining=9)");
+    }
+
+    #[test]
+    fn test_totp_attempt_incremented_response_serialization() {
+        let response = LedgerResponse::TotpAttemptIncremented { attempts: 2 };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(format!("{response}"), "TotpAttemptIncremented(attempts=2)");
+    }
+
+    #[test]
+    fn test_verify_email_code_with_totp_serialization() {
+        let request = SystemRequest::VerifyEmailCode {
+            email_hmac: "hmac123".to_string(),
+            code_hash: [0xAA; 32],
+            region: Region::US_EAST_VA,
+            existing_user_hmac_hit: true,
+            onboarding_token_hash: [0xBB; 32],
+            onboarding_expires_at: chrono::Utc::now(),
+            totp: Some(TotpPreResolve {
+                nonce: [0xCC; 32],
+                expires_at: chrono::Utc::now(),
+                user_id: UserId::new(42),
+                user_slug: UserSlug::new(12345),
+            }),
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_verify_email_code_without_totp_serialization() {
+        let request = SystemRequest::VerifyEmailCode {
+            email_hmac: "hmac456".to_string(),
+            code_hash: [0xDD; 32],
+            region: Region::US_WEST_OR,
+            existing_user_hmac_hit: false,
+            onboarding_token_hash: [0xEE; 32],
+            onboarding_expires_at: chrono::Utc::now(),
+            totp: None,
+        };
+
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_email_code_verified_totp_required_serialization() {
+        let response = LedgerResponse::EmailCodeVerified {
+            result: EmailCodeVerifiedResult::TotpRequired { nonce: [0xFF; 32] },
+        };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert!(format!("{response}").contains("TotpRequired"));
+    }
+
+    #[test]
+    fn test_email_code_verified_existing_user_serialization() {
+        let response =
+            LedgerResponse::EmailCodeVerified { result: EmailCodeVerifiedResult::ExistingUser };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert!(format!("{response}").contains("ExistingUser"));
+    }
+
+    #[test]
+    fn test_verify_email_code_classification_regional() {
+        let request = SystemRequest::VerifyEmailCode {
+            email_hmac: "test".to_string(),
+            code_hash: [0; 32],
+            region: Region::US_EAST_VA,
+            existing_user_hmac_hit: true,
+            onboarding_token_hash: [0; 32],
+            onboarding_expires_at: chrono::Utc::now(),
+            totp: Some(TotpPreResolve {
+                nonce: [0; 32],
+                expires_at: chrono::Utc::now(),
+                user_id: UserId::new(1),
+                user_slug: UserSlug::new(1),
+            }),
+        };
+        assert_eq!(classify_system_request(&request), RaftScope::Regional);
+    }
+
+    #[test]
+    fn test_onboarding_cleaned_up_response_serialization() {
+        let response = LedgerResponse::OnboardingCleanedUp {
+            verification_codes_deleted: 3,
+            onboarding_accounts_deleted: 1,
+            totp_challenges_deleted: 5,
+        };
+
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(response, deserialized);
+        assert_eq!(
+            format!("{response}"),
+            "OnboardingCleanedUp(codes=3, accounts=1, totp_challenges=5)"
+        );
+    }
+
+    // ============================================
     // Property-based Raft log invariant tests
     // ============================================
 
@@ -2775,6 +3351,17 @@ mod tests {
             SystemRequest::WriteOnboardingUserProfile { .. } => RaftScope::Regional,
             SystemRequest::WriteOrganizationProfile { .. } => RaftScope::Regional,
             SystemRequest::WriteTeam { .. } => RaftScope::Regional,
+
+            // REGIONAL — credential CRUD (encrypted via EncryptedUserSystemRequest)
+            SystemRequest::CreateUserCredential { .. } => RaftScope::Regional,
+            SystemRequest::UpdateUserCredential { .. } => RaftScope::Regional,
+            SystemRequest::DeleteUserCredential { .. } => RaftScope::Regional,
+
+            // REGIONAL — TOTP challenge lifecycle (plain, no PII, but REGIONAL scope)
+            SystemRequest::CreateTotpChallenge { .. } => RaftScope::Regional,
+            SystemRequest::ConsumeTotpAndCreateSession { .. } => RaftScope::Regional,
+            SystemRequest::ConsumeRecoveryAndCreateSession { .. } => RaftScope::Regional,
+            SystemRequest::IncrementTotpAttempt { .. } => RaftScope::Regional,
         }
     }
 
@@ -2808,6 +3395,34 @@ mod tests {
             region: Region::US_EAST_VA,
         };
         assert_eq!(classify_system_request(&global_create), RaftScope::Global);
+
+        // CreateUserCredential — REGIONAL (encrypted, carries credential data)
+        let regional_cred = SystemRequest::CreateUserCredential {
+            user_id: UserId::new(1),
+            credential_type: CredentialType::Passkey,
+            credential_data: CredentialData::Passkey(PasskeyCredential {
+                credential_id: vec![1, 2, 3],
+                public_key: vec![4, 5, 6],
+                sign_count: 0,
+                transports: vec!["internal".to_string()],
+                backup_eligible: false,
+                backup_state: false,
+                attestation_format: None,
+                aaguid: None,
+            }),
+            name: "Test Key".to_string(),
+        };
+        assert_eq!(classify_system_request(&regional_cred), RaftScope::Regional);
+
+        // CreateTotpChallenge — REGIONAL (plain, no PII, but REGIONAL scope)
+        let regional_challenge = SystemRequest::CreateTotpChallenge {
+            user_id: UserId::new(1),
+            user_slug: UserSlug::new(100),
+            nonce: [0xAA; 32],
+            expires_at: chrono::Utc::now(),
+            primary_method: PrimaryAuthMethod::EmailCode,
+        };
+        assert_eq!(classify_system_request(&regional_challenge), RaftScope::Regional);
     }
 
     /// Verifies that GLOBAL SystemRequest variants contain no String fields

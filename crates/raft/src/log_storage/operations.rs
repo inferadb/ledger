@@ -19,9 +19,9 @@ use inferadb_ledger_state::{
 };
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
-    AppId, AppSlug, ErrorCode, Hash, NodeId, Operation, OrganizationId, TeamId, TeamSlug,
-    TokenSubject, TokenType, TokenVersion, UserRole, UserStatus, VaultEntry, VaultId,
-    compute_tx_merkle_root, decode, encode,
+    AppId, AppSlug, ErrorCode, Hash, NodeId, Operation, OrganizationId, PendingTotpChallenge,
+    PrimaryAuthMethod, TeamId, TeamSlug, TokenSubject, TokenType, TokenVersion, UserRole,
+    UserStatus, VaultEntry, VaultId, compute_tx_merkle_root, decode, encode,
     events::{EventAction, EventEntry, EventOutcome},
     hash_eq,
 };
@@ -3101,6 +3101,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         existing_user_hmac_hit,
                         onboarding_token_hash,
                         onboarding_expires_at,
+                        totp,
                     } => {
                         if let Some(sys) = &sys_service {
                             // 1. Read pending verification
@@ -3171,11 +3172,37 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             // 5. Code valid — delete verification record
                             let _ = sys.delete_email_verification(email_hmac);
 
-                            // 6. Branch on existing_user_hmac_hit
+                            // 6. Branch on existing_user_hmac_hit and TOTP status
                             if *existing_user_hmac_hit {
-                                // Existing user: signal only, no writes
-                                LedgerResponse::EmailCodeVerified {
-                                    result: EmailCodeVerifiedResult::ExistingUser,
+                                if let Some(totp) = totp {
+                                    // Existing user with TOTP: atomically create challenge
+                                    let challenge = PendingTotpChallenge {
+                                        nonce: totp.nonce,
+                                        user: totp.user_id,
+                                        user_slug: totp.user_slug,
+                                        expires_at: totp.expires_at,
+                                        attempts: 0,
+                                        primary_method: PrimaryAuthMethod::EmailCode,
+                                    };
+                                    match sys.create_totp_challenge(&challenge) {
+                                        Ok(()) => LedgerResponse::EmailCodeVerified {
+                                            result: EmailCodeVerifiedResult::TotpRequired {
+                                                nonce: totp.nonce,
+                                            },
+                                        },
+                                        Err(SystemError::ResourceExhausted { message }) => {
+                                            ledger_error(ErrorCode::RateLimited, message)
+                                        },
+                                        Err(e) => ledger_error(
+                                            ErrorCode::Internal,
+                                            format!("Failed to create TOTP challenge: {e}"),
+                                        ),
+                                    }
+                                } else {
+                                    // Existing user without TOTP: signal only, no writes
+                                    LedgerResponse::EmailCodeVerified {
+                                        result: EmailCodeVerifiedResult::ExistingUser,
+                                    }
                                 }
                             } else {
                                 // New user: create OnboardingAccount
@@ -3721,6 +3748,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         if let Some(state_layer) = &self.state_layer {
                             let mut codes_deleted: u32 = 0;
                             let mut accounts_deleted: u32 = 0;
+                            let mut totp_deleted: u32 = 0;
 
                             // 1. Scan expired verification codes
                             if let Ok(entities) = state_layer.list_entities(
@@ -3785,9 +3813,42 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 }
                             }
 
+                            // 3. Scan expired TOTP challenges
+                            if let Ok(entities) = state_layer.list_entities(
+                                SYSTEM_VAULT_ID,
+                                Some(SystemKeys::TOTP_CHALLENGE_PREFIX),
+                                None,
+                                inferadb_ledger_types::onboarding::MAX_ONBOARDING_SCAN,
+                            ) {
+                                let mut delete_ops = Vec::new();
+                                for entity in &entities {
+                                    let key_str = String::from_utf8_lossy(&entity.key).to_string();
+                                    if let Ok(record) =
+                                        decode::<PendingTotpChallenge>(&entity.value)
+                                        && record.expires_at <= block_timestamp
+                                    {
+                                        delete_ops.push(Operation::DeleteEntity { key: key_str });
+                                    }
+                                }
+                                totp_deleted = delete_ops.len() as u32;
+                                if !delete_ops.is_empty()
+                                    && let Err(e) = state_layer.apply_operations(
+                                        SYSTEM_VAULT_ID,
+                                        &delete_ops,
+                                        0,
+                                    )
+                                {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to delete expired TOTP challenges"
+                                    );
+                                }
+                            }
+
                             LedgerResponse::OnboardingCleanedUp {
                                 verification_codes_deleted: codes_deleted,
                                 onboarding_accounts_deleted: accounts_deleted,
+                                totp_challenges_deleted: totp_deleted,
                             }
                         } else {
                             LedgerResponse::Error {
@@ -4282,6 +4343,406 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             ledger_error(
                                 ErrorCode::Internal,
                                 "State layer unavailable for regional purge",
+                            )
+                        }
+                    },
+
+                    // ── User Credential CRUD (REGIONAL, encrypted) ──
+                    SystemRequest::CreateUserCredential {
+                        user_id,
+                        credential_type,
+                        credential_data,
+                        name,
+                    } => {
+                        if let Some(sys) = &sys_service {
+                            match sys.create_user_credential(
+                                *user_id,
+                                *credential_type,
+                                credential_data.clone(),
+                                name,
+                                block_timestamp,
+                            ) {
+                                Ok(cred) => {
+                                    LedgerResponse::UserCredentialCreated { credential_id: cred.id }
+                                },
+                                Err(SystemError::AlreadyExists { entity }) => ledger_error(
+                                    ErrorCode::AlreadyExists,
+                                    format!("Credential already exists: {entity}"),
+                                ),
+                                Err(SystemError::FailedPrecondition { message }) => {
+                                    ledger_error(ErrorCode::InvalidArgument, message)
+                                },
+                                Err(e) => ledger_error(
+                                    ErrorCode::Internal,
+                                    format!("Failed to create credential: {e}"),
+                                ),
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for credential create",
+                            )
+                        }
+                    },
+
+                    SystemRequest::UpdateUserCredential {
+                        user_id,
+                        credential_id,
+                        name,
+                        enabled,
+                        passkey_update,
+                    } => {
+                        if let Some(sys) = &sys_service {
+                            match sys.update_user_credential(
+                                *user_id,
+                                *credential_id,
+                                name.as_deref(),
+                                *enabled,
+                                None, // last_used_at: management ops don't count as "use"
+                                passkey_update.as_ref(),
+                            ) {
+                                Ok(cred) => {
+                                    LedgerResponse::UserCredentialUpdated { credential_id: cred.id }
+                                },
+                                Err(SystemError::NotFound { entity }) => ledger_error(
+                                    ErrorCode::NotFound,
+                                    format!("Credential not found: {entity}"),
+                                ),
+                                Err(e) => ledger_error(
+                                    ErrorCode::Internal,
+                                    format!("Failed to update credential: {e}"),
+                                ),
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for credential update",
+                            )
+                        }
+                    },
+
+                    SystemRequest::DeleteUserCredential { user_id, credential_id } => {
+                        if let Some(sys) = &sys_service {
+                            match sys.delete_user_credential(*user_id, *credential_id) {
+                                Ok(()) => LedgerResponse::UserCredentialDeleted {
+                                    credential_id: *credential_id,
+                                },
+                                Err(SystemError::NotFound { entity }) => ledger_error(
+                                    ErrorCode::NotFound,
+                                    format!("Credential not found: {entity}"),
+                                ),
+                                Err(SystemError::FailedPrecondition { message }) => {
+                                    ledger_error(ErrorCode::FailedPrecondition, message)
+                                },
+                                Err(e) => ledger_error(
+                                    ErrorCode::Internal,
+                                    format!("Failed to delete credential: {e}"),
+                                ),
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for credential delete",
+                            )
+                        }
+                    },
+
+                    // ── TOTP Challenge Lifecycle (REGIONAL, plain) ──
+                    SystemRequest::CreateTotpChallenge {
+                        user_id,
+                        user_slug,
+                        nonce,
+                        expires_at,
+                        primary_method,
+                    } => {
+                        if let Some(sys) = &sys_service {
+                            let challenge = PendingTotpChallenge {
+                                nonce: *nonce,
+                                user: *user_id,
+                                user_slug: *user_slug,
+                                expires_at: *expires_at,
+                                attempts: 0,
+                                primary_method: *primary_method,
+                            };
+                            match sys.create_totp_challenge(&challenge) {
+                                Ok(()) => LedgerResponse::TotpChallengeCreated { nonce: *nonce },
+                                Err(SystemError::ResourceExhausted { message }) => {
+                                    ledger_error(ErrorCode::RateLimited, message)
+                                },
+                                Err(e) => ledger_error(
+                                    ErrorCode::Internal,
+                                    format!("Failed to create TOTP challenge: {e}"),
+                                ),
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for TOTP challenge create",
+                            )
+                        }
+                    },
+
+                    SystemRequest::ConsumeTotpAndCreateSession {
+                        user_id,
+                        nonce,
+                        token_hash,
+                        family,
+                        kid,
+                        ttl_secs,
+                    } => {
+                        if let Some(sys) = &sys_service {
+                            // 1. Read and validate the challenge
+                            let challenge = match sys.get_totp_challenge(*user_id, nonce) {
+                                Ok(Some(c)) => c,
+                                Ok(None) => {
+                                    return (
+                                        ledger_error(ErrorCode::NotFound, "Challenge not found"),
+                                        None,
+                                    );
+                                },
+                                Err(e) => {
+                                    return (
+                                        ledger_error(
+                                            ErrorCode::Internal,
+                                            format!("Failed to read challenge: {e}"),
+                                        ),
+                                        None,
+                                    );
+                                },
+                            };
+
+                            // 2. Deterministic expiry check (proposed_at, not SystemTime::now)
+                            if challenge.expires_at <= block_timestamp {
+                                return (
+                                    ledger_error(
+                                        ErrorCode::FailedPrecondition,
+                                        "Challenge expired",
+                                    ),
+                                    None,
+                                );
+                            }
+
+                            // 3. Defense-in-depth: reject if max attempts exceeded.
+                            // The service layer should never propose consumption for a
+                            // locked-out challenge, but the state machine enforces this
+                            // independently to prevent bypasses.
+                            // Mirrors `SystemOrganizationService::MAX_TOTP_ATTEMPTS`.
+                            const MAX_TOTP_ATTEMPTS: u8 = 3;
+                            if challenge.attempts >= MAX_TOTP_ATTEMPTS {
+                                return (
+                                    ledger_error(ErrorCode::TooManyAttempts, "Too many attempts"),
+                                    None,
+                                );
+                            }
+
+                            // 4. Delete the challenge (consumed)
+                            if let Err(e) = sys.delete_totp_challenge(*user_id, nonce) {
+                                return (
+                                    ledger_error(
+                                        ErrorCode::Internal,
+                                        format!("Failed to delete challenge: {e}"),
+                                    ),
+                                    None,
+                                );
+                            }
+
+                            // 5. Create refresh token (same pattern as CreateRefreshToken)
+                            let user_slug = challenge.user_slug;
+                            let token_id = state.sequences.next_refresh_token();
+                            let expires_at = block_timestamp + saturating_duration_secs(*ttl_secs);
+
+                            let token = RefreshToken {
+                                id: token_id,
+                                token_hash: *token_hash,
+                                family: *family,
+                                token_type: TokenType::UserSession,
+                                subject: TokenSubject::User(user_slug),
+                                organization: None,
+                                vault: None,
+                                kid: kid.clone(),
+                                expires_at,
+                                used: false,
+                                created_at: block_timestamp,
+                                used_at: None,
+                                revoked_at: None,
+                            };
+
+                            if let Err(e) = sys.store_refresh_token(&token) {
+                                return (
+                                    ledger_error(
+                                        ErrorCode::Internal,
+                                        format!("Failed to store refresh token: {e}"),
+                                    ),
+                                    None,
+                                );
+                            }
+
+                            LedgerResponse::TotpVerified { refresh_token_id: token_id }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for TOTP consumption",
+                            )
+                        }
+                    },
+
+                    SystemRequest::ConsumeRecoveryAndCreateSession {
+                        user_id,
+                        nonce,
+                        code_hash,
+                        credential_id,
+                        token_hash,
+                        family,
+                        kid,
+                        ttl_secs,
+                    } => {
+                        if let Some(sys) = &sys_service {
+                            // 1. Read and validate the challenge
+                            let challenge = match sys.get_totp_challenge(*user_id, nonce) {
+                                Ok(Some(c)) => c,
+                                Ok(None) => {
+                                    return (
+                                        ledger_error(ErrorCode::NotFound, "Challenge not found"),
+                                        None,
+                                    );
+                                },
+                                Err(e) => {
+                                    return (
+                                        ledger_error(
+                                            ErrorCode::Internal,
+                                            format!("Failed to read challenge: {e}"),
+                                        ),
+                                        None,
+                                    );
+                                },
+                            };
+
+                            // 2. Deterministic expiry check
+                            if challenge.expires_at <= block_timestamp {
+                                return (
+                                    ledger_error(
+                                        ErrorCode::FailedPrecondition,
+                                        "Challenge expired",
+                                    ),
+                                    None,
+                                );
+                            }
+
+                            // 3. Defense-in-depth: reject if max attempts exceeded.
+                            // Mirrors `SystemOrganizationService::MAX_TOTP_ATTEMPTS`.
+                            const MAX_TOTP_ATTEMPTS: u8 = 3;
+                            if challenge.attempts >= MAX_TOTP_ATTEMPTS {
+                                return (
+                                    ledger_error(ErrorCode::TooManyAttempts, "Too many attempts"),
+                                    None,
+                                );
+                            }
+
+                            // 4. Delete the challenge first (invalidate before
+                            // credential mutation — matches ConsumeTotpAndCreateSession
+                            // ordering to prevent partial-replay windows).
+                            let user_slug = challenge.user_slug;
+                            if let Err(e) = sys.delete_totp_challenge(*user_id, nonce) {
+                                return (
+                                    ledger_error(
+                                        ErrorCode::Internal,
+                                        format!("Failed to delete challenge: {e}"),
+                                    ),
+                                    None,
+                                );
+                            }
+
+                            // 5. Consume the recovery code (atomic hash removal)
+                            let remaining = match sys.consume_recovery_code(
+                                *user_id,
+                                *credential_id,
+                                code_hash,
+                                block_timestamp,
+                            ) {
+                                Ok(count) => count,
+                                Err(SystemError::NotFound { .. }) => {
+                                    return (
+                                        ledger_error(
+                                            ErrorCode::Unauthenticated,
+                                            "Verification failed",
+                                        ),
+                                        None,
+                                    );
+                                },
+                                Err(e) => {
+                                    return (
+                                        ledger_error(
+                                            ErrorCode::Internal,
+                                            format!("Failed to consume recovery code: {e}"),
+                                        ),
+                                        None,
+                                    );
+                                },
+                            };
+
+                            // 6. Create refresh token
+                            let token_id = state.sequences.next_refresh_token();
+                            let expires_at = block_timestamp + saturating_duration_secs(*ttl_secs);
+
+                            let token = RefreshToken {
+                                id: token_id,
+                                token_hash: *token_hash,
+                                family: *family,
+                                token_type: TokenType::UserSession,
+                                subject: TokenSubject::User(user_slug),
+                                organization: None,
+                                vault: None,
+                                kid: kid.clone(),
+                                expires_at,
+                                used: false,
+                                created_at: block_timestamp,
+                                used_at: None,
+                                revoked_at: None,
+                            };
+
+                            if let Err(e) = sys.store_refresh_token(&token) {
+                                return (
+                                    ledger_error(
+                                        ErrorCode::Internal,
+                                        format!("Failed to store refresh token: {e}"),
+                                    ),
+                                    None,
+                                );
+                            }
+
+                            LedgerResponse::RecoveryCodeConsumed {
+                                refresh_token_id: token_id,
+                                remaining_codes: remaining,
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for recovery code consumption",
+                            )
+                        }
+                    },
+
+                    SystemRequest::IncrementTotpAttempt { user_id, nonce } => {
+                        if let Some(sys) = &sys_service {
+                            match sys.increment_totp_attempts(*user_id, nonce) {
+                                Ok(challenge) => LedgerResponse::TotpAttemptIncremented {
+                                    attempts: challenge.attempts,
+                                },
+                                Err(SystemError::NotFound { entity }) => {
+                                    ledger_error(ErrorCode::NotFound, entity)
+                                },
+                                Err(SystemError::FailedPrecondition { message }) => {
+                                    ledger_error(ErrorCode::TooManyAttempts, message)
+                                },
+                                Err(e) => ledger_error(
+                                    ErrorCode::Internal,
+                                    format!("Failed to increment TOTP attempts: {e}"),
+                                ),
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for TOTP attempt increment",
                             )
                         }
                     },

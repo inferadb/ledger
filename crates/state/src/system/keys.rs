@@ -3,9 +3,9 @@
 use std::fmt::Write;
 
 use inferadb_ledger_types::{
-    AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, NodeId, OrganizationId,
+    AppId, AppSlug, ClientAssertionId, CredentialType, EmailVerifyTokenId, NodeId, OrganizationId,
     OrganizationSlug, RefreshTokenId, Region, SigningKeyId, SigningKeyScope, TeamId, TeamSlug,
-    TokenSubject, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
+    TokenSubject, UserCredentialId, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
 
 /// Encodes a byte slice as lowercase hexadecimal.
@@ -137,6 +137,7 @@ impl SystemKeys {
         key_entry!(EMAIL_VERIFY_HASH_INDEX_PREFIX, Regional, Index),
         key_entry!(APP_NAME_INDEX_PREFIX, Regional, Index),
         key_entry!(USER_EMAILS_INDEX_PREFIX, Regional, Index),
+        key_entry!(USER_CREDENTIAL_TYPE_INDEX_PREFIX, Regional, Index),
         // -- _meta: Bookkeeping (GLOBAL) --
         key_entry!(META_PREFIX, Global, Meta),
         key_entry!(NODE_PREFIX, Global, Meta),
@@ -149,6 +150,7 @@ impl SystemKeys {
         // -- _tmp: Ephemeral (REGIONAL) --
         key_entry!(ONBOARD_VERIFY_PREFIX, Regional, Temporary),
         key_entry!(ONBOARD_ACCOUNT_PREFIX, Regional, Temporary),
+        key_entry!(TOTP_CHALLENGE_PREFIX, Regional, Temporary),
         // -- _audit: Compliance (GLOBAL) --
         key_entry!(ERASURE_AUDIT_PREFIX, Global, Audit),
         // -- Bare entity prefixes (GLOBAL) --
@@ -166,6 +168,7 @@ impl SystemKeys {
         key_entry!(ORG_PROFILE_PREFIX, Regional, Entity),
         key_entry!(ASSERTION_NAME_PREFIX, Regional, Entity),
         key_entry!(EMAIL_VERIFY_PREFIX, Regional, Entity),
+        key_entry!(USER_CREDENTIAL_PREFIX, Regional, Entity),
         // -- _meta:seq: Sequence counters (GLOBAL) --
         key_entry!(ORG_SEQ_KEY, Global, Sequence),
         key_entry!(USER_SEQ_KEY, Global, Sequence),
@@ -176,6 +179,8 @@ impl SystemKeys {
         key_entry!(CLIENT_ASSERTION_SEQ_KEY, Global, Sequence),
         key_entry!(SIGNING_KEY_SEQ_KEY, Global, Sequence),
         key_entry!(REFRESH_TOKEN_SEQ_KEY, Global, Sequence),
+        // -- _meta:seq: Sequence counters (REGIONAL) --
+        key_entry!(USER_CREDENTIAL_SEQ_KEY, Regional, Sequence),
     ];
 
     // ========================================================================
@@ -800,6 +805,92 @@ impl SystemKeys {
     pub const ONBOARD_ACCOUNT_PREFIX: &'static str = "_tmp:onboard_account:";
 
     // ========================================================================
+    // User Credential Keys
+    // ========================================================================
+
+    /// Primary key for a user credential record (REGIONAL).
+    ///
+    /// Pattern: `user_credential:{user_id}:{credential_id}`
+    ///
+    /// Stored in a REGIONAL Raft group. The composite key enables prefix
+    /// scan for all credentials belonging to a user.
+    pub fn user_credential_key(user_id: UserId, credential_id: UserCredentialId) -> String {
+        format!("user_credential:{}:{}", user_id.value(), credential_id.value())
+    }
+
+    /// Prefix for scanning all credentials belonging to a user.
+    ///
+    /// Pattern: `user_credential:{user_id}:`
+    pub fn user_credential_prefix(user_id: UserId) -> String {
+        format!("user_credential:{}:", user_id.value())
+    }
+
+    /// Parses a user credential key into its components.
+    ///
+    /// Returns `None` if the key doesn't match `user_credential:{user_id}:{credential_id}`.
+    pub fn parse_user_credential_key(key: &str) -> Option<(UserId, UserCredentialId)> {
+        let rest = key.strip_prefix(Self::USER_CREDENTIAL_PREFIX)?;
+        let (user_str, cred_str) = rest.split_once(':')?;
+        let user_id = user_str.parse::<i64>().ok().map(UserId::new)?;
+        let credential_id = cred_str.parse::<i64>().ok().map(UserCredentialId::new)?;
+        Some((user_id, credential_id))
+    }
+
+    /// Index key for scanning credentials by type within a user.
+    ///
+    /// Pattern: `_idx:user_credential:type:{user_id}:{type}:`
+    ///
+    /// The trailing colon makes this a scan prefix — iterate to find all
+    /// credential IDs of this type for the user. Used to enforce
+    /// one-TOTP-per-user and one-recovery-code-per-user invariants.
+    pub fn user_credential_type_index_key(
+        user_id: UserId,
+        credential_type: &CredentialType,
+    ) -> String {
+        format!("_idx:user_credential:type:{}:{credential_type}:", user_id.value())
+    }
+
+    /// Prefix for scanning credential type index entries for a user.
+    ///
+    /// Pattern: `_idx:user_credential:type:{user_id}:`
+    pub fn user_credential_type_index_prefix(user_id: UserId) -> String {
+        format!("_idx:user_credential:type:{}:", user_id.value())
+    }
+
+    /// Key for a pending TOTP challenge (ephemeral, REGIONAL).
+    ///
+    /// Pattern: `_tmp:totp_challenge:{user_id}:{nonce_hex}`
+    ///
+    /// Stored in a REGIONAL Raft group. Auto-expires after 5 minutes.
+    /// The nonce is a 32-byte random value encoded as lowercase hex.
+    pub fn totp_challenge_key(user_id: UserId, nonce: &[u8; 32]) -> String {
+        format!("_tmp:totp_challenge:{}:{}", user_id.value(), encode_hex(nonce))
+    }
+
+    /// Prefix for scanning all TOTP challenges for a user.
+    ///
+    /// Pattern: `_tmp:totp_challenge:{user_id}:`
+    pub fn totp_challenge_prefix(user_id: UserId) -> String {
+        format!("_tmp:totp_challenge:{}:", user_id.value())
+    }
+
+    /// Prefix for all user credential primary keys (REGIONAL).
+    pub const USER_CREDENTIAL_PREFIX: &'static str = "user_credential:";
+
+    /// Prefix for credential type index keys (REGIONAL).
+    pub const USER_CREDENTIAL_TYPE_INDEX_PREFIX: &'static str = "_idx:user_credential:type:";
+
+    /// Key for the user credential ID sequence counter (REGIONAL).
+    ///
+    /// This is the first REGIONAL `_meta:seq:` key — all existing sequences
+    /// are GLOBAL. Credential IDs are user-scoped and region-scoped, so a
+    /// REGIONAL sequence avoids the cross-tier saga GLOBAL allocation requires.
+    pub const USER_CREDENTIAL_SEQ_KEY: &'static str = "_meta:seq:user_credential";
+
+    /// Prefix for TOTP challenge keys (ephemeral, REGIONAL).
+    pub const TOTP_CHALLENGE_PREFIX: &'static str = "_tmp:totp_challenge:";
+
+    // ========================================================================
     // Signing Key Keys
     // ========================================================================
 
@@ -1023,6 +1114,14 @@ impl SystemKeys {
     pub fn classify_key_tier(key: &str) -> Option<KeyTier> {
         // --- GLOBAL: infrastructure, structural data, cross-region indexes ---
 
+        // REGIONAL `_meta:seq:` — exact match, checked before the blanket `_meta:` → Global
+        // rule. `user_credential` is the first REGIONAL sequence counter. Use `==` (not
+        // `starts_with`) to avoid over-capturing future GLOBAL keys like
+        // `_meta:seq:user_credential_audit`.
+        if key == Self::USER_CREDENTIAL_SEQ_KEY {
+            return Some(KeyTier::Regional);
+        }
+
         if key.starts_with("_dir:") || key.starts_with("_meta:") || key.starts_with("_audit:") {
             return Some(KeyTier::Global);
         }
@@ -1062,11 +1161,12 @@ impl SystemKeys {
             return Some(KeyTier::Regional);
         }
 
-        // REGIONAL indexes: per-user data and PII-containing lookups
+        // REGIONAL indexes: per-user data, PII-containing lookups, credentials
         if key.starts_with("_idx:user_emails:")
             || key.starts_with("_idx:email_verify_hash:")
             || key.starts_with("_idx:email:")
             || key.starts_with("_idx:app:name:")
+            || key.starts_with("_idx:user_credential:")
         {
             return Some(KeyTier::Regional);
         }
@@ -1079,6 +1179,7 @@ impl SystemKeys {
             || key.starts_with("app_profile:")
             || key.starts_with("org_profile:")
             || key.starts_with("assertion_name:")
+            || key.starts_with("user_credential:")
         {
             return Some(KeyTier::Regional);
         }
@@ -1742,7 +1843,7 @@ mod tests {
     /// a new constant, preventing silent omissions.
     #[test]
     fn test_key_registry_completeness() {
-        const EXPECTED_COUNT: usize = 50;
+        const EXPECTED_COUNT: usize = 54;
         assert_eq!(
             SystemKeys::KEY_REGISTRY.len(),
             EXPECTED_COUNT,
@@ -1893,6 +1994,9 @@ mod tests {
             SystemKeys::user_emails_index_key(UserId::new(1)),
             SystemKeys::email_verify_hash_index_key("abc123"),
             SystemKeys::app_name_index_key(OrganizationId::new(1), "my-app"),
+            SystemKeys::user_credential_key(UserId::new(1), UserCredentialId::new(1)),
+            SystemKeys::user_credential_type_index_key(UserId::new(1), &CredentialType::Passkey),
+            SystemKeys::totp_challenge_key(UserId::new(1), &[0xab; 32]),
         ];
         for key in &regional_keys {
             assert_eq!(
@@ -1901,6 +2005,13 @@ mod tests {
                 "concrete key \"{key}\" should be Regional"
             );
         }
+
+        // REGIONAL sequence key (first REGIONAL _meta:seq:)
+        assert_eq!(
+            SystemKeys::classify_key_tier(SystemKeys::USER_CREDENTIAL_SEQ_KEY),
+            Some(KeyTier::Regional),
+            "user credential sequence key should be Regional"
+        );
     }
 
     /// Negative tests: `validate_key_tier` returns an error on tier mismatch.
@@ -1924,5 +2035,150 @@ mod tests {
         // Unknown keys pass validation (no false positives)
         assert!(SystemKeys::validate_key_tier("unknown:42", KeyTier::Global).is_ok());
         assert!(SystemKeys::validate_key_tier("unknown:42", KeyTier::Regional).is_ok());
+    }
+
+    // ========================================================================
+    // User Credential Key Tests
+    // ========================================================================
+
+    #[test]
+    fn test_user_credential_key_generation() {
+        let key = SystemKeys::user_credential_key(UserId::new(42), UserCredentialId::new(7));
+        assert_eq!(key, "user_credential:42:7");
+    }
+
+    #[test]
+    fn test_user_credential_prefix() {
+        let prefix = SystemKeys::user_credential_prefix(UserId::new(42));
+        assert_eq!(prefix, "user_credential:42:");
+
+        // Primary key must start with user prefix for scan
+        let key = SystemKeys::user_credential_key(UserId::new(42), UserCredentialId::new(7));
+        assert!(key.starts_with(&prefix));
+    }
+
+    #[test]
+    fn test_parse_user_credential_key_roundtrip() {
+        let user_id = UserId::new(42);
+        let cred_id = UserCredentialId::new(7);
+        let key = SystemKeys::user_credential_key(user_id, cred_id);
+
+        let (parsed_user, parsed_cred) = SystemKeys::parse_user_credential_key(&key).unwrap();
+        assert_eq!(parsed_user, user_id);
+        assert_eq!(parsed_cred, cred_id);
+    }
+
+    #[test]
+    fn test_parse_user_credential_key_invalid() {
+        assert!(SystemKeys::parse_user_credential_key("user_credential:").is_none());
+        assert!(SystemKeys::parse_user_credential_key("user_credential:42").is_none());
+        assert!(SystemKeys::parse_user_credential_key("user_credential:abc:7").is_none());
+        assert!(SystemKeys::parse_user_credential_key("user:42:7").is_none());
+        assert!(SystemKeys::parse_user_credential_key("").is_none());
+    }
+
+    #[test]
+    fn test_user_credential_type_index_key() {
+        let key =
+            SystemKeys::user_credential_type_index_key(UserId::new(42), &CredentialType::Passkey);
+        assert_eq!(key, "_idx:user_credential:type:42:passkey:");
+
+        let key =
+            SystemKeys::user_credential_type_index_key(UserId::new(42), &CredentialType::Totp);
+        assert_eq!(key, "_idx:user_credential:type:42:totp:");
+
+        let key = SystemKeys::user_credential_type_index_key(
+            UserId::new(42),
+            &CredentialType::RecoveryCode,
+        );
+        assert_eq!(key, "_idx:user_credential:type:42:recovery_code:");
+    }
+
+    #[test]
+    fn test_user_credential_type_index_prefix() {
+        let prefix = SystemKeys::user_credential_type_index_prefix(UserId::new(42));
+        assert_eq!(prefix, "_idx:user_credential:type:42:");
+
+        // Type index key must start with user type prefix
+        let key =
+            SystemKeys::user_credential_type_index_key(UserId::new(42), &CredentialType::Passkey);
+        assert!(key.starts_with(&prefix));
+    }
+
+    #[test]
+    fn test_totp_challenge_key() {
+        let nonce = [0xab; 32];
+        let key = SystemKeys::totp_challenge_key(UserId::new(42), &nonce);
+        let expected_hex = "ab".repeat(32);
+        assert_eq!(key, format!("_tmp:totp_challenge:42:{expected_hex}"));
+    }
+
+    #[test]
+    fn test_totp_challenge_prefix() {
+        let prefix = SystemKeys::totp_challenge_prefix(UserId::new(42));
+        assert_eq!(prefix, "_tmp:totp_challenge:42:");
+
+        // Challenge key must start with user challenge prefix
+        let nonce = [0xab; 32];
+        let key = SystemKeys::totp_challenge_key(UserId::new(42), &nonce);
+        assert!(key.starts_with(&prefix));
+    }
+
+    #[test]
+    fn test_user_credential_prefix_does_not_collide_with_user() {
+        // `user_credential:` must not be a prefix of `user:` or vice versa
+        assert!(!SystemKeys::USER_CREDENTIAL_PREFIX.starts_with(SystemKeys::USER_PREFIX));
+        assert!(!SystemKeys::USER_PREFIX.starts_with(SystemKeys::USER_CREDENTIAL_PREFIX));
+    }
+
+    #[test]
+    fn test_user_credential_seq_key_is_regional() {
+        // The user credential sequence is the first REGIONAL _meta:seq: key
+        assert_eq!(
+            SystemKeys::classify_key_tier(SystemKeys::USER_CREDENTIAL_SEQ_KEY),
+            Some(KeyTier::Regional),
+        );
+
+        // Validate that writing it to REGIONAL succeeds
+        assert!(
+            SystemKeys::validate_key_tier(SystemKeys::USER_CREDENTIAL_SEQ_KEY, KeyTier::Regional,)
+                .is_ok()
+        );
+
+        // Validate that writing it to GLOBAL fails (catches the pre-existing
+        // blanket _meta: → Global rule)
+        assert!(
+            SystemKeys::validate_key_tier(SystemKeys::USER_CREDENTIAL_SEQ_KEY, KeyTier::Global,)
+                .is_err()
+        );
+
+        // Existing GLOBAL sequence keys must remain Global after the REGIONAL
+        // ordering change — verify the exact-match guard doesn't over-capture.
+        for global_seq in [
+            SystemKeys::USER_SEQ_KEY,
+            SystemKeys::USER_EMAIL_SEQ_KEY,
+            SystemKeys::ORG_SEQ_KEY,
+            SystemKeys::APP_SEQ_KEY,
+            SystemKeys::VAULT_SEQ_KEY,
+            SystemKeys::EMAIL_VERIFY_SEQ_KEY,
+            SystemKeys::CLIENT_ASSERTION_SEQ_KEY,
+            SystemKeys::SIGNING_KEY_SEQ_KEY,
+            SystemKeys::REFRESH_TOKEN_SEQ_KEY,
+        ] {
+            assert_eq!(
+                SystemKeys::classify_key_tier(global_seq),
+                Some(KeyTier::Global),
+                "{global_seq} should remain Global after REGIONAL sequence addition",
+            );
+        }
+    }
+
+    #[test]
+    fn test_totp_challenge_prefix_does_not_collide_with_onboard() {
+        // `_tmp:totp_challenge:` and `_tmp:onboard_*:` are distinct
+        assert!(!SystemKeys::TOTP_CHALLENGE_PREFIX.starts_with(SystemKeys::ONBOARD_VERIFY_PREFIX));
+        assert!(!SystemKeys::TOTP_CHALLENGE_PREFIX.starts_with(SystemKeys::ONBOARD_ACCOUNT_PREFIX));
+        assert!(!SystemKeys::ONBOARD_VERIFY_PREFIX.starts_with(SystemKeys::TOTP_CHALLENGE_PREFIX));
+        assert!(!SystemKeys::ONBOARD_ACCOUNT_PREFIX.starts_with(SystemKeys::TOTP_CHALLENGE_PREFIX));
     }
 }

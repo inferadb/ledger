@@ -40,7 +40,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: Re-exports core types, errors, hashing utilities, and codec
 - **Key Types/Functions**:
 - Public modules: `codec`, `config`, `email_hash`, `error`, `events`, `hash`, `merkle`, `onboarding`, `snowflake`, `token`, `types`, `validation`
-- Re-exports: `OrganizationId`, `OrganizationSlug`, `OrganizationUsage`, `VaultId`, `VaultSlug`, `ShardId`, `UserId`, `UserSlug`, `BlockHeader`, `Transaction`, `Entity`, `Relationship`, `Operation`, `EmailBlindingKey`, `compute_email_hmac`, `compute_code_hash`, `normalize_email`, `TokenVersion`, `TokenType`, `TokenSubject`, `UserSessionClaims`, `VaultTokenClaims`, `TokenPair`, `ValidatedToken`, `TokenError`, `SigningKeyEnvelope`, etc.
+- Re-exports: `OrganizationId`, `OrganizationSlug`, `OrganizationUsage`, `VaultId`, `VaultSlug`, `ShardId`, `UserId`, `UserSlug`, `UserCredentialId`, `CredentialType`, `TotpAlgorithm`, `PrimaryAuthMethod`, `PasskeyCredential`, `TotpCredential`, `RecoveryCodeCredential`, `CredentialData`, `UserCredential`, `PendingTotpChallenge`, `BlockHeader`, `Transaction`, `Entity`, `Relationship`, `Operation`, `EmailBlindingKey`, `compute_email_hmac`, `compute_code_hash`, `normalize_email`, `TokenVersion`, `TokenType`, `TokenSubject`, `UserSessionClaims`, `VaultTokenClaims`, `TokenPair`, `ValidatedToken`, `TokenError`, `SigningKeyEnvelope`, etc.
 - **Insights**: Clean public API surface, excellent organization
 
 #### `codec.rs`
@@ -114,7 +114,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `OrganizationId(i64)`: Internal storage key (display `"org:42"`), generated via `define_id!`
 - `OrganizationSlug(u64)`: External Snowflake identifier (display raw number), hand-implemented (not `define_id!` — `u64` not `i64`, no prefix)
 - `VaultSlug(u64)`: External Snowflake identifier for vaults (same hand-implemented pattern as `OrganizationSlug`)
-- `VaultId`, `UserId`, `ShardId`, `SigningKeyId`, `RefreshTokenId`: Newtype IDs via `define_id!` (replaced type aliases)
+- `VaultId`, `UserId`, `ShardId`, `SigningKeyId`, `RefreshTokenId`, `UserCredentialId`: Newtype IDs via `define_id!` (replaced type aliases)
 - `TeamSlug(u64)`, `AppSlug(u64)`: External Snowflake identifiers for teams and apps (hand-implemented, same pattern as `OrganizationSlug`)
 - `TokenVersion(u64)`: Monotonic counter for forced session invalidation (manual impl, not `define_id!` — needs `Default` and `increment()`)
 - `BlockHeader`: height, organization, vault, previous_hash, tx_merkle_root, state_root, timestamp, term, committed_index
@@ -122,7 +122,16 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `Operation`: 5 variants (CreateRelationship, DeleteRelationship, SetEntity, DeleteEntity, ExpireEntity)
 - `Entity`: key, value, expires_at (0 = never), version
 - `Relationship`: resource, relation, subject (authorization tuple)
-- **Insights**: Dual-ID architecture for both organizations and vaults: internal sequential IDs (`OrganizationId`/`VaultId`, `i64`) for B+ tree key density, external Snowflake IDs (`OrganizationSlug`/`VaultSlug`, `u64`) for API-facing use. Fallible Transaction builder validates constraints (max 1000 ops, max 100MB batch payload). `BlockHeader` includes `organization`/`vault` scope and Raft consensus fields (`term`, `committed_index`).
+- `CredentialType` enum: `Passkey`, `Totp`, `RecoveryCode` (with `Display` impl for storage key encoding)
+- `TotpAlgorithm` enum: `Sha1` (default, widest compat), `Sha256`, `Sha512`
+- `PrimaryAuthMethod` enum: `EmailCode`, `Passkey` — distinguishes primary auth for TOTP challenge audit trail (email-code is NOT a `CredentialType`)
+- `PasskeyCredential` struct: credential_id, public_key, sign_count, transports, backup_eligible, backup_state, attestation_format, aaguid
+- `TotpCredential` struct: secret (`Zeroizing<Vec<u8>>`), algorithm, digits, period — manual `Debug` impl redacts secret as `[REDACTED]`, custom serde module for `Zeroizing` wrapper
+- `RecoveryCodeCredential` struct: code_hashes (`Vec<Vec<u8>>`), total_generated
+- `CredentialData` enum: `Passkey(PasskeyCredential)` | `Totp(TotpCredential)` | `RecoveryCode(RecoveryCodeCredential)` — externally-tagged serde (required for postcard in `EncryptedUserSystemRequest`)
+- `UserCredential` struct: id, user_id, credential_type, name, enabled, created_at, last_used_at, data — `credential_type` intentionally redundant with `CredentialData` discriminant (needed for type index scans without deserialization)
+- `PendingTotpChallenge` struct: nonce (`[u8; 32]`), expires_at, attempts, primary_method — stores both UserId and UserSlug (state machine needs UserId for keys, session creation needs UserSlug for JWT)
+- **Insights**: Dual-ID architecture for both organizations and vaults: internal sequential IDs (`OrganizationId`/`VaultId`, `i64`) for B+ tree key density, external Snowflake IDs (`OrganizationSlug`/`VaultSlug`, `u64`) for API-facing use. Fallible Transaction builder validates constraints (max 1000 ops, max 100MB batch payload). `BlockHeader` includes `organization`/`vault` scope and Raft consensus fields (`term`, `committed_index`). Credential types use externally-tagged serde for postcard compatibility (internally-tagged enums fail postcard deserialization). `TotpCredential` derives `Zeroize` on secret field for secure memory cleanup. `UserCredentialId` follows the single-ID pattern (like `SigningKeyId`, `RefreshTokenId`) — no slug needed since credentials are always accessed under a user context.
 
 #### `snowflake.rs`
 
@@ -644,7 +653,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### `system/service.rs`
 
-- **Purpose**: `SystemOrganizationService` — organization CRUD with slug-based lookup, vault slug storage, user directory management, email hash indexing, onboarding CRUD
+- **Purpose**: `SystemOrganizationService` — organization CRUD with slug-based lookup, vault slug storage, user directory management, email hash indexing, onboarding CRUD, credential CRUD, TOTP challenge management
 - **Key Types/Functions**:
 - `register_organization()`, `get_organization()`, `get_organization_by_slug()`, `list_organizations()`
 - `update_organization_status()`, `assign_organization_to_region()`
@@ -655,12 +664,15 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `store_user_shred_key()`, `get_user_shred_key()`: Per-user encryption key CRUD for crypto-shredding
 - `store_org_shred_key()`, `get_org_shred_key()`: Per-organization encryption key CRUD for crypto-shredding
 - Onboarding CRUD: `store_email_verification()`, `get_email_verification()`, `delete_email_verification()`, `store_onboarding_account()`, `get_onboarding_account_by_hmac()`, `delete_onboarding_account()` — all use postcard serialization, `SYSTEM_VAULT_ID`, and `_tmp:` key prefix.
+- Credential CRUD: `create_user_credential()` (enforces one-TOTP, one-recovery-code, passkey uniqueness via type index), `list_user_credentials()` (prefix scan with optional type filter), `get_user_credential()`, `update_user_credential()` (passkey-only field updates), `delete_user_credential()` (last-credential guard), `delete_all_user_credentials()` (bypass guards — user erasure only)
+- TOTP challenge management: `create_totp_challenge()` (rate limited: max 3 active per user), `get_totp_challenge()`, `delete_totp_challenge()`, `increment_totp_attempts()` (max 3 attempts), `delete_all_totp_challenges()` (user erasure only), `count_active_totp_challenges()` (rate limit check)
+- Recovery code: `consume_recovery_code()` (accepts pre-hashed `[u8; 32]`, constant-time comparison via `hash_eq()`)
 - Token operations (defined in `system/token.rs`, implemented as methods on `SystemOrganizationService`): signing key CRUD, refresh token lifecycle, family revocation, cascade operations
-- **Insights**: Slug index always created alongside organization registration. Vault slug index uses entity-storage pattern (`_idx:vault:slug:{slug}` → VaultId). Onboarding store methods use `condition: None` (overwrite semantics) — re-initiation replaces old code, re-verification replaces old onboarding account. Token operations extend the service via `impl` blocks in the sibling `token.rs` file (using `pub(super)` field visibility).
+- **Insights**: Slug index always created alongside organization registration. Vault slug index uses entity-storage pattern (`_idx:vault:slug:{slug}` → VaultId). Onboarding store methods use `condition: None` (overwrite semantics) — re-initiation replaces old code, re-verification replaces old onboarding account. Token operations extend the service via `impl` blocks in the sibling `token.rs` file (using `pub(super)` field visibility). Credential type index keys for multi-instance types (passkeys) include credential_id as suffix to prevent overwriting. Last-credential guard counts ALL credentials including disabled (email-code auth is always available as baseline). `erase_user()` extended with credential + TOTP challenge cleanup steps (warn + continue pattern, shred key backstop).
 
 #### `system/keys.rs`
 
-- **Purpose**: Key encoding for system organization entries, signing keys, refresh tokens, and onboarding records
+- **Purpose**: Key encoding for system organization entries, signing keys, refresh tokens, onboarding records, and user credentials
 - **Key Types/Functions**:
 - `ORG_PREFIX` (`"org:"`), `ORG_SEQ_KEY` (`"_meta:seq:organization"`): Key constants
 - `organization_key(OrganizationId)`, `organization_slug_key(OrganizationSlug)`: Key constructors
@@ -675,8 +687,10 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - Directory keys: `DIR_PREFIX` (`"_dir:"`), `USER_DIRECTORY_PREFIX` (`"_dir:user:"`)
 - Saga/node keys: `saga_key(id)` (format: `"_meta:saga:{id}"`), `SAGA_PREFIX` (`"_meta:saga:"`), `node_key(id)` (format: `"_meta:node:{id}"`), `NODE_PREFIX` (`"_meta:node:"`)
 - Signing key org index: `signing_key_org_prefix(org)` (format: `"_idx:signing_key:org:{org}:"`), `signing_key_org_entry(org, id)`, `SIGNING_KEY_ORG_PREFIX` (`"_idx:signing_key:org:"`)
+- Credential keys: `USER_CREDENTIAL_PREFIX` (`"user_credential:"`), `USER_CREDENTIAL_TYPE_INDEX_PREFIX` (`"_idx:user_credential:type:"`), `USER_CREDENTIAL_SEQ_KEY` (`"_meta:seq:user_credential"`), `TOTP_CHALLENGE_PREFIX` (`"_tmp:totp_challenge:"`)
+- Credential key functions: `user_credential_key(user_id, credential_id)`, `user_credential_prefix(user_id)`, `user_credential_type_index_key(user_id, credential_type)` (trailing colon — prefix generator, not point-key), `totp_challenge_key(user_id, nonce)`, `totp_challenge_prefix(user_id)`
 - Tier validation: `KeyTier` enum (`Global`, `Regional`), `classify_key_tier(key)` → `Option<KeyTier>`, `validate_key_tier(key, expected)` → `Result<(), String>`
-- **Insights**: Dedicated key scheme for system metadata. Underscore-prefixed keys (`_dir:`, `_idx:`, `_meta:`, `_shred:`, `_tmp:`, `_audit:`) are infrastructure; bare keys are domain entities. The `_shred:` prefix isolates crypto-shredding key material. `_dir:` holds GLOBAL directory routing entries. `_meta:` holds saga state and node membership. The `:` vs `_` ASCII ordering invariant (0x3A < 0x5F) ensures `app:` prefix scans never match `app_profile:` or `app_vault:` keys. `test_prefix_taxonomy` enforces the full convention. Signing key scope index points to the current active key's kid (replaced atomically on rotation). Refresh token indexes use hex-encoded family/hash bytes. Poisoned family key is an O(1) existence check for reuse detection.
+- **Insights**: Dedicated key scheme for system metadata. Underscore-prefixed keys (`_dir:`, `_idx:`, `_meta:`, `_shred:`, `_tmp:`, `_audit:`) are infrastructure; bare keys are domain entities. The `_shred:` prefix isolates crypto-shredding key material. `_dir:` holds GLOBAL directory routing entries. `_meta:` holds saga state and node membership. The `:` vs `_` ASCII ordering invariant (0x3A < 0x5F) ensures `app:` prefix scans never match `app_profile:` or `app_vault:` keys. `test_prefix_taxonomy` enforces the full convention. Signing key scope index points to the current active key's kid (replaced atomically on rotation). Refresh token indexes use hex-encoded family/hash bytes. Poisoned family key is an O(1) existence check for reuse detection. `USER_CREDENTIAL_SEQ_KEY` is the first REGIONAL `_meta:seq:` key — `classify_key_tier` checks it by exact equality BEFORE the blanket `_meta:` → Global rule (ordering is load-bearing). `user_credential_type_index_key()` generates a prefix with trailing colon; the service layer appends credential_id for multi-instance types (passkeys).
 
 #### `system/types.rs`
 
@@ -715,7 +729,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 ## Crate: `inferadb-ledger-proto`
 
 - **Purpose**: Protobuf definitions for gRPC API and domain↔proto conversions.
-- **Dependencies**: `types`, `prost`, `tonic`
+- **Dependencies**: `types`, `prost`, `tonic`, `zeroize`
 - **Quality Rating**: ★★★★☆
 
 ### Files
@@ -747,9 +761,10 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - Events conversions: `From<EventScope>`, `From<&EventOutcome>`, `From<&EventEmission>`, `From<&EventEntry>` (both directions), `TryFrom<proto::EventEntry>` for domain `EventEntry`, datetime↔Timestamp helpers
 - `impl std::str::FromStr for EventAction`: Iterates `EventAction::ALL` array, matches via `as_str()`
 - Token conversions: `DomainTokenPair → proto::TokenPair`, `ValidatedToken ↔ ValidateTokenResponse`, `signing_key_scope_from_i32()` (`UNSPECIFIED=0` → `InvalidArgument`), `validate_signing_key_status()`, `UserSessionClaims`/`VaultAccessClaims` proto ↔ domain
-- Covers all domain types: Block, Transaction, Operation, Entity, Relationship, VaultSlug, EventEntry, TokenPair, ValidatedToken, etc.
-- Unit tests + Proptests validating round-trip conversions (including events and tokens)
-- **Insights**: Deduplication effort (Phase 2 Task 15) removed duplicate helper functions. Events proto conversion flattens Rust's data-carrying enums. Token conversions for `SigningKeyScope` domain enum (carries `OrganizationId`) and `PublicKeyInfo ↔ SigningKey` deferred to services layer where both proto and state crate types are available.
+- Credential conversions: `From<CredentialType>` / `TryFrom<proto::CredentialType>`, `From<TotpAlgorithm>` / `TryFrom<proto::TotpAlgorithm>`, `From<&PasskeyCredential>` / `TryFrom<proto::PasskeyCredentialData>`, `From<&TotpCredential>` / `TryFrom<proto::TotpCredentialData>`, `From<&RecoveryCodeCredential>` / `TryFrom<proto::RecoveryCodeCredentialData>`, `user_credential_to_proto()` (function, not `From` — needs explicit `UserSlug` parameter), `strip_totp_secret()`, `strip_recovery_code_hashes()`, `validate_credential_info_type()`, `credential_type_from_i32()`, `totp_algorithm_from_i32()`
+- Covers all domain types: Block, Transaction, Operation, Entity, Relationship, VaultSlug, EventEntry, TokenPair, ValidatedToken, UserCredential, etc.
+- Unit tests + Proptests validating round-trip conversions (including events, tokens, and credentials)
+- **Insights**: Deduplication effort (Phase 2 Task 15) removed duplicate helper functions. Events proto conversion flattens Rust's data-carrying enums. Token conversions for `SigningKeyScope` domain enum (carries `OrganizationId`) and `PublicKeyInfo ↔ SigningKey` deferred to services layer where both proto and state crate types are available. `user_credential_to_proto()` is a function (not `From` trait) because domain `UserCredential.user` is `UserId(i64)` but proto uses `UserSlug(u64)` — `From` trait doesn't support extra parameters. `strip_totp_secret()` is a defense-in-depth helper for gRPC handlers (caller obligation, not conversion-layer guarantee). Proto `TotpAlgorithm` uses `SHA1 = 0` (not `UNSPECIFIED = 0`) because SHA-1 is the RFC 6238 default.
 
 #### `generated/ledger.v1.rs`
 
@@ -770,9 +785,12 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - Events messages: `EventEntry`, `EventFilter`, `ListEventsRequest/Response`, `GetEventRequest/Response`, `CountEventsRequest/Response`, `IngestEventEntry`, `IngestEventsRequest/Response`, `RejectedEvent`
 - Events enums: `EventScope`, `EventOutcome`, `EventEmissionPath`
 - UserService onboarding RPCs: `InitiateEmailVerification`, `VerifyEmailCode`, `CompleteRegistration`
-- Onboarding messages: `InitiateEmailVerificationRequest/Response`, `VerifyEmailCodeRequest/Response` (with `oneof result` for `ExistingUserSession`/`OnboardingSession`), `CompleteRegistrationRequest/Response` (includes `email` + `region` fields, response includes `User` + `TokenPair` + `OrganizationSlug`), `ExistingUserSession`, `OnboardingSession`
+- UserService credential RPCs: `CreateUserCredential`, `ListUserCredentials`, `UpdateUserCredential`, `DeleteUserCredential`, `CreateTotpChallenge`, `VerifyTotp`, `ConsumeRecoveryCode`
+- Onboarding messages: `InitiateEmailVerificationRequest/Response`, `VerifyEmailCodeRequest/Response` (with `oneof result` for `ExistingUserSession`/`OnboardingSession`/`TotpRequired`), `CompleteRegistrationRequest/Response` (includes `email` + `region` fields, response includes `User` + `TokenPair` + `OrganizationSlug`), `ExistingUserSession`, `OnboardingSession`, `TotpRequired`
+- Credential messages: `CredentialType` enum, `TotpAlgorithm` enum, `UserCredential` (with `oneof data` for passkey/totp/recovery_code), `PasskeyCredentialData`, `TotpCredentialData`, `RecoveryCodeCredentialData`, `CredentialInfo` (audit trail), `CreateUserCredentialRequest/Response`, `ListUserCredentialsRequest/Response`, `UpdateUserCredentialRequest/Response`, `DeleteUserCredentialRequest/Response`, `CreateTotpChallengeRequest/Response`, `VerifyTotpRequest/Response`, `ConsumeRecoveryCodeRequest/Response`
 - Proto `VaultSlug { uint64 slug }` replaces former `VaultId { int64 id }` in all external-facing RPCs
-- **Insights**: Large generated file. Regular updates needed when .proto changes. Leader transfer added `TransferLeadership` to AdminService and `TriggerElection` to RaftService (internal). `VerifyEmailCodeResponse` uses `oneof result` pattern — generates nested enum `verify_email_code_response::Result` in Rust.
+- Token messages extended: `CreateUserSessionRequest` gains `CredentialInfo` field (audit trail for primary auth method)
+- **Insights**: Large generated file. Regular updates needed when .proto changes. Leader transfer added `TransferLeadership` to AdminService and `TriggerElection` to RaftService (internal). `VerifyEmailCodeResponse` uses `oneof result` pattern — generates nested enum `verify_email_code_response::Result` in Rust. `TotpRequired` is the third variant (field 3) on `VerifyEmailCodeResponse.result` oneof.
 
 ---
 
@@ -858,13 +876,18 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `RaftPayload`: Wrapper around `LedgerRequest` with leader-assigned `proposed_at: DateTime<Utc>` timestamp. Ensures all replicas apply with identical timestamps (deterministic apply-phase).
 - `LedgerTypeConfig`: openraft type config with `D = RaftPayload` (was `D = LedgerRequest`)
 - `LedgerNodeId`: Newtype for node ID (Snowflake ID)
-- `LedgerRequest`: 26 variants — 14 original (Write, CreateOrganization, CreateVault, DeleteOrganization, DeleteVault, SuspendOrganization, ResumeOrganization, StartMigration, CompleteMigration, UpdateVaultHealth, UpdateVault, BatchWrite, System(SystemRequest), EncryptedOrgSystem(EncryptedOrgSystemRequest)) + 12 token variants:
+- `LedgerRequest`: 27 variants — 15 structural (Write, CreateOrganization, CreateVault, DeleteOrganization, DeleteVault, SuspendOrganization, ResumeOrganization, StartMigration, CompleteMigration, UpdateVaultHealth, UpdateVault, BatchWrite, System(SystemRequest), EncryptedOrgSystem(EncryptedOrgSystemRequest), EncryptedUserSystem(EncryptedUserSystemRequest)) + 12 token variants:
   - Signing keys: `CreateSigningKey`, `RotateSigningKey`, `RevokeSigningKey`, `TransitionSigningKeyRevoked`
   - Refresh tokens: `CreateRefreshToken`, `UseRefreshToken`, `RevokeTokenFamily`, `RevokeAllSubjectTokens`, `RevokeAppVaultTokens`, `RevokeAllUserSessions`, `RevokeAllAppSessions`, `DeleteExpiredRefreshTokens`
-- `LedgerResponse`: Operation results (OrganizationCreated, VaultCreated, VaultUpdated, AllAppSessionsRevoked, success/error) + 11 token response variants + 6 onboarding response variants: `EmailVerificationCreated`, `EmailCodeVerified { result: EmailCodeVerifiedResult }`, `OnboardingUserCreated { user_id, organization_id }`, `OnboardingUserProfileWritten { refresh_token_id }`, `OnboardingUserActivated`, `OnboardingCleanedUp { verification_codes_deleted, onboarding_accounts_deleted }`
-- `EmailCodeVerifiedResult` enum: `ExistingUser` | `NewUser` — no fields on either variant. Service handler handles session creation (existing user) and token return (new user) post-apply.
+- `LedgerResponse`: Operation results (OrganizationCreated, VaultCreated, VaultUpdated, AllAppSessionsRevoked, success/error) + 11 token response variants + 6 onboarding response variants + 7 credential response variants:
+  - Onboarding: `EmailVerificationCreated`, `EmailCodeVerified { result: EmailCodeVerifiedResult }`, `OnboardingUserCreated { user_id, organization_id }`, `OnboardingUserProfileWritten { refresh_token_id }`, `OnboardingUserActivated`, `OnboardingCleanedUp { verification_codes_deleted, onboarding_accounts_deleted, totp_challenges_deleted }`
+  - Credential: `UserCredentialCreated { credential_id }`, `UserCredentialUpdated { credential_id }`, `UserCredentialDeleted { credential_id }`, `TotpChallengeCreated { nonce }`, `TotpVerified { refresh_token_id }`, `RecoveryCodeConsumed { refresh_token_id, remaining_codes }`, `TotpAttemptIncremented { attempts }`
+- `EmailCodeVerifiedResult` enum: `ExistingUser` | `TotpRequired { nonce }` | `NewUser` — `ExistingUser` and `NewUser` have no fields. `TotpRequired` carries the challenge nonce for TOTP-enabled users. Service handler creates sessions (existing user without TOTP), returns onboarding token (new user), or returns challenge nonce (TOTP required).
+- `TotpPreResolve` struct: `nonce: [u8; 32]`, `expires_at: DateTime<Utc>`, `user_id: UserId`, `user_slug: UserSlug` — embedded in `SystemRequest::VerifyEmailCode` as `Option<TotpPreResolve>` (replaces PRD's 4 `Option` fields — "parse, don't validate" pattern eliminates invalid states)
 - `SystemRequest` variants (onboarding): `CreateEmailVerification` (REGIONAL, PII removed — email no longer in Raft log), `VerifyEmailCode` (REGIONAL, with `existing_user_hmac_hit: bool` pre-resolved at service layer), `CleanupExpiredOnboarding` (REGIONAL, no fields), `CreateOnboardingUser` (GLOBAL, saga step 0), `WriteOnboardingUserProfile` (REGIONAL, saga step 1, PII sealed via `sealed_pii`/`pii_nonce`), `ActivateOnboardingUser` (GLOBAL, saga step 2). Also `UpdateUserProfile` (REGIONAL, PII split from former `UpdateUser`).
 - `SystemRequest` variants (team/assertion): `AddTeamMember` (REGIONAL), `RemoveTeamMember` (REGIONAL), `WriteClientAssertionName` (REGIONAL), `DeleteClientAssertionName` (REGIONAL)
+- `SystemRequest` variants (credential CRUD — encrypted via `EncryptedUserSystemRequest`): `CreateUserCredential`, `UpdateUserCredential`, `DeleteUserCredential` (all REGIONAL)
+- `SystemRequest` variants (TOTP/recovery — plain `LedgerRequest::System`, no PII): `CreateTotpChallenge`, `ConsumeTotpAndCreateSession`, `ConsumeRecoveryAndCreateSession`, `IncrementTotpAttempt` (all REGIONAL)
 - `SystemRequest` PII sealing: `WriteOrganizationProfile` uses `sealed_name`/`name_nonce`/`shred_key_bytes` instead of plaintext `name`. `CreateEmailVerification` removed `email` field. `CreateAppClientAssertion` removed `name` field (moved to `WriteClientAssertionName`).
 - **Insights**: Type-safe Raft integration. `RaftPayload` wraps `LedgerRequest` at the proposal boundary so leaders embed wall-clock timestamps — all replicas apply with the same timestamp, producing byte-identical event storage, B+ tree keys, and pagination cursors across nodes. Both `CreateOrganization` and `CreateVault` include pre-generated slugs (`OrganizationSlug`/`VaultSlug`) for atomic slug index insertion during state machine apply. Data residency invariant: no plaintext PII in ANY Raft entry (GLOBAL or REGIONAL). PII-carrying variants use sealed encryption — `WriteOrganizationProfile` seals org name with per-org shred key, `WriteOnboardingUserProfile` seals PII with user shred key. `EncryptedOrgSystem` wraps org-scoped SystemRequests encrypted with OrgShredKey for crypto-shredding. `classify_system_request()` exhaustive test forces compile-time review of new variants.
 
@@ -981,13 +1004,21 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### `services/user.rs`
 
-- **Purpose**: UserService gRPC implementation — user management and self-service onboarding (email verification, registration)
+- **Purpose**: UserService gRPC implementation — user management, self-service onboarding, credential CRUD, TOTP verification, recovery code consumption
 - **Key Types/Functions**:
 - `initiate_email_verification()`: Validates email + region, computes HMAC, generates verification code via `compute_code_hash`, proposes `CreateEmailVerification` to regional Raft group via `propose_regional`
-- `verify_email_code()`: Pre-resolves existing user from GLOBAL HMAC index (`existing_user_hmac_hit`), proposes `VerifyEmailCode` to verification region. Existing-user path: reads user from actual region, checks suspended/deleted, updates `verified_at`, creates session via `CreateRefreshToken` in user's actual region. New-user path: returns onboarding token.
+- `verify_email_code()`: Pre-resolves existing user from GLOBAL HMAC index (`existing_user_hmac_hit`) AND TOTP status. Existing-user path: reads user from actual region, checks suspended/deleted, updates `verified_at`, creates session via `CreateRefreshToken` in user's actual region. If user has TOTP enabled, pre-generates challenge nonce and embeds `TotpPreResolve` in the Raft proposal — state machine atomically consumes email code + creates `PendingTotpChallenge`, returns `TotpRequired { nonce }`. New-user path: returns onboarding token.
 - `complete_registration()`: Idempotency check via GLOBAL HMAC index (`EmailHashEntry::Active` → fresh session, `Provisioning` → ALREADY_EXISTS). Validates onboarding token via `hash_eq`. Submits `CreateOnboardingUserSaga` via `saga_handle.submit_saga(SagaSubmission { record, pii, notify })`. Awaits `tokio::time::timeout(min(SAGA_COMPLETION_TIMEOUT, remaining_deadline - 2s), receiver)`. Signs JWT with `TokenVersion(1)` on completion. Returns `DEADLINE_EXCEEDED` on timeout (saga continues in background, client retries).
+- Credential CRUD: `create_user_credential()`, `list_user_credentials()`, `update_user_credential()`, `delete_user_credential()` — route through `propose_regional_encrypted()` (encrypts with `UserShredKey` for crypto-shredding). TOTP secret stripping in gRPC response serialization via `strip_totp_secret()`.
+- `create_totp_challenge()`: Creates `PendingTotpChallenge` for passkey-initiated TOTP flow. Trusted service-to-service call from Control after passkey verification.
+- `verify_totp()`: Service-layer TOTP verification → Raft session creation. Reads challenge, decrypts TOTP secret via `UserShredKey`, verifies code with `SystemTime::now()` (±1 time-step window). Proposes `ConsumeTotpAndCreateSession`. Signs JWT on success, returns `TokenPair`.
+- `consume_recovery_code()`: SHA-256 hashes input, reads challenge, proposes `ConsumeRecoveryAndCreateSession`. Returns `TokenPair` + remaining codes.
+- Helper: `verify_totp_code()` — HMAC-SHA1/SHA256/SHA512 verification with ±1 time-step window, constant-time comparison via `subtle::ConstantTimeEq`
+- Helper: `dynamic_truncate()` — RFC 4226 code extraction from HMAC digest
+- Helper: `sign_session_after_challenge()` — shared JWT signing + user lookup between `verify_totp` and `consume_recovery_code` (~50 lines deduplicated)
+- Helper: `resolve_user_region()` — region lookup for regional Raft proposal
 - Onboarding RPCs reject with `FAILED_PRECONDITION` if `email_blinding_key` is not configured.
-- **Insights**: Cross-region session creation for existing users: verification code validated in client-specified region, `RefreshToken` created in user's actual region (may differ). The `complete_registration` handler is the only synchronous saga consumer — uses `oneshot` channel for saga completion notification, with timeout fallback to idempotent retry.
+- **Insights**: Cross-region session creation for existing users: verification code validated in client-specified region, `RefreshToken` created in user's actual region (may differ). The `complete_registration` handler is the only synchronous saga consumer — uses `oneshot` channel for saga completion notification, with timeout fallback to idempotent retry. TOTP verification is split across service layer (non-deterministic HMAC with `SystemTime::now()`) and state machine (deterministic challenge consumption with `proposed_at`). `verify_totp_code` checks code length before constant-time comparison to avoid leaking configured `digits` via timing.
 
 #### Additional Services
 
@@ -1014,7 +1045,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `pagination.rs`: HMAC-signed page tokens. Includes `EventPageToken` (version, organization, last_key, query_hash) with encode/decode/validate methods on `PageTokenCodec`.
 - `rate_limit.rs`: 3-tier token bucket rate limiter
 - `hot_key_detector.rs`: Count-Min Sketch with rotating windows
-- `metrics.rs`: Prometheus metrics with SLI histograms. Leader transfer metrics: `ledger_leader_transfers_total` (status label), `ledger_leader_transfer_latency_seconds` (histogram), `ledger_trigger_elections_total` (result label). Events metrics: `ledger_event_writes_total` (emission/scope/action labels), `ledger_events_gc_*` (entries*deleted, cycle_duration, cycles), `ledger_events_ingest*\*`(total, batch_size, rate_limited, duration). Onboarding metrics:`ledger_onboarding_initiation_total{status}`, `ledger_onboarding_verification_total{status}`, `ledger_onboarding_registration_total{status}`, `ledger_onboarding_verification_codes_gc_total`, `ledger_onboarding_accounts_gc_total`. Post-erasure compaction metrics: `ledger_post_erasure_compaction_triggered_total{region}`. Organization purge metrics: `ledger_org_purge_regional_failures_total{region}`, `ledger_org_purge_global_failures_total`, `ledger_org_purge_retry_exhausted_total`.
+- `metrics.rs`: Prometheus metrics with SLI histograms. Leader transfer metrics: `ledger_leader_transfers_total` (status label), `ledger_leader_transfer_latency_seconds` (histogram), `ledger_trigger_elections_total` (result label). Events metrics: `ledger_event_writes_total` (emission/scope/action labels), `ledger_events_gc_*` (entries*deleted, cycle_duration, cycles), `ledger_events_ingest*\*`(total, batch_size, rate_limited, duration). Onboarding metrics:`ledger_onboarding_initiation_total{status}`, `ledger_onboarding_verification_total{status}`, `ledger_onboarding_registration_total{status}`, `ledger_onboarding_verification_codes_gc_total`, `ledger_onboarding_accounts_gc_total`, `ledger_totp_challenges_gc_total`. Post-erasure compaction metrics: `ledger_post_erasure_compaction_triggered_total{region}`. Organization purge metrics: `ledger_org_purge_regional_failures_total{region}`, `ledger_org_purge_global_failures_total`, `ledger_org_purge_retry_exhausted_total`.
 - `otel.rs`: OpenTelemetry tracing setup and OTLP exporter configuration. `SpanAttributes` uses `vault` key.
 
 #### Enterprise Features
@@ -1027,7 +1058,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `api_version.rs`: API version negotiation (in `inferadb-ledger-services`)
 - `deadline.rs`: Request deadline propagation
 - `dependency_health.rs`: Disk/Raft/peer health checks
-- `entry_crypto.rs`: AES-256-GCM encryption for Raft log entries. `EncryptedUserSystemRequest` (per-user shred key encryption), `EncryptedOrgSystemRequest` (per-org shred key encryption for crypto-shredding). Generic `seal()`/`unseal()` helpers. `OnboardingPii` sealed during saga step 1. Organization ID used as AAD to prevent cross-org entry substitution.
+- `entry_crypto.rs`: AES-256-GCM encryption for Raft log entries. `EncryptedUserSystemRequest` (per-user shred key encryption — used for credential CRUD and onboarding PII), `EncryptedOrgSystemRequest` (per-org shred key encryption for crypto-shredding). Generic `seal()`/`unseal()` helpers. `OnboardingPii` sealed during saga step 1. Credential data (passkey public keys, TOTP secrets, recovery code hashes) encrypted via `EncryptedUserSystemRequest` through `propose_regional_encrypted()`. Organization ID used as AAD to prevent cross-org entry substitution.
 
 #### Background Jobs
 
@@ -1055,7 +1086,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `proof.rs`: Merkle proof generation (accepts `vault_slug: Option<VaultSlug>` parameter)
 - `region_router.rs`: Dynamic region routing
 - `saga_orchestrator.rs`: Distributed transaction orchestration — CAS-based sequence ID allocation (prevents duplicates on leader failover), watchdog/metrics integration, configurable via `SagaConfig`, with optional `event_handle` for UserDeleted handler-phase events. JWT additions: `key_manager: Option<Arc<dyn RegionKeyManager>>` field, `execute_create_signing_key_step()`, `write_signing_key_saga()`, `check_global_signing_key_bootstrap()`, org creation triggers (`CreateOrganizationSaga` completion). **Onboarding additions**: `SagaOrchestratorHandle` (cloneable, wraps `mpsc::Sender<SagaSubmission>`) returned by `start()` for service handler submission. `SagaSubmission` (record + optional `OnboardingPii` + optional `oneshot::Sender`). `OnboardingPii` (email, name, organization_name — in-memory only, never persisted; custom `Debug` redacts all fields). `SagaOutput` (user_id, user_slug, organization_id, organization_slug, refresh_token_id, kid, refresh_family_id, refresh_expires_at; custom `Debug` redacts token fields). `pii_cache: Mutex<HashMap>` + `notify_cache: Mutex<HashMap>` for in-memory PII and notification tracking. `drain_submissions()` called each tick before `run_cycle()`. PII-loss compensation: if `pii` is `None` when constructing step 1, saga immediately compensates. `execute_create_onboarding_user_step()` implements 3-step state machine (Pending→IdsAllocated→RegionalDataWritten→Completed), fires `CreateSigningKeySaga` after step 2. **PII sealing**: org creation step 1 generates OrgShredKey and seals org name via `entry_crypto::seal()`. Onboarding step 1 seals PII with user shred key before proposing `WriteOnboardingUserProfile`.
-- `token_maintenance.rs`: Background job for token lifecycle maintenance. Three-phase cycle: (1) proposes `DeleteExpiredRefreshTokens` through Raft (handles expired token cleanup + poisoned family GC), (2) scans for rotated signing keys past grace period via `list_rotated_keys_past_grace()`, proposes `TransitionSigningKeyRevoked` for each, (3) proposes `CleanupExpiredOnboarding` to each regional Raft group via `RaftManager` (scans `_tmp:onboard_verify:*` and `_tmp:onboard_account:*`). `manager: Option<Arc<RaftManager>>` field for regional proposal access. Accumulates `onboarding_codes_deleted` and `onboarding_accounts_deleted` into `MaintenanceResult`. Configurable interval (default 300s).
+- `token_maintenance.rs`: Background job for token lifecycle maintenance. Three-phase cycle: (1) proposes `DeleteExpiredRefreshTokens` through Raft (handles expired token cleanup + poisoned family GC), (2) scans for rotated signing keys past grace period via `list_rotated_keys_past_grace()`, proposes `TransitionSigningKeyRevoked` for each, (3) proposes `CleanupExpiredOnboarding` to each regional Raft group via `RaftManager` (scans `_tmp:onboard_verify:*`, `_tmp:onboard_account:*`, and `_tmp:totp_challenge:*`). `manager: Option<Arc<RaftManager>>` field for regional proposal access. `MaintenanceResult` accumulates `onboarding_codes_deleted`, `onboarding_accounts_deleted`, and `totp_challenges_deleted`. Configurable interval (default 300s).
 - `dek_rewrap.rs`: Background job for re-wrapping Data Encryption Key sidecar metadata after Region Master Key rotation. `RewrapProgress` (AtomicU64 fields for lock-free admin queries), `DekRewrapJob<B>` (bon builder, periodic cycles, leader-only). Idempotent — pages already at target RMK version are skipped. Unit tests.
 - `region_storage.rs`: Per-region database file layout and lifecycle management. `RegionStorage` (holds raw database handles for state, blocks, events per region), `RegionStorageManager` (HashMap of open regions, directory layout enforcement: `global/` for GLOBAL Raft group, `regions/{name}/` for data regions). TOCTOU-safe region opening, legacy layout detection, 16KB page size. Unit tests.
 - `file_lock.rs`: Data directory locking
@@ -1075,17 +1106,18 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Re-exports public API (LedgerClient, ClientConfig, builders, error types, events types, token types)
 - **Key Types/Functions**:
-- Modules: `client`, `config`, `connection`, `error`, `retry`, `circuit_breaker`, `discovery`, `metrics`, `streaming`, `token`, `tracing`, `builders`, `server`, `mock`
+- Modules: `client`, `config`, `connection`, `error`, `retry`, `circuit_breaker`, `discovery`, `metrics`, `streaming`, `token`, `tracing`, `builders`, `server`, `mock`, `ops` (submodules: `credential`, `onboarding`, `token`), `types` (submodules: `admin`, `credential`, `mod`)
 - Events re-exports: `EventEmissionPath`, `EventFilter`, `EventOutcome`, `EventPage`, `EventScope`, `IngestRejection`, `IngestResult`, `SdkEventEntry`, `SdkIngestEventEntry`
 - Token re-exports: `TokenPair`, `ValidatedToken`, `PublicKeyInfo`
 - Onboarding re-exports: `EmailVerificationCode`, `EmailVerificationResult`, `RegistrationResult`
-- **Insights**: Comprehensive SDK. All features needed for production use, including events query/ingestion, JWT token management, and self-service onboarding.
+- Credential re-exports: `CredentialType`, `TotpAlgorithm`, `PasskeyCredentialInfo`, `TotpCredentialInfo`, `RecoveryCodeCredentialInfo`, `CredentialData`, `UserCredentialInfo`, `RecoveryCodeResult`, `UserCredentialId`
+- **Insights**: Comprehensive SDK. All features needed for production use, including events query/ingestion, JWT token management, self-service onboarding, and multi-credential authentication (passkey, TOTP, recovery codes).
 
 #### `client.rs`
 
 - **Purpose**: LedgerClient with 40+ public methods, retry, cancellation, metrics, and comprehensive tests
 - **Key Types/Functions**:
-- `LedgerClient::new(config) -> Result<Self>`: Create client (50+ public methods)
+- `LedgerClient::new(config) -> Result<Self>`: Create client (55+ public methods)
 - Data ops: `read()`, `write()`, `batch_read()`, `batch_write()` (with `_with_token` variants for cancellation) — all accept `organization: OrganizationSlug, vault: Option<VaultSlug>`
 - Convenience ops: `set_entity(org, vault, key, value, expires_at, condition)`, `get_entity()`, `delete_entity()` — optional TTL and condition on set operations
 - `SetCondition::from_expected(expected: Option<impl Into<Vec<u8>>>) -> Self`: Convenience constructor — `None` maps to `MustNotExist`, `Some(value)` maps to `MustEqual(value)`
@@ -1099,9 +1131,11 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - Team ops: `get_organization_team(team, caller)`, `add_team_member(team, user, role, initiator)`, `remove_team_member(team, user, initiator)`
 - Vault ops: `update_vault(organization, vault, retention_policy)`
 - Onboarding ops: `initiate_email_verification(email, region) -> EmailVerificationCode`, `verify_email_code(email, code, region) -> EmailVerificationResult`, `complete_registration(onboarding_token, email, region, name, organization_name) -> RegistrationResult`
-- Onboarding types: `EmailVerificationCode` (code field), `EmailVerificationResult` enum (`ExistingUser { user, session }` | `NewUser { onboarding_token }`), `RegistrationResult` (user, session, organization)
+- Onboarding types: `EmailVerificationCode` (code field), `EmailVerificationResult` enum (`ExistingUser { user, session }` | `TotpRequired { challenge_nonce }` | `NewUser { onboarding_token }`), `RegistrationResult` (user, session, organization)
+- Credential ops (in `ops/credential.rs`): `create_user_credential(user, name, data) -> UserCredentialInfo`, `list_user_credentials(user, credential_type) -> Vec<UserCredentialInfo>`, `update_user_credential(user, credential_id, name, enabled, passkey_data) -> UserCredentialInfo`, `delete_user_credential(user, credential_id)`, `create_totp_challenge(user, primary_method) -> Vec<u8>`, `verify_totp(user, totp_code, challenge_nonce) -> TokenPair`, `consume_recovery_code(user, code, challenge_nonce) -> RecoveryCodeResult`
+- Credential types (in `types/credential.rs`): `CredentialType` enum (Passkey/Totp/RecoveryCode with `from_data()` helper), `TotpAlgorithm` enum, `PasskeyCredentialInfo`, `TotpCredentialInfo` (manual `Debug` redacts secret), `RecoveryCodeCredentialInfo`, `CredentialData` enum, `UserCredentialInfo`, `RecoveryCodeResult` (tokens + remaining_codes)
 - Events unit tests
-- **Insights**: Clean API. Cancellation support via CancellationToken. Circuit breaker integrated. Metrics track end-to-end latency. Events SDK uses `from_proto`/`into_proto` associated functions (not From trait impls). `SetCondition::from_expected()` provides ergonomic CAS condition construction for compare-and-set patterns. Onboarding methods follow same `with_retry_cancellable` + `with_metrics` pattern as all other client methods.
+- **Insights**: Clean API. Cancellation support via CancellationToken. Circuit breaker integrated. Metrics track end-to-end latency. Events SDK uses `from_proto`/`into_proto` associated functions (not From trait impls). `SetCondition::from_expected()` provides ergonomic CAS condition construction for compare-and-set patterns. All methods (onboarding, credential, TOTP) follow the same `with_retry_cancellable` + `with_metrics` pattern. `CredentialType` parameter on `create_user_credential` is derived from `CredentialData` discriminant via `from_data()` to prevent mismatched type+data.
 
 #### `token.rs`
 
@@ -1237,6 +1271,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - Mock onboarding: `initiate_email_verification` returns "ABC123", `verify_email_code` returns NewUser path, `complete_registration` returns user+session+org
 - Mock team: `get_organization_team`, `add_team_member`, `remove_team_member`
 - Mock vault: `update_vault`
+- Mock credential: 7 stubs returning `Status::unimplemented()` (`create_user_credential`, `list_user_credentials`, `update_user_credential`, `delete_user_credential`, `create_totp_challenge`, `verify_totp`, `consume_recovery_code`)
 - **Insights**: Enables integration testing with real gRPC transport without a Raft cluster. In-memory state for fast tests. Tuple keys use `OrganizationSlug`/`VaultSlug` newtypes, not raw integers or internal IDs. Large due to comprehensive mock service implementations and inline tests.
 
 ---
@@ -1462,6 +1497,7 @@ The codebase follows excellent security practices:
 - **JWT token security**: EdDSA (Ed25519) only — defense-in-depth algorithm enforcement (raw header string pre-check + library-level `Validation::algorithms`). `kid` UUID format validation before state lookup (prevents cache pollution). Error normalization (identical UNAUTHENTICATED for "kid not found" and "signature invalid"). Signing key private material: `Zeroizing<Vec<u8>>` for cached bytes, `EncodingKey` built on-demand per signing op (not cached). Refresh token `ilrt_` prefix for secret scanning tool detection. Refresh token theft detection via poisoned-family pattern (O(1) poison on reuse, background GC). Token version binding prevents race between refresh and concurrent revocation.
 - **Data residency & crypto-shredding**: No plaintext PII in ANY Raft log entry (GLOBAL or REGIONAL). PII is sealed before Raft proposal: `WriteOrganizationProfile` seals org name with per-org `OrgShredKey` via AES-256-GCM, `WriteOnboardingUserProfile` seals PII with `UserShredKey`. `EncryptedOrgSystem` wraps org-scoped SystemRequests encrypted with `OrgShredKey` — destroying the shred key makes all org data in Raft logs unreadable (crypto-shredding). `PostErasureCompactionJob` triggers proactive Raft snapshots after erasure to evict plaintext from log retention. `CreateEmailVerification` and `CreateAppClientAssertion` had PII fields removed entirely. Compile-time `classify_system_request()` test forces scope classification of every variant. `EraseUser` no longer carries `erased_by` in the Raft log (actor identity in canonical log lines only). `KeyTier`/`validate_key_tier()` safeguards catch cross-tier write bugs at runtime.
 - **Onboarding security**: Verification codes hashed with domain-separated HMAC (`"code:"` prefix). Onboarding tokens use 256-bit entropy with bare SHA-256 (no blinding key dependency). Rate limiting Raft-enforced (3 initiations/hr/email/region, 5 attempts/code). `EmailBlindingKey` derives `Zeroize`+`ZeroizeOnDrop`. Token consumed on use (single-use with 12hr TTL). Idempotent `complete_registration` tradeoff documented (consumed token can't be re-validated on retry — see PRD Security #15).
+- **Credential security**: TOTP secrets encrypted in Raft log via `EncryptedUserSystemRequest`, crypto-shredded on user erasure. TOTP secrets are write-once (never returned after creation, stripped from gRPC responses via `strip_totp_secret()`). `TotpCredential.secret` uses `Zeroizing<Vec<u8>>` for secure memory cleanup, with manual `Debug` impl that redacts secret. TOTP verification in service layer (non-deterministic `SystemTime::now()`) — state machine uses deterministic `proposed_at` for expiry. TOTP attempts Raft-persisted (survive leader failover), state machine enforces 3-attempt limit as defense-in-depth. Challenge rate limiting (max 3 active per user) prevents cross-challenge brute force. Recovery code hashes compared via `hash_eq()` (constant-time). `VerifyTotp` and `ConsumeRecoveryCode` directly create sessions — no intermediate MFA token.
 - **Envelope encryption for signing keys**: Per-key DEK wrapped by RMK via AES-KWP, private key encrypted with AES-256-GCM using `kid` as AAD (binds ciphertext to key identity). Same pattern as page-level crypto.
 - **TLS support**: Client and server support TLS with optional mTLS (client certificates).
 - **Rate limiting**: 3-tier token bucket rate limiter (client/organization/backpressure) prevents abuse.
@@ -1505,6 +1541,7 @@ The codebase includes numerous production-ready features:
 - **Per-organization crypto-shredding**: `OrgShredKey` (AES-256-GCM per-org key, stored at `_shred:org:{id}`) seals org-scoped PII in Raft entries. `EncryptedOrgSystem` wraps SystemRequests encrypted with `OrgShredKey`. Organization purge destroys the shred key, making all org data in Raft logs unreadable. `PostErasureCompactionJob` triggers proactive snapshots to evict plaintext from log retention window. Retry-resilient purge with exponential backoff. Per-user crypto-shredding via `UserShredKey` (stored at `_shred:user:{id}`).
 - **Team management**: `AddTeamMember`/`RemoveTeamMember` via REGIONAL Raft. SDK methods for team CRUD. Prevents removal of last manager.
 - **App session revocation**: `RevokeAllAppSessions` bulk revokes all refresh tokens for an app with atomic `TokenVersion` increment.
+- **Multi-credential authentication**: `UserCredential` entity with three types (passkey, TOTP, recovery code). Ledger-authoritative TOTP verification (service layer verifies, state machine creates sessions). `PendingTotpChallenge` with Raft-persisted attempt budget. Direct session creation from `VerifyTotp`/`ConsumeRecoveryCode` (no intermediate MFA token). Credential CRUD with safety invariants: one-TOTP/one-recovery-code per user, last-credential guard, passkey uniqueness.
 - **And more**...
 
 ### 7. Documentation Quality
@@ -1548,10 +1585,10 @@ InferaDB Ledger is a **production-grade blockchain database** with exceptional e
 - **Zero `unsafe` code**, comprehensive error handling (snafu), structured error taxonomy
 - **Custom B+ tree engine** with ACID transactions, crash recovery, compaction
 - **Raft consensus** via openraft, batching, idempotency, multi-region horizontal scaling
-- **Enterprise features**: JWT token authentication (EdDSA, refresh token theft detection, signing key auto-bootstrap, cascade revocation), graceful shutdown with leader transfer (Draining phase, best-effort handoff before election timeout), circuit breaker, rate limiting, hot key detection, quota enforcement, backup/restore, tiered storage with multipart upload, API versioning, deadline propagation, dependency health checks, runtime reconfiguration, organization-scoped event logging, externalized state persistence, streaming snapshots, automatic write forwarding, and many more
+- **Enterprise features**: JWT token authentication (EdDSA, refresh token theft detection, signing key auto-bootstrap, cascade revocation), multi-credential authentication (passkeys, TOTP, recovery codes with Ledger-authoritative verification), graceful shutdown with leader transfer (Draining phase, best-effort handoff before election timeout), circuit breaker, rate limiting, hot key detection, quota enforcement, backup/restore, tiered storage with multipart upload, API versioning, deadline propagation, dependency health checks, runtime reconfiguration, organization-scoped event logging, externalized state persistence, streaming snapshots, automatic write forwarding, and many more
 - **Excellent observability**: OpenTelemetry tracing, Prometheus metrics, canonical log lines, structured request logging, SDK-side metrics, queryable event audit trails via gRPC EventsService
 - **Comprehensive testing**: Unit tests, property-based tests (proptest), crash recovery tests, chaos tests, integration tests
-- **Security practices**: No unsafe, constant-time comparison, input validation, deterministic event replication via leader-assigned timestamps, event logging with audit trails, TLS/mTLS, rate limiting, quotas, envelope encryption at rest (AES-256-GCM with per-page DEKs wrapped by Region Master Keys), privacy-preserving email hashing (HMAC-SHA256 blinding), JWT token security (defense-in-depth algorithm enforcement, kid validation, signing key zeroization, refresh token theft detection)
+- **Security practices**: No unsafe, constant-time comparison, input validation, deterministic event replication via leader-assigned timestamps, event logging with audit trails, TLS/mTLS, rate limiting, quotas, envelope encryption at rest (AES-256-GCM with per-page DEKs wrapped by Region Master Keys), privacy-preserving email hashing (HMAC-SHA256 blinding), JWT token security (defense-in-depth algorithm enforcement, kid validation, signing key zeroization, refresh token theft detection), credential encryption in Raft log (TOTP secrets encrypted via UserShredKey, write-once with Zeroize)
 - **Documentation**: ADRs, invariant specs, module docs, rustdoc examples, operations guides, client guides, error code reference, events architecture doc, Grafana dashboard templates
 
 Overall assessment: **★★★★★ Exemplary codebase** ready for production deployment.

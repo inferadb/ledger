@@ -648,6 +648,36 @@ client.migrate_user_region(user_slug, target_region).await?;
 client.erase_user(user_slug).await?;
 ```
 
+## Credential Operations
+
+```rust
+use inferadb_ledger_sdk::{CredentialType, UserCredentialInfo, PasskeyCredentialInfo};
+
+// Create a passkey credential
+let passkey = PasskeyCredentialInfo { credential_id: cred_id, public_key, sign_count: 0, .. };
+let credential = client.create_user_credential(
+    user_slug, CredentialData::Passkey(passkey), "MacBook Touch ID",
+).await?;
+
+// List credentials (TOTP secrets are always stripped)
+let credentials = client.list_user_credentials(user_slug, None).await?;
+let passkeys = client.list_user_credentials(user_slug, Some(CredentialType::Passkey)).await?;
+
+// Update passkey (sign_count after authentication)
+client.update_user_credential(user_slug, credential_id, None, None, Some(updated_passkey)).await?;
+
+// Delete credential (Ledger enforces last-credential guard)
+client.delete_user_credential(user_slug, credential_id).await?;
+
+// TOTP challenge + verification (returns session directly)
+let challenge = client.create_totp_challenge(user_slug, "passkey").await?;
+let tokens = client.verify_totp(user_slug, "123456", challenge.nonce).await?;
+
+// Recovery code (returns session directly)
+let result = client.consume_recovery_code(user_slug, "ABCD1234", challenge.nonce).await?;
+println!("Remaining codes: {}", result.remaining_codes);
+```
+
 ## App Operations
 
 ```rust

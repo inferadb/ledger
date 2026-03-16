@@ -197,6 +197,21 @@ ledger_determinism_bug_total > 0
 - `op`: `create_session`, `validate`, `refresh`, `revoke`, `revoke_all`, `create_vault_token`, `create_key`, `rotate_key`, `revoke_key`
 - `from`/`to`: `active`, `rotated`, `revoked`
 
+## Onboarding and TOTP
+
+| Metric                                          | Type    | Labels   | Description                               |
+| ----------------------------------------------- | ------- | -------- | ----------------------------------------- |
+| `ledger_onboarding_initiation_total`            | Counter | `status` | Email verification initiations            |
+| `ledger_onboarding_verification_total`          | Counter | `status` | Email code verifications                  |
+| `ledger_onboarding_registration_total`          | Counter | `status` | Registration completions                  |
+| `ledger_onboarding_verification_codes_gc_total` | Counter | -        | Expired verification codes cleaned by GC  |
+| `ledger_onboarding_accounts_gc_total`           | Counter | -        | Expired onboarding accounts cleaned by GC |
+| `ledger_totp_challenges_gc_total`               | Counter | -        | Expired TOTP challenges cleaned by GC     |
+
+**Labels:**
+
+- `status`: `success`, `failure`, `rate_limited`, `expired`, `totp_required`
+
 ## Background Jobs
 
 | Metric                                        | Type      | Labels          | Description                |

@@ -1864,11 +1864,12 @@ pub struct VerifyEmailCodeRequest {
     #[prost(enumeration = "Region", tag = "3")]
     pub region: i32,
 }
-/// Result is either a session for an existing user or an onboarding token
-/// for a new user who must complete registration.
+/// Result is either a session for an existing user, an onboarding token
+/// for a new user who must complete registration, or a TOTP challenge
+/// if the existing user has TOTP enabled.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct VerifyEmailCodeResponse {
-    #[prost(oneof = "verify_email_code_response::Result", tags = "1, 2")]
+    #[prost(oneof = "verify_email_code_response::Result", tags = "1, 2, 3")]
     pub result: ::core::option::Option<verify_email_code_response::Result>,
 }
 /// Nested message and enum types in `VerifyEmailCodeResponse`.
@@ -1879,6 +1880,8 @@ pub mod verify_email_code_response {
         ExistingUser(super::ExistingUserSession),
         #[prost(message, tag = "2")]
         NewUser(super::OnboardingSession),
+        #[prost(message, tag = "3")]
+        TotpRequired(super::TotpRequired),
     }
 }
 /// Session for an existing user whose email was verified.
@@ -1926,6 +1929,234 @@ pub struct CompleteRegistrationResponse {
     /// The auto-created organization
     #[prost(message, optional, tag = "3")]
     pub organization: ::core::option::Option<OrganizationSlug>,
+}
+/// A user authentication credential (passkey, TOTP, or recovery codes).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UserCredential {
+    /// UserCredentialId
+    #[prost(int64, tag = "1")]
+    pub id: i64,
+    #[prost(message, optional, tag = "2")]
+    pub user: ::core::option::Option<UserSlug>,
+    #[prost(enumeration = "CredentialType", tag = "3")]
+    pub credential_type: i32,
+    #[prost(string, tag = "4")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(bool, tag = "5")]
+    pub enabled: bool,
+    #[prost(message, optional, tag = "6")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "7")]
+    pub last_used_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(oneof = "user_credential::Data", tags = "10, 11, 12")]
+    pub data: ::core::option::Option<user_credential::Data>,
+}
+/// Nested message and enum types in `UserCredential`.
+pub mod user_credential {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Data {
+        #[prost(message, tag = "10")]
+        Passkey(super::PasskeyCredentialData),
+        #[prost(message, tag = "11")]
+        Totp(super::TotpCredentialData),
+        #[prost(message, tag = "12")]
+        RecoveryCode(super::RecoveryCodeCredentialData),
+    }
+}
+/// WebAuthn passkey credential data.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PasskeyCredentialData {
+    /// WebAuthn credential ID
+    #[prost(bytes = "vec", tag = "1")]
+    pub credential_id: ::prost::alloc::vec::Vec<u8>,
+    /// COSE-encoded public key
+    #[prost(bytes = "vec", tag = "2")]
+    pub public_key: ::prost::alloc::vec::Vec<u8>,
+    /// Replay protection counter
+    #[prost(uint32, tag = "3")]
+    pub sign_count: u32,
+    /// "internal", "usb", "ble", "nfc"
+    #[prost(string, repeated, tag = "4")]
+    pub transports: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(bool, tag = "5")]
+    pub backup_eligible: bool,
+    #[prost(bool, tag = "6")]
+    pub backup_state: bool,
+    #[prost(string, optional, tag = "7")]
+    pub attestation_format: ::core::option::Option<::prost::alloc::string::String>,
+    /// 16-byte authenticator model ID
+    #[prost(bytes = "vec", optional, tag = "8")]
+    pub aaguid: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+}
+/// TOTP credential data (RFC 6238).
+/// The secret field is stripped from gRPC responses by the handler layer.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TotpCredentialData {
+    /// 20-byte HMAC secret
+    #[prost(bytes = "vec", tag = "1")]
+    pub secret: ::prost::alloc::vec::Vec<u8>,
+    #[prost(enumeration = "TotpAlgorithm", tag = "2")]
+    pub algorithm: i32,
+    /// Standard: 6
+    #[prost(uint32, tag = "3")]
+    pub digits: u32,
+    /// Standard: 30 seconds
+    #[prost(uint32, tag = "4")]
+    pub period: u32,
+}
+/// Recovery code credential data.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RecoveryCodeCredentialData {
+    /// SHA-256 hashes of unused codes
+    #[prost(bytes = "vec", repeated, tag = "1")]
+    pub code_hashes: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    /// Original count (e.g., 10)
+    #[prost(uint32, tag = "2")]
+    pub total_generated: u32,
+}
+/// Audit trail metadata for primary authentication method.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CredentialInfo {
+    /// "passkey", "email_code", "recovery_code"
+    #[prost(string, tag = "1")]
+    pub credential_type: ::prost::alloc::string::String,
+    /// UserCredentialId, if credential-based
+    #[prost(int64, optional, tag = "2")]
+    pub credential_id: ::core::option::Option<i64>,
+}
+/// Returned when a TOTP-enabled user must complete second-factor verification.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TotpRequired {
+    /// 32-byte one-time challenge nonce
+    #[prost(bytes = "vec", tag = "1")]
+    pub challenge_nonce: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateUserCredentialRequest {
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<UserSlug>,
+    #[prost(enumeration = "CredentialType", tag = "2")]
+    pub credential_type: i32,
+    #[prost(string, tag = "3")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(oneof = "create_user_credential_request::Data", tags = "10, 11, 12")]
+    pub data: ::core::option::Option<create_user_credential_request::Data>,
+}
+/// Nested message and enum types in `CreateUserCredentialRequest`.
+pub mod create_user_credential_request {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Data {
+        #[prost(message, tag = "10")]
+        Passkey(super::PasskeyCredentialData),
+        #[prost(message, tag = "11")]
+        Totp(super::TotpCredentialData),
+        #[prost(message, tag = "12")]
+        RecoveryCode(super::RecoveryCodeCredentialData),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateUserCredentialResponse {
+    #[prost(message, optional, tag = "1")]
+    pub credential: ::core::option::Option<UserCredential>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListUserCredentialsRequest {
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<UserSlug>,
+    #[prost(enumeration = "CredentialType", optional, tag = "2")]
+    pub credential_type: ::core::option::Option<i32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListUserCredentialsResponse {
+    /// TOTP secrets stripped
+    #[prost(message, repeated, tag = "1")]
+    pub credentials: ::prost::alloc::vec::Vec<UserCredential>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateUserCredentialRequest {
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<UserSlug>,
+    #[prost(int64, tag = "2")]
+    pub credential_id: i64,
+    #[prost(string, optional, tag = "3")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, optional, tag = "4")]
+    pub enabled: ::core::option::Option<bool>,
+    /// Only passkey updates are allowed (sign_count, backup_state).
+    /// TOTP and recovery code credentials are immutable after creation.
+    #[prost(message, optional, tag = "10")]
+    pub passkey: ::core::option::Option<PasskeyCredentialData>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateUserCredentialResponse {
+    #[prost(message, optional, tag = "1")]
+    pub credential: ::core::option::Option<UserCredential>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeleteUserCredentialRequest {
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<UserSlug>,
+    #[prost(int64, tag = "2")]
+    pub credential_id: i64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeleteUserCredentialResponse {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateTotpChallengeRequest {
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<UserSlug>,
+    /// "passkey" — audit trail
+    #[prost(string, tag = "2")]
+    pub primary_method: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateTotpChallengeResponse {
+    /// 32-byte one-time nonce
+    #[prost(bytes = "vec", tag = "1")]
+    pub challenge_nonce: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct VerifyTotpRequest {
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<UserSlug>,
+    /// 6-digit TOTP code
+    #[prost(string, tag = "2")]
+    pub totp_code: ::prost::alloc::string::String,
+    /// Nonce from CreateTotpChallenge or VerifyEmailCode
+    #[prost(bytes = "vec", tag = "3")]
+    pub challenge_nonce: ::prost::alloc::vec::Vec<u8>,
+    /// Audit trail for created session
+    #[prost(message, optional, tag = "4")]
+    pub credential_used: ::core::option::Option<CredentialInfo>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct VerifyTotpResponse {
+    /// Session created directly
+    #[prost(message, optional, tag = "1")]
+    pub tokens: ::core::option::Option<TokenPair>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConsumeRecoveryCodeRequest {
+    #[prost(message, optional, tag = "1")]
+    pub user: ::core::option::Option<UserSlug>,
+    /// 8-char alphanumeric recovery code
+    #[prost(string, tag = "2")]
+    pub code: ::prost::alloc::string::String,
+    /// Nonce from the TOTP challenge
+    #[prost(bytes = "vec", tag = "3")]
+    pub challenge_nonce: ::prost::alloc::vec::Vec<u8>,
+    /// Audit trail for created session
+    #[prost(message, optional, tag = "4")]
+    pub credential_used: ::core::option::Option<CredentialInfo>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConsumeRecoveryCodeResponse {
+    /// Session created directly
+    #[prost(message, optional, tag = "1")]
+    pub tokens: ::core::option::Option<TokenPair>,
+    /// Remaining unused recovery codes
+    #[prost(uint32, tag = "2")]
+    pub remaining_codes: u32,
 }
 /// Update runtime-reconfigurable configuration parameters.
 /// Only fields that are set will be updated; unset fields retain current values.
@@ -2493,10 +2724,14 @@ pub struct TokenPair {
     #[prost(message, optional, tag = "4")]
     pub refresh_expires_at: ::core::option::Option<::prost_types::Timestamp>,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateUserSessionRequest {
     #[prost(message, optional, tag = "1")]
     pub user: ::core::option::Option<UserSlug>,
+    /// Audit trail: which credential was used for primary authentication.
+    /// Required for passkey logins; omitted for email-code (implicit).
+    #[prost(message, optional, tag = "2")]
+    pub credential_used: ::core::option::Option<CredentialInfo>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateUserSessionResponse {
@@ -3917,6 +4152,70 @@ impl VaultHealthProto {
             "VAULT_HEALTH_PROTO_HEALTHY" => Some(Self::Healthy),
             "VAULT_HEALTH_PROTO_DIVERGED" => Some(Self::Diverged),
             "VAULT_HEALTH_PROTO_RECOVERING" => Some(Self::Recovering),
+            _ => None,
+        }
+    }
+}
+/// Credential type discriminator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CredentialType {
+    Unspecified = 0,
+    Passkey = 1,
+    Totp = 2,
+    RecoveryCode = 3,
+}
+impl CredentialType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CREDENTIAL_TYPE_UNSPECIFIED",
+            Self::Passkey => "CREDENTIAL_TYPE_PASSKEY",
+            Self::Totp => "CREDENTIAL_TYPE_TOTP",
+            Self::RecoveryCode => "CREDENTIAL_TYPE_RECOVERY_CODE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CREDENTIAL_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "CREDENTIAL_TYPE_PASSKEY" => Some(Self::Passkey),
+            "CREDENTIAL_TYPE_TOTP" => Some(Self::Totp),
+            "CREDENTIAL_TYPE_RECOVERY_CODE" => Some(Self::RecoveryCode),
+            _ => None,
+        }
+    }
+}
+/// TOTP hash algorithm (RFC 6238).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum TotpAlgorithm {
+    /// Default, widest authenticator compatibility
+    Sha1 = 0,
+    Sha256 = 1,
+    Sha512 = 2,
+}
+impl TotpAlgorithm {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Sha1 => "TOTP_ALGORITHM_SHA1",
+            Self::Sha256 => "TOTP_ALGORITHM_SHA256",
+            Self::Sha512 => "TOTP_ALGORITHM_SHA512",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "TOTP_ALGORITHM_SHA1" => Some(Self::Sha1),
+            "TOTP_ALGORITHM_SHA256" => Some(Self::Sha256),
+            "TOTP_ALGORITHM_SHA512" => Some(Self::Sha512),
             _ => None,
         }
     }
@@ -10387,6 +10686,193 @@ pub mod user_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Create a new credential (passkey, TOTP, or recovery codes) for a user.
+        /// Enforces: one TOTP per user, one recovery code set per user, passkey ID uniqueness.
+        pub async fn create_user_credential(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateUserCredentialRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateUserCredentialResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.UserService/CreateUserCredential",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.UserService", "CreateUserCredential"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// List credentials for a user, optionally filtered by type.
+        /// TOTP secrets are stripped from responses.
+        pub async fn list_user_credentials(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListUserCredentialsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListUserCredentialsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.UserService/ListUserCredentials",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.UserService", "ListUserCredentials"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Update credential metadata (name, enabled) or passkey-specific fields.
+        /// TOTP and recovery code credentials are immutable after creation.
+        pub async fn update_user_credential(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateUserCredentialRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateUserCredentialResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.UserService/UpdateUserCredential",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.UserService", "UpdateUserCredential"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Delete a credential. Rejects if it's the user's last credential.
+        pub async fn delete_user_credential(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DeleteUserCredentialRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteUserCredentialResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.UserService/DeleteUserCredential",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.UserService", "DeleteUserCredential"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Create a TOTP challenge after passkey authentication.
+        /// Called by trusted services (e.g., Control) that verified passkey auth.
+        pub async fn create_totp_challenge(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateTotpChallengeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateTotpChallengeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.UserService/CreateTotpChallenge",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.UserService", "CreateTotpChallenge"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Verify a TOTP code against a pending challenge.
+        /// On success, atomically consumes the challenge and creates a session.
+        pub async fn verify_totp(
+            &mut self,
+            request: impl tonic::IntoRequest<super::VerifyTotpRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::VerifyTotpResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.UserService/VerifyTotp",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.UserService", "VerifyTotp"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Consume a recovery code to bypass TOTP verification.
+        /// Atomically removes the code hash and creates a session.
+        pub async fn consume_recovery_code(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ConsumeRecoveryCodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ConsumeRecoveryCodeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.UserService/ConsumeRecoveryCode",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.UserService", "ConsumeRecoveryCode"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -10530,6 +11016,68 @@ pub mod user_service_server {
             request: tonic::Request<super::CompleteRegistrationRequest>,
         ) -> std::result::Result<
             tonic::Response<super::CompleteRegistrationResponse>,
+            tonic::Status,
+        >;
+        /// Create a new credential (passkey, TOTP, or recovery codes) for a user.
+        /// Enforces: one TOTP per user, one recovery code set per user, passkey ID uniqueness.
+        async fn create_user_credential(
+            &self,
+            request: tonic::Request<super::CreateUserCredentialRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateUserCredentialResponse>,
+            tonic::Status,
+        >;
+        /// List credentials for a user, optionally filtered by type.
+        /// TOTP secrets are stripped from responses.
+        async fn list_user_credentials(
+            &self,
+            request: tonic::Request<super::ListUserCredentialsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListUserCredentialsResponse>,
+            tonic::Status,
+        >;
+        /// Update credential metadata (name, enabled) or passkey-specific fields.
+        /// TOTP and recovery code credentials are immutable after creation.
+        async fn update_user_credential(
+            &self,
+            request: tonic::Request<super::UpdateUserCredentialRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateUserCredentialResponse>,
+            tonic::Status,
+        >;
+        /// Delete a credential. Rejects if it's the user's last credential.
+        async fn delete_user_credential(
+            &self,
+            request: tonic::Request<super::DeleteUserCredentialRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteUserCredentialResponse>,
+            tonic::Status,
+        >;
+        /// Create a TOTP challenge after passkey authentication.
+        /// Called by trusted services (e.g., Control) that verified passkey auth.
+        async fn create_totp_challenge(
+            &self,
+            request: tonic::Request<super::CreateTotpChallengeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateTotpChallengeResponse>,
+            tonic::Status,
+        >;
+        /// Verify a TOTP code against a pending challenge.
+        /// On success, atomically consumes the challenge and creates a session.
+        async fn verify_totp(
+            &self,
+            request: tonic::Request<super::VerifyTotpRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::VerifyTotpResponse>,
+            tonic::Status,
+        >;
+        /// Consume a recovery code to bypass TOTP verification.
+        /// Atomically removes the code hash and creates a session.
+        async fn consume_recovery_code(
+            &self,
+            request: tonic::Request<super::ConsumeRecoveryCodeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ConsumeRecoveryCodeResponse>,
             tonic::Status,
         >;
     }
@@ -11279,6 +11827,327 @@ pub mod user_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = CompleteRegistrationSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.UserService/CreateUserCredential" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateUserCredentialSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::CreateUserCredentialRequest>
+                    for CreateUserCredentialSvc<T> {
+                        type Response = super::CreateUserCredentialResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateUserCredentialRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::create_user_credential(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateUserCredentialSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.UserService/ListUserCredentials" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListUserCredentialsSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::ListUserCredentialsRequest>
+                    for ListUserCredentialsSvc<T> {
+                        type Response = super::ListUserCredentialsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListUserCredentialsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::list_user_credentials(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListUserCredentialsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.UserService/UpdateUserCredential" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpdateUserCredentialSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::UpdateUserCredentialRequest>
+                    for UpdateUserCredentialSvc<T> {
+                        type Response = super::UpdateUserCredentialResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UpdateUserCredentialRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::update_user_credential(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpdateUserCredentialSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.UserService/DeleteUserCredential" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeleteUserCredentialSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::DeleteUserCredentialRequest>
+                    for DeleteUserCredentialSvc<T> {
+                        type Response = super::DeleteUserCredentialResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DeleteUserCredentialRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::delete_user_credential(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeleteUserCredentialSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.UserService/CreateTotpChallenge" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateTotpChallengeSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::CreateTotpChallengeRequest>
+                    for CreateTotpChallengeSvc<T> {
+                        type Response = super::CreateTotpChallengeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateTotpChallengeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::create_totp_challenge(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateTotpChallengeSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.UserService/VerifyTotp" => {
+                    #[allow(non_camel_case_types)]
+                    struct VerifyTotpSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::VerifyTotpRequest>
+                    for VerifyTotpSvc<T> {
+                        type Response = super::VerifyTotpResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::VerifyTotpRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::verify_totp(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = VerifyTotpSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.UserService/ConsumeRecoveryCode" => {
+                    #[allow(non_camel_case_types)]
+                    struct ConsumeRecoveryCodeSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::ConsumeRecoveryCodeRequest>
+                    for ConsumeRecoveryCodeSvc<T> {
+                        type Response = super::ConsumeRecoveryCodeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ConsumeRecoveryCodeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::consume_recovery_code(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ConsumeRecoveryCodeSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

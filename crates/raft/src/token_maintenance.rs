@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 use crate::{
     metrics::{
         record_background_job_duration, record_background_job_items, record_background_job_run,
-        record_onboarding_gc_accounts, record_onboarding_gc_codes,
+        record_onboarding_gc_accounts, record_onboarding_gc_codes, record_totp_gc_challenges,
     },
     raft_manager::RaftManager,
     trace_context::TraceContext,
@@ -42,6 +42,8 @@ pub struct MaintenanceResult {
     pub onboarding_codes_deleted: u64,
     /// Number of expired onboarding accounts deleted across all regions.
     pub onboarding_accounts_deleted: u64,
+    /// Number of expired TOTP challenges deleted across all regions.
+    pub totp_challenges_deleted: u64,
 }
 
 /// Background job for token lifecycle maintenance.
@@ -186,18 +188,22 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
                                 if let crate::types::LedgerResponse::OnboardingCleanedUp {
                                     verification_codes_deleted,
                                     onboarding_accounts_deleted,
+                                    totp_challenges_deleted,
                                 } = response.data
                                 {
                                     let codes = u64::from(verification_codes_deleted);
                                     let accounts = u64::from(onboarding_accounts_deleted);
+                                    let totp = u64::from(totp_challenges_deleted);
                                     result.onboarding_codes_deleted += codes;
                                     result.onboarding_accounts_deleted += accounts;
-                                    if codes > 0 || accounts > 0 {
+                                    result.totp_challenges_deleted += totp;
+                                    if codes > 0 || accounts > 0 || totp > 0 {
                                         info!(
                                             trace_id = %trace_ctx.trace_id,
                                             region = %region,
                                             codes_deleted = codes,
                                             accounts_deleted = accounts,
+                                            totp_challenges_deleted = totp,
                                             "Cleaned up expired onboarding records"
                                         );
                                     }
@@ -231,6 +237,9 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
             if result.onboarding_accounts_deleted > 0 {
                 record_onboarding_gc_accounts(result.onboarding_accounts_deleted);
             }
+            if result.totp_challenges_deleted > 0 {
+                record_totp_gc_challenges(result.totp_challenges_deleted);
+            }
         }
 
         let duration = cycle_start.elapsed().as_secs_f64();
@@ -242,7 +251,8 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
             result.expired_tokens_deleted
                 + result.signing_keys_revoked
                 + result.onboarding_codes_deleted
-                + result.onboarding_accounts_deleted,
+                + result.onboarding_accounts_deleted
+                + result.totp_challenges_deleted,
         );
 
         debug!(
@@ -251,6 +261,7 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
             keys_revoked = result.signing_keys_revoked,
             onboarding_codes = result.onboarding_codes_deleted,
             onboarding_accounts = result.onboarding_accounts_deleted,
+            totp_challenges = result.totp_challenges_deleted,
             duration_secs = duration,
             "Token maintenance cycle complete"
         );
@@ -294,6 +305,7 @@ mod tests {
         assert_eq!(result.signing_keys_revoked, 0);
         assert_eq!(result.onboarding_codes_deleted, 0);
         assert_eq!(result.onboarding_accounts_deleted, 0);
+        assert_eq!(result.totp_challenges_deleted, 0);
     }
 
     #[test]
@@ -301,7 +313,9 @@ mod tests {
         let mut result = MaintenanceResult::default();
         result.onboarding_codes_deleted += 5;
         result.onboarding_accounts_deleted += 3;
+        result.totp_challenges_deleted += 7;
         assert_eq!(result.onboarding_codes_deleted, 5);
         assert_eq!(result.onboarding_accounts_deleted, 3);
+        assert_eq!(result.totp_challenges_deleted, 7);
     }
 }

@@ -116,6 +116,7 @@ async fn wait_for_signing_key_ready(
         let result = client
             .create_user_session(proto::CreateUserSessionRequest {
                 user: Some(proto::UserSlug { slug: user.value() }),
+                credential_used: None,
             })
             .await;
 
@@ -327,6 +328,7 @@ async fn test_revoke_all_user_sessions() {
     let session2 = client
         .create_user_session(proto::CreateUserSessionRequest {
             user: Some(proto::UserSlug { slug: user.value() }),
+            credential_used: None,
         })
         .await
         .expect("session 2")
@@ -336,6 +338,7 @@ async fn test_revoke_all_user_sessions() {
     let session3 = client
         .create_user_session(proto::CreateUserSessionRequest {
             user: Some(proto::UserSlug { slug: user.value() }),
+            credential_used: None,
         })
         .await
         .expect("session 3")
@@ -384,6 +387,7 @@ async fn test_revoke_all_user_sessions() {
     let new_session = client
         .create_user_session(proto::CreateUserSessionRequest {
             user: Some(proto::UserSlug { slug: user.value() }),
+            credential_used: None,
         })
         .await
         .expect("new session after revoke-all should work");
@@ -1228,6 +1232,7 @@ async fn test_signing_key_rotation_during_active_sessions() {
     let tokens_new = client
         .create_user_session(proto::CreateUserSessionRequest {
             user: Some(proto::UserSlug { slug: user.value() }),
+            credential_used: None,
         })
         .await
         .expect("new session after rotation")
@@ -1495,6 +1500,7 @@ async fn test_global_key_not_found_returns_error() {
     let result = client
         .create_user_session(proto::CreateUserSessionRequest {
             user: Some(proto::UserSlug { slug: user.value() }),
+            credential_used: None,
         })
         .await;
 

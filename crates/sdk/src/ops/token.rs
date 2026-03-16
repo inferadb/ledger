@@ -31,6 +31,7 @@ impl LedgerClient {
 
                     let request = proto::CreateUserSessionRequest {
                         user: Some(proto::UserSlug { slug: user.value() }),
+                        credential_used: None,
                     };
 
                     let response = client

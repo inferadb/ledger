@@ -1367,6 +1367,15 @@ pub fn record_onboarding_gc_accounts(count: u64) {
     counter!(ONBOARDING_ACCOUNTS_GC_TOTAL).increment(count);
 }
 
+/// Total expired TOTP challenges cleaned up by background GC (counter).
+const TOTP_CHALLENGES_GC_TOTAL: &str = "ledger_totp_challenges_gc_total";
+
+/// Records expired TOTP challenges deleted.
+#[inline]
+pub fn record_totp_gc_challenges(count: u64) {
+    counter!(TOTP_CHALLENGES_GC_TOTAL).increment(count);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1454,5 +1463,7 @@ mod tests {
         assert!(ONBOARDING_VERIFICATION_CODES_GC_TOTAL.ends_with("_total"));
         assert!(ONBOARDING_ACCOUNTS_GC_TOTAL.starts_with("ledger_"));
         assert!(ONBOARDING_ACCOUNTS_GC_TOTAL.ends_with("_total"));
+        assert!(TOTP_CHALLENGES_GC_TOTAL.starts_with("ledger_"));
+        assert!(TOTP_CHALLENGES_GC_TOTAL.ends_with("_total"));
     }
 }

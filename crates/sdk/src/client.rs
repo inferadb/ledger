@@ -3676,9 +3676,7 @@ mod tests {
                 assert_eq!(session.access_token, "at");
                 assert_eq!(session.refresh_token, "rt");
             },
-            EmailVerificationResult::NewUser { .. } => {
-                panic!("Expected ExistingUser");
-            },
+            _ => panic!("Expected ExistingUser"),
         }
     }
 
@@ -3689,9 +3687,7 @@ mod tests {
             EmailVerificationResult::NewUser { onboarding_token } => {
                 assert_eq!(onboarding_token, "ilobt_abc");
             },
-            EmailVerificationResult::ExistingUser { .. } => {
-                panic!("Expected NewUser");
-            },
+            _ => panic!("Expected NewUser"),
         }
     }
 

@@ -2617,6 +2617,55 @@ impl UserService for MockUserService {
             organization: Some(proto::OrganizationSlug { slug: user_slug + 1000 }),
         }))
     }
+
+    async fn create_user_credential(
+        &self,
+        _request: Request<proto::CreateUserCredentialRequest>,
+    ) -> Result<Response<proto::CreateUserCredentialResponse>, Status> {
+        Err(Status::unimplemented("CreateUserCredential not implemented in mock"))
+    }
+
+    async fn list_user_credentials(
+        &self,
+        _request: Request<proto::ListUserCredentialsRequest>,
+    ) -> Result<Response<proto::ListUserCredentialsResponse>, Status> {
+        Err(Status::unimplemented("ListUserCredentials not implemented in mock"))
+    }
+
+    async fn update_user_credential(
+        &self,
+        _request: Request<proto::UpdateUserCredentialRequest>,
+    ) -> Result<Response<proto::UpdateUserCredentialResponse>, Status> {
+        Err(Status::unimplemented("UpdateUserCredential not implemented in mock"))
+    }
+
+    async fn delete_user_credential(
+        &self,
+        _request: Request<proto::DeleteUserCredentialRequest>,
+    ) -> Result<Response<proto::DeleteUserCredentialResponse>, Status> {
+        Err(Status::unimplemented("DeleteUserCredential not implemented in mock"))
+    }
+
+    async fn create_totp_challenge(
+        &self,
+        _request: Request<proto::CreateTotpChallengeRequest>,
+    ) -> Result<Response<proto::CreateTotpChallengeResponse>, Status> {
+        Err(Status::unimplemented("CreateTotpChallenge not implemented in mock"))
+    }
+
+    async fn verify_totp(
+        &self,
+        _request: Request<proto::VerifyTotpRequest>,
+    ) -> Result<Response<proto::VerifyTotpResponse>, Status> {
+        Err(Status::unimplemented("VerifyTotp not implemented in mock"))
+    }
+
+    async fn consume_recovery_code(
+        &self,
+        _request: Request<proto::ConsumeRecoveryCodeRequest>,
+    ) -> Result<Response<proto::ConsumeRecoveryCodeResponse>, Status> {
+        Err(Status::unimplemented("ConsumeRecoveryCode not implemented in mock"))
+    }
 }
 
 #[cfg(test)]

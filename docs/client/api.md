@@ -6,20 +6,20 @@ This document covers read and write operations, error handling, and pagination.
 
 ## gRPC Services Overview
 
-| Service               | Purpose                                          |
-| --------------------- | ------------------------------------------------ |
-| `ReadService`         | Entity/relationship reads, verified reads, lists |
-| `WriteService`        | Transactional writes, conditional operations     |
-| `AdminService`        | Cluster, maintenance, config, backup, keys       |
-| `OrganizationService` | Organization CRUD, members, teams, migration     |
-| `VaultService`        | Vault creation, listing, metadata                |
-| `UserService`         | User CRUD, emails, search, erasure               |
-| `AppService`          | App lifecycle, credentials, vault connections    |
-| `TokenService`        | JWT sessions, refresh, signing key management    |
-| `EventsService`       | Audit event listing, filtering, ingestion        |
-| `HealthService`       | Readiness, liveness, startup probes              |
-| `DiscoveryService`    | Endpoint discovery, region topology              |
-| `RaftService`         | Inter-node consensus (internal)                  |
+| Service               | Purpose                                                                   |
+| --------------------- | ------------------------------------------------------------------------- |
+| `ReadService`         | Entity/relationship reads, verified reads, lists                          |
+| `WriteService`        | Transactional writes, conditional operations                              |
+| `AdminService`        | Cluster, maintenance, config, backup, keys                                |
+| `OrganizationService` | Organization CRUD, members, teams, migration                              |
+| `VaultService`        | Vault creation, listing, metadata                                         |
+| `UserService`         | User CRUD, emails, credentials (passkey/TOTP/recovery), TOTP verification |
+| `AppService`          | App lifecycle, credentials, vault connections                             |
+| `TokenService`        | JWT sessions, refresh, signing key management                             |
+| `EventsService`       | Audit event listing, filtering, ingestion                                 |
+| `HealthService`       | Readiness, liveness, startup probes                                       |
+| `DiscoveryService`    | Endpoint discovery, region topology                                       |
+| `RaftService`         | Inter-node consensus (internal)                                           |
 
 See [AdminService](admin.md) for admin operations, [SDK](sdk.md) for Rust client usage, and [Errors](errors.md) for error handling.
 
@@ -362,6 +362,44 @@ let stream = client.watch_blocks(WatchBlocksRequest {
 ```
 
 `start_height` must be >= 1. For full replay from genesis, use `start_height = 1`.
+
+## Credential Operations
+
+### Credential CRUD
+
+The `UserService` provides credential management for passkeys, TOTP, and recovery codes:
+
+| RPC                    | Purpose                                                       |
+| ---------------------- | ------------------------------------------------------------- |
+| `CreateUserCredential` | Register a passkey, TOTP secret, or recovery codes for a user |
+| `ListUserCredentials`  | List credentials (TOTP secrets always stripped)               |
+| `UpdateUserCredential` | Update passkey metadata (sign_count, backup_state)            |
+| `DeleteUserCredential` | Remove a credential (last-credential guard enforced)          |
+
+### TOTP Verification
+
+| RPC                   | Purpose                                                                   |
+| --------------------- | ------------------------------------------------------------------------- |
+| `CreateTotpChallenge` | Create a TOTP challenge after passkey auth (email code path is automatic) |
+| `VerifyTotp`          | Verify a TOTP code and directly create a session (`TokenPair`)            |
+| `ConsumeRecoveryCode` | Verify a recovery code (TOTP bypass) and create a session                 |
+
+`VerifyTotp` and `ConsumeRecoveryCode` return `TokenPair` directly — no separate `CreateUserSession` call needed for TOTP-enabled users.
+
+### Email Code + TOTP
+
+`VerifyEmailCode` (on `OnboardingService`) returns a `TotpRequired { challenge_nonce }` variant when the user has TOTP enabled. The email code is consumed atomically with TOTP challenge creation.
+
+### Credential Error Codes
+
+| Condition                  | gRPC Code             | Detail                            |
+| -------------------------- | --------------------- | --------------------------------- |
+| Wrong TOTP / recovery code | `UNAUTHENTICATED`     | Generic "verification failed"     |
+| Challenge expired          | `FAILED_PRECONDITION` | "Challenge expired"               |
+| Max attempts exceeded      | `RESOURCE_EXHAUSTED`  | "Too many attempts"               |
+| Last-credential guard      | `FAILED_PRECONDITION` | "Cannot delete last credential"   |
+| Duplicate TOTP/recovery    | `ALREADY_EXISTS`      | "Credential type already exists"  |
+| Too many active challenges | `RESOURCE_EXHAUSTED`  | "Too many active TOTP challenges" |
 
 ## Error Handling
 

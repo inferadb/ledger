@@ -69,6 +69,8 @@ These fields are updatable via the `UpdateConfig` RPC without restart:
 | `ledger.backup.restored`        | `backup_restored`        | Handler     | RestoreBackup RPC           | `backup_id`                            |
 | `ledger.snapshot.created`       | `snapshot_created`       | Handler     | CreateSnapshot RPC          |                                        |
 
+Credential operations (create, update, delete credentials; TOTP verification; recovery code consumption) are currently auditable via **canonical log lines** (wide events) on each request. Dedicated `EventAction` variants for the events system are planned but not yet implemented.
+
 ### Organization Scope Events
 
 | Event Type                         | Action                      | Emission    | Trigger                  | Details                                         |

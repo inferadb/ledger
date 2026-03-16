@@ -68,6 +68,9 @@ pub use types::{
     ClientAssertionId,
     // Type aliases
     ClientId,
+    // Credential types
+    CredentialData,
+    CredentialType,
     EmailVerifyTokenId,
     Entity,
     // Raft node ID
@@ -81,6 +84,14 @@ pub use types::{
     OrganizationSlug,
     // Resource accounting
     OrganizationUsage,
+    // Credential data structs
+    PasskeyCredential,
+    // TOTP challenge
+    PendingTotpChallenge,
+    // Primary auth method
+    PrimaryAuthMethod,
+    // Recovery codes
+    RecoveryCodeCredential,
     // Refresh token identifier
     RefreshTokenId,
     // Region types
@@ -98,9 +109,15 @@ pub use types::{
     TeamSlug,
     // Token version counter
     TokenVersion,
+    // TOTP types
+    TotpAlgorithm,
+    TotpCredential,
     Transaction,
     TransactionValidationError,
     TxId,
+    // User credential types
+    UserCredential,
+    UserCredentialId,
     UserEmailId,
     UserId,
     // User enums

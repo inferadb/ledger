@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod app;
+pub mod credential;
 pub mod events;
 pub mod query;
 pub mod read;

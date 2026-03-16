@@ -108,12 +108,13 @@ Removes orphaned membership records left behind when users are deleted from the 
 
 ### Token Maintenance
 
-Cleans up expired refresh tokens and transitions rotated signing keys past their grace period. Two phases per cycle:
+Cleans up expired refresh tokens, transitions rotated signing keys, and garbage-collects expired onboarding and TOTP challenge records. Three phases per cycle:
 
 1. **Phase 1**: Proposes `DeleteExpiredRefreshTokens` through Raft (also garbage-collects poisoned token families)
 2. **Phase 2**: Scans for rotated signing keys past `valid_until`, proposes `TransitionSigningKeyRevoked` for each
+3. **Phase 3**: Proposes `CleanupExpiredOnboarding` which scans three `_tmp:` prefixes: `_tmp:onboard_verify:` (email verification codes), `_tmp:onboard_account:` (onboarding accounts), and `_tmp:totp_challenge:` (TOTP second-factor challenges). Expired records are deleted in a single Raft proposal.
 
-Both phases go through Raft — background jobs cannot bypass consensus for state changes.
+All phases go through Raft — background jobs cannot bypass consensus for state changes.
 
 - **Default interval**: 5 minutes (300 seconds)
 - **Leader only**: Yes

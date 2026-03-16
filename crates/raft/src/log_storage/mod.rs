@@ -65,15 +65,17 @@ pub struct RegionChainState {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use chrono::{DateTime, Utc};
+    use chrono::{DateTime, Duration, Utc};
     use inferadb_ledger_state::{
         EventStore, EventsDatabase,
         system::{OrganizationStatus, OrganizationTier},
     };
     use inferadb_ledger_store::{FileBackend, tables};
     use inferadb_ledger_types::{
-        ClientId, EmailVerifyTokenId, ErrorCode, Operation, OrganizationId, Region, Transaction,
-        UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
+        ClientId, CredentialData, CredentialType, EmailVerifyTokenId, ErrorCode, Operation,
+        OrganizationId, PasskeyCredential, PrimaryAuthMethod, RecoveryCodeCredential, Region,
+        TotpCredential, Transaction, UserCredentialId, UserEmailId, UserId, UserSlug, VaultId,
+        VaultSlug,
         events::{EventAction, EventConfig, EventEntry, EventScope},
     };
     use openraft::{
@@ -6593,5 +6595,968 @@ mod tests {
             registry.deleted_at.is_some(),
             "deleted_at must be set so PurgeJob can compute retention window"
         );
+    }
+
+    // =========================================================================
+    // Credential CRUD apply handler tests
+    // =========================================================================
+
+    /// Creates a `RaftLogStore` backed by a real B+ tree with a state layer.
+    ///
+    /// Credential operations require `sys_service` (state layer) to be present.
+    fn create_store_with_state(dir: &std::path::Path) -> RaftLogStore<FileBackend> {
+        let state_db = Arc::new(
+            inferadb_ledger_store::Database::create(dir.join("state.db")).expect("create state db"),
+        );
+        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db));
+        RaftLogStore::<FileBackend>::open(dir.join("raft_log.db"))
+            .expect("open store")
+            .with_state_layer(state_layer)
+    }
+
+    /// Creates a user in the state machine so credential operations can reference it.
+    fn create_test_user(
+        store: &RaftLogStore<FileBackend>,
+        state: &mut AppliedState,
+        slug: UserSlug,
+        region: Region,
+    ) -> UserId {
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateUser {
+                user: UserId::new(0), // Ignored — state machine assigns
+                admin: false,
+                slug,
+                region,
+            }),
+            state,
+        );
+        match response {
+            LedgerResponse::UserCreated { user_id, .. } => user_id,
+            other => panic!("expected UserCreated, got {other:?}"),
+        }
+    }
+
+    /// Creates a passkey credential for a user via the apply handler.
+    ///
+    /// Uses `seed` to generate distinct `credential_id`/`public_key` bytes
+    /// so multiple passkeys per user don't collide.
+    fn create_passkey_credential_with_seed(
+        store: &RaftLogStore<FileBackend>,
+        state: &mut AppliedState,
+        user_id: UserId,
+        seed: u8,
+    ) -> UserCredentialId {
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateUserCredential {
+                user_id,
+                credential_type: CredentialType::Passkey,
+                credential_data: CredentialData::Passkey(PasskeyCredential {
+                    credential_id: vec![seed, seed + 1, seed + 2],
+                    public_key: vec![seed + 3, seed + 4, seed + 5],
+                    sign_count: 0,
+                    transports: vec!["internal".to_string()],
+                    backup_eligible: true,
+                    backup_state: false,
+                    attestation_format: Some("packed".to_string()),
+                    aaguid: None,
+                }),
+                name: format!("Passkey {seed}"),
+            }),
+            state,
+        );
+        match response {
+            LedgerResponse::UserCredentialCreated { credential_id } => credential_id,
+            other => panic!("expected UserCredentialCreated, got {other:?}"),
+        }
+    }
+
+    /// Creates a passkey credential with default seed (1).
+    fn create_passkey_credential(
+        store: &RaftLogStore<FileBackend>,
+        state: &mut AppliedState,
+        user_id: UserId,
+    ) -> UserCredentialId {
+        create_passkey_credential_with_seed(store, state, user_id, 1)
+    }
+
+    /// Creates a recovery code credential for a user via the apply handler.
+    fn create_recovery_credential(
+        store: &RaftLogStore<FileBackend>,
+        state: &mut AppliedState,
+        user_id: UserId,
+        code_hashes: Vec<[u8; 32]>,
+    ) -> UserCredentialId {
+        let total = code_hashes.len() as u8;
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateUserCredential {
+                user_id,
+                credential_type: CredentialType::RecoveryCode,
+                credential_data: CredentialData::RecoveryCode(RecoveryCodeCredential {
+                    code_hashes,
+                    total_generated: total,
+                }),
+                name: "Recovery codes".to_string(),
+            }),
+            state,
+        );
+        match response {
+            LedgerResponse::UserCredentialCreated { credential_id } => credential_id,
+            other => panic!("expected UserCredentialCreated, got {other:?}"),
+        }
+    }
+
+    /// Applies a request at `fixed_timestamp()`, discarding events and pending writes.
+    fn apply_at_fixed_time(
+        store: &RaftLogStore<FileBackend>,
+        request: &LedgerRequest,
+        state: &mut AppliedState,
+    ) -> LedgerResponse {
+        let mut events = Vec::new();
+        let mut op_index = 0u32;
+        let mut pending = PendingExternalWrites::default();
+        let (response, _) = store.apply_request_with_events(
+            request,
+            state,
+            fixed_timestamp(),
+            &mut op_index,
+            &mut events,
+            0,
+            &mut pending,
+        );
+        response
+    }
+
+    /// Creates a TOTP challenge via the apply handler.
+    fn create_test_totp_challenge(
+        store: &RaftLogStore<FileBackend>,
+        state: &mut AppliedState,
+        user_id: UserId,
+        user_slug: UserSlug,
+        nonce: [u8; 32],
+        expires_at: DateTime<Utc>,
+    ) {
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateTotpChallenge {
+                user_id,
+                user_slug,
+                nonce,
+                expires_at,
+                primary_method: PrimaryAuthMethod::EmailCode,
+            }),
+            state,
+        );
+        match response {
+            LedgerResponse::TotpChallengeCreated { nonce: n } => {
+                assert_eq!(n, nonce);
+            },
+            other => panic!("expected TotpChallengeCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_create_user_credential_passkey() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+        let cred_id = create_passkey_credential(&store, &mut state, user_id);
+
+        assert_eq!(cred_id, UserCredentialId::new(1), "first credential gets ID 1");
+    }
+
+    #[test]
+    fn test_apply_create_user_credential_totp() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateUserCredential {
+                user_id,
+                credential_type: CredentialType::Totp,
+                credential_data: CredentialData::Totp(TotpCredential {
+                    secret: zeroize::Zeroizing::new(vec![0xAA; 20]),
+                    algorithm: inferadb_ledger_types::TotpAlgorithm::Sha1,
+                    digits: 6,
+                    period: 30,
+                }),
+                name: "Authenticator app".to_string(),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::UserCredentialCreated { credential_id } => {
+                assert_eq!(credential_id, UserCredentialId::new(1));
+            },
+            other => panic!("expected UserCredentialCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_create_user_credential_recovery_codes() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateUserCredential {
+                user_id,
+                credential_type: CredentialType::RecoveryCode,
+                credential_data: CredentialData::RecoveryCode(RecoveryCodeCredential {
+                    code_hashes: vec![[0xAA; 32], [0xBB; 32], [0xCC; 32]],
+                    total_generated: 3,
+                }),
+                name: "Recovery codes".to_string(),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::UserCredentialCreated { credential_id } => {
+                assert_eq!(credential_id, UserCredentialId::new(1));
+            },
+            other => panic!("expected UserCredentialCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_create_user_credential_duplicate_totp_rejected() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+
+        let totp_request = LedgerRequest::System(SystemRequest::CreateUserCredential {
+            user_id,
+            credential_type: CredentialType::Totp,
+            credential_data: CredentialData::Totp(TotpCredential {
+                secret: zeroize::Zeroizing::new(vec![0xAA; 20]),
+                algorithm: inferadb_ledger_types::TotpAlgorithm::Sha1,
+                digits: 6,
+                period: 30,
+            }),
+            name: "TOTP 1".to_string(),
+        });
+
+        // First TOTP succeeds
+        let (r1, _) = store.apply_request(&totp_request, &mut state);
+        assert!(matches!(r1, LedgerResponse::UserCredentialCreated { .. }));
+
+        // Second TOTP rejected (one TOTP per user invariant)
+        let totp_request_2 = LedgerRequest::System(SystemRequest::CreateUserCredential {
+            user_id,
+            credential_type: CredentialType::Totp,
+            credential_data: CredentialData::Totp(TotpCredential {
+                secret: zeroize::Zeroizing::new(vec![0xBB; 20]),
+                algorithm: inferadb_ledger_types::TotpAlgorithm::Sha1,
+                digits: 6,
+                period: 30,
+            }),
+            name: "TOTP 2".to_string(),
+        });
+        let (r2, _) = store.apply_request(&totp_request_2, &mut state);
+        match r2 {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::AlreadyExists);
+            },
+            other => panic!("expected Error(AlreadyExists), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_update_user_credential() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+        let cred_id = create_passkey_credential(&store, &mut state, user_id);
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::UpdateUserCredential {
+                user_id,
+                credential_id: cred_id,
+                name: Some("Renamed Key".to_string()),
+                enabled: Some(false),
+                passkey_update: None,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::UserCredentialUpdated { credential_id } => {
+                assert_eq!(credential_id, cred_id);
+            },
+            other => panic!("expected UserCredentialUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_update_user_credential_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::UpdateUserCredential {
+                user_id,
+                credential_id: UserCredentialId::new(999),
+                name: Some("Nonexistent".to_string()),
+                enabled: None,
+                passkey_update: None,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => assert_eq!(code, ErrorCode::NotFound),
+            other => panic!("expected Error(NotFound), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_delete_user_credential() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+
+        // Create two credentials so deletion of one is allowed
+        let cred1 = create_passkey_credential(&store, &mut state, user_id);
+        create_passkey_credential_with_seed(&store, &mut state, user_id, 7);
+
+        // Delete first credential
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::DeleteUserCredential {
+                user_id,
+                credential_id: cred1,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::UserCredentialDeleted { credential_id } => {
+                assert_eq!(credential_id, cred1);
+            },
+            other => panic!("expected UserCredentialDeleted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_delete_last_credential_rejected() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+        let cred_id = create_passkey_credential(&store, &mut state, user_id);
+
+        // Attempt to delete the only credential
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::DeleteUserCredential {
+                user_id,
+                credential_id: cred_id,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::FailedPrecondition);
+            },
+            other => panic!("expected Error(FailedPrecondition), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_sequential_credential_ids() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+
+        let id1 = create_passkey_credential(&store, &mut state, user_id);
+        let id2 = create_passkey_credential_with_seed(&store, &mut state, user_id, 7);
+
+        assert_eq!(id1, UserCredentialId::new(1));
+        assert_eq!(id2, UserCredentialId::new(2));
+    }
+
+    #[test]
+    fn test_apply_create_duplicate_recovery_code_rejected() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+
+        // First recovery code set succeeds
+        create_recovery_credential(&store, &mut state, user_id, vec![[0xAA; 32]]);
+
+        // Second recovery code set rejected (one per user invariant)
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateUserCredential {
+                user_id,
+                credential_type: CredentialType::RecoveryCode,
+                credential_data: CredentialData::RecoveryCode(RecoveryCodeCredential {
+                    code_hashes: vec![[0xBB; 32]],
+                    total_generated: 1,
+                }),
+                name: "Recovery codes 2".to_string(),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::AlreadyExists);
+            },
+            other => panic!("expected Error(AlreadyExists), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_create_duplicate_passkey_credential_id_rejected() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+
+        // First passkey succeeds
+        create_passkey_credential(&store, &mut state, user_id);
+
+        // Second passkey with same credential_id bytes rejected
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateUserCredential {
+                user_id,
+                credential_type: CredentialType::Passkey,
+                credential_data: CredentialData::Passkey(PasskeyCredential {
+                    credential_id: vec![1, 2, 3], // Same as seed=1 helper
+                    public_key: vec![99, 99, 99], // Different key, same credential_id
+                    sign_count: 0,
+                    transports: vec![],
+                    backup_eligible: false,
+                    backup_state: false,
+                    attestation_format: None,
+                    aaguid: None,
+                }),
+                name: "Duplicate passkey".to_string(),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::AlreadyExists);
+            },
+            other => panic!("expected Error(AlreadyExists), got {other:?}"),
+        }
+    }
+
+    // =========================================================================
+    // TOTP Challenge Lifecycle apply handler tests
+    // =========================================================================
+
+    #[test]
+    fn test_apply_create_totp_challenge() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+        let nonce = [0xAA; 32];
+        let expires_at = Utc::now() + Duration::minutes(5);
+
+        create_test_totp_challenge(
+            &store,
+            &mut state,
+            user_id,
+            UserSlug::new(100),
+            nonce,
+            expires_at,
+        );
+    }
+
+    #[test]
+    fn test_apply_create_totp_challenge_rate_limited() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+        let expires_at = Utc::now() + Duration::minutes(5);
+
+        // Create 3 challenges (max allowed)
+        for i in 0..3u8 {
+            let mut nonce = [0u8; 32];
+            nonce[0] = i;
+            create_test_totp_challenge(
+                &store,
+                &mut state,
+                user_id,
+                UserSlug::new(100),
+                nonce,
+                expires_at,
+            );
+        }
+
+        // 4th challenge should be rate limited
+        let mut nonce_4 = [0u8; 32];
+        nonce_4[0] = 3;
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateTotpChallenge {
+                user_id,
+                user_slug: UserSlug::new(100),
+                nonce: nonce_4,
+                expires_at,
+                primary_method: PrimaryAuthMethod::EmailCode,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::RateLimited);
+            },
+            other => panic!("expected Error(RateLimited), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_consume_totp_and_create_session() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_slug = UserSlug::new(100);
+        let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
+
+        let nonce = [0xAA; 32];
+        let expires_at = fixed_timestamp() + Duration::minutes(5);
+        create_test_totp_challenge(&store, &mut state, user_id, user_slug, nonce, expires_at);
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::ConsumeTotpAndCreateSession {
+                user_id,
+                nonce,
+                token_hash: [0xCC; 32],
+                family: [0xDD; 16],
+                kid: "key-001".to_string(),
+                ttl_secs: 3600,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::TotpVerified { refresh_token_id } => {
+                assert_eq!(refresh_token_id.value(), 1, "first refresh token gets ID 1");
+            },
+            other => panic!("expected TotpVerified, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_consume_totp_expired_challenge() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_slug = UserSlug::new(100);
+        let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
+
+        let nonce = [0xAA; 32];
+        // Challenge expires at fixed_timestamp (2025-01-15 12:00:00)
+        let expires_at = fixed_timestamp();
+        create_test_totp_challenge(&store, &mut state, user_id, user_slug, nonce, expires_at);
+
+        // Apply at block_timestamp == expires_at (expired: uses <=)
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::ConsumeTotpAndCreateSession {
+                user_id,
+                nonce,
+                token_hash: [0xCC; 32],
+                family: [0xDD; 16],
+                kid: "key-001".to_string(),
+                ttl_secs: 3600,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::FailedPrecondition);
+            },
+            other => {
+                panic!("expected Error(FailedPrecondition) for expired challenge, got {other:?}")
+            },
+        }
+    }
+
+    #[test]
+    fn test_apply_consume_totp_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+
+        // Try to consume a non-existent challenge
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::ConsumeTotpAndCreateSession {
+                user_id,
+                nonce: [0xFF; 32],
+                token_hash: [0xCC; 32],
+                family: [0xDD; 16],
+                kid: "key-001".to_string(),
+                ttl_secs: 3600,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::NotFound);
+            },
+            other => panic!("expected Error(NotFound), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_consume_totp_max_attempts_exceeded() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_slug = UserSlug::new(100);
+        let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
+
+        let nonce = [0xAA; 32];
+        let expires_at = fixed_timestamp() + Duration::minutes(5);
+        create_test_totp_challenge(&store, &mut state, user_id, user_slug, nonce, expires_at);
+
+        // Increment 3 times (0→1, 1→2, 2→3). Check >= 3 is BEFORE increment,
+        // so all 3 succeed. The 4th would be rejected.
+        for expected in 1..=3u8 {
+            let (response, _) = store.apply_request(
+                &LedgerRequest::System(SystemRequest::IncrementTotpAttempt { user_id, nonce }),
+                &mut state,
+            );
+            match response {
+                LedgerResponse::TotpAttemptIncremented { attempts } => {
+                    assert_eq!(attempts, expected);
+                },
+                other => panic!("expected TotpAttemptIncremented({expected}), got {other:?}"),
+            }
+        }
+
+        // Consumption should be rejected (defense-in-depth: attempts >= 3)
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::ConsumeTotpAndCreateSession {
+                user_id,
+                nonce,
+                token_hash: [0xCC; 32],
+                family: [0xDD; 16],
+                kid: "key-001".to_string(),
+                ttl_secs: 3600,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::TooManyAttempts);
+            },
+            other => panic!("expected Error(TooManyAttempts), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_increment_totp_attempt() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_slug = UserSlug::new(100);
+        let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
+
+        let nonce = [0xAA; 32];
+        let expires_at = Utc::now() + Duration::minutes(5);
+        create_test_totp_challenge(&store, &mut state, user_id, user_slug, nonce, expires_at);
+
+        // First increment: 0 → 1
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::IncrementTotpAttempt { user_id, nonce }),
+            &mut state,
+        );
+        match response {
+            LedgerResponse::TotpAttemptIncremented { attempts } => {
+                assert_eq!(attempts, 1);
+            },
+            other => panic!("expected TotpAttemptIncremented, got {other:?}"),
+        }
+
+        // Second increment: 1 → 2
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::IncrementTotpAttempt { user_id, nonce }),
+            &mut state,
+        );
+        match response {
+            LedgerResponse::TotpAttemptIncremented { attempts } => {
+                assert_eq!(attempts, 2);
+            },
+            other => panic!("expected TotpAttemptIncremented, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_increment_totp_attempt_max_reached() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_slug = UserSlug::new(100);
+        let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
+
+        let nonce = [0xAA; 32];
+        let expires_at = Utc::now() + Duration::minutes(5);
+        create_test_totp_challenge(&store, &mut state, user_id, user_slug, nonce, expires_at);
+
+        // Increment 3 times (0→1, 1→2, 2→3) — all succeed because check is >= 3 BEFORE increment
+        for _ in 0..3 {
+            store.apply_request(
+                &LedgerRequest::System(SystemRequest::IncrementTotpAttempt { user_id, nonce }),
+                &mut state,
+            );
+        }
+
+        // 4th increment: attempts == 3 >= MAX_TOTP_ATTEMPTS → rejected
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::IncrementTotpAttempt { user_id, nonce }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::TooManyAttempts);
+            },
+            other => panic!("expected TooManyAttempts on 4th attempt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_increment_totp_attempt_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::IncrementTotpAttempt {
+                user_id,
+                nonce: [0xFF; 32],
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::NotFound);
+            },
+            other => panic!("expected Error(NotFound), got {other:?}"),
+        }
+    }
+
+    // =========================================================================
+    // Recovery Code Consumption + Direct Session Creation
+    // =========================================================================
+
+    #[test]
+    fn test_apply_consume_recovery_and_create_session() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_slug = UserSlug::new(100);
+        let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
+
+        let code_hash = [0xEE; 32];
+        let recovery_cred_id =
+            create_recovery_credential(&store, &mut state, user_id, vec![code_hash, [0xFF; 32]]);
+
+        // Create a TOTP challenge (required for recovery code consumption)
+        let nonce = [0xAA; 32];
+        let expires_at = fixed_timestamp() + Duration::minutes(5);
+        create_test_totp_challenge(&store, &mut state, user_id, user_slug, nonce, expires_at);
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::ConsumeRecoveryAndCreateSession {
+                user_id,
+                nonce,
+                code_hash,
+                credential_id: recovery_cred_id,
+                token_hash: [0xCC; 32],
+                family: [0xDD; 16],
+                kid: "key-001".to_string(),
+                ttl_secs: 3600,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::RecoveryCodeConsumed { refresh_token_id, remaining_codes } => {
+                assert_eq!(refresh_token_id.value(), 1);
+                assert_eq!(remaining_codes, 1, "one of two codes consumed");
+            },
+            other => panic!("expected RecoveryCodeConsumed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_consume_recovery_wrong_code() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_slug = UserSlug::new(100);
+        let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
+
+        let recovery_cred_id =
+            create_recovery_credential(&store, &mut state, user_id, vec![[0xEE; 32]]);
+
+        let nonce = [0xAA; 32];
+        let expires_at = fixed_timestamp() + Duration::minutes(5);
+        create_test_totp_challenge(&store, &mut state, user_id, user_slug, nonce, expires_at);
+
+        // Try with wrong code hash
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::ConsumeRecoveryAndCreateSession {
+                user_id,
+                nonce,
+                code_hash: [0x00; 32], // Wrong hash!
+                credential_id: recovery_cred_id,
+                token_hash: [0xCC; 32],
+                family: [0xDD; 16],
+                kid: "key-001".to_string(),
+                ttl_secs: 3600,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, message } => {
+                assert_eq!(code, ErrorCode::Unauthenticated);
+                // Verify generic error message (no entity detail)
+                assert_eq!(message, "Verification failed");
+            },
+            other => panic!("expected Error(Unauthenticated), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_consume_recovery_expired_challenge() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_slug = UserSlug::new(100);
+        let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
+
+        let recovery_cred_id =
+            create_recovery_credential(&store, &mut state, user_id, vec![[0xEE; 32]]);
+
+        // Challenge expires at fixed_timestamp
+        let nonce = [0xAA; 32];
+        let expires_at = fixed_timestamp();
+        create_test_totp_challenge(&store, &mut state, user_id, user_slug, nonce, expires_at);
+
+        // Consume at fixed_timestamp == expires_at (expired: <=)
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::ConsumeRecoveryAndCreateSession {
+                user_id,
+                nonce,
+                code_hash: [0xEE; 32],
+                credential_id: recovery_cred_id,
+                token_hash: [0xCC; 32],
+                family: [0xDD; 16],
+                kid: "key-001".to_string(),
+                ttl_secs: 3600,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::FailedPrecondition);
+            },
+            other => panic!("expected Error(FailedPrecondition), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_consume_totp_challenge_one_time_use() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_slug = UserSlug::new(100);
+        let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
+
+        let nonce = [0xAA; 32];
+        let expires_at = fixed_timestamp() + Duration::minutes(5);
+        create_test_totp_challenge(&store, &mut state, user_id, user_slug, nonce, expires_at);
+
+        // First consumption succeeds
+        let r1 = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::ConsumeTotpAndCreateSession {
+                user_id,
+                nonce,
+                token_hash: [0xCC; 32],
+                family: [0xDD; 16],
+                kid: "key-001".to_string(),
+                ttl_secs: 3600,
+            }),
+            &mut state,
+        );
+        assert!(matches!(r1, LedgerResponse::TotpVerified { .. }));
+
+        // Second consumption with same nonce fails (challenge deleted)
+        let r2 = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::ConsumeTotpAndCreateSession {
+                user_id,
+                nonce,
+                token_hash: [0xEE; 32],
+                family: [0xFF; 16],
+                kid: "key-002".to_string(),
+                ttl_secs: 3600,
+            }),
+            &mut state,
+        );
+        match r2 {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::NotFound);
+            },
+            other => panic!("expected Error(NotFound) for replayed nonce, got {other:?}"),
+        }
     }
 }

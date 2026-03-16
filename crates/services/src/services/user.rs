@@ -10,15 +10,19 @@
 
 use chrono::Utc;
 use inferadb_ledger_proto::proto::{
-    self, CompleteRegistrationRequest, CompleteRegistrationResponse, CreateUserEmailRequest,
-    CreateUserEmailResponse, CreateUserRequest, CreateUserResponse, DeleteUserEmailRequest,
-    DeleteUserEmailResponse, DeleteUserRequest, DeleteUserResponse, EraseUserRequest,
-    EraseUserResponse, GetUserRequest, GetUserResponse, InitiateEmailVerificationRequest,
-    InitiateEmailVerificationResponse, ListUsersRequest, ListUsersResponse,
+    self, CompleteRegistrationRequest, CompleteRegistrationResponse, ConsumeRecoveryCodeRequest,
+    ConsumeRecoveryCodeResponse, CreateTotpChallengeRequest, CreateTotpChallengeResponse,
+    CreateUserCredentialRequest, CreateUserCredentialResponse, CreateUserEmailRequest,
+    CreateUserEmailResponse, CreateUserRequest, CreateUserResponse, DeleteUserCredentialRequest,
+    DeleteUserCredentialResponse, DeleteUserEmailRequest, DeleteUserEmailResponse,
+    DeleteUserRequest, DeleteUserResponse, EraseUserRequest, EraseUserResponse, GetUserRequest,
+    GetUserResponse, InitiateEmailVerificationRequest, InitiateEmailVerificationResponse,
+    ListUserCredentialsRequest, ListUserCredentialsResponse, ListUsersRequest, ListUsersResponse,
     MigrateUserRegionRequest, MigrateUserRegionResponse, Region as ProtoRegion,
     SearchUserEmailRequest, SearchUserEmailResponse, SearchUsersRequest, SearchUsersResponse,
-    UpdateUserRequest, UpdateUserResponse, UserSlug as ProtoUserSlug, VerifyEmailCodeRequest,
-    VerifyEmailCodeResponse, VerifyUserEmailRequest, VerifyUserEmailResponse,
+    UpdateUserCredentialRequest, UpdateUserCredentialResponse, UpdateUserRequest,
+    UpdateUserResponse, UserSlug as ProtoUserSlug, VerifyEmailCodeRequest, VerifyEmailCodeResponse,
+    VerifyTotpRequest, VerifyTotpResponse, VerifyUserEmailRequest, VerifyUserEmailResponse,
 };
 use inferadb_ledger_raft::{
     error::ServiceError,
@@ -153,6 +157,168 @@ impl UserService {
             access_expires_at,
             refresh_token: refresh_token_str,
             refresh_expires_at,
+        })
+    }
+
+    /// Resolves a user slug to internal ID, external slug, and home region.
+    ///
+    /// This is the common preamble for credential and TOTP handlers that need
+    /// to know which region to propose to or read from.
+    fn resolve_user_region(
+        &self,
+        proto_slug: &Option<ProtoUserSlug>,
+        ctx: &mut inferadb_ledger_raft::logging::CanonicalLogLine,
+    ) -> Result<
+        (
+            inferadb_ledger_types::UserId,
+            inferadb_ledger_types::UserSlug,
+            inferadb_ledger_types::Region,
+        ),
+        Status,
+    > {
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
+        let user_id = slug_resolver.extract_and_resolve_user(proto_slug).inspect_err(|status| {
+            ctx.set_error("InvalidArgument", status.message());
+        })?;
+        let user_slug = SlugResolver::extract_user_slug(proto_slug)?;
+
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let dir_entry = sys_svc
+            .get_user_directory(user_id)
+            .map_err(|e| Status::internal(format!("Failed to read user directory: {e}")))?
+            .ok_or_else(|| {
+                ctx.set_error("NotFound", "User directory entry not found");
+                Status::not_found("User not found")
+            })?;
+        let region = dir_entry.region.ok_or_else(|| {
+            ctx.set_error("Internal", "User has no assigned region");
+            Status::internal("User has no assigned region")
+        })?;
+
+        Ok((user_id, user_slug, region))
+    }
+
+    fn verify_totp_code(
+        secret: &[u8],
+        code: &str,
+        algorithm: inferadb_ledger_types::TotpAlgorithm,
+        digits: u8,
+        period: u32,
+    ) -> bool {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        use hmac::{Hmac, Mac};
+
+        // Reject if code length doesn't match configured digits (prevents ct_eq length leak)
+        if code.len() != digits as usize {
+            return false;
+        }
+
+        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()) else {
+            // System clock before UNIX epoch — refuse to verify rather than using counter 0
+            return false;
+        };
+        let counter = now / u64::from(period);
+        let modulus = 10u32.pow(u32::from(digits));
+
+        // Check current step, next step (+1), and previous step (-1 via wrapping)
+        for offset in [0u64, 1, u64::MAX] {
+            let step = counter.wrapping_add(offset);
+            let step_bytes = step.to_be_bytes();
+
+            let computed = match algorithm {
+                inferadb_ledger_types::TotpAlgorithm::Sha1 => {
+                    let Ok(mut mac) = Hmac::<sha1::Sha1>::new_from_slice(secret) else {
+                        return false;
+                    };
+                    mac.update(&step_bytes);
+                    Self::dynamic_truncate(&mac.finalize().into_bytes(), modulus)
+                },
+                inferadb_ledger_types::TotpAlgorithm::Sha256 => {
+                    let Ok(mut mac) = Hmac::<sha2::Sha256>::new_from_slice(secret) else {
+                        return false;
+                    };
+                    mac.update(&step_bytes);
+                    Self::dynamic_truncate(&mac.finalize().into_bytes(), modulus)
+                },
+                inferadb_ledger_types::TotpAlgorithm::Sha512 => {
+                    let Ok(mut mac) = Hmac::<sha2::Sha512>::new_from_slice(secret) else {
+                        return false;
+                    };
+                    mac.update(&step_bytes);
+                    Self::dynamic_truncate(&mac.finalize().into_bytes(), modulus)
+                },
+            };
+
+            let expected = format!("{computed:0>width$}", width = digits as usize);
+            if subtle::ConstantTimeEq::ct_eq(expected.as_bytes(), code.as_bytes()).into() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// RFC 4226 §5.4 dynamic truncation: extracts a `digits`-length code from an HMAC result.
+    fn dynamic_truncate(hmac_result: &[u8], modulus: u32) -> u32 {
+        let offset = (hmac_result[hmac_result.len() - 1] & 0x0F) as usize;
+        let bin_code = u32::from_be_bytes([
+            hmac_result[offset] & 0x7F,
+            hmac_result[offset + 1],
+            hmac_result[offset + 2],
+            hmac_result[offset + 3],
+        ]);
+        bin_code % modulus
+    }
+
+    /// Signs a JWT and builds a `TokenPair` after successful TOTP or recovery code verification.
+    ///
+    /// Reads the user from state (for role/version), signs the access token, and assembles
+    /// the full token pair with the pre-generated refresh token.
+    fn sign_session_after_challenge(
+        &self,
+        user_id: inferadb_ledger_types::UserId,
+        user_slug: inferadb_ledger_types::UserSlug,
+        refresh_token_str: String,
+        signing_key: &inferadb_ledger_state::system::SigningKey,
+        refresh_ttl_secs: u64,
+    ) -> Result<proto::TokenPair, Status> {
+        let jwt_engine = self
+            .ctx
+            .jwt_engine
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("JWT engine not configured"))?;
+
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let dir_entry = sys_svc
+            .get_user_directory(user_id)
+            .map_err(|e| Status::internal(format!("Failed to read user directory: {e}")))?
+            .ok_or_else(|| Status::internal("User directory not found"))?;
+        let user_region =
+            dir_entry.region.ok_or_else(|| Status::internal("User has no assigned region"))?;
+
+        let regional_state = self.ctx.regional_state(user_region)?;
+        let regional_sys = SystemOrganizationService::new(regional_state);
+        let user = regional_sys
+            .get_user(user_id)
+            .map_err(|e| Status::internal(format!("Failed to read user: {e}")))?
+            .ok_or_else(|| Status::internal("User not found after verification"))?;
+
+        let role_str = match user.role {
+            inferadb_ledger_types::UserRole::Admin => "admin",
+            inferadb_ledger_types::UserRole::User => "user",
+        };
+
+        let (access_token, access_expires_at) = jwt_engine
+            .sign_user_session(user_slug, role_str, user.version, &signing_key.kid)
+            .map_err(|e| Status::internal(format!("Failed to sign access token: {e}")))?;
+
+        let refresh_expires_at = Utc::now() + chrono::Duration::seconds(refresh_ttl_secs as i64);
+
+        Ok(proto::TokenPair {
+            access_token,
+            refresh_token: refresh_token_str,
+            access_expires_at: Some(crate::proto_compat::datetime_to_proto(&access_expires_at)),
+            refresh_expires_at: Some(crate::proto_compat::datetime_to_proto(&refresh_expires_at)),
         })
     }
 }
@@ -1388,12 +1554,52 @@ impl proto::user_service_server::UserService for UserService {
         // Pre-resolve: check GLOBAL HMAC index for existing *active* user.
         // Provisioning entries (in-flight onboarding sagas) are not existing users.
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
-        let existing_user_hmac_hit = matches!(
-            sys_svc
-                .get_email_hash(&email_hmac)
-                .map_err(|e| Status::internal(format!("Failed to read email hash index: {e}")))?,
-            Some(EmailHashEntry::Active(_))
-        );
+        let email_hash_entry = sys_svc
+            .get_email_hash(&email_hmac)
+            .map_err(|e| Status::internal(format!("Failed to read email hash index: {e}")))?;
+        let existing_user_hmac_hit = matches!(&email_hash_entry, Some(EmailHashEntry::Active(_)));
+
+        // TOTP pre-resolve: if this is an existing active user, check whether
+        // they have a TOTP credential in their region. If so, pre-generate
+        // challenge data so the state machine can atomically create it.
+        let totp_pre_resolve = if let Some(EmailHashEntry::Active(user_id)) = &email_hash_entry {
+            let dir_entry = sys_svc
+                .get_user_directory(*user_id)
+                .map_err(|e| Status::internal(format!("Failed to read user directory: {e}")))?;
+            if let Some(ref dir) = dir_entry {
+                if let (Some(user_region), Some(slug)) = (dir.region, dir.slug) {
+                    let regional_state = self.ctx.regional_state(user_region)?;
+                    let regional_sys = SystemOrganizationService::new(regional_state);
+                    let totp_creds = regional_sys
+                        .list_user_credentials(
+                            *user_id,
+                            Some(inferadb_ledger_types::CredentialType::Totp),
+                        )
+                        .map_err(|e| {
+                            Status::internal(format!("Failed to check TOTP status: {e}"))
+                        })?;
+                    if totp_creds.iter().any(|c| c.enabled) {
+                        let mut nonce = [0u8; 32];
+                        rand::Rng::fill_bytes(&mut rand::rng(), &mut nonce);
+                        let expires_at = Utc::now() + chrono::Duration::minutes(5);
+                        Some(inferadb_ledger_raft::types::TotpPreResolve {
+                            nonce,
+                            expires_at,
+                            user_id: *user_id,
+                            user_slug: slug,
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // Pre-generate onboarding token for new-user path
         let (onboarding_token, onboarding_token_hash) =
@@ -1408,6 +1614,7 @@ impl proto::user_service_server::UserService for UserService {
             existing_user_hmac_hit,
             onboarding_token_hash,
             onboarding_expires_at,
+            totp: totp_pre_resolve,
         };
         let response =
             self.ctx.propose_regional(region, system_request, &grpc_metadata, &mut ctx).await?;
@@ -1497,6 +1704,15 @@ impl proto::user_service_server::UserService for UserService {
                                 )),
                             }),
                         },
+                    )),
+                }))
+            },
+            EmailCodeVerifiedResult::TotpRequired { nonce } => {
+                inferadb_ledger_raft::metrics::record_onboarding_verification("totp_required");
+                ctx.set_success();
+                Ok(Response::new(VerifyEmailCodeResponse {
+                    result: Some(proto::verify_email_code_response::Result::TotpRequired(
+                        proto::TotpRequired { challenge_nonce: nonce.to_vec() },
                     )),
                 }))
             },
@@ -1765,5 +1981,860 @@ impl proto::user_service_server::UserService for UserService {
                 slug: saga_result.organization_slug.value(),
             }),
         }))
+    }
+
+    // ── Credential Management (Task 9) ──
+
+    async fn create_user_credential(
+        &self,
+        request: Request<CreateUserCredentialRequest>,
+    ) -> Result<Response<CreateUserCredentialResponse>, Status> {
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = self.ctx.make_request_context(
+            "UserService",
+            "create_user_credential",
+            &grpc_metadata,
+            &trace_ctx,
+        );
+
+        // Resolve user slug → internal ID + region
+        let (user_id, user_slug, region) = self.resolve_user_region(&req.user, &mut ctx)?;
+
+        // Verify user is active (defense-in-depth: credentials for deleted users are useless)
+        let regional_state = self.ctx.regional_state(region)?;
+        let regional_sys = SystemOrganizationService::new(regional_state);
+        let user = regional_sys.get_user(user_id).map_err(|e| {
+            ctx.set_error("Internal", &e.to_string());
+            Status::internal(format!("Failed to read user: {e}"))
+        })?;
+        if !matches!(
+            user.as_ref().map(|u| u.status),
+            Some(inferadb_ledger_types::UserStatus::Active)
+        ) {
+            ctx.set_error("FailedPrecondition", "User is not active");
+            return Err(Status::failed_precondition("User is not active"));
+        }
+
+        // Validate credential type
+        let proto_ct =
+            inferadb_ledger_proto::convert::credential_type_from_i32(req.credential_type)?;
+        let credential_type: inferadb_ledger_types::CredentialType = proto_ct.try_into()?;
+
+        // Validate name
+        validation::validate_user_name(&req.name).map_err(|e| {
+            let msg = e.to_string();
+            ctx.set_error("InvalidArgument", &msg);
+            Status::invalid_argument(msg)
+        })?;
+
+        // Convert proto credential data → domain
+        let credential_data = match req.data {
+            Some(proto::create_user_credential_request::Data::Passkey(ref pk)) => {
+                let domain_pk = inferadb_ledger_types::PasskeyCredential::try_from(pk)?;
+                inferadb_ledger_types::CredentialData::Passkey(domain_pk)
+            },
+            Some(proto::create_user_credential_request::Data::Totp(ref totp)) => {
+                let domain_totp = inferadb_ledger_types::TotpCredential::try_from(totp)?;
+                inferadb_ledger_types::CredentialData::Totp(domain_totp)
+            },
+            Some(proto::create_user_credential_request::Data::RecoveryCode(ref rc)) => {
+                let domain_rc = inferadb_ledger_types::RecoveryCodeCredential::try_from(rc)?;
+                inferadb_ledger_types::CredentialData::RecoveryCode(domain_rc)
+            },
+            None => {
+                ctx.set_error("InvalidArgument", "credential data is required");
+                return Err(Status::invalid_argument("credential data is required"));
+            },
+        };
+
+        // Verify credential_type matches data discriminant
+        let data_type = match &credential_data {
+            inferadb_ledger_types::CredentialData::Passkey(_) => {
+                inferadb_ledger_types::CredentialType::Passkey
+            },
+            inferadb_ledger_types::CredentialData::Totp(_) => {
+                inferadb_ledger_types::CredentialType::Totp
+            },
+            inferadb_ledger_types::CredentialData::RecoveryCode(_) => {
+                inferadb_ledger_types::CredentialType::RecoveryCode
+            },
+        };
+        if credential_type != data_type {
+            ctx.set_error("InvalidArgument", "credential_type does not match data");
+            return Err(Status::invalid_argument(
+                "credential_type does not match the provided credential data",
+            ));
+        }
+
+        // Propose encrypted credential creation
+        let system_request = SystemRequest::CreateUserCredential {
+            user_id,
+            credential_type,
+            credential_data: credential_data.clone(),
+            name: req.name.clone(),
+        };
+        let response = self
+            .ctx
+            .propose_regional_encrypted(region, system_request, user_id, &grpc_metadata, &mut ctx)
+            .await?;
+
+        match response {
+            LedgerResponse::UserCredentialCreated { credential_id } => {
+                // Build proto response from input data + allocated ID
+                let domain_cred = inferadb_ledger_types::UserCredential {
+                    id: credential_id,
+                    user: user_id,
+                    credential_type,
+                    credential_data,
+                    name: req.name,
+                    enabled: true,
+                    created_at: Utc::now(),
+                    last_used_at: None,
+                };
+                // For create response: include TOTP secret (one-time setup).
+                // All other responses strip it via strip_totp_secret().
+                let proto_cred = inferadb_ledger_proto::convert::user_credential_to_proto(
+                    &domain_cred,
+                    user_slug,
+                );
+
+                ctx.set_success();
+                Ok(Response::new(CreateUserCredentialResponse { credential: Some(proto_cred) }))
+            },
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
+                Err(super::helpers::error_code_to_status(code, message))
+            },
+            other => {
+                ctx.set_error("UnexpectedResponse", &format!("{other:?}"));
+                Err(Status::internal("Unexpected response from Raft state machine"))
+            },
+        }
+    }
+
+    async fn list_user_credentials(
+        &self,
+        request: Request<ListUserCredentialsRequest>,
+    ) -> Result<Response<ListUserCredentialsResponse>, Status> {
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = self.ctx.make_request_context(
+            "UserService",
+            "list_user_credentials",
+            &grpc_metadata,
+            &trace_ctx,
+        );
+
+        // Resolve user slug → internal ID + region
+        let (user_id, user_slug, region) = self.resolve_user_region(&req.user, &mut ctx)?;
+
+        // Optional type filter
+        let type_filter: Option<inferadb_ledger_types::CredentialType> = req
+            .credential_type
+            .map(|ct| {
+                let proto_ct = inferadb_ledger_proto::convert::credential_type_from_i32(ct)?;
+                inferadb_ledger_types::CredentialType::try_from(proto_ct)
+            })
+            .transpose()?;
+
+        // Read credentials from regional state
+        let regional_state = self.ctx.regional_state(region)?;
+        let regional_sys = SystemOrganizationService::new(regional_state);
+        let credentials =
+            regional_sys.list_user_credentials(user_id, type_filter).map_err(|e| {
+                ctx.set_error("Internal", &e.to_string());
+                Status::internal(format!("Failed to list credentials: {e}"))
+            })?;
+
+        // Convert to proto, stripping sensitive credential data
+        let proto_creds: Vec<_> = credentials
+            .iter()
+            .map(|c| {
+                let mut pc = inferadb_ledger_proto::convert::user_credential_to_proto(c, user_slug);
+                inferadb_ledger_proto::convert::strip_totp_secret(&mut pc);
+                inferadb_ledger_proto::convert::strip_recovery_code_hashes(&mut pc);
+                pc
+            })
+            .collect();
+
+        ctx.set_success();
+        Ok(Response::new(ListUserCredentialsResponse { credentials: proto_creds }))
+    }
+
+    async fn update_user_credential(
+        &self,
+        request: Request<UpdateUserCredentialRequest>,
+    ) -> Result<Response<UpdateUserCredentialResponse>, Status> {
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = self.ctx.make_request_context(
+            "UserService",
+            "update_user_credential",
+            &grpc_metadata,
+            &trace_ctx,
+        );
+
+        let (user_id, user_slug, region) = self.resolve_user_region(&req.user, &mut ctx)?;
+
+        let credential_id = inferadb_ledger_types::UserCredentialId::new(req.credential_id);
+
+        // Validate name if provided
+        if let Some(ref name) = req.name {
+            validation::validate_user_name(name).map_err(|e| {
+                let msg = e.to_string();
+                ctx.set_error("InvalidArgument", &msg);
+                Status::invalid_argument(msg)
+            })?;
+        }
+
+        // Convert passkey update data if provided
+        let passkey_update = req
+            .passkey
+            .as_ref()
+            .map(inferadb_ledger_types::PasskeyCredential::try_from)
+            .transpose()?;
+
+        let system_request = SystemRequest::UpdateUserCredential {
+            user_id,
+            credential_id,
+            name: req.name,
+            enabled: req.enabled,
+            passkey_update,
+        };
+        let response = self
+            .ctx
+            .propose_regional_encrypted(region, system_request, user_id, &grpc_metadata, &mut ctx)
+            .await?;
+
+        match response {
+            LedgerResponse::UserCredentialUpdated { credential_id: updated_id } => {
+                // Read back the updated credential
+                let regional_state = self.ctx.regional_state(region)?;
+                let regional_sys = SystemOrganizationService::new(regional_state);
+                let cred = regional_sys
+                    .get_user_credential(user_id, updated_id)
+                    .map_err(|e| {
+                        Status::internal(format!("Failed to read updated credential: {e}"))
+                    })?
+                    .ok_or_else(|| Status::internal("Credential vanished after update"))?;
+
+                let mut proto_cred =
+                    inferadb_ledger_proto::convert::user_credential_to_proto(&cred, user_slug);
+                inferadb_ledger_proto::convert::strip_totp_secret(&mut proto_cred);
+                inferadb_ledger_proto::convert::strip_recovery_code_hashes(&mut proto_cred);
+
+                ctx.set_success();
+                Ok(Response::new(UpdateUserCredentialResponse { credential: Some(proto_cred) }))
+            },
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
+                Err(super::helpers::error_code_to_status(code, message))
+            },
+            other => {
+                ctx.set_error("UnexpectedResponse", &format!("{other:?}"));
+                Err(Status::internal("Unexpected response from Raft state machine"))
+            },
+        }
+    }
+
+    async fn delete_user_credential(
+        &self,
+        request: Request<DeleteUserCredentialRequest>,
+    ) -> Result<Response<DeleteUserCredentialResponse>, Status> {
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = self.ctx.make_request_context(
+            "UserService",
+            "delete_user_credential",
+            &grpc_metadata,
+            &trace_ctx,
+        );
+
+        let (user_id, _user_slug, region) = self.resolve_user_region(&req.user, &mut ctx)?;
+
+        let credential_id = inferadb_ledger_types::UserCredentialId::new(req.credential_id);
+
+        let system_request = SystemRequest::DeleteUserCredential { user_id, credential_id };
+        let response = self
+            .ctx
+            .propose_regional_encrypted(region, system_request, user_id, &grpc_metadata, &mut ctx)
+            .await?;
+
+        match response {
+            LedgerResponse::UserCredentialDeleted { .. } => {
+                ctx.set_success();
+                Ok(Response::new(DeleteUserCredentialResponse {}))
+            },
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
+                Err(super::helpers::error_code_to_status(code, message))
+            },
+            other => {
+                ctx.set_error("UnexpectedResponse", &format!("{other:?}"));
+                Err(Status::internal("Unexpected response from Raft state machine"))
+            },
+        }
+    }
+
+    async fn create_totp_challenge(
+        &self,
+        request: Request<CreateTotpChallengeRequest>,
+    ) -> Result<Response<CreateTotpChallengeResponse>, Status> {
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = self.ctx.make_request_context(
+            "UserService",
+            "create_totp_challenge",
+            &grpc_metadata,
+            &trace_ctx,
+        );
+
+        let (user_id, user_slug, region) = self.resolve_user_region(&req.user, &mut ctx)?;
+
+        // Validate primary_method
+        let primary_method = match req.primary_method.as_str() {
+            "passkey" => inferadb_ledger_types::PrimaryAuthMethod::Passkey,
+            "email_code" => inferadb_ledger_types::PrimaryAuthMethod::EmailCode,
+            _ => {
+                ctx.set_error("InvalidArgument", "invalid primary_method");
+                return Err(Status::invalid_argument(
+                    "primary_method must be \"passkey\" or \"email_code\"",
+                ));
+            },
+        };
+
+        // Generate challenge nonce and expiry
+        let mut nonce = [0u8; 32];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut nonce);
+        let expires_at = Utc::now() + chrono::Duration::minutes(5);
+
+        // Plain proposal (no PII — only IDs and nonces)
+        let system_request = SystemRequest::CreateTotpChallenge {
+            user_id,
+            user_slug,
+            nonce,
+            expires_at,
+            primary_method,
+        };
+        let response =
+            self.ctx.propose_regional(region, system_request, &grpc_metadata, &mut ctx).await?;
+
+        match response {
+            LedgerResponse::TotpChallengeCreated { nonce: created_nonce } => {
+                ctx.set_success();
+                Ok(Response::new(CreateTotpChallengeResponse {
+                    challenge_nonce: created_nonce.to_vec(),
+                }))
+            },
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
+                Err(super::helpers::error_code_to_status(code, message))
+            },
+            other => {
+                ctx.set_error("UnexpectedResponse", &format!("{other:?}"));
+                Err(Status::internal("Unexpected response from Raft state machine"))
+            },
+        }
+    }
+
+    async fn verify_totp(
+        &self,
+        request: Request<VerifyTotpRequest>,
+    ) -> Result<Response<VerifyTotpResponse>, Status> {
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx =
+            self.ctx.make_request_context("UserService", "verify_totp", &grpc_metadata, &trace_ctx);
+
+        let (user_id, _user_slug, region) = self.resolve_user_region(&req.user, &mut ctx)?;
+
+        // Parse challenge nonce
+        let nonce: [u8; 32] = req.challenge_nonce.as_slice().try_into().map_err(|_| {
+            ctx.set_error("InvalidArgument", "challenge_nonce must be 32 bytes");
+            Status::invalid_argument("challenge_nonce must be exactly 32 bytes")
+        })?;
+
+        // Validate TOTP code format (must be 6 or 8 digits)
+        if req.totp_code.is_empty()
+            || !req.totp_code.bytes().all(|b| b.is_ascii_digit())
+            || (req.totp_code.len() != 6 && req.totp_code.len() != 8)
+        {
+            ctx.set_error("InvalidArgument", "invalid TOTP code format");
+            return Err(Status::invalid_argument("TOTP code must be 6 or 8 digits"));
+        }
+
+        // Read challenge from regional state
+        let regional_state = self.ctx.regional_state(region)?;
+        let regional_sys = SystemOrganizationService::new(regional_state);
+
+        let challenge = regional_sys
+            .get_totp_challenge(user_id, &nonce)
+            .map_err(|e| Status::internal(format!("Failed to read TOTP challenge: {e}")))?
+            .ok_or_else(|| {
+                ctx.set_error("NotFound", "Challenge not found");
+                Status::not_found("Challenge not found")
+            })?;
+
+        // Service-layer expiry check (defense-in-depth; state machine checks deterministically)
+        if Utc::now() >= challenge.expires_at {
+            ctx.set_error("FailedPrecondition", "Challenge expired");
+            return Err(Status::failed_precondition("Challenge expired"));
+        }
+
+        // Service-layer attempt check (defense-in-depth; state machine enforces independently)
+        if challenge.attempts >= 3 {
+            ctx.set_error("ResourceExhausted", "Too many attempts");
+            return Err(Status::resource_exhausted("Too many attempts"));
+        }
+
+        // Read TOTP credential from regional state
+        let totp_creds = regional_sys
+            .list_user_credentials(user_id, Some(inferadb_ledger_types::CredentialType::Totp))
+            .map_err(|e| Status::internal(format!("Failed to read TOTP credential: {e}")))?;
+
+        let totp_cred = totp_creds.first().ok_or_else(|| {
+            ctx.set_error("FailedPrecondition", "No TOTP credential configured");
+            Status::failed_precondition("No TOTP credential configured for this user")
+        })?;
+
+        let totp_data = match &totp_cred.credential_data {
+            inferadb_ledger_types::CredentialData::Totp(t) => t,
+            _ => {
+                return Err(Status::internal("Credential type mismatch"));
+            },
+        };
+
+        // Service-layer TOTP verification (non-deterministic, leader only)
+        let code_valid = Self::verify_totp_code(
+            &totp_data.secret,
+            &req.totp_code,
+            totp_data.algorithm,
+            totp_data.digits,
+            totp_data.period,
+        );
+
+        if !code_valid {
+            // Persist failed attempt via Raft (survives leader failover)
+            let increment_request = SystemRequest::IncrementTotpAttempt { user_id, nonce };
+            if let Err(e) =
+                self.ctx.propose_regional(region, increment_request, &grpc_metadata, &mut ctx).await
+            {
+                tracing::warn!("Failed to persist TOTP attempt increment: {e}");
+            }
+
+            ctx.set_error("Unauthenticated", "Verification failed");
+            return Err(Status::unauthenticated("Verification failed"));
+        }
+
+        // TOTP code valid — create session directly
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let signing_key = self.ensure_signing_key_cached(&sys_svc)?;
+        let jwt_config = self
+            .ctx
+            .jwt_config
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("JWT config not configured"))?;
+
+        let (refresh_token_str, refresh_token_hash) = crate::jwt::generate_refresh_token();
+        let family = crate::jwt::generate_family_id();
+
+        let consume_request = SystemRequest::ConsumeTotpAndCreateSession {
+            user_id,
+            nonce,
+            token_hash: refresh_token_hash,
+            family,
+            kid: signing_key.kid.clone(),
+            ttl_secs: jwt_config.session_refresh_ttl_secs,
+        };
+        let response =
+            self.ctx.propose_regional(region, consume_request, &grpc_metadata, &mut ctx).await?;
+
+        match response {
+            LedgerResponse::TotpVerified { .. } => {
+                let token_pair = self.sign_session_after_challenge(
+                    user_id,
+                    challenge.user_slug,
+                    refresh_token_str,
+                    &signing_key,
+                    jwt_config.session_refresh_ttl_secs,
+                )?;
+
+                ctx.set_success();
+                Ok(Response::new(VerifyTotpResponse { tokens: Some(token_pair) }))
+            },
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
+                Err(super::helpers::error_code_to_status(code, message))
+            },
+            other => {
+                ctx.set_error("UnexpectedResponse", &format!("{other:?}"));
+                Err(Status::internal("Unexpected response from Raft state machine"))
+            },
+        }
+    }
+
+    async fn consume_recovery_code(
+        &self,
+        request: Request<ConsumeRecoveryCodeRequest>,
+    ) -> Result<Response<ConsumeRecoveryCodeResponse>, Status> {
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = self.ctx.make_request_context(
+            "UserService",
+            "consume_recovery_code",
+            &grpc_metadata,
+            &trace_ctx,
+        );
+
+        let (user_id, _user_slug, region) = self.resolve_user_region(&req.user, &mut ctx)?;
+
+        // Parse challenge nonce
+        let nonce: [u8; 32] = req.challenge_nonce.as_slice().try_into().map_err(|_| {
+            ctx.set_error("InvalidArgument", "challenge_nonce must be 32 bytes");
+            Status::invalid_argument("challenge_nonce must be exactly 32 bytes")
+        })?;
+
+        // Validate recovery code format
+        if req.code.is_empty() {
+            ctx.set_error("InvalidArgument", "code is required");
+            return Err(Status::invalid_argument("recovery code is required"));
+        }
+
+        // Read challenge from regional state
+        let regional_state = self.ctx.regional_state(region)?;
+        let regional_sys = SystemOrganizationService::new(regional_state);
+
+        let challenge = regional_sys
+            .get_totp_challenge(user_id, &nonce)
+            .map_err(|e| Status::internal(format!("Failed to read TOTP challenge: {e}")))?
+            .ok_or_else(|| {
+                ctx.set_error("NotFound", "Challenge not found");
+                Status::not_found("Challenge not found")
+            })?;
+
+        // Service-layer expiry check
+        if Utc::now() >= challenge.expires_at {
+            ctx.set_error("FailedPrecondition", "Challenge expired");
+            return Err(Status::failed_precondition("Challenge expired"));
+        }
+
+        // Service-layer attempt check
+        if challenge.attempts >= 3 {
+            ctx.set_error("ResourceExhausted", "Too many attempts");
+            return Err(Status::resource_exhausted("Too many attempts"));
+        }
+
+        // Find recovery code credential
+        let recovery_creds = regional_sys
+            .list_user_credentials(
+                user_id,
+                Some(inferadb_ledger_types::CredentialType::RecoveryCode),
+            )
+            .map_err(|e| Status::internal(format!("Failed to read recovery credentials: {e}")))?;
+
+        let Some(recovery_cred) = recovery_creds.first() else {
+            // No recovery credential — still increment attempts to prevent probing
+            let increment_request = SystemRequest::IncrementTotpAttempt { user_id, nonce };
+            if let Err(e) =
+                self.ctx.propose_regional(region, increment_request, &grpc_metadata, &mut ctx).await
+            {
+                tracing::warn!("Failed to persist TOTP attempt increment: {e}");
+            }
+            // Generic error — no distinguishing detail (PRD security requirement)
+            ctx.set_error("Unauthenticated", "Verification failed");
+            return Err(Status::unauthenticated("Verification failed"));
+        };
+
+        // Hash the raw recovery code (SHA-256)
+        use sha2::Digest;
+        let code_hash: [u8; 32] = sha2::Sha256::digest(req.code.as_bytes()).into();
+
+        // Prepare session tokens
+        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let signing_key = self.ensure_signing_key_cached(&sys_svc)?;
+        let jwt_config = self
+            .ctx
+            .jwt_config
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("JWT config not configured"))?;
+
+        let (refresh_token_str, refresh_token_hash) = crate::jwt::generate_refresh_token();
+        let family = crate::jwt::generate_family_id();
+
+        let consume_request = SystemRequest::ConsumeRecoveryAndCreateSession {
+            user_id,
+            nonce,
+            code_hash,
+            credential_id: recovery_cred.id,
+            token_hash: refresh_token_hash,
+            family,
+            kid: signing_key.kid.clone(),
+            ttl_secs: jwt_config.session_refresh_ttl_secs,
+        };
+        let response =
+            self.ctx.propose_regional(region, consume_request, &grpc_metadata, &mut ctx).await?;
+
+        match response {
+            LedgerResponse::RecoveryCodeConsumed { remaining_codes, .. } => {
+                let token_pair = self.sign_session_after_challenge(
+                    user_id,
+                    challenge.user_slug,
+                    refresh_token_str,
+                    &signing_key,
+                    jwt_config.session_refresh_ttl_secs,
+                )?;
+
+                ctx.set_success();
+                Ok(Response::new(ConsumeRecoveryCodeResponse {
+                    tokens: Some(token_pair),
+                    remaining_codes,
+                }))
+            },
+            LedgerResponse::Error { code, message } => {
+                // Generic error for recovery code failures (PRD: no distinguishing detail)
+                if code == inferadb_ledger_types::ErrorCode::Unauthenticated
+                    || code == inferadb_ledger_types::ErrorCode::NotFound
+                {
+                    // Increment attempt counter on the challenge
+                    let increment_request = SystemRequest::IncrementTotpAttempt { user_id, nonce };
+                    if let Err(e) = self
+                        .ctx
+                        .propose_regional(region, increment_request, &grpc_metadata, &mut ctx)
+                        .await
+                    {
+                        tracing::warn!("Failed to persist TOTP attempt increment: {e}");
+                    }
+
+                    ctx.set_error("Unauthenticated", "Verification failed");
+                    return Err(Status::unauthenticated("Verification failed"));
+                }
+                ctx.set_error(code.grpc_code_name(), &message);
+                Err(super::helpers::error_code_to_status(code, message))
+            },
+            other => {
+                ctx.set_error("UnexpectedResponse", &format!("{other:?}"));
+                Err(Status::internal("Unexpected response from Raft state machine"))
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // dynamic_truncate tests (RFC 4226 §5.4)
+    // =========================================================================
+
+    #[test]
+    fn dynamic_truncate_extracts_code_from_hmac() {
+        // RFC 4226 Appendix D test vector for HOTP counter=0 with
+        // secret "12345678901234567890" (ASCII):
+        // HMAC-SHA1 = cc93cf18508d94934c64b65d8ba7667fb7cde4b0
+        // Offset = last nibble = 0x0 → offset 0
+        // Binary code = 0x4c93cf18 & 0x7FFFFFFF = 0x4c93cf18
+        // OTP = 0x4c93cf18 % 10^6 = 755224
+        let hmac_result: [u8; 20] = [
+            0xcc, 0x93, 0xcf, 0x18, 0x50, 0x8d, 0x94, 0x93, 0x4c, 0x64, 0xb6, 0x5d, 0x8b, 0xa7,
+            0x66, 0x7f, 0xb7, 0xcd, 0xe4, 0xb0,
+        ];
+        let result = UserService::dynamic_truncate(&hmac_result, 1_000_000);
+        assert_eq!(result, 755_224);
+    }
+
+    #[test]
+    fn dynamic_truncate_different_offset() {
+        // Craft an HMAC result where the last byte's low nibble points to offset 4
+        let mut hmac = [0u8; 20];
+        hmac[19] = 0x04; // offset = 4
+        // Place known bytes at offset 4..8
+        hmac[4] = 0x7F; // high bit clear
+        hmac[5] = 0x12;
+        hmac[6] = 0x34;
+        hmac[7] = 0x56;
+        let result = UserService::dynamic_truncate(&hmac, 1_000_000);
+        // 0x7F123456 = 2131899478, mod 10^6 = 899478
+        assert_eq!(result, 899_478);
+    }
+
+    #[test]
+    fn dynamic_truncate_clears_high_bit() {
+        // When the byte at offset has the high bit set, it should be cleared
+        let mut hmac = [0u8; 20];
+        hmac[19] = 0x00; // offset = 0
+        hmac[0] = 0xFF; // high bit set → after & 0x7F → 0x7F
+        hmac[1] = 0xFF;
+        hmac[2] = 0xFF;
+        hmac[3] = 0xFF;
+        let result = UserService::dynamic_truncate(&hmac, 1_000_000);
+        // 0x7FFFFFFF = 2147483647, mod 10^6 = 483647
+        assert_eq!(result, 483_647);
+    }
+
+    // =========================================================================
+    // verify_totp_code tests
+    // =========================================================================
+
+    /// Generates a TOTP code for the current time step using the specified algorithm.
+    fn generate_totp_code(
+        secret: &[u8],
+        algorithm: inferadb_ledger_types::TotpAlgorithm,
+        digits: u8,
+        period: u32,
+    ) -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        use hmac::{Hmac, Mac};
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let counter = now / u64::from(period);
+        let step_bytes = counter.to_be_bytes();
+
+        let modulus = 10u32.pow(u32::from(digits));
+        let computed = match algorithm {
+            inferadb_ledger_types::TotpAlgorithm::Sha1 => {
+                let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret).unwrap();
+                mac.update(&step_bytes);
+                UserService::dynamic_truncate(&mac.finalize().into_bytes(), modulus)
+            },
+            inferadb_ledger_types::TotpAlgorithm::Sha256 => {
+                let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret).unwrap();
+                mac.update(&step_bytes);
+                UserService::dynamic_truncate(&mac.finalize().into_bytes(), modulus)
+            },
+            inferadb_ledger_types::TotpAlgorithm::Sha512 => {
+                let mut mac = Hmac::<sha2::Sha512>::new_from_slice(secret).unwrap();
+                mac.update(&step_bytes);
+                UserService::dynamic_truncate(&mac.finalize().into_bytes(), modulus)
+            },
+        };
+        format!("{computed:0>width$}", width = digits as usize)
+    }
+
+    #[test]
+    fn verify_totp_code_accepts_valid_code() {
+        let secret = b"12345678901234567890";
+        let alg = inferadb_ledger_types::TotpAlgorithm::Sha1;
+        let code = generate_totp_code(secret, alg, 6, 30);
+        assert!(
+            UserService::verify_totp_code(secret, &code, alg, 6, 30),
+            "should accept a code generated for the current time step"
+        );
+    }
+
+    #[test]
+    fn verify_totp_code_rejects_wrong_code() {
+        let secret = b"12345678901234567890";
+        let alg = inferadb_ledger_types::TotpAlgorithm::Sha1;
+        // Generate the valid code, then offset by 1 to guarantee rejection
+        let valid = generate_totp_code(secret, alg, 6, 30);
+        let valid_n: u32 = valid.parse().unwrap();
+        let wrong = format!("{:06}", (valid_n + 1) % 1_000_000);
+        assert!(
+            !UserService::verify_totp_code(secret, &wrong, alg, 6, 30),
+            "should reject code that is off by 1 from the valid code"
+        );
+    }
+
+    #[test]
+    fn verify_totp_code_rejects_wrong_length() {
+        let secret = b"12345678901234567890";
+        // Code length mismatch: configured for 6 digits but passing 8
+        assert!(
+            !UserService::verify_totp_code(
+                secret,
+                "12345678",
+                inferadb_ledger_types::TotpAlgorithm::Sha1,
+                6,
+                30,
+            ),
+            "should reject code with wrong length"
+        );
+    }
+
+    #[test]
+    fn verify_totp_code_rejects_empty_secret() {
+        // Empty secret causes HMAC to fail
+        assert!(
+            !UserService::verify_totp_code(
+                &[],
+                "123456",
+                inferadb_ledger_types::TotpAlgorithm::Sha1,
+                6,
+                30,
+            ),
+            "should handle empty secret gracefully"
+        );
+    }
+
+    #[test]
+    fn verify_totp_code_sha256_accepts_valid() {
+        let secret = b"12345678901234567890123456789012"; // 32-byte secret for SHA-256
+        let alg = inferadb_ledger_types::TotpAlgorithm::Sha256;
+        let code = generate_totp_code(secret, alg, 6, 30);
+        assert!(
+            UserService::verify_totp_code(secret, &code, alg, 6, 30),
+            "should accept SHA-256 TOTP code for current time step"
+        );
+    }
+
+    #[test]
+    fn verify_totp_code_sha512_accepts_valid() {
+        let secret = b"1234567890123456789012345678901234567890123456789012345678901234"; // 64-byte
+        let alg = inferadb_ledger_types::TotpAlgorithm::Sha512;
+        let code = generate_totp_code(secret, alg, 6, 30);
+        assert!(
+            UserService::verify_totp_code(secret, &code, alg, 6, 30),
+            "should accept SHA-512 TOTP code for current time step"
+        );
+    }
+
+    #[test]
+    fn verify_totp_code_8_digits() {
+        let secret = b"12345678901234567890";
+        let alg = inferadb_ledger_types::TotpAlgorithm::Sha1;
+        let code = generate_totp_code(secret, alg, 8, 30);
+        assert!(
+            UserService::verify_totp_code(secret, &code, alg, 8, 30),
+            "should accept 8-digit TOTP code"
+        );
     }
 }

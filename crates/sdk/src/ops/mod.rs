@@ -3,6 +3,7 @@
 //! Each submodule provides an `impl LedgerClient` block with domain-specific methods.
 
 mod app;
+mod credential;
 mod data;
 mod events;
 mod health;

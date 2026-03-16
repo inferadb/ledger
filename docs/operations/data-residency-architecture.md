@@ -36,7 +36,7 @@ Exhaustive list of data stored in the GLOBAL Raft log:
 | Regions         | `Region` enum (e.g., `EU_WEST_DUBLIN`)                             | Not PII                              |
 | Tiers           | `OrganizationTier`                                                 | Not PII                              |
 | Timestamps      | `created_at`, `updated_at`                                         | Not PII                              |
-| Crypto material | `UserShredKey` (per-user encryption key), signing key envelopes      | Not PII (key material)               |
+| Crypto material | `UserShredKey` (per-user encryption key), signing key envelopes    | Not PII (key material)               |
 | Token metadata  | `RefreshTokenId`, `TokenVersion`, token hashes                     | Not PII                              |
 
 Zero plaintext PII appears in any GLOBAL Raft entry.
@@ -74,9 +74,25 @@ Making US regions optionally protected is a large architectural change (`require
 
 User-scoped REGIONAL Raft entries are encrypted with the user's `UserShredKey` (256-bit AES key). When `erase_user()` is called:
 
-1. The `UserShredKey` is destroyed from the state layer
-2. All encrypted Raft log entries for that user become cryptographically unrecoverable
-3. No log rewriting is required — the ciphertext remains but is permanently unreadable
+1. All user credentials and TOTP challenges are deleted from state
+2. The `UserShredKey` is destroyed from the state layer
+3. All encrypted Raft log entries for that user become cryptographically unrecoverable
+4. No log rewriting is required — the ciphertext remains but is permanently unreadable
+
+**Encrypted entity types** (via `EncryptedUserSystemRequest`):
+
+| Entity          | Key Pattern                   | Contains                                                |
+| --------------- | ----------------------------- | ------------------------------------------------------- |
+| User profile    | `user:{id}`                   | Name, email references                                  |
+| User credential | `user_credential:{uid}:{cid}` | Passkey public keys, TOTP secrets, recovery code hashes |
+
+**Non-encrypted REGIONAL entities** (IDs and nonces only):
+
+| Entity         | Key Pattern                         | Contains                           |
+| -------------- | ----------------------------------- | ---------------------------------- |
+| TOTP challenge | `_tmp:totp_challenge:{uid}:{nonce}` | Nonce, timestamps, attempt counter |
+
+The credential sequence counter (`_meta:seq:user_credential`) is the first REGIONAL `_meta:seq:` key. All other sequence counters are GLOBAL. This design avoids a cross-tier saga for credential creation.
 
 See `crates/raft/src/entry_crypto.rs` for the encryption implementation.
 
@@ -116,10 +132,10 @@ Ledger is responsible only for its own data residency guarantees. The Control pl
 
 ## Compliance Summary
 
-| Requirement                       | Implementation                                                                |
-| --------------------------------- | ----------------------------------------------------------------------------- |
-| No cross-border PII replication   | Independent GLOBAL Raft per region; REGIONAL data stays in-region             |
-| Pseudonymization (GDPR Art. 4(1)) | HMAC-blinded emails, stripped names, numeric IDs only in GLOBAL               |
+| Requirement                       | Implementation                                                                  |
+| --------------------------------- | ------------------------------------------------------------------------------- |
+| No cross-border PII replication   | Independent GLOBAL Raft per region; REGIONAL data stays in-region               |
+| Pseudonymization (GDPR Art. 4(1)) | HMAC-blinded emails, stripped names, numeric IDs only in GLOBAL                 |
 | Right to erasure (GDPR Art. 17)   | `erase_user()` + crypto-shredding via UserShredKey destruction                  |
-| Data minimization                 | GLOBAL log contains only the minimum needed for control-plane coordination    |
+| Data minimization                 | GLOBAL log contains only the minimum needed for control-plane coordination      |
 | Key separation                    | Blinding key held separately from Raft; RMKs per-region; UserShredKeys per-user |
