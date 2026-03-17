@@ -17,6 +17,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use inferadb_ledger_proto::proto::{
     admin_service_server::AdminServiceServer, app_service_server::AppServiceServer,
     events_service_server::EventsServiceServer, health_service_server::HealthServiceServer,
+    invitation_service_server::InvitationServiceServer,
     organization_service_server::OrganizationServiceServer, raft_service_server::RaftServiceServer,
     read_service_server::ReadServiceServer,
     system_discovery_service_server::SystemDiscoveryServiceServer,
@@ -36,8 +37,9 @@ use crate::{
     jwt::JwtEngine,
     services::{
         AdminService, AppService, DiscoveryService, EventsService, HealthService,
-        OrganizationService, RaftService, ReadService, RegionResolver, RegionResolverService,
-        TokenServiceImpl, UserService, VaultService, WriteService, service_infra::ServiceContext,
+        InvitationService, OrganizationService, RaftService, ReadService, RegionResolver,
+        RegionResolverService, TokenServiceImpl, UserService, VaultService, WriteService,
+        service_infra::ServiceContext,
     },
 };
 
@@ -315,6 +317,7 @@ impl LedgerServer {
             svc
         });
 
+        let invitation_service = InvitationService::new(svc_ctx.clone());
         let app_service = AppService::new(svc_ctx);
 
         // Extract connection tracker before health_state is moved into HealthService
@@ -386,6 +389,10 @@ impl LedgerServer {
             ))
             .add_service(UserServiceServer::with_interceptor(user_service, api_version_interceptor))
             .add_service(AppServiceServer::with_interceptor(app_service, api_version_interceptor))
+            .add_service(InvitationServiceServer::with_interceptor(
+                invitation_service,
+                api_version_interceptor,
+            ))
             .add_service(HealthServiceServer::new(health_service))
             .add_service(SystemDiscoveryServiceServer::new(discovery_service))
             .add_service(RaftServiceServer::new(raft_service))

@@ -19,9 +19,10 @@ use inferadb_ledger_state::{
 };
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
-    AppId, AppSlug, ErrorCode, Hash, NodeId, Operation, OrganizationId, PendingTotpChallenge,
-    PrimaryAuthMethod, TeamId, TeamSlug, TokenSubject, TokenType, TokenVersion, UserRole,
-    UserStatus, VaultEntry, VaultId, compute_tx_merkle_root, decode, encode,
+    AppId, AppSlug, ErrorCode, Hash, InvitationStatus, InviteEmailEntry, InviteIndexEntry, NodeId,
+    Operation, OrganizationId, PendingTotpChallenge, PrimaryAuthMethod, TeamId, TeamSlug,
+    TokenSubject, TokenType, TokenVersion, UserRole, UserStatus, VaultEntry, VaultId,
+    compute_tx_merkle_root, decode, encode,
     events::{EventAction, EventEntry, EventOutcome},
     hash_eq,
 };
@@ -492,8 +493,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 idempotency_key,
                 request_hash,
             } => {
-                if let Err(resp) = require_fully_active_org(organization, state) {
-                    return (resp, None);
+                // System writes (org_id=0) bypass the active-org check.
+                // The saga orchestrator uses org_id=0 + vault_id=0 to persist
+                // saga records (_meta:saga:*) before the target org exists.
+                if organization.value() != 0 {
+                    if let Err(resp) = require_fully_active_org(organization, state) {
+                        return (resp, None);
+                    }
                 }
 
                 let key = (*organization, *vault);
@@ -1132,6 +1138,423 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             .detail("organization_id", &organization.to_string())
                             .detail("target_user_id", &target.to_string())
                             .detail("new_role", &format!("{role:?}"))
+                            .outcome(EventOutcome::Success)
+                            .build(block_height, *op_index, block_timestamp, ttl_days),
+                    );
+                    *op_index += 1;
+                }
+
+                (response, None)
+            },
+
+            LedgerRequest::AddOrganizationMember { organization, user, user_slug: _, role } => {
+                let response = match require_active_org_with_state(
+                    organization,
+                    state,
+                    &self.state_layer,
+                    "modify",
+                ) {
+                    Ok(state_layer) => match load_organization(state_layer, *organization) {
+                        Ok(mut org) => {
+                            // Idempotent: if already a member, return success with
+                            // already_member=true
+                            if org.members.iter().any(|m| m.user_id == *user) {
+                                LedgerResponse::OrganizationMemberAdded {
+                                    organization_id: *organization,
+                                    already_member: true,
+                                }
+                            } else {
+                                org.members.push(
+                                    inferadb_ledger_state::system::OrganizationMember {
+                                        user_id: *user,
+                                        role: *role,
+                                        joined_at: block_timestamp,
+                                    },
+                                );
+                                org.updated_at = block_timestamp;
+                                if let Err(e) = save_organization(state_layer, *organization, &org)
+                                {
+                                    return (e, None);
+                                }
+                                // Update user→org index
+                                state
+                                    .user_org_index
+                                    .entry(*user)
+                                    .or_default()
+                                    .insert(*organization);
+                                // Re-serialize org meta
+                                if let Some(org_mut) = state.organizations.get_mut(organization)
+                                    && let Ok(blob) = encode(org_mut)
+                                {
+                                    pending.organizations.push((*organization, blob));
+                                }
+                                LedgerResponse::OrganizationMemberAdded {
+                                    organization_id: *organization,
+                                    already_member: false,
+                                }
+                            }
+                        },
+                        Err(e) => e,
+                    },
+                    Err(err_response) => err_response,
+                };
+
+                if matches!(
+                    response,
+                    LedgerResponse::OrganizationMemberAdded { already_member: false, .. }
+                ) {
+                    events.push(
+                        ApplyPhaseEmitter::for_system(EventAction::OrganizationMemberAdded)
+                            .detail("organization_id", &organization.to_string())
+                            .detail("user_id", &user.to_string())
+                            .detail("role", &format!("{role:?}"))
+                            .outcome(EventOutcome::Success)
+                            .build(block_height, *op_index, block_timestamp, ttl_days),
+                    );
+                    *op_index += 1;
+                }
+
+                (response, None)
+            },
+
+            // ── CreateOrganizationInvite (GLOBAL) ──
+            // Allocates InviteId, computes expires_at, writes 3 GLOBAL indexes.
+            LedgerRequest::CreateOrganizationInvite {
+                organization,
+                slug,
+                token_hash,
+                invitee_email_hmac,
+                ttl_hours,
+            } => {
+                let response = match require_active_org_with_state(
+                    organization,
+                    state,
+                    &self.state_layer,
+                    "modify",
+                ) {
+                    Ok(state_layer) => {
+                        let invite_id = state.sequences.next_invite();
+                        let expires_at = block_timestamp + Duration::hours(i64::from(*ttl_hours));
+
+                        // Write slug index: _idx:invite:slug:{slug} → InviteIndexEntry
+                        let slug_key = SystemKeys::invite_slug_index_key(*slug);
+                        let slug_entry =
+                            InviteIndexEntry { organization: *organization, invite: invite_id };
+                        let slug_value = match encode(&slug_entry) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                return error_result(
+                                    ErrorCode::Internal,
+                                    format!("Failed to encode invite slug index: {e}"),
+                                );
+                            },
+                        };
+
+                        // Write token hash index: _idx:invite:token_hash:{hex} →
+                        // InviteIndexEntry
+                        let token_hex: String =
+                            token_hash.iter().map(|b| format!("{b:02x}")).collect();
+                        let token_key = SystemKeys::invite_token_hash_index_key(&token_hex);
+                        let token_value = match encode(&slug_entry) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                return error_result(
+                                    ErrorCode::Internal,
+                                    format!("Failed to encode invite token hash index: {e}"),
+                                );
+                            },
+                        };
+
+                        // Write email hash index:
+                        // _idx:invite:email_hash:{hmac}:{invite_id} → InviteEmailEntry
+                        let email_key =
+                            SystemKeys::invite_email_hash_index_key(invitee_email_hmac, invite_id);
+                        let email_entry = InviteEmailEntry {
+                            organization: *organization,
+                            status: InvitationStatus::Pending,
+                        };
+                        let email_value = match encode(&email_entry) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                return error_result(
+                                    ErrorCode::Internal,
+                                    format!("Failed to encode invite email hash index: {e}"),
+                                );
+                            },
+                        };
+
+                        let ops = vec![
+                            Operation::SetEntity {
+                                key: slug_key,
+                                value: slug_value,
+                                condition: None,
+                                expires_at: None,
+                            },
+                            Operation::SetEntity {
+                                key: token_key,
+                                value: token_value,
+                                condition: None,
+                                expires_at: None,
+                            },
+                            Operation::SetEntity {
+                                key: email_key,
+                                value: email_value,
+                                condition: None,
+                                expires_at: None,
+                            },
+                        ];
+                        if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                            return error_result(
+                                ErrorCode::Internal,
+                                format!("Failed to write invite indexes: {e}"),
+                            );
+                        }
+
+                        LedgerResponse::OrganizationInviteCreated {
+                            invite_id,
+                            invite_slug: *slug,
+                            expires_at,
+                        }
+                    },
+                    Err(err_response) => err_response,
+                };
+
+                if matches!(response, LedgerResponse::OrganizationInviteCreated { .. }) {
+                    events.push(
+                        ApplyPhaseEmitter::for_system(EventAction::InvitationCreated)
+                            .detail("organization_id", &organization.to_string())
+                            .detail("invite_slug", &slug.to_string())
+                            .outcome(EventOutcome::Success)
+                            .build(block_height, *op_index, block_timestamp, ttl_days),
+                    );
+                    *op_index += 1;
+                }
+
+                (response, None)
+            },
+
+            // ── ResolveOrganizationInvite (GLOBAL) ──
+            // CAS: Pending-only. Updates email hash index status, removes token hash index.
+            LedgerRequest::ResolveOrganizationInvite {
+                invite,
+                organization,
+                status,
+                invitee_email_hmac,
+                token_hash,
+            } => {
+                // Validate target status is terminal
+                if !status.is_terminal() {
+                    return error_result(
+                        ErrorCode::InvalidArgument,
+                        format!("Target status must be terminal, got {status}"),
+                    );
+                }
+
+                let response = match require_active_org_with_state(
+                    organization,
+                    state,
+                    &self.state_layer,
+                    "modify",
+                ) {
+                    Ok(state_layer) => {
+                        // Construct exact email hash index key using provided HMAC
+                        let email_key =
+                            SystemKeys::invite_email_hash_index_key(invitee_email_hmac, *invite);
+
+                        // Read current email hash entry for CAS check
+                        let current_entry = match state_layer
+                            .get_entity(SYSTEM_VAULT_ID, email_key.as_bytes())
+                        {
+                            Ok(Some(entity)) => match decode::<InviteEmailEntry>(&entity.value) {
+                                Ok(entry) => entry,
+                                Err(e) => {
+                                    return error_result(
+                                        ErrorCode::Internal,
+                                        format!("Failed to decode email hash entry: {e}"),
+                                    );
+                                },
+                            },
+                            Ok(None) => {
+                                return error_result(
+                                    ErrorCode::NotFound,
+                                    format!("No email hash index found for invite {}", invite),
+                                );
+                            },
+                            Err(e) => {
+                                return error_result(
+                                    ErrorCode::Internal,
+                                    format!("Failed to read email hash index: {e}"),
+                                );
+                            },
+                        };
+
+                        // CAS: must be Pending
+                        if current_entry.status != InvitationStatus::Pending {
+                            return (
+                                LedgerResponse::Error {
+                                    code: ErrorCode::InvitationAlreadyResolved,
+                                    message: format!(
+                                        "Invitation {} is already {} (not Pending)",
+                                        invite, current_entry.status
+                                    ),
+                                },
+                                None,
+                            );
+                        }
+
+                        // Update email hash entry with new terminal status
+                        let updated_entry =
+                            InviteEmailEntry { organization: *organization, status: *status };
+                        let email_value = match encode(&updated_entry) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                return error_result(
+                                    ErrorCode::Internal,
+                                    format!("Failed to encode updated email hash entry: {e}"),
+                                );
+                            },
+                        };
+
+                        // Construct token hash index key for removal
+                        let token_hex: String =
+                            token_hash.iter().map(|b| format!("{b:02x}")).collect();
+                        let token_key = SystemKeys::invite_token_hash_index_key(&token_hex);
+
+                        let ops = vec![
+                            // Update email hash status
+                            Operation::SetEntity {
+                                key: email_key,
+                                value: email_value,
+                                condition: None,
+                                expires_at: None,
+                            },
+                            // Remove token hash index (single-use)
+                            Operation::DeleteEntity { key: token_key },
+                        ];
+
+                        if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                            return error_result(
+                                ErrorCode::Internal,
+                                format!("Failed to update invite indexes: {e}"),
+                            );
+                        }
+
+                        LedgerResponse::OrganizationInviteResolved { invite_id: *invite }
+                    },
+                    Err(err_response) => err_response,
+                };
+
+                if matches!(response, LedgerResponse::OrganizationInviteResolved { .. }) {
+                    events.push(
+                        ApplyPhaseEmitter::for_system(EventAction::InvitationResolved)
+                            .detail("organization_id", &organization.to_string())
+                            .detail("invite_id", &invite.to_string())
+                            .detail("status", &format!("{status}"))
+                            .outcome(EventOutcome::Success)
+                            .build(block_height, *op_index, block_timestamp, ttl_days),
+                    );
+                    *op_index += 1;
+                }
+
+                (response, None)
+            },
+
+            // ── PurgeOrganizationInviteIndexes (GLOBAL) ──────────
+            // Removes GLOBAL invitation indexes during retention reaping.
+            // Deletes: slug index, email hash index entry.
+            LedgerRequest::PurgeOrganizationInviteIndexes { invite, slug, invitee_email_hmac } => {
+                let response = if let Some(ref state_layer) = self.state_layer {
+                    let slug_key = SystemKeys::invite_slug_index_key(*slug);
+                    let email_key =
+                        SystemKeys::invite_email_hash_index_key(invitee_email_hmac, *invite);
+
+                    let ops = vec![
+                        Operation::DeleteEntity { key: slug_key },
+                        Operation::DeleteEntity { key: email_key },
+                    ];
+
+                    if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                        return error_result(
+                            ErrorCode::Internal,
+                            format!("Failed to purge invite indexes: {e}"),
+                        );
+                    }
+
+                    LedgerResponse::OrganizationInviteIndexesPurged { invite_id: *invite }
+                } else {
+                    return error_result(
+                        ErrorCode::Internal,
+                        "State layer not available".to_string(),
+                    );
+                };
+
+                if matches!(response, LedgerResponse::OrganizationInviteIndexesPurged { .. }) {
+                    events.push(
+                        ApplyPhaseEmitter::for_system(EventAction::InvitationPurged)
+                            .detail("invite_id", &invite.to_string())
+                            .outcome(EventOutcome::Success)
+                            .build(block_height, *op_index, block_timestamp, ttl_days),
+                    );
+                    *op_index += 1;
+                }
+
+                (response, None)
+            },
+
+            // ── RehashInviteEmailIndex (GLOBAL) ──────────────────
+            // Re-keys the GLOBAL email hash index entry during blinding
+            // key rotation. Deletes old HMAC entry, creates new one.
+            LedgerRequest::RehashInviteEmailIndex {
+                invite,
+                old_hmac,
+                new_hmac,
+                organization,
+                status,
+            } => {
+                let response = if let Some(ref state_layer) = self.state_layer {
+                    let old_key = SystemKeys::invite_email_hash_index_key(old_hmac, *invite);
+                    let new_key = SystemKeys::invite_email_hash_index_key(new_hmac, *invite);
+
+                    let entry = InviteEmailEntry { organization: *organization, status: *status };
+                    let value = match encode(&entry) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return error_result(
+                                ErrorCode::Internal,
+                                format!("Failed to encode rehashed email entry: {e}"),
+                            );
+                        },
+                    };
+
+                    let ops = vec![
+                        Operation::DeleteEntity { key: old_key },
+                        Operation::SetEntity {
+                            key: new_key,
+                            value,
+                            condition: None,
+                            expires_at: None,
+                        },
+                    ];
+
+                    if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                        return error_result(
+                            ErrorCode::Internal,
+                            format!("Failed to rehash invite email index: {e}"),
+                        );
+                    }
+
+                    LedgerResponse::InviteEmailIndexRehashed { invite_id: *invite }
+                } else {
+                    return error_result(
+                        ErrorCode::Internal,
+                        "State layer not available".to_string(),
+                    );
+                };
+
+                if matches!(response, LedgerResponse::InviteEmailIndexRehashed { .. }) {
+                    events.push(
+                        ApplyPhaseEmitter::for_system(EventAction::InvitationEmailRehashed)
+                            .detail("invite_id", &invite.to_string())
                             .outcome(EventOutcome::Success)
                             .build(block_height, *op_index, block_timestamp, ttl_days),
                     );
@@ -4743,6 +5166,127 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             ledger_error(
                                 ErrorCode::Internal,
                                 "State layer unavailable for TOTP attempt increment",
+                            )
+                        }
+                    },
+
+                    // ── WriteOrganizationInvite (REGIONAL) ──
+                    // Writes the full invitation record to REGIONAL state.
+                    SystemRequest::WriteOrganizationInvite {
+                        organization,
+                        invite,
+                        slug,
+                        token_hash,
+                        inviter,
+                        invitee_email_hmac,
+                        invitee_email,
+                        role,
+                        team,
+                        expires_at,
+                    } => {
+                        if let Some(sys) = &sys_service {
+                            let invitation = inferadb_ledger_types::OrganizationInvitation {
+                                id: *invite,
+                                slug: *slug,
+                                organization: *organization,
+                                token_hash: *token_hash,
+                                inviter: *inviter,
+                                invitee_email_hmac: invitee_email_hmac.clone(),
+                                invitee_email: invitee_email.clone(),
+                                role: *role,
+                                team: *team,
+                                status: InvitationStatus::Pending,
+                                created_at: block_timestamp,
+                                expires_at: *expires_at,
+                                resolved_at: None,
+                            };
+                            match sys.create_invitation(&invitation) {
+                                Ok(()) => LedgerResponse::Empty,
+                                Err(e) => ledger_error(
+                                    ErrorCode::Internal,
+                                    format!("Failed to write invitation record: {e}"),
+                                ),
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for invitation write",
+                            )
+                        }
+                    },
+
+                    // ── UpdateOrganizationInviteStatus (REGIONAL) ──
+                    // CAS: Pending-only. Sets resolved_at = proposed_at.
+                    SystemRequest::UpdateOrganizationInviteStatus {
+                        organization,
+                        invite,
+                        status,
+                    } => {
+                        if let Some(sys) = &sys_service {
+                            match sys.update_invitation_status(
+                                *organization,
+                                *invite,
+                                *status,
+                                block_timestamp,
+                            ) {
+                                Ok(_) => LedgerResponse::Empty,
+                                Err(SystemError::NotFound { entity }) => {
+                                    ledger_error(ErrorCode::NotFound, entity)
+                                },
+                                Err(SystemError::FailedPrecondition { message }) => {
+                                    ledger_error(ErrorCode::InvitationAlreadyResolved, message)
+                                },
+                                Err(e) => ledger_error(
+                                    ErrorCode::Internal,
+                                    format!("Failed to update invitation status: {e}"),
+                                ),
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for invitation status update",
+                            )
+                        }
+                    },
+
+                    // ── DeleteOrganizationInvite (REGIONAL) ──
+                    // Deletes the invitation record. Used by the retention reaper.
+                    SystemRequest::DeleteOrganizationInvite { organization, invite } => {
+                        if let Some(sys) = &sys_service {
+                            match sys.delete_invitation(*organization, *invite) {
+                                Ok(()) => LedgerResponse::Empty,
+                                Err(e) => ledger_error(
+                                    ErrorCode::Internal,
+                                    format!("Failed to delete invitation record: {e}"),
+                                ),
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for invitation delete",
+                            )
+                        }
+                    },
+
+                    // ── RehashInvitationEmailHmac (REGIONAL) ──
+                    // Updates the invitee_email_hmac field during blinding key rotation.
+                    SystemRequest::RehashInvitationEmailHmac { organization, invite, new_hmac } => {
+                        if let Some(sys) = &sys_service {
+                            match sys.update_invitation_email_hmac(
+                                *organization,
+                                *invite,
+                                new_hmac.clone(),
+                            ) {
+                                Ok(()) => LedgerResponse::Empty,
+                                Err(e) => ledger_error(
+                                    ErrorCode::Internal,
+                                    format!("Failed to rehash invitation email HMAC: {e}"),
+                                ),
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for invitation rehash",
                             )
                         }
                     },

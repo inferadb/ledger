@@ -14,10 +14,11 @@ use std::{
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_raft::{
     AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, EventsGarbageCollector,
-    GrpcRaftNetworkFactory, HotKeyDetector, IntegrityScrubberJob, LearnerRefreshJob, LedgerNodeId,
-    LedgerTypeConfig, OrganizationPurgeJob, OrphanCleanupJob, PostErasureCompactionJob,
-    RaftLogStore, RaftManager, RaftManagerConfig, RateLimiter, ResourceMetricsCollector,
-    RuntimeConfigHandle, SagaOrchestrator, TokenMaintenanceJob, TtlGarbageCollector,
+    GrpcRaftNetworkFactory, HotKeyDetector, IntegrityScrubberJob, InviteMaintenanceJob,
+    LearnerRefreshJob, LedgerNodeId, LedgerTypeConfig, OrganizationPurgeJob, OrphanCleanupJob,
+    PostErasureCompactionJob, RaftLogStore, RaftManager, RaftManagerConfig, RateLimiter,
+    ResourceMetricsCollector, RuntimeConfigHandle, SagaOrchestrator, TokenMaintenanceJob,
+    TtlGarbageCollector,
     event_writer::{EventHandle, EventWriter},
 };
 use inferadb_ledger_services::LedgerServer;
@@ -99,6 +100,10 @@ pub struct BootstrappedNode {
     /// The shared state layer (internally thread-safe via inferadb-ledger-store MVCC).
     #[allow(dead_code)] // retained to maintain Arc reference count for shared state layer
     pub state: Arc<StateLayer<FileBackend>>,
+    /// Multi-Raft manager for region routing. Exposed so callers (e.g., test
+    /// infrastructure) can start additional data regions post-bootstrap.
+    #[allow(dead_code)] // used by test infrastructure
+    pub manager: Arc<RaftManager>,
     /// gRPC server running in background.
     pub server_handle: tokio::task::JoinHandle<Result<(), String>>,
     /// TTL garbage collector background task handle.
@@ -144,6 +149,9 @@ pub struct BootstrappedNode {
     /// Token maintenance background task handle (leader-only).
     #[allow(dead_code)] // retained to keep background task alive
     pub token_maintenance_handle: tokio::task::JoinHandle<()>,
+    /// Invite maintenance background task handle (leader-only).
+    #[allow(dead_code)] // retained to keep background task alive
+    pub invite_maintenance_handle: tokio::task::JoinHandle<()>,
     /// Post-erasure compaction background task handle (leader-only).
     #[allow(dead_code)] // retained to keep background task alive
     pub post_erasure_compaction_handle: tokio::task::JoinHandle<()>,
@@ -696,6 +704,17 @@ pub async fn bootstrap_node(
         .start();
     tracing::info!("Started token maintenance job");
 
+    // Start invite maintenance job for invitation expiration and retention reaping
+    let invite_maintenance_handle = InviteMaintenanceJob::builder()
+        .raft(raft.clone())
+        .node_id(node_id)
+        .state(state.clone())
+        .manager(Some(manager.clone()))
+        .watchdog_handle(watchdog.map(|w| w.register("invite_maintenance", 600)))
+        .build()
+        .start();
+    tracing::info!("Started invite maintenance job");
+
     // Start post-erasure compaction job to enforce maximum Raft log retention.
     // Triggers proactive snapshots on all Raft groups (GLOBAL + regional) when
     // time since last snapshot exceeds the configured threshold, ensuring
@@ -739,6 +758,7 @@ pub async fn bootstrap_node(
     Ok(BootstrappedNode {
         raft,
         state,
+        manager,
         server_handle,
         gc_handle,
         compactor_handle,
@@ -754,6 +774,7 @@ pub async fn bootstrap_node(
         integrity_scrub_handle,
         org_purge_handle,
         token_maintenance_handle,
+        invite_maintenance_handle,
         post_erasure_compaction_handle,
         snapshot_demotion_handle,
     })

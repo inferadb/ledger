@@ -51,6 +51,26 @@ pub enum ErrorCode {
     /// Too many failed attempts (code verification, authentication, etc.).
     /// Maps to `FAILED_PRECONDITION`.
     TooManyAttempts,
+
+    /// Invitation rate limit exceeded (per-user, per-org, per-email, or cooldown).
+    /// Maps to `RESOURCE_EXHAUSTED`.
+    InvitationRateLimited,
+
+    /// Invitation is no longer Pending (already accepted, declined, expired, or revoked).
+    /// Maps to `FAILED_PRECONDITION`.
+    InvitationAlreadyResolved,
+
+    /// User's email does not match invitee.
+    /// Maps to `NOT_FOUND` (privacy: avoids confirming invitation existence).
+    InvitationEmailMismatch,
+
+    /// Invitee email belongs to an existing member of the inviting organization.
+    /// Maps to `ALREADY_EXISTS`.
+    InvitationAlreadyMember,
+
+    /// A Pending invitation already exists for this org+email combination.
+    /// Maps to `ALREADY_EXISTS`.
+    InvitationDuplicatePending,
 }
 
 impl ErrorCode {
@@ -64,9 +84,12 @@ impl ErrorCode {
             Self::InvalidArgument => "INVALID_ARGUMENT",
             Self::Internal => "INTERNAL",
             Self::Unauthenticated => "UNAUTHENTICATED",
-            Self::RateLimited => "RESOURCE_EXHAUSTED",
-            Self::Expired => "FAILED_PRECONDITION",
-            Self::TooManyAttempts => "FAILED_PRECONDITION",
+            Self::RateLimited | Self::InvitationRateLimited => "RESOURCE_EXHAUSTED",
+            Self::Expired | Self::TooManyAttempts | Self::InvitationAlreadyResolved => {
+                "FAILED_PRECONDITION"
+            },
+            Self::InvitationEmailMismatch => "NOT_FOUND",
+            Self::InvitationAlreadyMember | Self::InvitationDuplicatePending => "ALREADY_EXISTS",
         }
     }
 }

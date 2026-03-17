@@ -2112,6 +2112,176 @@ service UserService {
 }
 
 // =============================================================================
+// Invitation Service
+// =============================================================================
+
+// External Snowflake identifier for an organization invitation.
+// Internal sequential InviteId(i64) is used for storage but never appears in the API.
+message InviteSlug {
+  uint64 slug = 1;
+}
+
+// Lifecycle state of an organization invitation.
+// All transitions originate from PENDING. Terminal states are immutable.
+enum InvitationStatus {
+  INVITATION_STATUS_UNSPECIFIED = 0;
+  INVITATION_STATUS_PENDING = 1;
+  INVITATION_STATUS_ACCEPTED = 2;
+  INVITATION_STATUS_DECLINED = 3;
+  INVITATION_STATUS_EXPIRED = 4;
+  INVITATION_STATUS_REVOKED = 5;
+}
+
+// Shared invitation view. Field population varies by caller role:
+// - Admin callers: invitee_email populated, organization_name empty.
+// - User callers: invitee_email omitted, organization_name populated.
+message Invitation {
+  InviteSlug slug = 1;
+  OrganizationSlug organization = 2;
+  UserSlug inviter = 3;
+  string invitee_email = 4;                   // Admin reads only
+  string organization_name = 5;              // User reads only
+  OrganizationMemberRole role = 6;
+  optional TeamSlug team = 7;
+  InvitationStatus status = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp expires_at = 10;
+  optional google.protobuf.Timestamp resolved_at = 11;
+}
+
+// Organization invitation lifecycle management.
+// Admin operations require org admin authorization.
+// User operations require authenticated user with matching email HMAC.
+service InvitationService {
+  // Create an invitation for an email address to join an organization.
+  // Returns the raw token once (for Control to embed in the email URL).
+  rpc CreateOrganizationInvite(CreateOrganizationInviteRequest)
+      returns (CreateOrganizationInviteResponse);
+
+  // List invitations created by an organization (admin view).
+  rpc ListOrganizationInvites(ListOrganizationInvitesRequest)
+      returns (ListOrganizationInvitesResponse);
+
+  // Get a single invitation by slug (admin view).
+  rpc GetOrganizationInvite(GetOrganizationInviteRequest)
+      returns (GetOrganizationInviteResponse);
+
+  // Revoke a pending invitation. CAS-guarded (Pending-only).
+  rpc RevokeOrganizationInvite(RevokeOrganizationInviteRequest)
+      returns (RevokeOrganizationInviteResponse);
+
+  // List invitations received by the authenticated user.
+  // Scans all verified email HMACs and unions results.
+  rpc ListReceivedInvitations(ListReceivedInvitationsRequest)
+      returns (ListReceivedInvitationsResponse);
+
+  // Get invitation details for the authenticated user.
+  // Returns NOT_FOUND for both non-existent and unauthorized slugs.
+  rpc GetInvitationDetails(GetInvitationDetailsRequest)
+      returns (GetInvitationDetailsResponse);
+
+  // Accept a pending invitation. Grants org membership and optional team membership.
+  // GLOBAL-first proposal ordering. Partial failure recovery on retry.
+  rpc AcceptInvitation(AcceptInvitationRequest)
+      returns (AcceptInvitationResponse);
+
+  // Decline a pending invitation. CAS-guarded (Pending-only).
+  rpc DeclineInvitation(DeclineInvitationRequest)
+      returns (DeclineInvitationResponse);
+}
+
+// -----------------------------------------------------------------------------
+// Invitation Messages
+// -----------------------------------------------------------------------------
+
+message CreateOrganizationInviteRequest {
+  OrganizationSlug organization = 1;
+  UserSlug caller = 2;                        // Must be org admin
+  string email = 3;                           // Invitee email address
+  OrganizationMemberRole role = 4;            // Role upon acceptance
+  uint32 ttl_hours = 5;                       // 1–720
+  optional TeamSlug team = 6;                // Auto-join team on acceptance
+}
+
+message CreateOrganizationInviteResponse {
+  InviteSlug slug = 1;
+  InvitationStatus status = 2;
+  google.protobuf.Timestamp created_at = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  string token = 5;                           // Raw token — returned ONLY on creation
+}
+
+message ListOrganizationInvitesRequest {
+  OrganizationSlug organization = 1;
+  UserSlug caller = 2;                        // Must be org admin
+  optional InvitationStatus status_filter = 3;
+  optional bytes page_token = 4;
+  uint32 page_size = 5;
+}
+
+message ListOrganizationInvitesResponse {
+  repeated Invitation invitations = 1;
+  optional bytes next_page_token = 2;
+}
+
+message GetOrganizationInviteRequest {
+  InviteSlug slug = 1;
+  UserSlug caller = 2;                        // Must be org admin
+}
+
+message GetOrganizationInviteResponse {
+  Invitation invitation = 1;
+}
+
+message RevokeOrganizationInviteRequest {
+  InviteSlug slug = 1;
+  UserSlug caller = 2;                        // Must be org admin
+}
+
+message RevokeOrganizationInviteResponse {
+  Invitation invitation = 1;
+}
+
+message ListReceivedInvitationsRequest {
+  UserSlug user = 1;                          // Authenticated user
+  optional InvitationStatus status_filter = 2;
+  optional bytes page_token = 3;
+  uint32 page_size = 4;
+}
+
+message ListReceivedInvitationsResponse {
+  repeated Invitation invitations = 1;
+  optional bytes next_page_token = 2;
+}
+
+message GetInvitationDetailsRequest {
+  InviteSlug slug = 1;
+  UserSlug user = 2;                          // Must match invitee email
+}
+
+message GetInvitationDetailsResponse {
+  Invitation invitation = 1;
+}
+
+message AcceptInvitationRequest {
+  InviteSlug slug = 1;
+  UserSlug acceptor = 2;                      // Authenticated user
+}
+
+message AcceptInvitationResponse {
+  Invitation invitation = 1;
+}
+
+message DeclineInvitationRequest {
+  InviteSlug slug = 1;
+  UserSlug user = 2;                          // Authenticated user
+}
+
+message DeclineInvitationResponse {
+  Invitation invitation = 1;
+}
+
+// =============================================================================
 // App Service
 // =============================================================================
 

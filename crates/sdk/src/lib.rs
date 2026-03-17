@@ -95,8 +95,9 @@ pub use discovery::{DiscoveryResult, DiscoveryService, PeerInfo};
 pub use error::{Result, SdkError};
 // Re-export commonly used types from inferadb-ledger-types
 pub use inferadb_ledger_types::{
-    AppId, AppSlug, ClientAssertionId, OrganizationId, OrganizationSlug, Region, TeamId, TeamSlug,
-    UserCredentialId, UserEmailId, UserRole, UserSlug, UserStatus, VaultId, VaultSlug,
+    AppId, AppSlug, ClientAssertionId, InviteSlug, OrganizationId, OrganizationSlug, Region,
+    TeamId, TeamSlug, UserCredentialId, UserEmailId, UserRole, UserSlug, UserStatus, VaultId,
+    VaultSlug,
 };
 pub use metrics::{ConnectionEvent, MetricsSdkMetrics, NoopSdkMetrics, SdkMetrics};
 pub use retry::{with_retry, with_retry_cancellable};
@@ -126,6 +127,10 @@ pub use types::{
     events::{
         EventEmissionPath, EventFilter, EventOutcome, EventPage, EventScope, EventSource,
         IngestRejection, IngestResult, SdkEventEntry, SdkIngestEventEntry,
+    },
+    invitation::{
+        InvitationCreated, InvitationInfo, InvitationPage, InvitationStatus,
+        ReceivedInvitationInfo, ReceivedInvitationPage,
     },
     query::{
         Entity, ListEntitiesOpts, ListRelationshipsOpts, ListResourcesOpts, Operation, PagedResult,

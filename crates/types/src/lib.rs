@@ -26,6 +26,8 @@ mod error_code;
 pub mod events;
 /// Cryptographic hashing (SHA-256, seahash) and block/transaction hashing.
 pub mod hash;
+/// Organization invitation types: status, records, and index entries.
+pub mod invitation;
 /// Merkle tree construction and verification.
 pub mod merkle;
 /// Constants for user onboarding (email verification + account creation).
@@ -48,6 +50,9 @@ pub use error_code::ErrorCode;
 pub use hash::{
     BucketHasher, EMPTY_HASH, Hash, ZERO_HASH, bucket_id, compute_chain_commitment,
     compute_tx_merkle_root, hash_eq, sha256, sha256_concat, tx_hash, vault_entry_hash,
+};
+pub use invitation::{
+    InvitationStatus, InviteEmailEntry, InviteIndexEntry, OrganizationInvitation,
 };
 pub use token::{
     SESSION_AUDIENCE, SIGNING_KEY_ENVELOPE_SIZE, SigningKeyEnvelope, TokenError, TokenSubject,
@@ -73,6 +78,9 @@ pub use types::{
     CredentialType,
     EmailVerifyTokenId,
     Entity,
+    // Invitation identifiers
+    InviteId,
+    InviteSlug,
     // Raft node ID
     LedgerNodeId,
     NodeId,

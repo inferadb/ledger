@@ -68,14 +68,14 @@ mod tests {
     use chrono::{DateTime, Duration, Utc};
     use inferadb_ledger_state::{
         EventStore, EventsDatabase,
-        system::{OrganizationStatus, OrganizationTier},
+        system::{OrganizationMemberRole, OrganizationStatus, OrganizationTier},
     };
     use inferadb_ledger_store::{FileBackend, tables};
     use inferadb_ledger_types::{
-        ClientId, CredentialData, CredentialType, EmailVerifyTokenId, ErrorCode, Operation,
-        OrganizationId, PasskeyCredential, PrimaryAuthMethod, RecoveryCodeCredential, Region,
-        TotpCredential, Transaction, UserCredentialId, UserEmailId, UserId, UserSlug, VaultId,
-        VaultSlug,
+        ClientId, CredentialData, CredentialType, EmailVerifyTokenId, ErrorCode, InvitationStatus,
+        InviteId, InviteSlug, Operation, OrganizationId, PasskeyCredential, PrimaryAuthMethod,
+        RecoveryCodeCredential, Region, TotpCredential, Transaction, UserCredentialId, UserEmailId,
+        UserId, UserSlug, VaultId, VaultSlug,
         events::{EventAction, EventConfig, EventEntry, EventScope},
     };
     use openraft::{
@@ -7557,6 +7557,661 @@ mod tests {
                 assert_eq!(code, ErrorCode::NotFound);
             },
             other => panic!("expected Error(NotFound) for replayed nonce, got {other:?}"),
+        }
+    }
+
+    // ========================================================================
+    // AddOrganizationMember Tests
+    // ========================================================================
+
+    /// Creates a store with state layer configured (required for member operations).
+    fn create_store_with_state_layer(dir: &tempfile::TempDir) -> RaftLogStore<FileBackend> {
+        let state_db = Arc::new(
+            inferadb_ledger_store::Database::create(dir.path().join("state.db"))
+                .expect("create state db"),
+        );
+        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db));
+        RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
+            .expect("open store")
+            .with_state_layer(state_layer)
+    }
+
+    #[tokio::test]
+    async fn test_add_organization_member() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let new_user = UserId::new(42);
+        let new_user_slug = UserSlug::new(4200);
+
+        let request = LedgerRequest::AddOrganizationMember {
+            organization: org_id,
+            user: new_user,
+            user_slug: new_user_slug,
+            role: OrganizationMemberRole::Member,
+        };
+        let (response, _) = store.apply_request(&request, &mut state);
+
+        match response {
+            LedgerResponse::OrganizationMemberAdded { organization_id, already_member } => {
+                assert_eq!(organization_id, org_id);
+                assert!(!already_member);
+            },
+            other => panic!("expected OrganizationMemberAdded, got {other}"),
+        }
+
+        // Verify the member was added to the user→org index
+        assert!(state.user_org_index.get(&new_user).is_some_and(|orgs| orgs.contains(&org_id)));
+    }
+
+    #[tokio::test]
+    async fn test_add_organization_member_idempotent() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(101),
+            Region::US_EAST_VA,
+        );
+
+        let new_user = UserId::new(43);
+        let new_user_slug = UserSlug::new(4300);
+
+        let request = LedgerRequest::AddOrganizationMember {
+            organization: org_id,
+            user: new_user,
+            user_slug: new_user_slug,
+            role: OrganizationMemberRole::Member,
+        };
+
+        // First add
+        let (response, _) = store.apply_request(&request, &mut state);
+        assert!(matches!(
+            response,
+            LedgerResponse::OrganizationMemberAdded { already_member: false, .. }
+        ));
+
+        // Second add — idempotent, returns already_member=true
+        let (response, _) = store.apply_request(&request, &mut state);
+        match response {
+            LedgerResponse::OrganizationMemberAdded { organization_id, already_member } => {
+                assert_eq!(organization_id, org_id);
+                assert!(already_member);
+            },
+            other => panic!("expected OrganizationMemberAdded, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_add_member_to_nonexistent_organization() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let request = LedgerRequest::AddOrganizationMember {
+            organization: OrganizationId::new(9999),
+            user: UserId::new(1),
+            user_slug: UserSlug::new(100),
+            role: OrganizationMemberRole::Member,
+        };
+        let (response, _) = store.apply_request(&request, &mut state);
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::NotFound);
+            },
+            other => panic!("expected Error(NotFound), got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // CreateOrganizationInvite / ResolveOrganizationInvite Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_create_organization_invite() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let request = LedgerRequest::CreateOrganizationInvite {
+            organization: org_id,
+            slug: InviteSlug::new(9999),
+            token_hash: [0xAB; 32],
+            invitee_email_hmac: "deadbeef".to_string(),
+            ttl_hours: 168,
+        };
+        let (response, _) = store.apply_request(&request, &mut state);
+
+        match response {
+            LedgerResponse::OrganizationInviteCreated { invite_id, invite_slug, expires_at } => {
+                assert_eq!(invite_id, InviteId::new(1));
+                assert_eq!(invite_slug, InviteSlug::new(9999));
+                // expires_at should be roughly block_timestamp + 168 hours
+                // block_timestamp is close to Utc::now() in tests
+                let expected_duration = chrono::Duration::hours(168);
+                let diff = expires_at - Utc::now();
+                // Allow 10-second tolerance for test execution time
+                assert!(
+                    diff > expected_duration - chrono::Duration::seconds(10),
+                    "expires_at too early: diff={diff}"
+                );
+            },
+            other => panic!("expected OrganizationInviteCreated, got {other}"),
+        }
+
+        // Second invite should get InviteId(2)
+        let request2 = LedgerRequest::CreateOrganizationInvite {
+            organization: org_id,
+            slug: InviteSlug::new(8888),
+            token_hash: [0xCD; 32],
+            invitee_email_hmac: "cafe0123".to_string(),
+            ttl_hours: 24,
+        };
+        let (response2, _) = store.apply_request(&request2, &mut state);
+
+        match response2 {
+            LedgerResponse::OrganizationInviteCreated { invite_id, .. } => {
+                assert_eq!(invite_id, InviteId::new(2));
+            },
+            other => panic!("expected OrganizationInviteCreated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_invite_nonexistent_org() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let request = LedgerRequest::CreateOrganizationInvite {
+            organization: OrganizationId::new(9999),
+            slug: InviteSlug::new(100),
+            token_hash: [0; 32],
+            invitee_email_hmac: "hmac".to_string(),
+            ttl_hours: 168,
+        };
+        let (response, _) = store.apply_request(&request, &mut state);
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::NotFound);
+            },
+            other => panic!("expected Error(NotFound), got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_organization_invite_accept() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create an invitation first
+        let create_req = LedgerRequest::CreateOrganizationInvite {
+            organization: org_id,
+            slug: InviteSlug::new(9999),
+            token_hash: [0xAB; 32],
+            invitee_email_hmac: "deadbeef".to_string(),
+            ttl_hours: 168,
+        };
+        let (create_resp, _) = store.apply_request(&create_req, &mut state);
+        let invite_id = match create_resp {
+            LedgerResponse::OrganizationInviteCreated { invite_id, .. } => invite_id,
+            other => panic!("expected OrganizationInviteCreated, got {other}"),
+        };
+
+        // Resolve it as Accepted
+        let resolve_req = LedgerRequest::ResolveOrganizationInvite {
+            invite: invite_id,
+            organization: org_id,
+            status: InvitationStatus::Accepted,
+            invitee_email_hmac: "deadbeef".to_string(),
+            token_hash: [0xAB; 32],
+        };
+        let (response, _) = store.apply_request(&resolve_req, &mut state);
+
+        match response {
+            LedgerResponse::OrganizationInviteResolved { invite_id: resolved_id } => {
+                assert_eq!(resolved_id, invite_id);
+            },
+            other => panic!("expected OrganizationInviteResolved, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_invite_cas_already_resolved() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create an invitation
+        let create_req = LedgerRequest::CreateOrganizationInvite {
+            organization: org_id,
+            slug: InviteSlug::new(9999),
+            token_hash: [0xAB; 32],
+            invitee_email_hmac: "deadbeef".to_string(),
+            ttl_hours: 168,
+        };
+        let (create_resp, _) = store.apply_request(&create_req, &mut state);
+        let invite_id = match create_resp {
+            LedgerResponse::OrganizationInviteCreated { invite_id, .. } => invite_id,
+            other => panic!("expected OrganizationInviteCreated, got {other}"),
+        };
+
+        // Resolve as Accepted (first time — succeeds)
+        let resolve_req = LedgerRequest::ResolveOrganizationInvite {
+            invite: invite_id,
+            organization: org_id,
+            status: InvitationStatus::Accepted,
+            invitee_email_hmac: "deadbeef".to_string(),
+            token_hash: [0xAB; 32],
+        };
+        let (resp1, _) = store.apply_request(&resolve_req, &mut state);
+        assert!(matches!(resp1, LedgerResponse::OrganizationInviteResolved { .. }));
+
+        // Try to resolve again (CAS failure — already resolved)
+        let resolve_again = LedgerRequest::ResolveOrganizationInvite {
+            invite: invite_id,
+            organization: org_id,
+            status: InvitationStatus::Revoked,
+            invitee_email_hmac: "deadbeef".to_string(),
+            token_hash: [0xAB; 32],
+        };
+        let (resp2, _) = store.apply_request(&resolve_again, &mut state);
+
+        match resp2 {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::InvitationAlreadyResolved);
+            },
+            other => panic!("expected Error(InvitationAlreadyResolved), got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_invite_accept_after_revoke_rejected() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create invitation
+        let create_req = LedgerRequest::CreateOrganizationInvite {
+            organization: org_id,
+            slug: InviteSlug::new(9999),
+            token_hash: [0xAB; 32],
+            invitee_email_hmac: "deadbeef".to_string(),
+            ttl_hours: 168,
+        };
+        let (create_resp, _) = store.apply_request(&create_req, &mut state);
+        let invite_id = match create_resp {
+            LedgerResponse::OrganizationInviteCreated { invite_id, .. } => invite_id,
+            other => panic!("expected OrganizationInviteCreated, got {other}"),
+        };
+
+        // Revoke first
+        let revoke_req = LedgerRequest::ResolveOrganizationInvite {
+            invite: invite_id,
+            organization: org_id,
+            status: InvitationStatus::Revoked,
+            invitee_email_hmac: "deadbeef".to_string(),
+            token_hash: [0xAB; 32],
+        };
+        let (resp1, _) = store.apply_request(&revoke_req, &mut state);
+        assert!(matches!(resp1, LedgerResponse::OrganizationInviteResolved { .. }));
+
+        // Try to accept after revoke — should fail
+        let accept_req = LedgerRequest::ResolveOrganizationInvite {
+            invite: invite_id,
+            organization: org_id,
+            status: InvitationStatus::Accepted,
+            invitee_email_hmac: "deadbeef".to_string(),
+            token_hash: [0xAB; 32],
+        };
+        let (resp2, _) = store.apply_request(&accept_req, &mut state);
+
+        match resp2 {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::InvitationAlreadyResolved);
+            },
+            other => panic!("expected Error(InvitationAlreadyResolved), got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_invite_expire_after_accept_rejected() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create invitation
+        let create_req = LedgerRequest::CreateOrganizationInvite {
+            organization: org_id,
+            slug: InviteSlug::new(9999),
+            token_hash: [0xAB; 32],
+            invitee_email_hmac: "deadbeef".to_string(),
+            ttl_hours: 168,
+        };
+        let (create_resp, _) = store.apply_request(&create_req, &mut state);
+        let invite_id = match create_resp {
+            LedgerResponse::OrganizationInviteCreated { invite_id, .. } => invite_id,
+            other => panic!("expected OrganizationInviteCreated, got {other}"),
+        };
+
+        // Accept first
+        let accept_req = LedgerRequest::ResolveOrganizationInvite {
+            invite: invite_id,
+            organization: org_id,
+            status: InvitationStatus::Accepted,
+            invitee_email_hmac: "deadbeef".to_string(),
+            token_hash: [0xAB; 32],
+        };
+        let (resp1, _) = store.apply_request(&accept_req, &mut state);
+        assert!(matches!(resp1, LedgerResponse::OrganizationInviteResolved { .. }));
+
+        // Try to expire after accept — should fail (CAS rejects non-Pending)
+        let expire_req = LedgerRequest::ResolveOrganizationInvite {
+            invite: invite_id,
+            organization: org_id,
+            status: InvitationStatus::Expired,
+            invitee_email_hmac: "deadbeef".to_string(),
+            token_hash: [0xAB; 32],
+        };
+        let (resp2, _) = store.apply_request(&expire_req, &mut state);
+
+        match resp2 {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::InvitationAlreadyResolved);
+            },
+            other => panic!("expected Error(InvitationAlreadyResolved), got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_invite_decline_after_expire_rejected() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create invitation
+        let create_req = LedgerRequest::CreateOrganizationInvite {
+            organization: org_id,
+            slug: InviteSlug::new(9999),
+            token_hash: [0xAB; 32],
+            invitee_email_hmac: "deadbeef".to_string(),
+            ttl_hours: 168,
+        };
+        let (create_resp, _) = store.apply_request(&create_req, &mut state);
+        let invite_id = match create_resp {
+            LedgerResponse::OrganizationInviteCreated { invite_id, .. } => invite_id,
+            other => panic!("expected OrganizationInviteCreated, got {other}"),
+        };
+
+        // Expire first
+        let expire_req = LedgerRequest::ResolveOrganizationInvite {
+            invite: invite_id,
+            organization: org_id,
+            status: InvitationStatus::Expired,
+            invitee_email_hmac: "deadbeef".to_string(),
+            token_hash: [0xAB; 32],
+        };
+        let (resp1, _) = store.apply_request(&expire_req, &mut state);
+        assert!(matches!(resp1, LedgerResponse::OrganizationInviteResolved { .. }));
+
+        // Try to decline after expire — should fail
+        let decline_req = LedgerRequest::ResolveOrganizationInvite {
+            invite: invite_id,
+            organization: org_id,
+            status: InvitationStatus::Declined,
+            invitee_email_hmac: "deadbeef".to_string(),
+            token_hash: [0xAB; 32],
+        };
+        let (resp2, _) = store.apply_request(&decline_req, &mut state);
+
+        match resp2 {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::InvitationAlreadyResolved);
+            },
+            other => panic!("expected Error(InvitationAlreadyResolved), got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rehash_invite_email_index_replaces_old_with_new() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create an invitation (writes email hash index with "deadbeef" HMAC)
+        let create_req = LedgerRequest::CreateOrganizationInvite {
+            organization: org_id,
+            slug: InviteSlug::new(9999),
+            token_hash: [0xAB; 32],
+            invitee_email_hmac: "deadbeef".to_string(),
+            ttl_hours: 168,
+        };
+        let (create_resp, _) = store.apply_request(&create_req, &mut state);
+        let invite_id = match create_resp {
+            LedgerResponse::OrganizationInviteCreated { invite_id, .. } => invite_id,
+            other => panic!("expected OrganizationInviteCreated, got {other}"),
+        };
+
+        // Verify old HMAC index key exists
+        let state_layer = store.state_layer.as_ref().unwrap();
+        let old_key = inferadb_ledger_state::system::SystemKeys::invite_email_hash_index_key(
+            "deadbeef",
+            invite_id,
+        );
+        let old_entry = state_layer
+            .get_entity(VaultId::new(0), old_key.as_bytes())
+            .unwrap();
+        assert!(old_entry.is_some(), "old HMAC index entry should exist");
+
+        // Rehash: old_hmac="deadbeef" → new_hmac="cafebabe"
+        let rehash_req = LedgerRequest::RehashInviteEmailIndex {
+            invite: invite_id,
+            old_hmac: "deadbeef".to_string(),
+            new_hmac: "cafebabe".to_string(),
+            organization: org_id,
+            status: InvitationStatus::Pending,
+        };
+        let (rehash_resp, _) = store.apply_request(&rehash_req, &mut state);
+        assert!(
+            matches!(rehash_resp, LedgerResponse::InviteEmailIndexRehashed { .. }),
+            "expected InviteEmailIndexRehashed, got {rehash_resp}"
+        );
+
+        // Verify old HMAC index key is deleted
+        let old_entry_after = state_layer
+            .get_entity(VaultId::new(0), old_key.as_bytes())
+            .unwrap();
+        assert!(old_entry_after.is_none(), "old HMAC index entry should be deleted after rehash");
+
+        // Verify new HMAC index key exists
+        let new_key = inferadb_ledger_state::system::SystemKeys::invite_email_hash_index_key(
+            "cafebabe",
+            invite_id,
+        );
+        let new_entry = state_layer
+            .get_entity(VaultId::new(0), new_key.as_bytes())
+            .unwrap();
+        assert!(new_entry.is_some(), "new HMAC index entry should exist after rehash");
+
+        // Verify the new entry deserializes with correct org_id and status
+        let decoded: inferadb_ledger_types::InviteEmailEntry =
+            inferadb_ledger_types::decode(&new_entry.unwrap().value).unwrap();
+        assert_eq!(decoded.organization, org_id);
+        assert_eq!(decoded.status, InvitationStatus::Pending);
+    }
+
+    /// Tests the full acceptance partial-failure recovery scenario at the Raft level:
+    /// 1. Create invitation → 2. Resolve as Accepted → 3. AddOrganizationMember
+    /// If step 3 is retried (simulating partial failure), it should be idempotent.
+    #[tokio::test]
+    async fn test_accept_then_add_member_partial_failure_recovery() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create invitation
+        let create_req = LedgerRequest::CreateOrganizationInvite {
+            organization: org_id,
+            slug: InviteSlug::new(9999),
+            token_hash: [0xAB; 32],
+            invitee_email_hmac: "deadbeef".to_string(),
+            ttl_hours: 168,
+        };
+        let (create_resp, _) = store.apply_request(&create_req, &mut state);
+        let invite_id = match create_resp {
+            LedgerResponse::OrganizationInviteCreated { invite_id, .. } => invite_id,
+            other => panic!("expected OrganizationInviteCreated, got {other}"),
+        };
+
+        // Resolve as Accepted (simulates step 7 in accept flow succeeding)
+        let resolve_req = LedgerRequest::ResolveOrganizationInvite {
+            invite: invite_id,
+            organization: org_id,
+            status: InvitationStatus::Accepted,
+            invitee_email_hmac: "deadbeef".to_string(),
+            token_hash: [0xAB; 32],
+        };
+        let (resolve_resp, _) = store.apply_request(&resolve_req, &mut state);
+        assert!(matches!(resolve_resp, LedgerResponse::OrganizationInviteResolved { .. }));
+
+        // Retry resolve — CAS rejects (already Accepted), simulating duplicate call
+        let (retry_resolve, _) = store.apply_request(&resolve_req, &mut state);
+        assert!(matches!(retry_resolve, LedgerResponse::Error { code: ErrorCode::InvitationAlreadyResolved, .. }));
+
+        // AddOrganizationMember — first time
+        let add_req = LedgerRequest::AddOrganizationMember {
+            organization: org_id,
+            user: UserId::new(42),
+            user_slug: UserSlug::new(4200),
+            role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
+        };
+        let (add_resp, _) = store.apply_request(&add_req, &mut state);
+        match &add_resp {
+            LedgerResponse::OrganizationMemberAdded { already_member, .. } => {
+                assert!(!already_member);
+            },
+            other => panic!("expected OrganizationMemberAdded, got {other}"),
+        }
+
+        // Retry AddOrganizationMember — idempotent (simulating partial failure recovery)
+        let (add_retry, _) = store.apply_request(&add_req, &mut state);
+        match &add_retry {
+            LedgerResponse::OrganizationMemberAdded { already_member, .. } => {
+                assert!(already_member, "retry should report already_member");
+            },
+            other => panic!("expected OrganizationMemberAdded, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_invite_proposed_at_based_expiry() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Test with different TTL values
+        for ttl in [1, 24, 168, 720] {
+            let request = LedgerRequest::CreateOrganizationInvite {
+                organization: org_id,
+                slug: InviteSlug::new(1000 + u64::from(ttl)),
+                token_hash: [ttl as u8; 32],
+                invitee_email_hmac: format!("hmac_{ttl}"),
+                ttl_hours: ttl,
+            };
+            let (response, _) = store.apply_request(&request, &mut state);
+
+            match response {
+                LedgerResponse::OrganizationInviteCreated { expires_at, .. } => {
+                    let now = Utc::now();
+                    let expected_min = now + chrono::Duration::hours(i64::from(ttl))
+                        - chrono::Duration::seconds(10);
+                    let expected_max = now
+                        + chrono::Duration::hours(i64::from(ttl))
+                        + chrono::Duration::seconds(10);
+                    assert!(
+                        expires_at >= expected_min && expires_at <= expected_max,
+                        "expires_at={expires_at} not within expected range for ttl={ttl}h"
+                    );
+                },
+                other => panic!("expected OrganizationInviteCreated, got {other}"),
+            }
         }
     }
 }

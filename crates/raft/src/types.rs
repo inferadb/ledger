@@ -10,10 +10,10 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
-    AppId, AppSlug, ClientAssertionId, CredentialData, CredentialType, Hash, OrganizationId,
-    OrganizationSlug, PasskeyCredential, PrimaryAuthMethod, RefreshTokenId, Region, SetCondition,
-    SigningKeyId, TeamId, TeamSlug, TokenSubject, TokenType, TokenVersion, Transaction,
-    UserCredentialId, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
+    AppId, AppSlug, ClientAssertionId, CredentialData, CredentialType, Hash, InvitationStatus,
+    InviteId, InviteSlug, OrganizationId, OrganizationSlug, PasskeyCredential, PrimaryAuthMethod,
+    RefreshTokenId, Region, SetCondition, SigningKeyId, TeamId, TeamSlug, TokenSubject, TokenType,
+    TokenVersion, Transaction, UserCredentialId, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
 // Re-export domain types that originated here but now live in types crate.
 pub use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId};
@@ -233,6 +233,92 @@ pub enum LedgerRequest {
         target: UserId,
         /// New role for the member.
         role: inferadb_ledger_state::system::OrganizationMemberRole,
+    },
+
+    /// Adds a user as a member of an organization. Idempotent: no-op if already a member.
+    AddOrganizationMember {
+        /// Organization to add the member to.
+        organization: OrganizationId,
+        /// User to add.
+        user: UserId,
+        /// External Snowflake slug for the user.
+        user_slug: UserSlug,
+        /// Role to assign upon joining.
+        role: inferadb_ledger_state::system::OrganizationMemberRole,
+    },
+
+    /// Creates a new organization invitation (GLOBAL indexes only).
+    ///
+    /// Allocates an `InviteId` from the sequence counter, computes
+    /// `expires_at = proposed_at + ttl_hours`, and writes three GLOBAL indexes:
+    /// - `_idx:invite:slug:{slug}` → `InviteIndexEntry`
+    /// - `_idx:invite:token_hash:{hex}` → `InviteIndexEntry`
+    /// - `_idx:invite:email_hash:{hmac}:{invite_id}` → `InviteEmailEntry`
+    ///
+    /// The full invitation record (with PII) is written separately via
+    /// `SystemRequest::WriteOrganizationInvite` to the REGIONAL Raft group.
+    /// No plaintext email appears in this GLOBAL entry.
+    CreateOrganizationInvite {
+        /// Organization issuing the invitation.
+        organization: OrganizationId,
+        /// External Snowflake slug for the invitation.
+        slug: InviteSlug,
+        /// SHA-256 hash of the raw invitation token.
+        token_hash: [u8; 32],
+        /// HMAC of the invitee's normalized email (blinding key).
+        invitee_email_hmac: String,
+        /// Invitation TTL in hours (1–720). `expires_at` is computed by
+        /// the apply handler as `proposed_at + ttl_hours`.
+        ttl_hours: u32,
+    },
+
+    /// Resolves an organization invitation to a terminal state (GLOBAL).
+    ///
+    /// CAS: apply handler verifies `current_status == Pending` in the email
+    /// hash index before applying. Updates `InviteEmailEntry.status` and
+    /// removes the `_idx:invite:token_hash` index entry. Returns
+    /// `LedgerResponse::Error { code: InvitationAlreadyResolved }` on
+    /// CAS failure.
+    ///
+    /// The `invitee_email_hmac` and `token_hash` fields are included so the
+    /// apply handler can construct exact index keys without scanning.
+    ResolveOrganizationInvite {
+        /// Invitation to resolve.
+        invite: InviteId,
+        /// Organization that owns the invitation.
+        organization: OrganizationId,
+        /// Terminal status to transition to (Accepted, Declined, Expired, or Revoked).
+        status: InvitationStatus,
+        /// HMAC of the invitee's email (for email hash index key construction).
+        invitee_email_hmac: String,
+        /// SHA-256 hash of the invitation token (for token hash index removal).
+        token_hash: [u8; 32],
+    },
+
+    /// Removes GLOBAL invitation indexes during retention reaping.
+    /// Used by `InviteMaintenanceJob` — deletes slug, email hash entries.
+    PurgeOrganizationInviteIndexes {
+        /// Invitation being purged.
+        invite: InviteId,
+        /// Invitation slug for slug index cleanup.
+        slug: InviteSlug,
+        /// HMAC hex for email hash index cleanup.
+        invitee_email_hmac: String,
+    },
+
+    /// Re-keys the GLOBAL `_idx:invite:email_hash` index during blinding
+    /// key rotation. Deletes old HMAC entry, creates new HMAC entry.
+    RehashInviteEmailIndex {
+        /// Invitation ID (key suffix).
+        invite: InviteId,
+        /// Old HMAC hex (to delete).
+        old_hmac: String,
+        /// New HMAC hex (to create).
+        new_hmac: String,
+        /// Organization ID (preserved in new entry).
+        organization: OrganizationId,
+        /// Current invitation status (preserved in new entry).
+        status: InvitationStatus,
     },
 
     /// Purges a deleted organization after its retention cooldown.
@@ -1230,6 +1316,71 @@ pub enum SystemRequest {
         /// Challenge nonce.
         nonce: [u8; 32],
     },
+
+    // ── Invitation Operations (REGIONAL) ──
+    /// Writes a full invitation record to REGIONAL state (encrypted with OrgShredKey).
+    ///
+    /// Proposed to the REGIONAL Raft group via `propose_regional_org_encrypted()`.
+    /// Contains the plaintext email (PII) and role/team fields that are not
+    /// in the GLOBAL `LedgerRequest::CreateOrganizationInvite`.
+    WriteOrganizationInvite {
+        /// Organization issuing the invitation.
+        organization: OrganizationId,
+        /// Internal invite ID (allocated by GLOBAL `CreateOrganizationInvite`).
+        invite: InviteId,
+        /// External Snowflake slug.
+        slug: InviteSlug,
+        /// SHA-256 hash of the raw invitation token.
+        token_hash: [u8; 32],
+        /// User who created the invitation.
+        inviter: UserId,
+        /// HMAC of the invitee's normalized email.
+        invitee_email_hmac: String,
+        /// Plaintext invitee email (PII — REGIONAL only).
+        invitee_email: String,
+        /// Role to assign upon acceptance.
+        role: inferadb_ledger_state::system::OrganizationMemberRole,
+        /// Optional team to auto-join upon acceptance.
+        team: Option<TeamId>,
+        /// Computed expiration timestamp (from GLOBAL response).
+        expires_at: DateTime<Utc>,
+    },
+
+    /// Updates an invitation's status in REGIONAL state (encrypted with OrgShredKey).
+    ///
+    /// CAS: apply handler verifies `current_status == Pending` before applying.
+    /// Uses `proposed_at` from `RaftPayload` as `resolved_at` timestamp.
+    UpdateOrganizationInviteStatus {
+        /// Organization that owns the invitation.
+        organization: OrganizationId,
+        /// Invitation to update.
+        invite: InviteId,
+        /// Terminal status to transition to.
+        status: InvitationStatus,
+    },
+
+    /// Deletes an invitation record from REGIONAL state.
+    ///
+    /// Used by the retention reaper to clean up terminal invitations
+    /// past the 90-day retention window.
+    DeleteOrganizationInvite {
+        /// Organization that owns the invitation.
+        organization: OrganizationId,
+        /// Invitation to delete.
+        invite: InviteId,
+    },
+
+    /// REGIONAL — updates the `invitee_email_hmac` field in an invitation
+    /// record during blinding key rotation. Without this, acceptance HMAC
+    /// comparison would fail after key rotation.
+    RehashInvitationEmailHmac {
+        /// Organization that owns the invitation.
+        organization: OrganizationId,
+        /// Invitation to update.
+        invite: InviteId,
+        /// New HMAC hex computed with the rotated blinding key.
+        new_hmac: String,
+    },
 }
 
 /// Response from the Raft state machine.
@@ -1305,6 +1456,47 @@ pub enum LedgerResponse {
     OrganizationMemberRoleUpdated {
         /// Organization whose member was updated.
         organization_id: OrganizationId,
+    },
+
+    /// Organization member added (or already existed — idempotent).
+    OrganizationMemberAdded {
+        /// Organization the member was added to.
+        organization_id: OrganizationId,
+        /// Whether the user was already a member (idempotent no-op).
+        already_member: bool,
+    },
+
+    /// Organization invitation created (GLOBAL indexes written).
+    ///
+    /// Returned by `CreateOrganizationInvite`. The service handler needs
+    /// `invite_id` and `expires_at` for the REGIONAL follow-up proposal.
+    OrganizationInviteCreated {
+        /// Allocated internal invite ID.
+        invite_id: InviteId,
+        /// External Snowflake slug (echoed back for convenience).
+        invite_slug: InviteSlug,
+        /// Computed expiration: `proposed_at + ttl_hours`.
+        expires_at: DateTime<Utc>,
+    },
+
+    /// Organization invitation resolved to a terminal state.
+    ///
+    /// Returned by `ResolveOrganizationInvite` on successful CAS transition.
+    OrganizationInviteResolved {
+        /// Invitation that was resolved.
+        invite_id: InviteId,
+    },
+
+    /// Returned by `PurgeOrganizationInviteIndexes` on success.
+    OrganizationInviteIndexesPurged {
+        /// Invitation that was purged.
+        invite_id: InviteId,
+    },
+
+    /// Returned by `RehashInviteEmailIndex` on success.
+    InviteEmailIndexRehashed {
+        /// Invitation whose email index was rehashed.
+        invite_id: InviteId,
     },
 
     /// Organization purged (all data removed).
@@ -1788,6 +1980,29 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::OrganizationMemberRoleUpdated { organization_id } => {
                 write!(f, "OrganizationMemberRoleUpdated(id={})", organization_id)
             },
+            LedgerResponse::OrganizationMemberAdded { organization_id, already_member } => {
+                write!(
+                    f,
+                    "OrganizationMemberAdded(id={}, already_member={})",
+                    organization_id, already_member
+                )
+            },
+            LedgerResponse::OrganizationInviteCreated { invite_id, invite_slug, expires_at } => {
+                write!(
+                    f,
+                    "OrganizationInviteCreated(id={}, slug={}, expires_at={})",
+                    invite_id, invite_slug, expires_at
+                )
+            },
+            LedgerResponse::OrganizationInviteResolved { invite_id } => {
+                write!(f, "OrganizationInviteResolved(id={})", invite_id)
+            },
+            LedgerResponse::OrganizationInviteIndexesPurged { invite_id } => {
+                write!(f, "OrganizationInviteIndexesPurged(id={})", invite_id)
+            },
+            LedgerResponse::InviteEmailIndexRehashed { invite_id } => {
+                write!(f, "InviteEmailIndexRehashed(id={})", invite_id)
+            },
             LedgerResponse::OrganizationTeamCreated { team_id, team_slug } => {
                 write!(f, "OrganizationTeamCreated(id={}, slug={})", team_id, team_slug)
             },
@@ -2016,6 +2231,41 @@ mod tests {
             LedgerRequest::System(SystemRequest::CreateOrganization { slug, region, .. }) => {
                 assert_eq!(slug, OrganizationSlug::new(12345));
                 assert_eq!(region, Region::US_EAST_VA);
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_add_organization_member_serialization_roundtrip() {
+        let request = LedgerRequest::AddOrganizationMember {
+            organization: OrganizationId::new(5),
+            user: UserId::new(42),
+            user_slug: UserSlug::new(4200),
+            role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
+        };
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        match deserialized {
+            LedgerRequest::AddOrganizationMember { organization, user, user_slug, role } => {
+                assert_eq!(organization, OrganizationId::new(5));
+                assert_eq!(user, UserId::new(42));
+                assert_eq!(user_slug, UserSlug::new(4200));
+                assert_eq!(role, inferadb_ledger_state::system::OrganizationMemberRole::Member);
+            },
+            _ => panic!("unexpected variant"),
+        }
+
+        let response = LedgerResponse::OrganizationMemberAdded {
+            organization_id: OrganizationId::new(5),
+            already_member: true,
+        };
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        match deserialized {
+            LedgerResponse::OrganizationMemberAdded { organization_id, already_member } => {
+                assert_eq!(organization_id, OrganizationId::new(5));
+                assert!(already_member);
             },
             _ => panic!("unexpected variant"),
         }
@@ -3362,6 +3612,12 @@ mod tests {
             SystemRequest::ConsumeTotpAndCreateSession { .. } => RaftScope::Regional,
             SystemRequest::ConsumeRecoveryAndCreateSession { .. } => RaftScope::Regional,
             SystemRequest::IncrementTotpAttempt { .. } => RaftScope::Regional,
+
+            // REGIONAL — invitation operations (encrypted via EncryptedOrgSystemRequest)
+            SystemRequest::WriteOrganizationInvite { .. } => RaftScope::Regional,
+            SystemRequest::UpdateOrganizationInviteStatus { .. } => RaftScope::Regional,
+            SystemRequest::DeleteOrganizationInvite { .. } => RaftScope::Regional,
+            SystemRequest::RehashInvitationEmailHmac { .. } => RaftScope::Regional,
         }
     }
 
@@ -3560,6 +3816,11 @@ mod tests {
             LedgerRequest::ResumeOrganization { .. } => RaftScope::Global,
             LedgerRequest::RemoveOrganizationMember { .. } => RaftScope::Global,
             LedgerRequest::UpdateOrganizationMemberRole { .. } => RaftScope::Global,
+            LedgerRequest::AddOrganizationMember { .. } => RaftScope::Global,
+            LedgerRequest::CreateOrganizationInvite { .. } => RaftScope::Global,
+            LedgerRequest::ResolveOrganizationInvite { .. } => RaftScope::Global,
+            LedgerRequest::PurgeOrganizationInviteIndexes { .. } => RaftScope::Global,
+            LedgerRequest::RehashInviteEmailIndex { .. } => RaftScope::Global,
             LedgerRequest::PurgeOrganization { .. } => RaftScope::Global,
             LedgerRequest::StartMigration { .. } => RaftScope::Global,
             LedgerRequest::CompleteMigration { .. } => RaftScope::Global,
@@ -3636,5 +3897,315 @@ mod tests {
                 organization: OrganizationId::new(1),
             });
         assert_eq!(classify_ledger_request(&encrypted_org), RaftScope::Regional);
+    }
+
+    // ── Invitation Request/Response Serialization Tests ──
+
+    #[test]
+    fn test_create_organization_invite_serialization_roundtrip() {
+        let request = LedgerRequest::CreateOrganizationInvite {
+            organization: OrganizationId::new(5),
+            slug: InviteSlug::new(9999),
+            token_hash: [0xAB; 32],
+            invitee_email_hmac: "deadbeef".to_string(),
+            ttl_hours: 168,
+        };
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        match deserialized {
+            LedgerRequest::CreateOrganizationInvite {
+                organization,
+                slug,
+                token_hash,
+                invitee_email_hmac,
+                ttl_hours,
+            } => {
+                assert_eq!(organization, OrganizationId::new(5));
+                assert_eq!(slug, InviteSlug::new(9999));
+                assert_eq!(token_hash, [0xAB; 32]);
+                assert_eq!(invitee_email_hmac, "deadbeef");
+                assert_eq!(ttl_hours, 168);
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_organization_invite_serialization_roundtrip() {
+        let request = LedgerRequest::ResolveOrganizationInvite {
+            invite: InviteId::new(42),
+            organization: OrganizationId::new(5),
+            status: InvitationStatus::Accepted,
+            invitee_email_hmac: "cafe0123".to_string(),
+            token_hash: [0xCD; 32],
+        };
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        match deserialized {
+            LedgerRequest::ResolveOrganizationInvite {
+                invite,
+                organization,
+                status,
+                invitee_email_hmac,
+                token_hash,
+            } => {
+                assert_eq!(invite, InviteId::new(42));
+                assert_eq!(organization, OrganizationId::new(5));
+                assert_eq!(status, InvitationStatus::Accepted);
+                assert_eq!(invitee_email_hmac, "cafe0123");
+                assert_eq!(token_hash, [0xCD; 32]);
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_organization_invite_created_response_serialization_roundtrip() {
+        use chrono::TimeZone;
+        let expires = Utc.with_ymd_and_hms(2099, 6, 15, 12, 30, 0).unwrap();
+        let response = LedgerResponse::OrganizationInviteCreated {
+            invite_id: InviteId::new(10),
+            invite_slug: InviteSlug::new(5000),
+            expires_at: expires,
+        };
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        match deserialized {
+            LedgerResponse::OrganizationInviteCreated { invite_id, invite_slug, expires_at } => {
+                assert_eq!(invite_id, InviteId::new(10));
+                assert_eq!(invite_slug, InviteSlug::new(5000));
+                assert_eq!(expires_at, expires);
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_organization_invite_resolved_response_serialization_roundtrip() {
+        let response = LedgerResponse::OrganizationInviteResolved { invite_id: InviteId::new(42) };
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        match deserialized {
+            LedgerResponse::OrganizationInviteResolved { invite_id } => {
+                assert_eq!(invite_id, InviteId::new(42));
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_write_organization_invite_serialization_roundtrip() {
+        use chrono::TimeZone;
+        let request = SystemRequest::WriteOrganizationInvite {
+            organization: OrganizationId::new(5),
+            invite: InviteId::new(10),
+            slug: InviteSlug::new(9999),
+            token_hash: [0xAB; 32],
+            inviter: UserId::new(1),
+            invitee_email_hmac: "deadbeef".to_string(),
+            invitee_email: "alice@example.com".to_string(),
+            role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
+            team: Some(TeamId::new(3)),
+            expires_at: Utc.with_ymd_and_hms(2099, 6, 15, 12, 30, 0).unwrap(),
+        };
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_update_organization_invite_status_serialization_roundtrip() {
+        let request = SystemRequest::UpdateOrganizationInviteStatus {
+            organization: OrganizationId::new(5),
+            invite: InviteId::new(10),
+            status: InvitationStatus::Declined,
+        };
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_delete_organization_invite_serialization_roundtrip() {
+        let request = SystemRequest::DeleteOrganizationInvite {
+            organization: OrganizationId::new(5),
+            invite: InviteId::new(10),
+        };
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_invitation_system_request_pii_classification() {
+        // WriteOrganizationInvite — REGIONAL (contains plaintext email PII)
+        let write = SystemRequest::WriteOrganizationInvite {
+            organization: OrganizationId::new(1),
+            invite: InviteId::new(1),
+            slug: InviteSlug::new(100),
+            token_hash: [0; 32],
+            inviter: UserId::new(1),
+            invitee_email_hmac: "hmac".to_string(),
+            invitee_email: "alice@example.com".to_string(),
+            role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
+            team: None,
+            expires_at: Utc::now(),
+        };
+        assert_eq!(classify_system_request(&write), RaftScope::Regional);
+
+        // UpdateOrganizationInviteStatus — REGIONAL
+        let update = SystemRequest::UpdateOrganizationInviteStatus {
+            organization: OrganizationId::new(1),
+            invite: InviteId::new(1),
+            status: InvitationStatus::Revoked,
+        };
+        assert_eq!(classify_system_request(&update), RaftScope::Regional);
+
+        // DeleteOrganizationInvite — REGIONAL
+        let delete = SystemRequest::DeleteOrganizationInvite {
+            organization: OrganizationId::new(1),
+            invite: InviteId::new(1),
+        };
+        assert_eq!(classify_system_request(&delete), RaftScope::Regional);
+    }
+
+    #[test]
+    fn test_invitation_ledger_request_pii_classification() {
+        // CreateOrganizationInvite — GLOBAL (no PII, only IDs and HMAC)
+        let create = LedgerRequest::CreateOrganizationInvite {
+            organization: OrganizationId::new(1),
+            slug: InviteSlug::new(100),
+            token_hash: [0; 32],
+            invitee_email_hmac: "hmac".to_string(),
+            ttl_hours: 168,
+        };
+        assert_eq!(classify_ledger_request(&create), RaftScope::Global);
+
+        // ResolveOrganizationInvite — GLOBAL (no PII)
+        let resolve = LedgerRequest::ResolveOrganizationInvite {
+            invite: InviteId::new(1),
+            organization: OrganizationId::new(1),
+            status: InvitationStatus::Accepted,
+            invitee_email_hmac: "hmac".to_string(),
+            token_hash: [0; 32],
+        };
+        assert_eq!(classify_ledger_request(&resolve), RaftScope::Global);
+
+        // PurgeOrganizationInviteIndexes — GLOBAL (no PII, only IDs and HMAC)
+        let purge = LedgerRequest::PurgeOrganizationInviteIndexes {
+            invite: InviteId::new(1),
+            slug: InviteSlug::new(100),
+            invitee_email_hmac: "hmac".to_string(),
+        };
+        assert_eq!(classify_ledger_request(&purge), RaftScope::Global);
+
+        // RehashInviteEmailIndex — GLOBAL (no PII, only IDs and HMACs)
+        let rehash = LedgerRequest::RehashInviteEmailIndex {
+            invite: InviteId::new(1),
+            old_hmac: "old_hmac".to_string(),
+            new_hmac: "new_hmac".to_string(),
+            organization: OrganizationId::new(1),
+            status: InvitationStatus::Pending,
+        };
+        assert_eq!(classify_ledger_request(&rehash), RaftScope::Global);
+    }
+
+    #[test]
+    fn test_purge_organization_invite_indexes_serialization_roundtrip() {
+        let request = LedgerRequest::PurgeOrganizationInviteIndexes {
+            invite: InviteId::new(42),
+            slug: InviteSlug::new(9999),
+            invitee_email_hmac: "deadbeef".to_string(),
+        };
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        match deserialized {
+            LedgerRequest::PurgeOrganizationInviteIndexes { invite, slug, invitee_email_hmac } => {
+                assert_eq!(invite, InviteId::new(42));
+                assert_eq!(slug, InviteSlug::new(9999));
+                assert_eq!(invitee_email_hmac, "deadbeef");
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_rehash_invite_email_index_serialization_roundtrip() {
+        let request = LedgerRequest::RehashInviteEmailIndex {
+            invite: InviteId::new(7),
+            old_hmac: "oldhmac123".to_string(),
+            new_hmac: "newhmac456".to_string(),
+            organization: OrganizationId::new(5),
+            status: InvitationStatus::Pending,
+        };
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        match deserialized {
+            LedgerRequest::RehashInviteEmailIndex {
+                invite,
+                old_hmac,
+                new_hmac,
+                organization,
+                status,
+            } => {
+                assert_eq!(invite, InviteId::new(7));
+                assert_eq!(old_hmac, "oldhmac123");
+                assert_eq!(new_hmac, "newhmac456");
+                assert_eq!(organization, OrganizationId::new(5));
+                assert_eq!(status, InvitationStatus::Pending);
+            },
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_organization_invite_indexes_purged_response_serialization_roundtrip() {
+        let response =
+            LedgerResponse::OrganizationInviteIndexesPurged { invite_id: InviteId::new(42) };
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        match deserialized {
+            LedgerResponse::OrganizationInviteIndexesPurged { invite_id } => {
+                assert_eq!(invite_id, InviteId::new(42));
+            },
+            _ => panic!("unexpected variant"),
+        }
+        assert_eq!(format!("{response}"), "OrganizationInviteIndexesPurged(id=invite:42)");
+    }
+
+    #[test]
+    fn test_invite_email_index_rehashed_response_serialization_roundtrip() {
+        let response = LedgerResponse::InviteEmailIndexRehashed { invite_id: InviteId::new(7) };
+        let bytes = postcard::to_allocvec(&response).expect("serialize");
+        let deserialized: LedgerResponse = postcard::from_bytes(&bytes).expect("deserialize");
+        match deserialized {
+            LedgerResponse::InviteEmailIndexRehashed { invite_id } => {
+                assert_eq!(invite_id, InviteId::new(7));
+            },
+            _ => panic!("unexpected variant"),
+        }
+        assert_eq!(format!("{response}"), "InviteEmailIndexRehashed(id=invite:7)");
+    }
+
+    #[test]
+    fn test_rehash_invitation_email_hmac_serialization_roundtrip() {
+        let request = SystemRequest::RehashInvitationEmailHmac {
+            organization: OrganizationId::new(5),
+            invite: InviteId::new(10),
+            new_hmac: "newhmac789".to_string(),
+        };
+        let bytes = postcard::to_allocvec(&request).expect("serialize");
+        let deserialized: SystemRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_rehash_invitation_email_hmac_pii_classification() {
+        let request = SystemRequest::RehashInvitationEmailHmac {
+            organization: OrganizationId::new(1),
+            invite: InviteId::new(1),
+            new_hmac: "hmac".to_string(),
+        };
+        assert_eq!(classify_system_request(&request), RaftScope::Regional);
     }
 }

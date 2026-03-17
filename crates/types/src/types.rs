@@ -378,6 +378,32 @@ impl Default for UserCredentialId {
     }
 }
 
+define_id!(
+    /// Internal sequential identifier for an organization invitation.
+    ///
+    /// Wraps an `i64` assigned by the Raft leader from the
+    /// `_meta:seq:invite` GLOBAL sequence counter.
+    ///
+    /// # Display
+    ///
+    /// Formats with `invite:` prefix: `invite:1`.
+    InviteId, i64, "invite"
+);
+
+impl Default for InviteId {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+define_slug!(
+    /// External Snowflake identifier for an organization invitation.
+    ///
+    /// Used in gRPC APIs and SDK methods. Resolved to [`InviteId`] at
+    /// the service boundary via slug index lookup.
+    InviteSlug
+);
+
 // ============================================================================
 // TokenVersion
 // ============================================================================

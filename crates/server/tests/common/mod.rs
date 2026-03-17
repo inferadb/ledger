@@ -48,15 +48,20 @@ use openraft::Raft;
 use tokio::time::timeout;
 
 /// A test node in a cluster.
+///
+/// Every node gets the full production bootstrap (saga orchestrator, blinding
+/// key, background jobs, etc.) plus at least one data region for org creation.
 pub struct TestNode {
     /// The node ID.
     pub id: u64,
     /// The gRPC address.
     pub addr: SocketAddr,
-    /// The Raft instance.
+    /// The GLOBAL Raft instance.
     pub raft: Arc<Raft<LedgerTypeConfig>>,
-    /// The state layer (internally thread-safe via inferadb-ledger-store MVCC).
+    /// The GLOBAL state layer (internally thread-safe via inferadb-ledger-store MVCC).
     pub state: Arc<StateLayer<FileBackend>>,
+    /// Multi-Raft manager for region routing and data region access.
+    pub manager: Arc<RaftManager>,
     /// Temporary directory for node data.
     _temp_dir: TestDir,
     /// Server task handle for cleanup.
@@ -68,25 +73,47 @@ pub struct TestNode {
 }
 
 impl TestNode {
-    /// Checks if this node is the current leader.
+    /// Checks if this node is the current leader for the GLOBAL region.
     pub fn is_leader(&self) -> bool {
         let metrics = self.raft.metrics().borrow().clone();
         metrics.current_leader == Some(self.id)
     }
 
-    /// Returns the current leader ID if known.
+    /// Returns the current leader ID for the GLOBAL region if known.
     pub fn current_leader(&self) -> Option<u64> {
         self.raft.metrics().borrow().current_leader
     }
 
-    /// Returns the current term.
+    /// Returns the current term for the GLOBAL region.
     pub fn current_term(&self) -> u64 {
         self.raft.metrics().borrow().current_term
     }
 
-    /// Returns the last applied log index.
+    /// Returns the last applied log index for the GLOBAL region.
     pub fn last_applied(&self) -> u64 {
         self.raft.metrics().borrow().last_applied.map_or(0, |id| id.index)
+    }
+
+    /// Returns the system (GLOBAL) region group.
+    pub fn system_region(&self) -> Arc<RegionGroup> {
+        self.manager.system_region().expect("system region exists")
+    }
+
+    /// Returns a region group by region.
+    pub fn region_group(&self, region: inferadb_ledger_types::Region) -> Option<Arc<RegionGroup>> {
+        self.manager.get_region_group(region).ok()
+    }
+
+    /// Returns all region IDs registered on this node.
+    pub fn regions(&self) -> Vec<inferadb_ledger_types::Region> {
+        self.manager.list_regions()
+    }
+
+    /// Checks if this node is leader for the system (GLOBAL) region.
+    pub fn is_system_leader(&self) -> bool {
+        let region = self.system_region();
+        let metrics = region.raft().metrics().borrow().clone();
+        metrics.current_leader == Some(self.id)
     }
 }
 
@@ -118,19 +145,34 @@ fn test_raft_config() -> inferadb_ledger_types::config::RaftConfig {
 }
 
 /// A test cluster of Raft nodes.
+///
+/// Every cluster gets the full production bootstrap (saga orchestrator, blinding
+/// key, background jobs) plus at least one data region. This mirrors production
+/// where all Ledger instances are inherently multi-region.
 pub struct TestCluster {
     /// The nodes in the cluster.
     nodes: Vec<TestNode>,
+    /// Number of data regions (at least 1).
+    num_data_regions: usize,
 }
 
 impl TestCluster {
-    /// Creates a new test cluster with the given number of nodes.
+    /// Creates a new test cluster with the given number of nodes and 1 data region.
     ///
     /// The first node bootstraps the cluster, and other nodes join via
     /// the AdminService's join_cluster RPC.
     /// All nodes use ephemeral ports on localhost.
     pub async fn new(size: usize) -> Self {
+        Self::with_data_regions(size, 1).await
+    }
+
+    /// Creates a new test cluster with the given number of nodes and data regions.
+    ///
+    /// Each node gets a full production bootstrap (saga, blinding key, background
+    /// jobs) plus `num_data_regions` data regions in addition to the GLOBAL region.
+    pub async fn with_data_regions(size: usize, num_data_regions: usize) -> Self {
         assert!(size >= 1, "cluster must have at least 1 node");
+        assert!(num_data_regions >= 1, "cluster must have at least 1 data region");
 
         let base_port = allocate_ports(size as u16);
         let mut nodes = Vec::with_capacity(size);
@@ -195,6 +237,7 @@ impl TestCluster {
         // Extract fields before moving server_handle into the spawned task.
         let raft_clone = bootstrapped.raft.clone();
         let state_clone = bootstrapped.state.clone();
+        let manager_clone = bootstrapped.manager.clone();
         let bg_server_handle = bootstrapped.server_handle;
         let server_handle = tokio::spawn(async move {
             let _ = bg_server_handle.await;
@@ -207,12 +250,13 @@ impl TestCluster {
             addr,
             raft: raft_clone,
             state: state_clone,
+            manager: manager_clone.clone(),
             _temp_dir: temp_dir,
             _server_handle: server_handle,
             _shutdown_tx: shutdown_tx,
         });
 
-        // Wait for the bootstrap node to become leader.
+        // Wait for the bootstrap node to become GLOBAL leader first.
         // With test Raft config (150-300ms election timeout on localhost), 3 seconds
         // is ~10 election cycles — more than enough unless something is fundamentally broken.
         let start = tokio::time::Instant::now();
@@ -225,12 +269,50 @@ impl TestCluster {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
-        // Verify leader election succeeded
+        // Verify GLOBAL leader election succeeded
         {
             let metrics = leader_raft.metrics().borrow().clone();
             if metrics.current_leader != Some(node_id) {
-                panic!("Bootstrap node failed to become leader within timeout");
+                panic!("Bootstrap node failed to become GLOBAL leader within timeout");
             }
+        }
+
+        // Start data regions AFTER GLOBAL leader election so the two don't interfere.
+        let data_regions = &inferadb_ledger_types::ALL_REGIONS[1..];
+        for &data_region in data_regions.iter().take(num_data_regions) {
+            let data_region_config = RegionConfig {
+                region: data_region,
+                initial_members: vec![(node_id, addr.to_string())],
+                bootstrap: true,
+                enable_background_jobs: true,
+                batch_writer_config: None,
+                event_writer: None,
+            };
+            manager_clone
+                .start_data_region(data_region_config)
+                .await
+                .unwrap_or_else(|e| panic!("start data region {:?}: {e}", data_region));
+        }
+
+        // Wait for all data region leader elections
+        let data_region_wait_start = tokio::time::Instant::now();
+        'data_wait: while data_region_wait_start.elapsed() < Duration::from_secs(5) {
+            let mut all_ready = true;
+            for &dr in data_regions.iter().take(num_data_regions) {
+                if let Ok(rg) = manager_clone.get_region_group(dr) {
+                    if rg.raft().metrics().borrow().current_leader.is_none() {
+                        all_ready = false;
+                        break;
+                    }
+                } else {
+                    all_ready = false;
+                    break;
+                }
+            }
+            if all_ready {
+                break 'data_wait;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
         // Step 2: Start remaining nodes and have them join the cluster dynamically
@@ -291,6 +373,7 @@ impl TestCluster {
             // Extract fields before moving server_handle into the spawned task.
             let raft_clone = bootstrapped.raft.clone();
             let state_clone = bootstrapped.state.clone();
+            let manager_clone = bootstrapped.manager.clone();
             let bg_server_handle = bootstrapped.server_handle;
             let server_handle = tokio::spawn(async move {
                 let _ = bg_server_handle.await;
@@ -368,6 +451,7 @@ impl TestCluster {
                 addr,
                 raft: raft_clone,
                 state: state_clone,
+                manager: manager_clone,
                 _temp_dir: temp_dir,
                 _server_handle: server_handle,
                 _shutdown_tx: shutdown_tx,
@@ -408,7 +492,7 @@ impl TestCluster {
             }
         }
 
-        Self { nodes }
+        Self { nodes, num_data_regions }
     }
 
     /// Waits for a leader to be elected AND all nodes to agree.
@@ -502,6 +586,60 @@ impl TestCluster {
         })
         .await
         .unwrap_or(false)
+    }
+
+    /// Returns any node (convenience for single-node clusters or when
+    /// any node will do).
+    pub fn any_node(&self) -> &TestNode {
+        &self.nodes[0]
+    }
+
+    /// Returns the leader node for the system (GLOBAL) region.
+    pub fn system_leader(&self) -> Option<&TestNode> {
+        self.nodes.iter().find(|n| n.is_system_leader())
+    }
+
+    /// Returns the number of data regions.
+    pub fn num_data_regions(&self) -> usize {
+        self.num_data_regions
+    }
+
+    /// Returns all node addresses.
+    pub fn addrs(&self) -> Vec<SocketAddr> {
+        self.nodes.iter().map(|n| n.addr).collect()
+    }
+
+    /// Waits until all regions (GLOBAL + data) on the first node have elected
+    /// leaders. Used by multi-region tests to ensure the cluster is fully ready.
+    pub async fn wait_for_leaders(&self, timeout_duration: Duration) -> bool {
+        let start = tokio::time::Instant::now();
+
+        while start.elapsed() < timeout_duration {
+            let mut all_ready = true;
+
+            if let Some(node) = self.nodes.first() {
+                for region in node.regions() {
+                    if let Some(region_group) = node.region_group(region) {
+                        let metrics = region_group.raft().metrics().borrow().clone();
+                        if metrics.current_leader.is_none() {
+                            all_ready = false;
+                            break;
+                        }
+                    } else {
+                        all_ready = false;
+                        break;
+                    }
+                }
+            }
+
+            if all_ready {
+                return true;
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        false
     }
 }
 
@@ -1067,4 +1205,21 @@ pub async fn create_user_client(
 > {
     let endpoint = format!("http://{}", addr);
     inferadb_ledger_proto::proto::user_service_client::UserServiceClient::connect(endpoint).await
+}
+
+/// Helper to create an invitation service client for a node.
+#[allow(dead_code)]
+pub async fn create_invitation_client(
+    addr: SocketAddr,
+) -> Result<
+    inferadb_ledger_proto::proto::invitation_service_client::InvitationServiceClient<
+        tonic::transport::Channel,
+    >,
+    tonic::transport::Error,
+> {
+    let endpoint = format!("http://{}", addr);
+    inferadb_ledger_proto::proto::invitation_service_client::InvitationServiceClient::connect(
+        endpoint,
+    )
+    .await
 }

@@ -540,6 +540,11 @@ impl LedgerClient {
     create_grpc_client!(create_events_client, events_service_client, EventsServiceClient);
     create_grpc_client!(create_health_client, health_service_client, HealthServiceClient);
     create_grpc_client!(create_token_client, token_service_client, TokenServiceClient);
+    create_grpc_client!(
+        create_invitation_client,
+        invitation_service_client,
+        InvitationServiceClient
+    );
 }
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]

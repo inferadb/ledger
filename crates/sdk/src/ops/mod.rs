@@ -7,6 +7,7 @@ mod credential;
 mod data;
 mod events;
 mod health;
+mod invitation;
 mod list;
 mod onboarding;
 mod organization;

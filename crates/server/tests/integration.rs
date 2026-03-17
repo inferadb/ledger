@@ -15,6 +15,7 @@ mod design_compliance;
 mod election;
 mod externalized_state;
 mod get_node_info;
+mod invitation;
 mod isolation;
 mod leader_failover;
 mod multi_region;

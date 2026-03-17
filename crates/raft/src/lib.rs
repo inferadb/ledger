@@ -71,6 +71,8 @@ pub mod idempotency;
 #[doc(hidden)]
 pub mod integrity_scrubber;
 #[doc(hidden)]
+pub mod invite_maintenance;
+#[doc(hidden)]
 pub mod leader_transfer;
 #[doc(hidden)]
 pub mod log_storage;
@@ -155,6 +157,8 @@ pub use graceful_shutdown::{BackgroundJobWatchdog, GracefulShutdown, HealthState
 pub use hot_key_detector::HotKeyDetector;
 #[doc(hidden)]
 pub use integrity_scrubber::IntegrityScrubberJob;
+#[doc(hidden)]
+pub use invite_maintenance::InviteMaintenanceJob;
 #[doc(hidden)]
 pub use learner_refresh::LearnerRefreshJob;
 #[doc(hidden)]

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
 use inferadb_ledger_types::{
-    AppId, AppSlug, ClientAssertionId, ClientId, EmailVerifyTokenId, Hash, Operation,
+    AppId, AppSlug, ClientAssertionId, ClientId, EmailVerifyTokenId, Hash, InviteId, Operation,
     OrganizationId, OrganizationSlug, RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug,
     Transaction, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
@@ -211,6 +211,9 @@ pub struct SequenceCounters {
     /// Next refresh token ID.
     #[serde(default)]
     pub refresh_token: RefreshTokenId,
+    /// Next invite ID.
+    #[serde(default)]
+    pub invite: InviteId,
 }
 
 impl Default for SequenceCounters {
@@ -227,6 +230,7 @@ impl Default for SequenceCounters {
             client_assertion: ClientAssertionId::new(1),
             signing_key: SigningKeyId::new(1),
             refresh_token: RefreshTokenId::new(1),
+            invite: InviteId::new(1),
         }
     }
 }
@@ -304,6 +308,13 @@ impl SequenceCounters {
     pub fn next_refresh_token(&mut self) -> RefreshTokenId {
         let id = self.refresh_token;
         self.refresh_token = RefreshTokenId::new(id.value() + 1);
+        id
+    }
+
+    /// Returns and increments the next invite ID.
+    pub fn next_invite(&mut self) -> InviteId {
+        let id = self.invite;
+        self.invite = InviteId::new(id.value() + 1);
         id
     }
 }

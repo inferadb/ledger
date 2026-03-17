@@ -32,9 +32,9 @@
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
     AppSlug as DomainAppSlug, BlockRetentionMode, BlockRetentionPolicy, CredentialType,
-    EmailVerifyTokenId, LedgerNodeId, OrganizationId, OrganizationSlug, PasskeyCredential,
-    RecoveryCodeCredential, TotpAlgorithm, TotpCredential, UserCredential, UserEmailId, UserSlug,
-    VaultSlug,
+    EmailVerifyTokenId, InvitationStatus, InviteSlug, LedgerNodeId, OrganizationId,
+    OrganizationSlug, PasskeyCredential, RecoveryCodeCredential, TotpAlgorithm, TotpCredential,
+    UserCredential, UserEmailId, UserSlug, VaultSlug,
     events::{EventAction, EventEmission, EventEntry, EventOutcome, EventScope},
     merkle::MerkleProof as InternalMerkleProof,
     token::{
@@ -513,6 +513,78 @@ impl From<&proto::EmailVerifyTokenId> for EmailVerifyTokenId {
     fn from(proto: &proto::EmailVerifyTokenId) -> Self {
         EmailVerifyTokenId::new(proto.id)
     }
+}
+
+// =============================================================================
+// InviteSlug conversions
+// =============================================================================
+
+/// Converts a domain [`InviteSlug`] to its protobuf representation.
+impl From<InviteSlug> for proto::InviteSlug {
+    fn from(slug: InviteSlug) -> Self {
+        proto::InviteSlug { slug: slug.value() }
+    }
+}
+
+/// Converts a protobuf [`InviteSlug`](proto::InviteSlug) to the domain type.
+impl From<proto::InviteSlug> for InviteSlug {
+    fn from(proto: proto::InviteSlug) -> Self {
+        InviteSlug::new(proto.slug)
+    }
+}
+
+/// Converts a protobuf [`InviteSlug`](proto::InviteSlug) reference to the domain type.
+impl From<&proto::InviteSlug> for InviteSlug {
+    fn from(proto: &proto::InviteSlug) -> Self {
+        InviteSlug::new(proto.slug)
+    }
+}
+
+// =============================================================================
+// InvitationStatus conversions
+// =============================================================================
+
+/// Converts a domain [`InvitationStatus`] to its protobuf representation.
+impl From<InvitationStatus> for proto::InvitationStatus {
+    fn from(status: InvitationStatus) -> Self {
+        match status {
+            InvitationStatus::Pending => proto::InvitationStatus::Pending,
+            InvitationStatus::Accepted => proto::InvitationStatus::Accepted,
+            InvitationStatus::Declined => proto::InvitationStatus::Declined,
+            InvitationStatus::Expired => proto::InvitationStatus::Expired,
+            InvitationStatus::Revoked => proto::InvitationStatus::Revoked,
+        }
+    }
+}
+
+/// Converts a protobuf [`InvitationStatus`](proto::InvitationStatus) to the domain type.
+///
+/// Returns [`Status::invalid_argument`] for `Unspecified` — callers must provide
+/// a concrete status value.
+impl TryFrom<proto::InvitationStatus> for InvitationStatus {
+    type Error = Status;
+
+    fn try_from(proto: proto::InvitationStatus) -> Result<Self, Status> {
+        match proto {
+            proto::InvitationStatus::Unspecified => {
+                Err(Status::invalid_argument("invitation status must be specified"))
+            },
+            proto::InvitationStatus::Pending => Ok(InvitationStatus::Pending),
+            proto::InvitationStatus::Accepted => Ok(InvitationStatus::Accepted),
+            proto::InvitationStatus::Declined => Ok(InvitationStatus::Declined),
+            proto::InvitationStatus::Expired => Ok(InvitationStatus::Expired),
+            proto::InvitationStatus::Revoked => Ok(InvitationStatus::Revoked),
+        }
+    }
+}
+
+/// Converts a raw `i32` proto enum value to a validated [`InvitationStatus`].
+///
+/// Returns [`Status::invalid_argument`] for `Unspecified` or unknown values.
+pub fn invitation_status_from_i32(value: i32) -> Result<InvitationStatus, Status> {
+    let proto_status = proto::InvitationStatus::try_from(value)
+        .map_err(|_| Status::invalid_argument(format!("unknown invitation status: {value}")))?;
+    InvitationStatus::try_from(proto_status)
 }
 
 // =============================================================================
@@ -3328,5 +3400,135 @@ mod tests {
         assert!(validate_credential_info_type("unknown").is_err());
         assert!(validate_credential_info_type("").is_err());
         assert!(validate_credential_info_type("Passkey").is_err()); // case-sensitive
+    }
+
+    // -------------------------------------------------------------------------
+    // InviteSlug conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn invite_slug_domain_to_proto() {
+        let domain = InviteSlug::new(42);
+        let proto: proto::InviteSlug = domain.into();
+        assert_eq!(proto.slug, 42);
+    }
+
+    #[test]
+    fn invite_slug_proto_to_domain_owned() {
+        let proto = proto::InviteSlug { slug: 99 };
+        let domain: InviteSlug = proto.into();
+        assert_eq!(domain.value(), 99);
+    }
+
+    #[test]
+    fn invite_slug_proto_to_domain_ref() {
+        let proto = proto::InviteSlug { slug: 77 };
+        let domain: InviteSlug = (&proto).into();
+        assert_eq!(domain.value(), 77);
+    }
+
+    #[test]
+    fn invite_slug_roundtrip() {
+        let original = InviteSlug::new(123456789);
+        let proto: proto::InviteSlug = original.into();
+        let roundtripped: InviteSlug = proto.into();
+        assert_eq!(original, roundtripped);
+    }
+
+    // -------------------------------------------------------------------------
+    // InvitationStatus conversion tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn invitation_status_domain_to_proto_all_variants() {
+        assert_eq!(
+            proto::InvitationStatus::from(InvitationStatus::Pending),
+            proto::InvitationStatus::Pending
+        );
+        assert_eq!(
+            proto::InvitationStatus::from(InvitationStatus::Accepted),
+            proto::InvitationStatus::Accepted
+        );
+        assert_eq!(
+            proto::InvitationStatus::from(InvitationStatus::Declined),
+            proto::InvitationStatus::Declined
+        );
+        assert_eq!(
+            proto::InvitationStatus::from(InvitationStatus::Expired),
+            proto::InvitationStatus::Expired
+        );
+        assert_eq!(
+            proto::InvitationStatus::from(InvitationStatus::Revoked),
+            proto::InvitationStatus::Revoked
+        );
+    }
+
+    #[test]
+    fn invitation_status_proto_to_domain_all_variants() {
+        use inferadb_ledger_types::InvitationStatus as DomainStatus;
+        assert_eq!(
+            DomainStatus::try_from(proto::InvitationStatus::Pending).unwrap(),
+            DomainStatus::Pending
+        );
+        assert_eq!(
+            DomainStatus::try_from(proto::InvitationStatus::Accepted).unwrap(),
+            DomainStatus::Accepted
+        );
+        assert_eq!(
+            DomainStatus::try_from(proto::InvitationStatus::Declined).unwrap(),
+            DomainStatus::Declined
+        );
+        assert_eq!(
+            DomainStatus::try_from(proto::InvitationStatus::Expired).unwrap(),
+            DomainStatus::Expired
+        );
+        assert_eq!(
+            DomainStatus::try_from(proto::InvitationStatus::Revoked).unwrap(),
+            DomainStatus::Revoked
+        );
+    }
+
+    #[test]
+    fn invitation_status_unspecified_rejected() {
+        use inferadb_ledger_types::InvitationStatus as DomainStatus;
+        let result = DomainStatus::try_from(proto::InvitationStatus::Unspecified);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invitation_status_roundtrip() {
+        use inferadb_ledger_types::InvitationStatus as DomainStatus;
+        for status in [
+            DomainStatus::Pending,
+            DomainStatus::Accepted,
+            DomainStatus::Declined,
+            DomainStatus::Expired,
+            DomainStatus::Revoked,
+        ] {
+            let proto_status = proto::InvitationStatus::from(status);
+            let roundtripped = DomainStatus::try_from(proto_status).unwrap();
+            assert_eq!(status, roundtripped);
+        }
+    }
+
+    #[test]
+    fn invitation_status_from_i32_valid() {
+        assert_eq!(invitation_status_from_i32(1).unwrap(), InvitationStatus::Pending);
+        assert_eq!(invitation_status_from_i32(2).unwrap(), InvitationStatus::Accepted);
+        assert_eq!(invitation_status_from_i32(3).unwrap(), InvitationStatus::Declined);
+        assert_eq!(invitation_status_from_i32(4).unwrap(), InvitationStatus::Expired);
+        assert_eq!(invitation_status_from_i32(5).unwrap(), InvitationStatus::Revoked);
+    }
+
+    #[test]
+    fn invitation_status_from_i32_invalid() {
+        assert!(invitation_status_from_i32(99).is_err());
+        assert!(invitation_status_from_i32(-1).is_err());
+    }
+
+    #[test]
+    fn invitation_status_from_i32_unspecified_rejected() {
+        // 0 = UNSPECIFIED — must be rejected, not silently mapped to Pending
+        assert!(invitation_status_from_i32(0).is_err());
     }
 }

@@ -590,6 +590,60 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Validate initiator is an organization administrator
         self.validate_org_admin(&slug_resolver, organization_id, &req.initiator, &mut ctx)?;
 
+        // Best-effort revocation of pending invitations BEFORE deleting the org.
+        // Must happen first because ResolveOrganizationInvite's apply handler
+        // requires the org to be Active (require_active_org_with_state).
+        // Failures are logged — InviteMaintenance will expire them by TTL.
+        if let Some(org_meta) = self.ctx.applied_state.get_organization(organization_id)
+            && let Ok(regional_state) = self.ctx.regional_state(org_meta.region)
+        {
+            let sys_svc = SystemOrganizationService::new(regional_state);
+            if let Ok(invitations) = sys_svc.list_invitations_by_org(organization_id, None, 1000) {
+                for inv in invitations {
+                    if inv.status != inferadb_ledger_types::InvitationStatus::Pending {
+                        continue;
+                    }
+                    // GLOBAL resolve
+                    let global_req = LedgerRequest::ResolveOrganizationInvite {
+                        invite: inv.id,
+                        organization: organization_id,
+                        status: inferadb_ledger_types::InvitationStatus::Revoked,
+                        invitee_email_hmac: inv.invitee_email_hmac.clone(),
+                        token_hash: inv.token_hash,
+                    };
+                    if let Err(e) =
+                        self.ctx.propose_request(global_req, &grpc_metadata, &mut ctx).await
+                    {
+                        tracing::warn!(
+                            invite_id = inv.id.value(),
+                            error = %e,
+                            "Failed to revoke pending invitation during org deletion"
+                        );
+                    }
+                    // REGIONAL status update
+                    if let Err(e) = self.ctx.propose_regional_org_encrypted(
+                        org_meta.region,
+                        inferadb_ledger_raft::types::SystemRequest::UpdateOrganizationInviteStatus {
+                            organization: organization_id,
+                            invite: inv.id,
+                            status: inferadb_ledger_types::InvitationStatus::Revoked,
+                        },
+                        organization_id,
+                        &grpc_metadata,
+                        &mut ctx,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            invite_id = inv.id.value(),
+                            error = %e,
+                            "REGIONAL invite revocation failed during org deletion"
+                        );
+                    }
+                }
+            }
+        }
+
         // Submit delete organization through Raft
         let ledger_request = LedgerRequest::DeleteOrganization { organization: organization_id };
 

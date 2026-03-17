@@ -3,9 +3,10 @@
 use std::fmt::Write;
 
 use inferadb_ledger_types::{
-    AppId, AppSlug, ClientAssertionId, CredentialType, EmailVerifyTokenId, NodeId, OrganizationId,
-    OrganizationSlug, RefreshTokenId, Region, SigningKeyId, SigningKeyScope, TeamId, TeamSlug,
-    TokenSubject, UserCredentialId, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
+    AppId, AppSlug, ClientAssertionId, CredentialType, EmailVerifyTokenId, InviteId, InviteSlug,
+    NodeId, OrganizationId, OrganizationSlug, RefreshTokenId, Region, SigningKeyId,
+    SigningKeyScope, TeamId, TeamSlug, TokenSubject, UserCredentialId, UserEmailId, UserId,
+    UserSlug, VaultId, VaultSlug,
 };
 
 /// Encodes a byte slice as lowercase hexadecimal.
@@ -179,8 +180,15 @@ impl SystemKeys {
         key_entry!(CLIENT_ASSERTION_SEQ_KEY, Global, Sequence),
         key_entry!(SIGNING_KEY_SEQ_KEY, Global, Sequence),
         key_entry!(REFRESH_TOKEN_SEQ_KEY, Global, Sequence),
+        key_entry!(INVITE_SEQ_KEY, Global, Sequence),
         // -- _meta:seq: Sequence counters (REGIONAL) --
         key_entry!(USER_CREDENTIAL_SEQ_KEY, Regional, Sequence),
+        // -- _idx: Invitation indexes (GLOBAL) --
+        key_entry!(INVITE_SLUG_INDEX_PREFIX, Global, Index),
+        key_entry!(INVITE_TOKEN_HASH_INDEX_PREFIX, Global, Index),
+        key_entry!(INVITE_EMAIL_HASH_INDEX_PREFIX, Global, Index),
+        // -- Bare entity prefixes (REGIONAL) — Invitations --
+        key_entry!(INVITE_PREFIX, Regional, Entity),
     ];
 
     // ========================================================================
@@ -1104,6 +1112,90 @@ impl SystemKeys {
     pub const REFRESH_TOKEN_SEQ_KEY: &'static str = "_meta:seq:refresh_token";
 
     // ========================================================================
+    // Invitation Keys
+    // ========================================================================
+
+    /// Primary key for an organization invitation record (REGIONAL).
+    ///
+    /// Pattern: `invite:{org_id}:{invite_id}`
+    ///
+    /// The full record contains PII (invitee email) and is encrypted with the
+    /// organization's `OrgShredKey` before entering the Raft log.
+    pub fn invite_key(organization: OrganizationId, invite: InviteId) -> String {
+        format!("invite:{}:{}", organization.value(), invite.value())
+    }
+
+    /// Parses an organization ID and invite ID from an invitation key.
+    ///
+    /// Returns `None` if the key doesn't match `invite:{org_id}:{invite_id}`.
+    pub fn parse_invite_key(key: &str) -> Option<(OrganizationId, InviteId)> {
+        let rest = key.strip_prefix(Self::INVITE_PREFIX)?;
+        let (org_str, invite_str) = rest.split_once(':')?;
+        Some((org_str.parse().ok()?, invite_str.parse().ok()?))
+    }
+
+    /// Prefix for listing all invitations in an organization.
+    ///
+    /// Pattern: `invite:{org_id}:`
+    pub fn invite_prefix(organization: OrganizationId) -> String {
+        format!("invite:{}:", organization.value())
+    }
+
+    /// Prefix for invitation keys (REGIONAL domain entities).
+    pub const INVITE_PREFIX: &'static str = "invite:";
+
+    /// Index key for invitation slug lookup.
+    ///
+    /// Pattern: `_idx:invite:slug:{slug}` → `InviteIndexEntry`
+    pub fn invite_slug_index_key(slug: InviteSlug) -> String {
+        format!("_idx:invite:slug:{}", slug.value())
+    }
+
+    /// Prefix for invitation slug index keys (GLOBAL cross-region resolution).
+    pub const INVITE_SLUG_INDEX_PREFIX: &'static str = "_idx:invite:slug:";
+
+    /// Index key for invitation token hash lookup.
+    ///
+    /// Pattern: `_idx:invite:token_hash:{hex}` → `InviteIndexEntry`
+    ///
+    /// The hex string is the SHA-256 hash of the raw invitation token.
+    /// This index is removed on any terminal state transition.
+    pub fn invite_token_hash_index_key(token_hash_hex: &str) -> String {
+        format!("_idx:invite:token_hash:{token_hash_hex}")
+    }
+
+    /// Prefix for invitation token hash index keys (GLOBAL).
+    pub const INVITE_TOKEN_HASH_INDEX_PREFIX: &'static str = "_idx:invite:token_hash:";
+
+    /// Index key for per-email invitation lookup.
+    ///
+    /// Pattern: `_idx:invite:email_hash:{hmac}:{invite_id}` → `InviteEmailEntry`
+    ///
+    /// Enables per-email rate limiting and received-invitations listing
+    /// without storing plaintext emails in GLOBAL state.
+    pub fn invite_email_hash_index_key(hmac_hex: &str, invite: InviteId) -> String {
+        format!("_idx:invite:email_hash:{}:{}", hmac_hex, invite.value())
+    }
+
+    /// Prefix for per-email invitation index keys (GLOBAL).
+    ///
+    /// Use with a specific HMAC to scan all invitations for one email:
+    /// `_idx:invite:email_hash:{hmac}:`
+    pub const INVITE_EMAIL_HASH_INDEX_PREFIX: &'static str = "_idx:invite:email_hash:";
+
+    /// Prefix for scanning all invitations for a specific email HMAC.
+    ///
+    /// Pattern: `_idx:invite:email_hash:{hmac}:`
+    pub fn invite_email_hash_prefix(hmac_hex: &str) -> String {
+        format!("_idx:invite:email_hash:{hmac_hex}:")
+    }
+
+    /// Key for the invitation ID sequence counter (GLOBAL).
+    ///
+    /// Pattern: `_meta:seq:invite` → next `InviteId`
+    pub const INVITE_SEQ_KEY: &'static str = "_meta:seq:invite";
+
+    // ========================================================================
     // Key Tier Classification
     // ========================================================================
 
@@ -1140,6 +1232,7 @@ impl SystemKeys {
             || key.starts_with("_idx:org:")
             || key.starts_with("_idx:vault:")
             || key.starts_with("_idx:team:slug:")
+            || key.starts_with("_idx:invite:")
         {
             return Some(KeyTier::Global);
         }
@@ -1180,6 +1273,7 @@ impl SystemKeys {
             || key.starts_with("org_profile:")
             || key.starts_with("assertion_name:")
             || key.starts_with("user_credential:")
+            || key.starts_with("invite:")
         {
             return Some(KeyTier::Regional);
         }
@@ -1843,7 +1937,7 @@ mod tests {
     /// a new constant, preventing silent omissions.
     #[test]
     fn test_key_registry_completeness() {
-        const EXPECTED_COUNT: usize = 54;
+        const EXPECTED_COUNT: usize = 59;
         assert_eq!(
             SystemKeys::KEY_REGISTRY.len(),
             EXPECTED_COUNT,
@@ -2180,5 +2274,120 @@ mod tests {
         assert!(!SystemKeys::TOTP_CHALLENGE_PREFIX.starts_with(SystemKeys::ONBOARD_ACCOUNT_PREFIX));
         assert!(!SystemKeys::ONBOARD_VERIFY_PREFIX.starts_with(SystemKeys::TOTP_CHALLENGE_PREFIX));
         assert!(!SystemKeys::ONBOARD_ACCOUNT_PREFIX.starts_with(SystemKeys::TOTP_CHALLENGE_PREFIX));
+    }
+
+    // ========================================================================
+    // Invitation Key Tests
+    // ========================================================================
+
+    #[test]
+    fn test_invite_key_generation() {
+        let org = OrganizationId::new(42);
+        let invite = InviteId::new(7);
+        assert_eq!(SystemKeys::invite_key(org, invite), "invite:42:7");
+    }
+
+    #[test]
+    fn test_parse_invite_key_roundtrip() {
+        let org = OrganizationId::new(42);
+        let invite = InviteId::new(7);
+        let key = SystemKeys::invite_key(org, invite);
+        let (parsed_org, parsed_invite) = SystemKeys::parse_invite_key(&key).unwrap();
+        assert_eq!(parsed_org, org);
+        assert_eq!(parsed_invite, invite);
+    }
+
+    #[test]
+    fn test_parse_invite_key_invalid() {
+        assert!(SystemKeys::parse_invite_key("user:42").is_none());
+        assert!(SystemKeys::parse_invite_key("invite:abc:7").is_none());
+        assert!(SystemKeys::parse_invite_key("invite:42").is_none());
+    }
+
+    #[test]
+    fn test_invite_prefix_consistency() {
+        let org = OrganizationId::new(42);
+        let key = SystemKeys::invite_key(org, InviteId::new(1));
+        let prefix = SystemKeys::invite_prefix(org);
+        assert!(key.starts_with(&prefix));
+        assert!(key.starts_with(SystemKeys::INVITE_PREFIX));
+    }
+
+    #[test]
+    fn test_invite_slug_index_key() {
+        let slug = InviteSlug::new(9876543210);
+        assert_eq!(SystemKeys::invite_slug_index_key(slug), "_idx:invite:slug:9876543210");
+    }
+
+    #[test]
+    fn test_invite_token_hash_index_key() {
+        assert_eq!(
+            SystemKeys::invite_token_hash_index_key("abcdef0123456789"),
+            "_idx:invite:token_hash:abcdef0123456789"
+        );
+    }
+
+    #[test]
+    fn test_invite_email_hash_index_key() {
+        let invite = InviteId::new(7);
+        let key = SystemKeys::invite_email_hash_index_key("deadbeef", invite);
+        assert_eq!(key, "_idx:invite:email_hash:deadbeef:7");
+        // Verify the key starts with the email hash prefix
+        assert!(key.starts_with(SystemKeys::INVITE_EMAIL_HASH_INDEX_PREFIX));
+    }
+
+    #[test]
+    fn test_invite_email_hash_prefix_scan() {
+        let hmac = "deadbeef";
+        let prefix = SystemKeys::invite_email_hash_prefix(hmac);
+        assert_eq!(prefix, "_idx:invite:email_hash:deadbeef:");
+        // Keys for different invites with the same email HMAC share this prefix
+        let key1 = SystemKeys::invite_email_hash_index_key(hmac, InviteId::new(1));
+        let key2 = SystemKeys::invite_email_hash_index_key(hmac, InviteId::new(2));
+        assert!(key1.starts_with(&prefix));
+        assert!(key2.starts_with(&prefix));
+    }
+
+    #[test]
+    fn test_invite_seq_key() {
+        assert_eq!(SystemKeys::INVITE_SEQ_KEY, "_meta:seq:invite");
+    }
+
+    #[test]
+    fn test_invite_key_tier_classification() {
+        let org = OrganizationId::new(1);
+        let invite = InviteId::new(1);
+        // REGIONAL: invitation record
+        assert_eq!(
+            SystemKeys::classify_key_tier(&SystemKeys::invite_key(org, invite)),
+            Some(KeyTier::Regional),
+        );
+        // GLOBAL: slug index
+        assert_eq!(
+            SystemKeys::classify_key_tier(&SystemKeys::invite_slug_index_key(InviteSlug::new(1))),
+            Some(KeyTier::Global),
+        );
+        // GLOBAL: token hash index
+        assert_eq!(
+            SystemKeys::classify_key_tier(&SystemKeys::invite_token_hash_index_key("abc")),
+            Some(KeyTier::Global),
+        );
+        // GLOBAL: email hash index
+        assert_eq!(
+            SystemKeys::classify_key_tier(&SystemKeys::invite_email_hash_index_key("abc", invite)),
+            Some(KeyTier::Global),
+        );
+        // GLOBAL: sequence counter
+        assert_eq!(
+            SystemKeys::classify_key_tier(SystemKeys::INVITE_SEQ_KEY),
+            Some(KeyTier::Global),
+        );
+    }
+
+    #[test]
+    fn test_invite_prefix_does_not_collide_with_idx() {
+        // Bare `invite:` prefix must not collide with `_idx:invite:`
+        assert!(!SystemKeys::INVITE_PREFIX.starts_with("_idx:"));
+        assert!(!"_idx:invite:".starts_with(SystemKeys::INVITE_PREFIX));
     }
 }

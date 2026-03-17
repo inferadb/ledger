@@ -109,7 +109,7 @@ cargo +1.92 clippy --workspace --all-targets -- -D warnings
 ## Architecture
 
 ```
-gRPC Services (12): Read, Write, Admin, Organization, Vault, User, App, Token, Events, Health, Discovery, Raft
+gRPC Services (13): Read, Write, Admin, Organization, Vault, User, App, Token, Invitation, Events, Health, Discovery, Raft
        ↓
 inferadb-ledger-services — gRPC service implementations, JWT engine, server assembly
        ↓
@@ -127,7 +127,7 @@ inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors, tok
 - `types` — SHA-256/seahash, merkle tree, snafu errors, config types, token claims, newtype identifiers
 - `store` — B+ tree engine, page management, memory/file backends, envelope encryption (RegionMasterKey/DEK)
 - `proto` — Protobuf code generation and From/TryFrom conversions
-- `state` — Domain state, entity/relationship CRUD, state root computation, system services (users, signing keys, refresh tokens)
+- `state` — Domain state, entity/relationship CRUD, state root computation, system services (users, signing keys, refresh tokens, invitations)
 - `raft` — openraft 0.9 integration, transaction batching, rate limiting, saga orchestrator, background jobs
 - `services` — gRPC service implementations, JwtEngine, LedgerServer assembly
 - `server` — Binary, bootstrap, CLI configuration, node ID generation
@@ -138,7 +138,7 @@ inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors, tok
 
 - `StorageEngine` (state/engine.rs) — store wrapper with transaction helpers
 - `StateLayer` (state/state.rs) — applies blocks, computes state roots
-- `LedgerServer` (services/server.rs) — gRPC server combining all 12 services with Raft
+- `LedgerServer` (services/server.rs) — gRPC server combining all 13 services with Raft
 
 **Data model:**
 
@@ -151,6 +151,7 @@ inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors, tok
 - Team → organization-scoped user group
 - SigningKey → Ed25519 JWT signing key with scope (Global/Organization) and status (Active/Rotated/Revoked)
 - RefreshToken → session token family with poison detection and TTL
+- OrganizationInvitation → invitation lifecycle (REGIONAL-only, Pattern 1)
 - Shard → organizations sharing a Raft group
 
 **Dual-ID architecture:** Internal sequential IDs (`i64`) for storage, Snowflake slugs (`u64`) for external APIs. The `SlugResolver` translates at gRPC service boundaries.
@@ -162,6 +163,7 @@ inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors, tok
 | `UserId(i64)`         | `UserSlug(u64)`         |
 | `AppId(i64)`          | `AppSlug(u64)`          |
 | `TeamId(i64)`         | `TeamSlug(u64)`         |
+| `InviteId(i64)`       | `InviteSlug(u64)`       |
 
 Other newtypes: `SigningKeyId(i64)`, `RefreshTokenId(i64)`, `UserEmailId(i64)`, `EmailVerifyTokenId(i64)`, `ClientAssertionId(i64)`, `TokenVersion(u64)`. All defined in `types/src/types.rs` via `define_id!`/`define_slug!` macros.
 
@@ -181,7 +183,7 @@ Underscore-prefixed keys (`_xxx:`) are system infrastructure; bare keys are doma
 
 **Data residency patterns:**
 
-- **Pattern 1 (REGIONAL-only)**: Full record in REGIONAL under bare key. No GLOBAL counterpart. Examples: `user:`, `team:`, `user_email:`.
+- **Pattern 1 (REGIONAL-only)**: Full record in REGIONAL under bare key. No GLOBAL counterpart. Examples: `user:`, `team:`, `user_email:`, `invite:`.
 - **Pattern 2 (skeleton+overlay)**: GLOBAL skeleton under bare key (PII fields empty), REGIONAL PII under `{entity}_profile:` key. Service layer merges on read. Examples: `app:` + `app_profile:`, `org:` + `org_profile:`.
 - **Pattern 3 (GLOBAL-only)**: No PII, no regional presence. Examples: `signing_key:`, `refresh_token:`.
 

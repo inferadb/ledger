@@ -941,6 +941,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             "client_assertion".to_string(),
             state.sequences.client_assertion.value() as u64,
         ));
+        pending.sequences.push(("invite".to_string(), state.sequences.invite.value() as u64));
 
         // Persist core state blob + external table writes atomically
         self.save_state_core(&state, &pending)?;

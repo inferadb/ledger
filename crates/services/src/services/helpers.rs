@@ -329,7 +329,15 @@ pub(crate) fn error_code_to_status(code: ErrorCode, message: String) -> Status {
         ErrorCode::InvalidArgument => Status::invalid_argument(message),
         ErrorCode::Internal => Status::internal(message),
         ErrorCode::Unauthenticated => Status::unauthenticated(message),
-        ErrorCode::RateLimited => Status::resource_exhausted(message),
-        ErrorCode::Expired | ErrorCode::TooManyAttempts => Status::failed_precondition(message),
+        ErrorCode::RateLimited | ErrorCode::InvitationRateLimited => {
+            Status::resource_exhausted(message)
+        },
+        ErrorCode::Expired | ErrorCode::TooManyAttempts | ErrorCode::InvitationAlreadyResolved => {
+            Status::failed_precondition(message)
+        },
+        ErrorCode::InvitationEmailMismatch => Status::not_found(message),
+        ErrorCode::InvitationAlreadyMember | ErrorCode::InvitationDuplicatePending => {
+            Status::already_exists(message)
+        },
     }
 }

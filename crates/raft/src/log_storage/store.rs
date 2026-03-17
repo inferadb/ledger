@@ -14,9 +14,9 @@ use inferadb_ledger_store::{
     Database, DatabaseConfig, FileBackend, Key, StorageBackend, Value, WriteTransaction, tables,
 };
 use inferadb_ledger_types::{
-    AppId, AppSlug, ClientAssertionId, ClientId, EmailVerifyTokenId, NodeId, OrganizationId,
-    OrganizationSlug, RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug, UserEmailId, UserId,
-    UserSlug, VaultId, VaultSlug, decode, encode,
+    AppId, AppSlug, ClientAssertionId, ClientId, EmailVerifyTokenId, InviteId, NodeId,
+    OrganizationId, OrganizationSlug, RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug,
+    UserEmailId, UserId, UserSlug, VaultId, VaultSlug, decode, encode,
 };
 use openraft::{Entry, LogId, StorageError, Vote};
 use parking_lot::RwLock;
@@ -782,6 +782,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 "refresh_token" => {
                     state.sequences.refresh_token = RefreshTokenId::new(value as i64);
                 },
+                "invite" => state.sequences.invite = InviteId::new(value as i64),
                 unknown => {
                     warn!(key = unknown, "Unknown sequence key in Sequences table, skipping");
                 },
@@ -1127,8 +1128,9 @@ mod tests {
     use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
     use inferadb_ledger_store::{FileBackend, tables};
     use inferadb_ledger_types::{
-        AppId, ClientAssertionId, ClientId, OrganizationId, OrganizationSlug, RefreshTokenId,
-        Region, SigningKeyId, TeamId, UserEmailId, VaultId, VaultSlug, decode, encode,
+        AppId, ClientAssertionId, ClientId, InviteId, OrganizationId, OrganizationSlug,
+        RefreshTokenId, Region, SigningKeyId, TeamId, UserEmailId, VaultId, VaultSlug, decode,
+        encode,
     };
     use openraft::{CommittedLeaderId, LogId};
     use tempfile::tempdir;
@@ -1160,6 +1162,7 @@ mod tests {
                 client_assertion: ClientAssertionId::new(0),
                 signing_key: SigningKeyId::new(0),
                 refresh_token: RefreshTokenId::new(0),
+                invite: InviteId::new(0),
             },
             ..Default::default()
         };
@@ -1284,6 +1287,7 @@ mod tests {
         pending
             .sequences
             .push(("refresh_token".to_string(), state.sequences.refresh_token.value() as u64));
+        pending.sequences.push(("invite".to_string(), state.sequences.invite.value() as u64));
 
         for ((org_id, vault_id, client_id), sequence) in &state.client_sequences {
             let key = PendingExternalWrites::client_sequence_key(
@@ -1818,6 +1822,7 @@ mod tests {
                 client_assertion: ClientAssertionId::new(0),
                 signing_key: SigningKeyId::new(0),
                 refresh_token: RefreshTokenId::new(0),
+                invite: InviteId::new(0),
             },
             ..Default::default()
         };
@@ -1923,6 +1928,7 @@ mod tests {
                 client_assertion: ClientAssertionId::new(0),
                 signing_key: SigningKeyId::new(0),
                 refresh_token: RefreshTokenId::new(0),
+                invite: InviteId::new(0),
             },
             ..Default::default()
         };

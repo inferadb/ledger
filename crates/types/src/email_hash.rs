@@ -61,13 +61,27 @@ impl fmt::Debug for EmailBlindingKey {
 
 /// Normalizes an email address for consistent HMAC computation.
 ///
-/// Rules:
-/// - Trims leading/trailing whitespace
-/// - Lowercases the entire address (RFC 5321 local-part is technically case-sensitive, but in
-///   practice all major providers treat it as case-insensitive — matching this convention avoids
-///   user confusion)
+/// Rules (applied in order):
+/// 1. Trims leading/trailing whitespace and lowercases
+/// 2. Strips plus-addressing: `user+tag@example.com` → `user@example.com`
+/// 3. Removes dots from Gmail/Googlemail local parts: `u.ser@gmail.com` → `user@gmail.com`
+///
+/// The plaintext email stored in REGIONAL is never modified. This normalization
+/// is only used for HMAC computation (rate limiting, dedup, uniqueness checks).
 pub fn normalize_email(email: &str) -> String {
-    email.trim().to_lowercase()
+    let email = email.trim().to_lowercase();
+    let Some((local, domain)) = email.rsplit_once('@') else {
+        return email;
+    };
+    // Strip plus-addressing: user+tag → user
+    let local = local.split('+').next().unwrap_or(local);
+    // Gmail dot-insensitivity: u.ser → user (Gmail/Googlemail only)
+    let local = if domain == "gmail.com" || domain == "googlemail.com" {
+        local.replace('.', "")
+    } else {
+        local.to_string()
+    };
+    format!("{local}@{domain}")
 }
 
 /// Computes `HMAC-SHA256(key, "email:" || normalize(email))` and returns the
@@ -430,6 +444,46 @@ mod tests {
         // With 36^6 combinations, two consecutive codes colliding is ~1/2.18B.
         // This test has a negligible false-positive rate.
         assert_ne!(code1, code2, "Two consecutive codes should differ");
+    }
+
+    #[test]
+    fn normalize_strips_plus_addressing() {
+        assert_eq!(normalize_email("user+tag@example.com"), "user@example.com");
+    }
+
+    #[test]
+    fn normalize_strips_plus_gmail() {
+        assert_eq!(normalize_email("user+tag@gmail.com"), "user@gmail.com");
+    }
+
+    #[test]
+    fn normalize_removes_gmail_dots() {
+        assert_eq!(normalize_email("u.s.e.r@gmail.com"), "user@gmail.com");
+    }
+
+    #[test]
+    fn normalize_removes_googlemail_dots() {
+        assert_eq!(normalize_email("u.s.e.r@googlemail.com"), "user@googlemail.com");
+    }
+
+    #[test]
+    fn normalize_preserves_non_gmail_dots() {
+        assert_eq!(normalize_email("u.s.e.r@corporate.com"), "u.s.e.r@corporate.com");
+    }
+
+    #[test]
+    fn normalize_plus_and_dots_combined() {
+        assert_eq!(normalize_email("u.s.e.r+tag@gmail.com"), "user@gmail.com");
+    }
+
+    #[test]
+    fn normalize_empty_plus_prefix() {
+        assert_eq!(normalize_email("+@gmail.com"), "@gmail.com");
+    }
+
+    #[test]
+    fn normalize_no_at_sign() {
+        assert_eq!(normalize_email("no-at-sign"), "no-at-sign");
     }
 
     proptest! {

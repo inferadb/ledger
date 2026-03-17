@@ -231,6 +231,16 @@ pub enum EventAction {
     OrganizationMemberRemoved,
     /// Organization member role updated.
     OrganizationMemberRoleUpdated,
+    /// Organization member added.
+    OrganizationMemberAdded,
+    /// Organization invitation created.
+    InvitationCreated,
+    /// Organization invitation resolved (accepted, declined, expired, or revoked).
+    InvitationResolved,
+    /// Invitation indexes purged during retention reaping.
+    InvitationPurged,
+    /// Invitation email HMAC rehashed during blinding key rotation.
+    InvitationEmailRehashed,
     /// Organization team created.
     TeamCreated,
     /// Organization team updated.
@@ -350,6 +360,11 @@ impl EventAction {
             | EventAction::OrganizationUpdated
             | EventAction::OrganizationMemberRemoved
             | EventAction::OrganizationMemberRoleUpdated
+            | EventAction::OrganizationMemberAdded
+            | EventAction::InvitationCreated
+            | EventAction::InvitationResolved
+            | EventAction::InvitationPurged
+            | EventAction::InvitationEmailRehashed
             | EventAction::TeamCreated
             | EventAction::TeamUpdated
             | EventAction::TeamDeleted
@@ -419,6 +434,11 @@ impl EventAction {
             EventAction::OrganizationUpdated => "ledger.organization.updated",
             EventAction::OrganizationMemberRemoved => "ledger.organization.member_removed",
             EventAction::OrganizationMemberRoleUpdated => "ledger.organization.member_role_updated",
+            EventAction::OrganizationMemberAdded => "ledger.organization.member_added",
+            EventAction::InvitationCreated => "ledger.invitation.created",
+            EventAction::InvitationResolved => "ledger.invitation.resolved",
+            EventAction::InvitationPurged => "ledger.invitation.purged",
+            EventAction::InvitationEmailRehashed => "ledger.invitation.email_rehashed",
             EventAction::TeamCreated => "ledger.team.created",
             EventAction::TeamUpdated => "ledger.team.updated",
             EventAction::TeamDeleted => "ledger.team.deleted",
@@ -486,6 +506,11 @@ impl EventAction {
             EventAction::OrganizationUpdated => "organization_updated",
             EventAction::OrganizationMemberRemoved => "organization_member_removed",
             EventAction::OrganizationMemberRoleUpdated => "organization_member_role_updated",
+            EventAction::OrganizationMemberAdded => "organization_member_added",
+            EventAction::InvitationCreated => "invitation_created",
+            EventAction::InvitationResolved => "invitation_resolved",
+            EventAction::InvitationPurged => "invitation_purged",
+            EventAction::InvitationEmailRehashed => "invitation_email_rehashed",
             EventAction::TeamCreated => "team_created",
             EventAction::TeamUpdated => "team_updated",
             EventAction::TeamDeleted => "team_deleted",
@@ -548,6 +573,11 @@ impl EventAction {
         EventAction::OrganizationUpdated,
         EventAction::OrganizationMemberRemoved,
         EventAction::OrganizationMemberRoleUpdated,
+        EventAction::OrganizationMemberAdded,
+        EventAction::InvitationCreated,
+        EventAction::InvitationResolved,
+        EventAction::InvitationPurged,
+        EventAction::InvitationEmailRehashed,
         EventAction::TeamCreated,
         EventAction::TeamUpdated,
         EventAction::TeamDeleted,
@@ -999,8 +1029,8 @@ mod tests {
 
     #[test]
     fn event_action_all_count() {
-        // 46 system + 11 organization = 57 total
-        assert_eq!(EventAction::ALL.len(), 57);
+        // 46 system + 12 organization = 58 total
+        assert_eq!(EventAction::ALL.len(), 62);
     }
 
     // ── EventOutcome ────────────────────────────────────────
