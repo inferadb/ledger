@@ -35,7 +35,7 @@ type InvClient =
 /// until the saga completes provisioning (Provisioning → Active).
 async fn setup_org(addr: std::net::SocketAddr, name: &str) -> u64 {
     let start = tokio::time::Instant::now();
-    let timeout = Duration::from_secs(15);
+    let timeout = Duration::from_secs(30);
 
     // Step 1: Create org (retry if saga orchestrator not ready)
     let slug = loop {
@@ -81,7 +81,7 @@ async fn setup_org(addr: std::net::SocketAddr, name: &str) -> u64 {
                 println!("org {slug} status = {} (waiting for Active=1)", org.status);
             },
             Err(e) => {
-                println!("org {slug} get failed: {}", e.message());
+                println!("org {slug} get failed: code={:?} msg={}", e.code(), e.message());
             },
         }
 
@@ -93,16 +93,18 @@ async fn setup_org(addr: std::net::SocketAddr, name: &str) -> u64 {
 }
 
 /// Creates an invitation and returns (slug, token).
+/// `admin_slug` must be a valid org admin for the target org.
 async fn create_invite(
     client: &mut InvClient,
     org: u64,
+    admin_slug: u64,
     email: &str,
     ttl_hours: u32,
 ) -> (u64, String) {
     let resp = client
         .create_organization_invite(proto::CreateOrganizationInviteRequest {
             organization: Some(proto::OrganizationSlug { slug: org }),
-            caller: Some(proto::UserSlug { slug: 1 }),
+            caller: Some(proto::UserSlug { slug: admin_slug }),
             email: email.to_string(),
             role: proto::OrganizationMemberRole::Member as i32,
             ttl_hours,
@@ -126,16 +128,6 @@ async fn create_invite(
 async fn test_create_and_list_invitations() {
     let cluster = TestCluster::new(1).await;
     let addr = cluster.nodes()[0].addr;
-
-    // Debug: verify node state
-    let node = &cluster.nodes()[0];
-    println!("node_id={}, is_leader={}, regions={:?}", node.id, node.is_leader(), node.regions());
-    for region in node.regions() {
-        if let Some(rg) = node.region_group(region) {
-            let m = rg.raft().metrics().borrow().clone();
-            println!("  region {:?}: leader={:?}, id={}", region, m.current_leader, m.id);
-        }
-    }
 
     let org = setup_org(addr, "Lifecycle Org").await;
     let mut client = create_invitation_client(addr).await.expect("connect inv");

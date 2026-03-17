@@ -1121,10 +1121,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 organization_slug,
             } => {
                 // Step 1 (REGIONAL): Write organization profile + ownership
-                // Organization name is PII — pull from in-memory cache, not saga state
-                let org_pii = self.org_pii_cache.lock().remove(&saga.id);
-                let name = match org_pii {
-                    Some(pii) => pii.name,
+                // Organization name is PII — read from in-memory cache (NOT removed yet;
+                // removal happens after the REGIONAL write succeeds to avoid PiiLost
+                // on transient Raft failures like leader-not-ready).
+                let name = match self.org_pii_cache.lock().get(&saga.id) {
+                    Some(pii) => pii.name.clone(),
                     None => {
                         warn!(
                             saga_id = %saga.id,
@@ -1153,6 +1154,9 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     shred_key_bytes,
                 });
                 self.propose_to_region(saga.input.region, request).await?;
+
+                // REGIONAL write succeeded — now safe to remove PII from cache
+                self.org_pii_cache.lock().remove(&saga.id);
 
                 saga.transition(CreateOrganizationSagaState::ProfileWritten {
                     organization_id,
