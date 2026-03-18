@@ -30,8 +30,8 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::Codec`] if serialization fails, or
-    /// [`SystemError::State`] if the write fails.
+    /// Returns [`super::SystemError::Codec`] if serialization fails, or
+    /// [`super::SystemError::State`] if the write fails.
     pub fn create_invitation(&self, invitation: &OrganizationInvitation) -> Result<()> {
         let key = SystemKeys::invite_key(invitation.organization, invitation.id);
         require_tier(&key, KeyTier::Regional)?;
@@ -48,8 +48,8 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::Codec`] if deserialization fails, or
-    /// [`SystemError::State`] if the read fails.
+    /// Returns [`super::SystemError::Codec`] if deserialization fails, or
+    /// [`super::SystemError::State`] if the read fails.
     pub fn read_invitation(
         &self,
         organization: OrganizationId,
@@ -73,14 +73,14 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     /// still `Pending`, applies the new status and `resolved_at` timestamp,
     /// then writes back. Returns the updated record on success.
     ///
-    /// Returns [`SystemError::NotFound`] if the invitation doesn't exist.
-    /// Returns [`SystemError::FailedPrecondition`] if the invitation is no
+    /// Returns [`super::SystemError::NotFound`] if the invitation doesn't exist.
+    /// Returns [`super::SystemError::FailedPrecondition`] if the invitation is no
     /// longer Pending (already resolved).
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::Codec`] on serialization failure, or
-    /// [`SystemError::State`] on storage failure.
+    /// Returns [`super::SystemError::Codec`] on serialization failure, or
+    /// [`super::SystemError::State`] on storage failure.
     pub fn update_invitation_status(
         &self,
         organization: OrganizationId,
@@ -134,10 +134,10 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::NotFound`] if the invitation doesn't exist.
-    /// Returns [`SystemError::FailedPrecondition`] if the invitation is
+    /// Returns [`super::SystemError::NotFound`] if the invitation doesn't exist.
+    /// Returns [`super::SystemError::FailedPrecondition`] if the invitation is
     /// no longer Pending.
-    /// Returns [`SystemError::Codec`] or [`SystemError::State`] on failures.
+    /// Returns [`super::SystemError::Codec`] or [`super::SystemError::State`] on failures.
     pub fn update_invitation_email_hmac(
         &self,
         organization: OrganizationId,
@@ -182,7 +182,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the delete fails.
+    /// Returns [`super::SystemError::State`] if the delete fails.
     pub fn delete_invitation(&self, organization: OrganizationId, invite: InviteId) -> Result<()> {
         let key = SystemKeys::invite_key(organization, invite);
         require_tier(&key, KeyTier::Regional)?;
@@ -202,7 +202,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the scan fails. Corrupt records
+    /// Returns [`super::SystemError::State`] if the scan fails. Corrupt records
     /// are logged and skipped rather than failing the entire scan.
     pub fn list_invitations_by_org(
         &self,

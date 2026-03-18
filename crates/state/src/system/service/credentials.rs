@@ -44,9 +44,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::AlreadyExists`] if a uniqueness invariant is
-    /// violated, [`SystemError::Codec`] for serialization failures, or
-    /// [`SystemError::State`] for storage failures.
+    /// Returns [`super::SystemError::AlreadyExists`] if a uniqueness invariant is
+    /// violated, [`super::SystemError::Codec`] for serialization failures, or
+    /// [`super::SystemError::State`] for storage failures.
     pub fn create_user_credential(
         &self,
         user_id: UserId,
@@ -146,8 +146,8 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the scan fails, or
-    /// [`SystemError::Codec`] if deserialization fails.
+    /// Returns [`super::SystemError::State`] if the scan fails, or
+    /// [`super::SystemError::Codec`] if deserialization fails.
     pub fn list_user_credentials(
         &self,
         user_id: UserId,
@@ -183,8 +183,8 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the read fails, or
-    /// [`SystemError::Codec`] if deserialization fails.
+    /// Returns [`super::SystemError::State`] if the read fails, or
+    /// [`super::SystemError::Codec`] if deserialization fails.
     pub fn get_user_credential(
         &self,
         user_id: UserId,
@@ -210,9 +210,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::NotFound`] if the credential doesn't exist,
-    /// [`SystemError::Codec`] for serialization failures, or
-    /// [`SystemError::State`] for storage failures.
+    /// Returns [`super::SystemError::NotFound`] if the credential doesn't exist,
+    /// [`super::SystemError::Codec`] for serialization failures, or
+    /// [`super::SystemError::State`] for storage failures.
     pub fn update_user_credential(
         &self,
         user_id: UserId,
@@ -265,9 +265,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::NotFound`] if the credential doesn't exist,
-    /// [`SystemError::FailedPrecondition`] if this is the last credential,
-    /// [`SystemError::State`] for storage failures.
+    /// Returns [`super::SystemError::NotFound`] if the credential doesn't exist,
+    /// [`super::SystemError::FailedPrecondition`] if this is the last credential,
+    /// [`super::SystemError::State`] for storage failures.
     pub fn delete_user_credential(
         &self,
         user_id: UserId,
@@ -312,7 +312,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the scan or delete fails.
+    /// Returns [`super::SystemError::State`] if the scan or delete fails.
     pub fn delete_all_user_credentials(&self, user_id: UserId) -> Result<()> {
         let prefix = SystemKeys::user_credential_prefix(user_id);
         let entities = self
@@ -359,9 +359,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::ResourceExhausted`] if the user already has
-    /// 3 active challenges, [`SystemError::Codec`] for serialization
-    /// failures, or [`SystemError::State`] for storage failures.
+    /// Returns [`super::SystemError::ResourceExhausted`] if the user already has
+    /// 3 active challenges, [`super::SystemError::Codec`] for serialization
+    /// failures, or [`super::SystemError::State`] for storage failures.
     pub fn create_totp_challenge(&self, challenge: &PendingTotpChallenge) -> Result<()> {
         // Rate limit: reject if user already has MAX_ACTIVE_TOTP_CHALLENGES
         // unexpired challenges.
@@ -394,8 +394,8 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the read fails, or
-    /// [`SystemError::Codec`] if deserialization fails.
+    /// Returns [`super::SystemError::State`] if the read fails, or
+    /// [`super::SystemError::Codec`] if deserialization fails.
     pub fn get_totp_challenge(
         &self,
         user_id: UserId,
@@ -417,7 +417,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the delete fails.
+    /// Returns [`super::SystemError::State`] if the delete fails.
     pub fn delete_totp_challenge(&self, user_id: UserId, nonce: &[u8; 32]) -> Result<()> {
         let key = SystemKeys::totp_challenge_key(user_id, nonce);
         require_tier(&key, KeyTier::Regional)?;
@@ -433,10 +433,10 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::NotFound`] if the challenge doesn't exist,
-    /// [`SystemError::FailedPrecondition`] if max attempts exceeded,
-    /// [`SystemError::Codec`] for codec failures, or
-    /// [`SystemError::State`] for storage failures.
+    /// Returns [`super::SystemError::NotFound`] if the challenge doesn't exist,
+    /// [`super::SystemError::FailedPrecondition`] if max attempts exceeded,
+    /// [`super::SystemError::Codec`] for codec failures, or
+    /// [`super::SystemError::State`] for storage failures.
     pub fn increment_totp_attempts(
         &self,
         user_id: UserId,
@@ -471,7 +471,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the scan or delete fails.
+    /// Returns [`super::SystemError::State`] if the scan or delete fails.
     pub fn delete_all_totp_challenges(&self, user_id: UserId) -> Result<()> {
         let prefix = SystemKeys::totp_challenge_prefix(user_id);
         let entities = self
@@ -515,7 +515,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::NotFound`] if no matching hash is found or
+    /// Returns [`super::SystemError::NotFound`] if no matching hash is found or
     /// the credential doesn't exist.
     pub fn consume_recovery_code(
         &self,

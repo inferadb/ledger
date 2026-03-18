@@ -39,7 +39,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] or [`SystemError::Codec`] if underlying
+    /// Returns [`super::SystemError::State`] or [`super::SystemError::Codec`] if underlying
     /// operations fail.
     pub fn migrate_existing_users(
         &self,

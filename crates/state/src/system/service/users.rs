@@ -33,9 +33,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::AlreadyExists`] if the email address is already
-    /// registered, [`SystemError::Codec`] if serialization fails, or
-    /// [`SystemError::State`] for other storage failures.
+    /// Returns [`super::SystemError::AlreadyExists`] if the email address is already
+    /// registered, [`super::SystemError::Codec`] if serialization fails, or
+    /// [`super::SystemError::State`] for other storage failures.
     pub fn create_user(
         &self,
         name: &str,
@@ -138,8 +138,8 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the read fails, or
-    /// [`SystemError::Codec`] if deserialization fails.
+    /// Returns [`super::SystemError::State`] if the read fails, or
+    /// [`super::SystemError::Codec`] if deserialization fails.
     pub fn get_user(&self, user_id: UserId) -> Result<Option<User>> {
         let key = SystemKeys::user_key(user_id);
         let entity_opt =
@@ -159,8 +159,8 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if any read fails, or
-    /// [`SystemError::Codec`] if deserialization fails.
+    /// Returns [`super::SystemError::State`] if any read fails, or
+    /// [`super::SystemError::Codec`] if deserialization fails.
     pub fn get_user_emails(&self, user_id: UserId) -> Result<Vec<UserEmail>> {
         let email_ids = self.get_user_email_ids(user_id)?;
         let mut emails = Vec::new();
@@ -180,9 +180,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::NotFound`] if the user does not exist or the
-    /// specified email is not owned by the user, [`SystemError::Codec`] if
-    /// serialization fails, or [`SystemError::State`] for storage failures.
+    /// Returns [`super::SystemError::NotFound`] if the user does not exist or the
+    /// specified email is not owned by the user, [`super::SystemError::Codec`] if
+    /// serialization fails, or [`super::SystemError::State`] for storage failures.
     pub fn update_user(
         &self,
         user_id: UserId,
@@ -223,9 +223,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::NotFound`] if the user does not exist,
-    /// [`SystemError::Codec`] if serialization fails, or
-    /// [`SystemError::State`] for storage failures.
+    /// Returns [`super::SystemError::NotFound`] if the user does not exist,
+    /// [`super::SystemError::Codec`] if serialization fails, or
+    /// [`super::SystemError::State`] for storage failures.
     pub fn update_user_profile(&self, user_id: UserId, name: &str) -> Result<User> {
         let mut user = self
             .get_user(user_id)?
@@ -249,10 +249,10 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::NotFound`] if the user does not exist,
-    /// [`SystemError::AlreadyExists`] if already in a deletion state,
-    /// [`SystemError::Codec`] if serialization fails, or
-    /// [`SystemError::State`] for storage failures.
+    /// Returns [`super::SystemError::NotFound`] if the user does not exist,
+    /// [`super::SystemError::AlreadyExists`] if already in a deletion state,
+    /// [`super::SystemError::Codec`] if serialization fails, or
+    /// [`super::SystemError::State`] for storage failures.
     pub fn soft_delete_user(&self, user_id: UserId) -> Result<User> {
         let mut user = self
             .get_user(user_id)?
@@ -284,7 +284,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the scan fails.
+    /// Returns [`super::SystemError::State`] if the scan fails.
     pub fn list_users(&self, start_after: Option<&str>, limit: usize) -> Result<Vec<User>> {
         let entities = self
             .state
@@ -312,8 +312,8 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the read fails, or
-    /// [`SystemError::Codec`] if deserialization fails.
+    /// Returns [`super::SystemError::State`] if the read fails, or
+    /// [`super::SystemError::Codec`] if deserialization fails.
     pub fn search_users_by_email(&self, email: &str) -> Result<Option<User>> {
         let email_lower = email.to_lowercase();
         let idx_key = SystemKeys::email_index_key(&email_lower);
@@ -343,9 +343,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::NotFound`] if the user does not exist,
-    /// [`SystemError::State`] for storage failures (including duplicate
-    /// email via CAS rejection), or [`SystemError::Codec`] if serialization
+    /// Returns [`super::SystemError::NotFound`] if the user does not exist,
+    /// [`super::SystemError::State`] for storage failures (including duplicate
+    /// email via CAS rejection), or [`super::SystemError::Codec`] if serialization
     /// fails.
     pub fn create_user_email_record(&self, user_id: UserId, email: &str) -> Result<UserEmailId> {
         let _ = self
@@ -416,10 +416,10 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::AlreadyExists`] if attempting to delete the
-    /// primary email, [`SystemError::NotFound`] if the user or email does not
-    /// exist or is not owned by this user, [`SystemError::Codec`] if
-    /// serialization fails, or [`SystemError::State`] for storage failures.
+    /// Returns [`super::SystemError::AlreadyExists`] if attempting to delete the
+    /// primary email, [`super::SystemError::NotFound`] if the user or email does not
+    /// exist or is not owned by this user, [`super::SystemError::Codec`] if
+    /// serialization fails, or [`super::SystemError::State`] for storage failures.
     pub fn delete_user_email_record(&self, user_id: UserId, email_id: UserEmailId) -> Result<()> {
         let user = self
             .get_user(user_id)?
@@ -469,9 +469,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::NotFound`] if the email record does not exist,
-    /// [`SystemError::Codec`] if serialization fails, or
-    /// [`SystemError::State`] for storage failures.
+    /// Returns [`super::SystemError::NotFound`] if the email record does not exist,
+    /// [`super::SystemError::Codec`] if serialization fails, or
+    /// [`super::SystemError::State`] for storage failures.
     pub fn verify_user_email_record(&self, email_id: UserEmailId) -> Result<UserEmail> {
         let mut email = self
             .get_user_email(email_id)?
@@ -513,8 +513,8 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] for storage failures or
-    /// [`SystemError::Codec`] if deserialization fails.
+    /// Returns [`super::SystemError::State`] for storage failures or
+    /// [`super::SystemError::Codec`] if deserialization fails.
     pub fn get_verification_token_by_hash(
         &self,
         plaintext_token: &str,

@@ -449,7 +449,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if flushing dirty pages or writing the header fails.
+    /// Returns [`super::Error::Io`] if flushing dirty pages or writing the header fails.
     pub fn commit(mut self) -> Result<()> {
         // Record modified page IDs in the backup dirty bitmap before draining.
         // This enables incremental backups to capture exactly which pages changed.

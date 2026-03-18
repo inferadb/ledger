@@ -18,8 +18,8 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::Codec`] if serialization fails, or
-    /// [`SystemError::State`] if the write operation fails.
+    /// Returns [`super::SystemError::Codec`] if serialization fails, or
+    /// [`super::SystemError::State`] if the write operation fails.
     pub fn register_node(&self, node: &NodeInfo) -> Result<()> {
         let key = SystemKeys::node_key(&node.node_id);
         let value = encode(node).context(CodecSnafu)?;
@@ -35,8 +35,8 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the read fails, or
-    /// [`SystemError::Codec`] if deserialization fails.
+    /// Returns [`super::SystemError::State`] if the read fails, or
+    /// [`super::SystemError::Codec`] if deserialization fails.
     pub fn get_node(&self, node_id: &NodeId) -> Result<Option<NodeInfo>> {
         let key = SystemKeys::node_key(node_id);
 
@@ -55,7 +55,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the underlying list operation fails.
+    /// Returns [`super::SystemError::State`] if the underlying list operation fails.
     pub fn list_nodes(&self) -> Result<Vec<NodeInfo>> {
         let entities = self
             .state
@@ -77,7 +77,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     ///
     /// # Errors
     ///
-    /// Returns [`SystemError::State`] if the delete operation fails.
+    /// Returns [`super::SystemError::State`] if the delete operation fails.
     pub fn remove_node(&self, node_id: &NodeId) -> Result<bool> {
         let key = SystemKeys::node_key(node_id);
         let ops = vec![Operation::DeleteEntity { key }];
