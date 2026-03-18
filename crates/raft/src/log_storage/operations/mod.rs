@@ -2,17 +2,21 @@
 //!
 //! Transforms committed log entries into state mutations via the storage engine.
 
-use std::sync::Arc;
+mod app_helpers;
+mod helpers;
+mod org_helpers;
+mod team_helpers;
+mod token_helpers;
 
 use chrono::{DateTime, Duration, Utc};
 use inferadb_ledger_state::{
-    StateError, StateLayer,
+    StateError,
     system::{
         App, AppCredentialType, AppCredentials, AppProfile, AppVaultConnection,
         ClientAssertionEntry, EmailHashEntry, KeyTier, OnboardingAccount, OrganizationMember,
         OrganizationMemberRole, OrganizationProfile, OrganizationRegistry, OrganizationStatus,
         OrganizationTier, PendingEmailVerification, ProvisioningReservation, RefreshToken,
-        RevocationResult, SYSTEM_VAULT_ID, SigningKey, SigningKeyStatus, SystemError, SystemKeys,
+        SYSTEM_VAULT_ID, SigningKey, SigningKeyStatus, SystemError, SystemKeys,
         SystemOrganizationService, Team, TeamMember, User, UserDirectoryEntry, UserDirectoryStatus,
         UserEmail,
     },
@@ -27,6 +31,19 @@ use inferadb_ledger_types::{
     hash_eq,
 };
 
+use self::{
+    app_helpers::{has_app_name_conflict, load_app, load_app_profile, save_app},
+    helpers::{
+        cascade_revoke, collect_all_entities_for_deletion, error_result, ledger_error,
+        saturating_duration_secs, try_encode,
+    },
+    org_helpers::{
+        load_organization, require_active_org_with_state, require_fully_active_org,
+        save_org_profile, save_organization,
+    },
+    team_helpers::{has_team_name_conflict, load_team, migrate_team_members, save_team},
+    token_helpers::require_signing_key,
+};
 use super::{
     store::RaftLogStore,
     types::{
@@ -38,407 +55,6 @@ use crate::{
     event_writer::ApplyPhaseEmitter,
     types::{EmailCodeVerifiedResult, LedgerRequest, LedgerResponse, SystemRequest},
 };
-
-/// Executes a cascade revocation and logs the outcome.
-///
-/// Cascade revocations are best-effort — failures are logged but do not
-/// abort the parent operation. Callers should enter a tracing span with
-/// relevant context fields (org_id, app_id, etc.) before calling.
-fn cascade_revoke<B: StorageBackend>(
-    state_layer: &Arc<StateLayer<B>>,
-    op: impl FnOnce(&SystemOrganizationService<B>) -> Result<RevocationResult, SystemError>,
-    success_msg: &str,
-    error_msg: &str,
-) {
-    let sys = SystemOrganizationService::new(state_layer.clone());
-    match op(&sys) {
-        Ok(result) => {
-            tracing::info!(revoked_count = result.revoked_count, "{success_msg}");
-        },
-        Err(e) => {
-            tracing::error!(error = %e, "{error_msg}");
-        },
-    }
-}
-
-/// Encodes a value for state persistence, logging an error if serialization fails.
-///
-/// In the Raft state machine, `encode()` failures are effectively impossible
-/// for well-formed domain types (bincode serialization of simple structs).
-/// However, silently swallowing failures would cause state divergence between
-/// in-memory and persisted state. This helper ensures any failure is logged
-/// at `error` level for immediate operational visibility.
-fn try_encode<T: serde::Serialize>(value: &T, context: &str) -> Option<Vec<u8>> {
-    match encode(value) {
-        Ok(blob) => Some(blob),
-        Err(e) => {
-            tracing::error!(context, error = %e, "Failed to encode state — persistence skipped, potential state divergence");
-            None
-        },
-    }
-}
-
-/// Constructs a `LedgerResponse::Error` with the given code and message.
-fn ledger_error(code: ErrorCode, message: impl Into<String>) -> LedgerResponse {
-    LedgerResponse::Error { code, message: message.into() }
-}
-
-/// Constructs an early-return error tuple for the apply handler.
-fn error_result(
-    code: ErrorCode,
-    message: impl Into<String>,
-) -> (LedgerResponse, Option<VaultEntry>) {
-    (ledger_error(code, message), None)
-}
-
-/// Validates a key's tier, returning a `LedgerResponse` error on mismatch.
-///
-/// Used in helper functions that return `Result<_, LedgerResponse>`.
-fn check_tier(key: &str, expected: KeyTier) -> Result<(), LedgerResponse> {
-    SystemKeys::validate_key_tier(key, expected)
-        .map_err(|msg| ledger_error(ErrorCode::Internal, msg))
-}
-
-/// Loads and decodes an `Organization` skeleton from the GLOBAL state layer.
-fn load_organization<B: StorageBackend>(
-    state_layer: &inferadb_ledger_state::StateLayer<B>,
-    organization: OrganizationId,
-) -> Result<inferadb_ledger_state::system::Organization, LedgerResponse> {
-    let key = SystemKeys::organization_key(organization);
-    let entity = state_layer
-        .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
-        .map_err(|e| {
-            ledger_error(ErrorCode::Internal, format!("Failed to read organization: {e}"))
-        })?
-        .ok_or_else(|| {
-            ledger_error(ErrorCode::NotFound, format!("Organization not found for {organization}"))
-        })?;
-    decode::<inferadb_ledger_state::system::Organization>(&entity.value).map_err(|e| {
-        ledger_error(ErrorCode::Internal, format!("Failed to decode organization: {e}"))
-    })
-}
-
-/// Encodes and writes an `Organization` skeleton back to the GLOBAL state layer.
-///
-/// The skeleton must have an empty `name` — PII lives in the REGIONAL
-/// `OrganizationProfile` overlay. A non-empty name here would leak PII to GLOBAL.
-fn save_organization<B: StorageBackend>(
-    state_layer: &inferadb_ledger_state::StateLayer<B>,
-    organization: OrganizationId,
-    org: &inferadb_ledger_state::system::Organization,
-) -> Result<(), LedgerResponse> {
-    if !org.name.is_empty() {
-        return Err(ledger_error(
-            ErrorCode::Internal,
-            format!(
-                "BUG: Organization skeleton must not carry a name to GLOBAL (org={})",
-                organization
-            ),
-        ));
-    }
-    let key = SystemKeys::organization_key(organization);
-    check_tier(&key, KeyTier::Global)?;
-    let bytes = encode(org).map_err(|e| {
-        ledger_error(ErrorCode::Internal, format!("Failed to encode organization: {e}"))
-    })?;
-    let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
-    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0).map(|_| ()).map_err(|e| {
-        ledger_error(ErrorCode::Internal, format!("Failed to write organization: {e}"))
-    })
-}
-
-/// Encodes and writes a slimmed `OrganizationProfile` (PII only) to the REGIONAL state layer.
-fn save_org_profile<B: StorageBackend>(
-    state_layer: &inferadb_ledger_state::StateLayer<B>,
-    organization: OrganizationId,
-    profile: &OrganizationProfile,
-) -> Result<(), LedgerResponse> {
-    let key = SystemKeys::organization_profile_key(organization);
-    check_tier(&key, KeyTier::Regional)?;
-    let bytes = encode(profile).map_err(|e| {
-        ledger_error(ErrorCode::Internal, format!("Failed to encode organization profile: {e}"))
-    })?;
-    let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
-    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0).map(|_| ()).map_err(|e| {
-        ledger_error(ErrorCode::Internal, format!("Failed to write organization profile: {e}"))
-    })
-}
-
-/// Checks whether an app name already exists within an organization.
-///
-/// Uses the in-memory `app_name_index` for O(1) lookups.
-/// The `exclude_app` parameter allows renaming an app to the same name.
-fn has_app_name_conflict(
-    state: &AppliedState,
-    organization: OrganizationId,
-    name: &str,
-    exclude_app: Option<AppId>,
-) -> bool {
-    let key = (organization, name.to_string());
-    match state.app_name_index.get(&key) {
-        Some(existing_app) => exclude_app.is_none_or(|a| *existing_app != a),
-        None => false,
-    }
-}
-
-/// Loads an `App` from the state layer by its storage key.
-fn load_app<B: StorageBackend>(
-    state_layer: &inferadb_ledger_state::StateLayer<B>,
-    organization: OrganizationId,
-    app: AppId,
-) -> Result<App, LedgerResponse> {
-    let key = SystemKeys::app_key(organization, app);
-    let entity = state_layer
-        .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
-        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to read app: {e}")))?
-        .ok_or_else(|| {
-            ledger_error(
-                ErrorCode::NotFound,
-                format!("App {} not found in organization {}", app, organization),
-            )
-        })?;
-    decode::<App>(&entity.value)
-        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to decode app: {e}")))
-}
-
-/// Saves an `App` skeleton to the GLOBAL state layer.
-fn save_app<B: StorageBackend>(
-    state_layer: &inferadb_ledger_state::StateLayer<B>,
-    organization: OrganizationId,
-    app: &App,
-) -> Result<(), LedgerResponse> {
-    let key = SystemKeys::app_key(organization, app.id);
-    check_tier(&key, KeyTier::Global)?;
-    let bytes = encode(app)
-        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to encode app: {e}")))?;
-    let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
-    state_layer
-        .apply_operations(SYSTEM_VAULT_ID, &ops, 0)
-        .map(|_| ())
-        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to write app: {e}")))
-}
-
-/// Loads an `AppProfile` from the state layer by its storage key.
-///
-/// Returns `Ok(profile)` on success, or `Err(NotFound)` if no profile exists yet.
-fn load_app_profile<B: StorageBackend>(
-    state_layer: &inferadb_ledger_state::StateLayer<B>,
-    organization: OrganizationId,
-    app: AppId,
-) -> Result<AppProfile, LedgerResponse> {
-    let key = SystemKeys::app_profile_key(organization, app);
-    let entity = state_layer
-        .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
-        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to read app profile: {e}")))?
-        .ok_or_else(|| {
-            ledger_error(
-                ErrorCode::NotFound,
-                format!("App profile {} not found in organization {}", app, organization),
-            )
-        })?;
-    decode::<AppProfile>(&entity.value).map_err(|e| {
-        ledger_error(ErrorCode::Internal, format!("Failed to decode app profile: {e}"))
-    })
-}
-
-/// Collects all entities matching a prefix and appends `DeleteEntity` operations for each.
-///
-/// Uses paginated `list_entities` calls to handle any number of sub-resources
-/// without a hard cap.
-fn collect_all_entities_for_deletion<B: StorageBackend>(
-    state_layer: &inferadb_ledger_state::StateLayer<B>,
-    prefix: &str,
-    ops: &mut Vec<Operation>,
-) {
-    const PAGE_SIZE: usize = 1000;
-    let mut cursor: Option<String> = None;
-    loop {
-        match state_layer.list_entities(SYSTEM_VAULT_ID, Some(prefix), cursor.as_deref(), PAGE_SIZE)
-        {
-            Ok(entities) => {
-                let is_last_page = entities.len() < PAGE_SIZE;
-                for entity in &entities {
-                    let key = String::from_utf8_lossy(&entity.key).into_owned();
-                    cursor = Some(key.clone());
-                    ops.push(Operation::DeleteEntity { key });
-                }
-                if is_last_page {
-                    break;
-                }
-            },
-            Err(e) => {
-                tracing::error!(prefix = %prefix, error = %e, "Failed to list entities for deletion");
-                break;
-            },
-        }
-    }
-}
-
-/// Checks whether a team name already exists within an organization.
-///
-/// Uses the in-memory `team_name_index` for O(1) lookups instead of
-/// scanning all team records. The `exclude_team` parameter allows
-/// renaming a team to the same name (self-conflict).
-fn has_team_name_conflict(
-    state: &AppliedState,
-    organization: OrganizationId,
-    name: &str,
-    exclude_team: Option<TeamId>,
-) -> bool {
-    let key = (organization, name.to_string());
-    match state.team_name_index.get(&key) {
-        Some(existing_team) => exclude_team.is_none_or(|t| *existing_team != t),
-        None => false,
-    }
-}
-
-/// Loads and decodes a team record from the state layer.
-///
-/// Returns the decoded `Team` or a structured `LedgerResponse::Error`
-/// suitable for direct return from the apply handler.
-fn load_team<B: StorageBackend>(
-    state_layer: &inferadb_ledger_state::StateLayer<B>,
-    organization: OrganizationId,
-    team: TeamId,
-) -> Result<Team, LedgerResponse> {
-    let key = SystemKeys::team_key(organization, team);
-    let entity = state_layer
-        .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
-        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to read team: {e}")))?
-        .ok_or_else(|| ledger_error(ErrorCode::NotFound, format!("Team {} not found", team)))?;
-    decode::<Team>(&entity.value)
-        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to decode team: {e}")))
-}
-
-/// Saves a team record to the REGIONAL state layer.
-fn save_team<B: StorageBackend>(
-    state_layer: &inferadb_ledger_state::StateLayer<B>,
-    organization: OrganizationId,
-    team: TeamId,
-    record: &Team,
-) -> Result<(), LedgerResponse> {
-    let key = SystemKeys::team_key(organization, team);
-    check_tier(&key, KeyTier::Regional)?;
-    let bytes = encode(record)
-        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to encode team: {e}")))?;
-    let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
-    state_layer
-        .apply_operations(SYSTEM_VAULT_ID, &ops, 0)
-        .map(|_| ())
-        .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to write team: {e}")))
-}
-
-/// Validates that an organization exists, is not deleted, and returns the state layer.
-///
-/// Consolidates the three-step guard (org exists → not deleted → state layer available)
-/// that repeats across most organization-scoped operations. Returns a reference to the
-/// state layer on success.
-///
-/// The `action` parameter is used in error messages (e.g., "modify", "create vaults in").
-fn require_active_org_with_state<'a, B: StorageBackend>(
-    organization: &OrganizationId,
-    state: &AppliedState,
-    state_layer: &'a Option<Arc<inferadb_ledger_state::StateLayer<B>>>,
-    action: &str,
-) -> Result<&'a Arc<inferadb_ledger_state::StateLayer<B>>, LedgerResponse> {
-    let org = state.organizations.get(organization).ok_or_else(|| LedgerResponse::Error {
-        code: ErrorCode::NotFound,
-        message: format!("Organization {} not found", organization),
-    })?;
-    if org.status == OrganizationStatus::Deleted {
-        return Err(LedgerResponse::Error {
-            code: ErrorCode::FailedPrecondition,
-            message: format!("Cannot {} deleted organization {}", action, organization),
-        });
-    }
-    state_layer.as_ref().ok_or_else(|| LedgerResponse::Error {
-        code: ErrorCode::Internal,
-        message: "State layer not configured".to_string(),
-    })
-}
-
-/// Validates that an organization is in Active status specifically, rejecting
-/// Provisioning, Suspended, Migrating, and Deleted states.
-///
-/// Used for write and vault creation operations that require a fully ready org.
-///
-/// In multi-Raft mode, data regions don't have organization metadata — only
-/// the GLOBAL region does. When the org isn't found in the local state, we
-/// allow the write to proceed (the service layer already validated the org
-/// exists and is Active using GLOBAL state). When the org IS found locally
-/// (GLOBAL region), we enforce the status check.
-fn require_fully_active_org(
-    organization: &OrganizationId,
-    state: &AppliedState,
-) -> Result<(), LedgerResponse> {
-    if let Some(org_meta) = state.organizations.get(organization) {
-        match org_meta.status {
-            OrganizationStatus::Active => Ok(()),
-            other => Err(LedgerResponse::Error {
-                code: ErrorCode::FailedPrecondition,
-                message: format!(
-                    "Organization {} is {} and not accepting this operation",
-                    organization,
-                    match other {
-                        OrganizationStatus::Provisioning => "still being provisioned",
-                        OrganizationStatus::Suspended => "suspended",
-                        OrganizationStatus::Migrating => "migrating",
-                        OrganizationStatus::Deleted => "deleted",
-                        OrganizationStatus::Active => "active",
-                    }
-                ),
-            }),
-        }
-    } else {
-        // Organization not in local state — this is expected in data regions
-        // where only the GLOBAL region has org metadata. The service layer
-        // validated the org before routing the proposal here.
-        Ok(())
-    }
-}
-
-/// Migrates members from one team to another, preserving roles and join dates.
-///
-/// Skips members already present in the target team (deduplication by user_id).
-fn migrate_team_members<B: StorageBackend>(
-    state_layer: &inferadb_ledger_state::StateLayer<B>,
-    organization: OrganizationId,
-    source: &Team,
-    target_team: TeamId,
-    block_timestamp: DateTime<Utc>,
-) -> Result<(), LedgerResponse> {
-    let mut target = load_team(state_layer, organization, target_team)?;
-    for member in &source.members {
-        if !target.members.iter().any(|m| m.user_id == member.user_id) {
-            target.members.push(TeamMember {
-                user_id: member.user_id,
-                role: member.role,
-                joined_at: member.joined_at,
-            });
-        }
-    }
-    target.updated_at = block_timestamp;
-    save_team(state_layer, organization, target_team, &target)
-}
-
-/// Converts a `u64` seconds value into a `chrono::Duration`, saturating at `i64::MAX`.
-fn saturating_duration_secs(secs: u64) -> Duration {
-    Duration::seconds(i64::try_from(secs).unwrap_or(i64::MAX))
-}
-
-/// Looks up a signing key by kid, returning the key or an early-return error tuple.
-fn require_signing_key<B: StorageBackend>(
-    sys: &SystemOrganizationService<B>,
-    kid: &str,
-) -> Result<SigningKey, (LedgerResponse, Option<VaultEntry>)> {
-    match sys.get_signing_key_by_kid(kid) {
-        Ok(Some(k)) => Ok(k),
-        Ok(None) => Err(error_result(ErrorCode::NotFound, format!("Signing key not found: {kid}"))),
-        Err(e) => {
-            Err(error_result(ErrorCode::Internal, format!("Failed to look up signing key: {e}")))
-        },
-    }
-}
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> RaftLogStore<B> {
