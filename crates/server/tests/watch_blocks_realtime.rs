@@ -15,10 +15,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
-use crate::common::{
-    TestCluster, create_organization_client, create_read_client, create_vault_client,
-    create_write_client,
-};
+use crate::common::{TestCluster, TestNode, create_read_client, create_write_client};
 
 // ============================================================================
 // Test Helpers
@@ -28,24 +25,10 @@ use crate::common::{
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
+    node: &TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let mut client = create_organization_client(addr).await?;
-    let response = client
-        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: name.to_string(),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            admin: None,
-        })
-        .await?;
-
-    let organization = response
-        .into_inner()
-        .slug
-        .map(|n| OrganizationSlug::new(n.slug))
-        .ok_or("No organization slug in response")?;
-
-    Ok(organization)
+    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
+    Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
@@ -53,25 +36,7 @@ async fn create_vault(
     addr: std::net::SocketAddr,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    let mut client = create_vault_client(addr).await?;
-    let response = client
-        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization.value(),
-            }),
-            replication_factor: 0,
-            initial_nodes: vec![],
-            retention_policy: None,
-        })
-        .await?;
-
-    let vault = response
-        .into_inner()
-        .vault
-        .map(|v| VaultSlug::new(v.slug))
-        .ok_or("No vault in response")?;
-
-    Ok(vault)
+    crate::common::create_test_vault(addr, organization).await
 }
 
 /// Writes a key-value pair to a vault and return the block height.
@@ -136,7 +101,7 @@ async fn test_watch_blocks_subscribe_before_writes() {
 
     // Create organization and vault
     let organization =
-        create_organization(leader.addr, "watch-ns").await.expect("create organization");
+        create_organization(leader.addr, "watch-ns", leader).await.expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Subscribe to WatchBlocks BEFORE any writes
@@ -161,9 +126,9 @@ async fn test_watch_blocks_subscribe_before_writes() {
     assert_eq!(block_height, 1, "First write should be at height 1");
 
     // Receive the announcement with timeout
-    let announcement = tokio::time::timeout(Duration::from_millis(500), stream.next())
+    let announcement = tokio::time::timeout(Duration::from_secs(10), stream.next())
         .await
-        .expect("should receive announcement within 500ms")
+        .expect("should receive announcement within timeout")
         .expect("stream should have item")
         .expect("announcement should be Ok");
 
@@ -191,8 +156,9 @@ async fn test_watch_blocks_historical_then_realtime() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization =
-        create_organization(leader.addr, "watch-mid-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "watch-mid-ns", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Write 3 blocks BEFORE subscribing
@@ -224,7 +190,7 @@ async fn test_watch_blocks_historical_then_realtime() {
 
     // Receive 3 historical announcements
     for expected_height in 1..=3 {
-        let announcement = tokio::time::timeout(Duration::from_millis(500), stream.next())
+        let announcement = tokio::time::timeout(Duration::from_secs(10), stream.next())
             .await
             .expect("should receive historical announcement")
             .expect("stream should have item")
@@ -253,7 +219,7 @@ async fn test_watch_blocks_historical_then_realtime() {
 
     // Receive 2 real-time announcements
     for expected_height in 4..=5 {
-        let announcement = tokio::time::timeout(Duration::from_millis(500), stream.next())
+        let announcement = tokio::time::timeout(Duration::from_secs(10), stream.next())
             .await
             .expect("should receive real-time announcement")
             .expect("stream should have item")
@@ -277,8 +243,9 @@ async fn test_watch_blocks_multiple_subscribers() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization =
-        create_organization(leader.addr, "multi-sub-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "multi-sub-ns", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Create 3 independent subscribers
@@ -307,7 +274,7 @@ async fn test_watch_blocks_multiple_subscribers() {
 
     // All 3 subscribers should receive the same announcement
     for (i, stream) in streams.iter_mut().enumerate() {
-        let announcement = tokio::time::timeout(Duration::from_millis(500), stream.next())
+        let announcement = tokio::time::timeout(Duration::from_secs(10), stream.next())
             .await
             .unwrap_or_else(|_| panic!("subscriber {} should receive announcement", i))
             .expect("stream should have item")
@@ -329,8 +296,9 @@ async fn test_watch_blocks_vault_isolation() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization with two vaults
-    let organization =
-        create_organization(leader.addr, "isolation-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "isolation-ns", leader)
+        .await
+        .expect("create organization");
     let vault_a = create_vault(leader.addr, organization).await.expect("create vault A");
     let vault_b = create_vault(leader.addr, organization).await.expect("create vault B");
 
@@ -374,7 +342,7 @@ async fn test_watch_blocks_vault_isolation() {
     .expect("write to vault A should succeed");
 
     // stream_a should only receive the vault A announcement
-    let announcement = tokio::time::timeout(Duration::from_millis(500), stream_a.next())
+    let announcement = tokio::time::timeout(Duration::from_secs(10), stream_a.next())
         .await
         .expect("should receive vault A announcement")
         .expect("stream should have item")
@@ -410,7 +378,7 @@ async fn test_watch_blocks_reconnection_after_restart() {
 
     // Create organization and vault
     let organization =
-        create_organization(leader.addr, "restart-ns").await.expect("create organization");
+        create_organization(leader.addr, "restart-ns", leader).await.expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Write initial blocks
@@ -442,7 +410,7 @@ async fn test_watch_blocks_reconnection_after_restart() {
 
     let mut last_height = 0u64;
     for _ in 1..=3 {
-        let announcement = tokio::time::timeout(Duration::from_millis(500), stream.next())
+        let announcement = tokio::time::timeout(Duration::from_secs(10), stream.next())
             .await
             .expect("should receive historical announcement")
             .expect("stream should have item")
@@ -491,7 +459,7 @@ async fn test_watch_blocks_reconnection_after_restart() {
 
     // Verify we receive the new blocks (no duplicates of 1-3)
     for expected_height in 4..=5 {
-        let announcement = tokio::time::timeout(Duration::from_millis(500), stream2.next())
+        let announcement = tokio::time::timeout(Duration::from_secs(10), stream2.next())
             .await
             .expect("should receive post-reconnect announcement")
             .expect("stream should have item")

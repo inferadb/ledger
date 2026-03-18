@@ -13,8 +13,7 @@
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
 use crate::common::{
-    TestCluster, create_admin_client, create_organization_client, create_read_client,
-    create_vault_client, create_write_client,
+    TestCluster, TestNode, create_admin_client, create_read_client, create_write_client,
 };
 
 // ============================================================================
@@ -25,24 +24,10 @@ use crate::common::{
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
+    node: &TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let mut client = create_organization_client(addr).await?;
-    let response = client
-        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: name.to_string(),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            admin: None,
-        })
-        .await?;
-
-    let organization = response
-        .into_inner()
-        .slug
-        .map(|n| OrganizationSlug::new(n.slug))
-        .ok_or("No organization slug in response")?;
-
-    Ok(organization)
+    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
+    Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
@@ -50,25 +35,7 @@ async fn create_vault(
     addr: std::net::SocketAddr,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    let mut client = create_vault_client(addr).await?;
-    let response = client
-        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization.value(),
-            }),
-            replication_factor: 0,
-            initial_nodes: vec![],
-            retention_policy: None,
-        })
-        .await?;
-
-    let vault = response
-        .into_inner()
-        .vault
-        .map(|v| VaultSlug::new(v.slug))
-        .ok_or("No vault in response")?;
-
-    Ok(vault)
+    crate::common::create_test_vault(addr, organization).await
 }
 
 /// Writes an entity with optional TTL.
@@ -175,7 +142,8 @@ async fn test_force_gc_removes_expired_entities() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let org = create_organization(leader.addr, "ttl-gc-test").await.expect("create organization");
+    let org =
+        create_organization(leader.addr, "ttl-gc-test", leader).await.expect("create organization");
     let vault = create_vault(leader.addr, org).await.expect("create vault");
 
     // Get current time
@@ -263,7 +231,9 @@ async fn test_force_gc_empty_vault() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let org = create_organization(leader.addr, "empty-gc-test").await.expect("create organization");
+    let org = create_organization(leader.addr, "empty-gc-test", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, org).await.expect("create vault");
 
     // Run GC on empty vault
@@ -282,8 +252,9 @@ async fn test_force_gc_all_vaults() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and multiple vaults
-    let org =
-        create_organization(leader.addr, "multi-vault-gc-test").await.expect("create organization");
+    let org = create_organization(leader.addr, "multi-vault-gc-test", leader)
+        .await
+        .expect("create organization");
     let vault1 = create_vault(leader.addr, org).await.expect("create vault 1");
     let vault2 = create_vault(leader.addr, org).await.expect("create vault 2");
 
@@ -333,8 +304,9 @@ async fn test_force_gc_multiple_ttl_timings() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let org =
-        create_organization(leader.addr, "multi-ttl-test").await.expect("create organization");
+    let org = create_organization(leader.addr, "multi-ttl-test", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, org).await.expect("create vault");
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
@@ -385,8 +357,9 @@ async fn test_force_gc_idempotent() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let org =
-        create_organization(leader.addr, "idempotent-gc-test").await.expect("create organization");
+    let org = create_organization(leader.addr, "idempotent-gc-test", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, org).await.expect("create vault");
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
@@ -425,8 +398,9 @@ async fn test_expired_entity_not_returned_by_read() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let org =
-        create_organization(leader.addr, "read-filter-test").await.expect("create organization");
+    let org = create_organization(leader.addr, "read-filter-test", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, org).await.expect("create vault");
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();

@@ -11,10 +11,7 @@
 
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
-use crate::common::{
-    TestCluster, create_admin_client, create_organization_client, create_vault_client,
-    create_write_client,
-};
+use crate::common::{TestCluster, create_admin_client, create_write_client};
 
 // ============================================================================
 // Test Helpers
@@ -24,24 +21,10 @@ use crate::common::{
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
+    node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let mut client = create_organization_client(addr).await?;
-    let response = client
-        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: name.to_string(),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            admin: None,
-        })
-        .await?;
-
-    let organization = response
-        .into_inner()
-        .slug
-        .map(|n| OrganizationSlug::new(n.slug))
-        .ok_or("No organization slug in response")?;
-
-    Ok(organization)
+    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
+    Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
@@ -49,24 +32,7 @@ async fn create_vault(
     addr: std::net::SocketAddr,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    let mut client = create_vault_client(addr).await?;
-    let response = client
-        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization.value(),
-            }),
-            replication_factor: 0,
-            initial_nodes: vec![],
-            retention_policy: None,
-        })
-        .await?;
-
-    let vault = response
-        .into_inner()
-        .vault
-        .map(|v| VaultSlug::new(v.slug))
-        .ok_or("No vault in response")?;
-    Ok(vault)
+    crate::common::create_test_vault(addr, organization).await
 }
 
 /// Writes an entity and return the block height.
@@ -158,8 +124,9 @@ async fn test_backup_create_and_list_metadata() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create some data to back up
-    let ns_id =
-        create_organization(leader.addr, "backup-metadata").await.expect("create organization");
+    let ns_id = create_organization(leader.addr, "backup-metadata", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     for i in 0..5 {
@@ -208,8 +175,9 @@ async fn test_backup_during_active_writes() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let ns_id =
-        create_organization(leader.addr, "backup-concurrent").await.expect("create organization");
+    let ns_id = create_organization(leader.addr, "backup-concurrent", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     // Write initial data
@@ -252,8 +220,9 @@ async fn test_backup_list_with_limit() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let ns_id =
-        create_organization(leader.addr, "backup-limit").await.expect("create organization");
+    let ns_id = create_organization(leader.addr, "backup-limit", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     // Write data and create multiple backups
@@ -269,14 +238,17 @@ async fn test_backup_list_with_limit() {
         .await
         .expect("write entity");
 
-        // Small delay to ensure different timestamps
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Delay between backups to ensure different timestamps and completion
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         let backup = create_backup(leader.addr, Some(&format!("backup-{}", i)), None)
             .await
             .expect("create backup");
         backup_ids.push(backup.backup_id);
     }
+
+    // Wait for all backup jobs to complete and metadata to be fully persisted.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
     // List with limit=2 should return at most 2
     let limited = list_backups(leader.addr, 2).await.expect("list limited");
@@ -297,8 +269,9 @@ async fn test_backup_checksum_present() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let ns_id =
-        create_organization(leader.addr, "backup-checksum").await.expect("create organization");
+    let ns_id = create_organization(leader.addr, "backup-checksum", leader)
+        .await
+        .expect("create organization");
     let _vault = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     let backup =

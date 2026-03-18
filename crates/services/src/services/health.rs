@@ -44,6 +44,8 @@ pub struct HealthService {
     last_observed_term: AtomicU64,
     /// Dependency health checker for disk/peer/raft-lag validation.
     dependency_checker: Option<DependencyHealthChecker>,
+    /// Multi-Raft manager for resolving vault health from regional applied state.
+    manager: Option<Arc<inferadb_ledger_raft::RaftManager>>,
 }
 
 impl HealthService {
@@ -61,7 +63,14 @@ impl HealthService {
             health_state,
             last_observed_term: AtomicU64::new(0),
             dependency_checker: None,
+            manager: None,
         }
+    }
+
+    /// Sets the RaftManager for resolving vault health from regional state.
+    pub fn with_manager(mut self, manager: Arc<inferadb_ledger_raft::RaftManager>) -> Self {
+        self.manager = Some(manager);
+        self
     }
 
     /// Attaches a dependency health checker for enhanced probe validation.
@@ -98,8 +107,25 @@ impl inferadb_ledger_proto::proto::health_service_server::HealthService for Heal
             let height = self.applied_state.vault_height(organization_id, vault_id);
             details.insert("block_height".to_string(), height.to_string());
 
-            // Get vault health status
-            let health_status = self.applied_state.vault_health(organization_id, vault_id);
+            // Get vault health status from the DATA REGION's applied state (where
+            // UpdateVaultHealth writes). Falls back to GLOBAL if no manager is configured.
+            let health_status = if let Some(ref manager) = self.manager {
+                let sys_svc = inferadb_ledger_state::system::SystemOrganizationService::new(
+                    self.state.clone(),
+                );
+                let resolved = sys_svc
+                    .get_region_for_organization(organization_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|region| manager.get_region_group(region).ok());
+                if let Some(rg) = resolved {
+                    rg.applied_state().vault_health(organization_id, vault_id)
+                } else {
+                    self.applied_state.vault_health(organization_id, vault_id)
+                }
+            } else {
+                self.applied_state.vault_health(organization_id, vault_id)
+            };
             let (status, message) = match &health_status {
                 VaultHealthStatus::Healthy => {
                     details.insert("health_status".to_string(), "healthy".to_string());

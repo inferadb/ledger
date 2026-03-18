@@ -10,10 +10,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
-use crate::common::{
-    TestCluster, create_organization_client, create_read_client, create_vault_client,
-    create_write_client,
-};
+use crate::common::{TestCluster, create_read_client, create_write_client};
 
 // ============================================================================
 // Test Helpers
@@ -23,24 +20,10 @@ use crate::common::{
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
+    node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let mut client = create_organization_client(addr).await?;
-    let response = client
-        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: name.to_string(),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            admin: None,
-        })
-        .await?;
-
-    let organization = response
-        .into_inner()
-        .slug
-        .map(|n| OrganizationSlug::new(n.slug))
-        .ok_or("No organization slug in response")?;
-
-    Ok(organization)
+    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
+    Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
@@ -48,25 +31,7 @@ async fn create_vault(
     addr: std::net::SocketAddr,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    let mut client = create_vault_client(addr).await?;
-    let response = client
-        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization.value(),
-            }),
-            replication_factor: 0,
-            initial_nodes: vec![],
-            retention_policy: None,
-        })
-        .await?;
-
-    let vault = response
-        .into_inner()
-        .vault
-        .map(|v| VaultSlug::new(v.slug))
-        .ok_or("No vault in response")?;
-
-    Ok(vault)
+    crate::common::create_test_vault(addr, organization).await
 }
 
 /// Writes a key-value pair to a vault and return the block height.
@@ -138,7 +103,7 @@ async fn test_watch_blocks_high_volume_reconnect() {
 
     // Create organization and vault
     let organization =
-        create_organization(leader.addr, "highvol-ns").await.expect("create organization");
+        create_organization(leader.addr, "highvol-ns", leader).await.expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Subscribe from block 1

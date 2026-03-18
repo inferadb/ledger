@@ -792,7 +792,12 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                                 .map_or(entry.organization.value() as u64, |s| s.value()),
                         }),
                         vault: Some(inferadb_ledger_proto::proto::VaultSlug {
-                            slug: state.vault_id_to_slug.get(&entry.vault).map_or(0, |s| s.value()),
+                            // Use external slug if available (GLOBAL), otherwise fall back to
+                            // internal VaultId (REGIONAL) for announcement filtering.
+                            slug: state
+                                .vault_id_to_slug
+                                .get(&entry.vault)
+                                .map_or(entry.vault.value() as u64, |s| s.value()),
                         }),
                         height: entry.vault_height,
                         block_hash: Some(inferadb_ledger_proto::proto::Hash {

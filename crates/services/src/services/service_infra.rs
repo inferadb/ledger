@@ -326,8 +326,10 @@ impl ServiceContext {
         grpc_metadata: &tonic::metadata::MetadataMap,
         ctx: &mut RequestContext,
     ) -> Result<LedgerResponse, Status> {
-        let sys_svc =
-            inferadb_ledger_state::system::SystemOrganizationService::new(self.state.clone());
+        // UserShredKey is stored in REGIONAL state (written during user creation).
+        // Read from the region's state layer, not the GLOBAL one.
+        let regional_state = self.regional_state(region)?;
+        let sys_svc = inferadb_ledger_state::system::SystemOrganizationService::new(regional_state);
         let shred_key = sys_svc.get_user_shred_key(user_id).map_err(|e| {
             Status::internal(format!("Failed to read UserShredKey for user {user_id}: {e}"))
         })?;
@@ -372,8 +374,10 @@ impl ServiceContext {
         grpc_metadata: &tonic::metadata::MetadataMap,
         ctx: &mut RequestContext,
     ) -> Result<LedgerResponse, Status> {
-        let sys_svc =
-            inferadb_ledger_state::system::SystemOrganizationService::new(self.state.clone());
+        // OrgShredKey is stored in REGIONAL state (written by CreateOrganization saga).
+        // Read from the region's state layer, not the GLOBAL one.
+        let regional_state = self.regional_state(region)?;
+        let sys_svc = inferadb_ledger_state::system::SystemOrganizationService::new(regional_state);
         let shred_key = sys_svc.get_org_shred_key(organization).map_err(|e| {
             Status::internal(format!(
                 "Failed to read OrgShredKey for organization {organization}: {e}"

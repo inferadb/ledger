@@ -353,14 +353,46 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
 
         // Extract kid from header and ensure key is cached (load from state on miss).
         // This handles followers and nodes after restart where the cache is cold.
-        if let Ok(kid) = JwtEngine::extract_kid(&req.token)
-            && !self.jwt_engine.has_cached_key(&kid)
-        {
-            let sys = self.system_service();
-            if let Ok(Some(key)) = sys.get_signing_key_by_kid(&kid)
-                && let Err(e) = self.ensure_key_cached(&key)
-            {
-                tracing::warn!(kid = %kid, error = %e, "Failed to cache signing key during validation");
+        // IMPORTANT: never cache revoked keys — tokens signed with revoked keys must
+        // fail validation even if the key is still in state.
+        if let Ok(kid) = JwtEngine::extract_kid(&req.token) {
+            if self.jwt_engine.has_cached_key(&kid) {
+                // Key is cached — verify it hasn't been revoked since caching.
+                let sys = self.system_service();
+                let key_result = sys.get_signing_key_by_kid(&kid);
+                if let Ok(Some(key)) = key_result {
+                    use inferadb_ledger_state::system::SigningKeyStatus;
+                    match key.status {
+                        SigningKeyStatus::Revoked => {
+                            self.jwt_engine.evict_key(&kid);
+                            return Err(Status::unauthenticated("Signing key has been revoked"));
+                        },
+                        SigningKeyStatus::Rotated => {
+                            // Check if the grace period has expired
+                            if let Some(valid_until) = key.valid_until
+                                && chrono::Utc::now() > valid_until
+                            {
+                                self.jwt_engine.evict_key(&kid);
+                                return Err(Status::unauthenticated(
+                                    "Signing key rotation grace period expired",
+                                ));
+                            }
+                        },
+                        _ => {},
+                    }
+                }
+            } else {
+                // Key not cached — load from state, but only cache if Active or Rotated
+                let sys = self.system_service();
+                if let Ok(Some(key)) = sys.get_signing_key_by_kid(&kid) {
+                    use inferadb_ledger_state::system::SigningKeyStatus;
+                    if key.status == SigningKeyStatus::Revoked {
+                        return Err(Status::unauthenticated("Signing key has been revoked"));
+                    }
+                    if let Err(e) = self.ensure_key_cached(&key) {
+                        tracing::warn!(kid = %kid, error = %e, "Failed to cache signing key during validation");
+                    }
+                }
             }
         }
 
@@ -581,6 +613,9 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             LedgerResponse::RefreshTokenRotated { token_version, allowed_scopes, .. } => {
                 (token_version, allowed_scopes)
             },
+            LedgerResponse::Error { code, message } => {
+                return Err(super::helpers::error_code_to_status(code, message));
+            },
             other => {
                 return Err(Status::internal(format!(
                     "Unexpected Raft response for UseRefreshToken: {other}"
@@ -738,6 +773,9 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
 
         let revoked_count = match response {
             LedgerResponse::AllUserSessionsRevoked { count, .. } => count,
+            LedgerResponse::Error { code, message } => {
+                return Err(super::helpers::error_code_to_status(code, message));
+            },
             other => {
                 return Err(Status::internal(format!(
                     "Unexpected Raft response for RevokeAllUserSessions: {other}"
@@ -844,7 +882,12 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             rmk_version,
         };
 
-        self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+
+        // Check for apply-level errors (e.g., active key already exists for scope)
+        if let LedgerResponse::Error { code, message } = response {
+            return Err(super::helpers::error_code_to_status(code, message));
+        }
 
         // Load key from state for cache and response (authoritative timestamps)
         let sys = self.system_service();
@@ -901,8 +944,11 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let (new_kid, new_public_key_bytes, new_encrypted_private_key, rmk_version) =
             self.generate_encrypted_keypair(&old_key.scope)?;
 
-        // 0 means "use default from JwtConfig" (proto convention for unset).
-        let grace_period_secs = if req.grace_period_secs == 0 {
+        // force_revoke=true skips the grace period entirely (immediate revocation).
+        // Otherwise, 0 means "use default from JwtConfig" (proto convention for unset).
+        let grace_period_secs = if req.force_revoke {
+            0 // Apply handler treats 0 as immediate Revoked status
+        } else if req.grace_period_secs == 0 {
             self.jwt_config.key_rotation_grace_secs
         } else {
             req.grace_period_secs

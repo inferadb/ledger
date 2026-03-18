@@ -104,7 +104,7 @@ pub use retry::{with_retry, with_retry_cancellable};
 pub use server::{
     DnsConfig, FileConfig, ResolvedServer, ServerResolver, ServerSelector, ServerSource,
 };
-pub use streaming::HeightTracker;
+pub use streaming::{HeightTracker, ReconnectingStream};
 pub use token::{PublicKeyInfo, TokenPair, ValidatedToken};
 pub use tracing::TraceConfig;
 // Public API exports — domain types (from types/ modules)

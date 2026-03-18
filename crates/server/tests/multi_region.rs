@@ -14,10 +14,7 @@ use std::time::Duration;
 
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
-use crate::common::{
-    RegionTestCluster, create_organization_client, create_read_client, create_vault_client,
-    create_write_client,
-};
+use crate::common::{TestCluster, TestNode, create_read_client, create_write_client};
 
 // ============================================================================
 // Test Helpers
@@ -27,24 +24,10 @@ use crate::common::{
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
+    node: &TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let mut client = create_organization_client(addr).await?;
-    let response = client
-        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: name.to_string(),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            admin: None,
-        })
-        .await?;
-
-    let organization = response
-        .into_inner()
-        .slug
-        .map(|n| OrganizationSlug::new(n.slug))
-        .ok_or("No organization slug in response")?;
-
-    Ok(organization)
+    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
+    Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
@@ -52,24 +35,7 @@ async fn create_vault(
     addr: std::net::SocketAddr,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    let mut client = create_vault_client(addr).await?;
-    let response = client
-        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization.value(),
-            }),
-            replication_factor: 0,
-            initial_nodes: vec![],
-            retention_policy: None,
-        })
-        .await?;
-
-    let vault = response
-        .into_inner()
-        .vault
-        .map(|v| VaultSlug::new(v.slug))
-        .ok_or("No vault in response")?;
-    Ok(vault)
+    crate::common::create_test_vault(addr, organization).await
 }
 
 /// Writes an entity and return the block height.
@@ -147,7 +113,7 @@ async fn read_entity(
 /// Exercises the full write→route→Raft→apply→read path through gRPC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_region_write_and_read() {
-    let cluster = RegionTestCluster::new(1, 2).await;
+    let cluster = TestCluster::with_data_regions(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
         "all regions should elect leaders"
@@ -156,7 +122,8 @@ async fn test_multi_region_write_and_read() {
     let node = cluster.any_node();
 
     // Create organization (gets assigned to a data region)
-    let ns_id = create_organization(node.addr, "ms-write-read").await.expect("create organization");
+    let ns_id =
+        create_organization(node.addr, "ms-write-read", node).await.expect("create organization");
     let vault = create_vault(node.addr, ns_id).await.expect("create vault");
 
     // Write entity
@@ -175,7 +142,7 @@ async fn test_multi_region_write_and_read() {
 /// are served by the same node.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_region_organization_isolation() {
-    let cluster = RegionTestCluster::new(1, 2).await;
+    let cluster = TestCluster::with_data_regions(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
         "all regions should elect leaders"
@@ -184,8 +151,8 @@ async fn test_multi_region_organization_isolation() {
     let node = cluster.any_node();
 
     // Create two organizations (may land in different regions)
-    let ns_a = create_organization(node.addr, "isolated-a").await.expect("create ns A");
-    let ns_b = create_organization(node.addr, "isolated-b").await.expect("create ns B");
+    let ns_a = create_organization(node.addr, "isolated-a", node).await.expect("create ns A");
+    let ns_b = create_organization(node.addr, "isolated-b", node).await.expect("create ns B");
 
     let vault_a = create_vault(node.addr, ns_a).await.expect("create vault A");
     let vault_b = create_vault(node.addr, ns_b).await.expect("create vault B");
@@ -209,7 +176,7 @@ async fn test_multi_region_organization_isolation() {
 /// Verifies that BatchWrite routes correctly and applies atomically.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_region_batch_write() {
-    let cluster = RegionTestCluster::new(1, 2).await;
+    let cluster = TestCluster::with_data_regions(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
         "all regions should elect leaders"
@@ -217,7 +184,8 @@ async fn test_multi_region_batch_write() {
 
     let node = cluster.any_node();
 
-    let ns_id = create_organization(node.addr, "ms-batch").await.expect("create organization");
+    let ns_id =
+        create_organization(node.addr, "ms-batch", node).await.expect("create organization");
     let vault = create_vault(node.addr, ns_id).await.expect("create vault");
 
     // Submit a batch write with multiple operations
@@ -280,7 +248,7 @@ async fn test_multi_region_batch_write() {
 /// Same client_id + idempotency_key should return cached result on retry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_region_write_idempotency() {
-    let cluster = RegionTestCluster::new(1, 2).await;
+    let cluster = TestCluster::with_data_regions(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
         "all regions should elect leaders"
@@ -288,7 +256,8 @@ async fn test_multi_region_write_idempotency() {
 
     let node = cluster.any_node();
 
-    let ns_id = create_organization(node.addr, "ms-idempotent").await.expect("create organization");
+    let ns_id =
+        create_organization(node.addr, "ms-idempotent", node).await.expect("create organization");
     let vault = create_vault(node.addr, ns_id).await.expect("create vault");
 
     let mut client = create_write_client(node.addr).await.expect("connect");
@@ -340,7 +309,7 @@ async fn test_multi_region_write_idempotency() {
 /// been created, rather than silently dropping them or panicking.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_region_write_nonexistent_organization() {
-    let cluster = RegionTestCluster::new(1, 2).await;
+    let cluster = TestCluster::with_data_regions(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
         "all regions should elect leaders"
@@ -408,7 +377,7 @@ async fn test_multi_region_write_nonexistent_organization() {
 /// without interfering with each other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_region_concurrent_writes() {
-    let cluster = RegionTestCluster::new(1, 2).await;
+    let cluster = TestCluster::with_data_regions(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(10)).await,
         "all regions should elect leaders"
@@ -419,7 +388,7 @@ async fn test_multi_region_concurrent_writes() {
     // Create 3 organizations
     let mut organizations = Vec::new();
     for i in 0..3 {
-        let ns_id = create_organization(node.addr, &format!("concurrent-{}", i))
+        let ns_id = create_organization(node.addr, &format!("concurrent-{}", i), node)
             .await
             .expect("create organization");
         let vault = create_vault(node.addr, ns_id).await.expect("create vault");
@@ -480,14 +449,15 @@ async fn test_multi_region_concurrent_writes() {
 async fn test_write_forwarding_local_region_all_nodes() {
     // Single-node cluster with 2 data regions still uses RegionResolverService
     // (supports_forwarding=true) so the forwarding code path is exercised.
-    let cluster = RegionTestCluster::new(1, 2).await;
+    let cluster = TestCluster::with_data_regions(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(15)).await,
         "all regions should elect leaders"
     );
 
     let node = cluster.any_node();
-    let ns_id = create_organization(node.addr, "fwd-local-all").await.expect("create organization");
+    let ns_id =
+        create_organization(node.addr, "fwd-local-all", node).await.expect("create organization");
     let vault = create_vault(node.addr, ns_id).await.expect("create vault");
 
     // Write through the forwarding-enabled resolver — resolve_with_forward
@@ -509,7 +479,7 @@ async fn test_write_forwarding_local_region_all_nodes() {
 /// `RegionResolverService` works correctly for local regions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_batch_write_forwarding_local_region() {
-    let cluster = RegionTestCluster::new(1, 2).await;
+    let cluster = TestCluster::with_data_regions(1, 2).await;
     assert!(
         cluster.wait_for_leaders(Duration::from_secs(15)).await,
         "all regions should elect leaders"
@@ -517,7 +487,7 @@ async fn test_batch_write_forwarding_local_region() {
 
     let node = cluster.any_node();
     let ns_id =
-        create_organization(node.addr, "fwd-batch-local").await.expect("create organization");
+        create_organization(node.addr, "fwd-batch-local", node).await.expect("create organization");
     let vault = create_vault(node.addr, ns_id).await.expect("create vault");
 
     // Send batch write through the forwarding-enabled resolver

@@ -575,9 +575,11 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             return result;
         }
 
-        // Local processing: resolve vault slug via org's region context
+        // Local processing: resolve vault slug via GLOBAL applied state.
+        // Vault slug indexes are maintained in the GLOBAL Raft group (CreateVault
+        // is a GLOBAL operation), not in the data region's applied state.
         let region = self.resolver.resolve(organization_id)?;
-        let vault_id = SlugResolver::new(region.applied_state.clone())
+        let vault_id = SlugResolver::new(system.applied_state.clone())
             .extract_and_resolve_vault(&req.vault)?;
 
         // Forward to within-region leader if this node is a follower
@@ -1128,9 +1130,11 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             return result;
         }
 
-        // Local processing: resolve vault slug via org's region context
+        // Local processing: resolve vault slug via GLOBAL applied state.
+        // Vault slug indexes are maintained in the GLOBAL Raft group (CreateVault
+        // is a GLOBAL operation), not in the data region's applied state.
         let region = self.resolver.resolve(organization_id)?;
-        let vault_id = SlugResolver::new(region.applied_state.clone())
+        let vault_id = SlugResolver::new(system.applied_state.clone())
             .extract_and_resolve_vault(&req.vault)?;
 
         // Forward to within-region leader if this node is a follower

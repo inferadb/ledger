@@ -18,10 +18,7 @@ use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
 use crate::{
     common,
-    common::{
-        TestCluster, create_health_client, create_organization_client, create_read_client,
-        create_vault_client,
-    },
+    common::{TestCluster, TestNode, create_health_client, create_read_client},
 };
 
 // =============================================================================
@@ -32,21 +29,9 @@ use crate::{
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
+    node: &TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let mut client = create_organization_client(addr).await?;
-    let response = client
-        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: name.to_string(),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            admin: None,
-        })
-        .await?;
-    let slug = response
-        .into_inner()
-        .slug
-        .map(|n| OrganizationSlug::new(n.slug))
-        .ok_or("No organization slug in response")?;
+    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
     Ok(slug)
 }
 
@@ -55,23 +40,7 @@ async fn create_vault(
     addr: std::net::SocketAddr,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    let mut client = create_vault_client(addr).await?;
-    let response = client
-        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization.value(),
-            }),
-            replication_factor: 0,
-            initial_nodes: vec![],
-            retention_policy: None,
-        })
-        .await?;
-    let slug = response
-        .into_inner()
-        .vault
-        .map(|v| VaultSlug::new(v.slug))
-        .ok_or("No vault slug in response")?;
-    Ok(slug)
+    crate::common::create_test_vault(addr, organization).await
 }
 
 // =============================================================================
@@ -88,8 +57,9 @@ async fn test_idempotency_key_reuse_detection() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization =
-        create_organization(leader.addr, "idem-reuse-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "idem-reuse-ns", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     let mut write_client =
@@ -170,8 +140,9 @@ async fn test_same_vault_two_writes() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization =
-        create_organization(leader.addr, "same-vault-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "same-vault-ns", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     let mut write_client =
@@ -248,7 +219,7 @@ async fn test_only_vault_2() {
 
     // Create organization and vault
     let organization =
-        create_organization(leader.addr, "only-v2-ns").await.expect("create organization");
+        create_organization(leader.addr, "only-v2-ns", leader).await.expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     let mut write_client =
@@ -324,8 +295,9 @@ async fn test_vault_2_first_then_1_then_2() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and two vaults
-    let organization =
-        create_organization(leader.addr, "vault-order-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "vault-order-ns", leader)
+        .await
+        .expect("create organization");
     let vault1 = create_vault(leader.addr, organization).await.expect("create vault 1");
     let vault2 = create_vault(leader.addr, organization).await.expect("create vault 2");
 
@@ -440,8 +412,9 @@ async fn test_two_vault_server_assigned_sequences() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and two vaults
-    let organization =
-        create_organization(leader.addr, "two-vault-seq-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "two-vault-seq-ns", leader)
+        .await
+        .expect("create organization");
     let vault1 = create_vault(leader.addr, organization).await.expect("create vault 1");
     let vault2 = create_vault(leader.addr, organization).await.expect("create vault 2");
 
@@ -576,8 +549,9 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and two vaults
-    let organization =
-        create_organization(leader.addr, "vault-isolation-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "vault-isolation-ns", leader)
+        .await
+        .expect("create organization");
     let vault1 = create_vault(leader.addr, organization).await.expect("create vault 1");
     let vault2 = create_vault(leader.addr, organization).await.expect("create vault 2");
 
@@ -760,8 +734,9 @@ async fn test_diverged_vault_returns_unavailable() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization =
-        create_organization(leader.addr, "divergence-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "divergence-ns", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     let mut write_client =
@@ -792,8 +767,9 @@ async fn test_diverged_vault_returns_unavailable() {
 
     write_client.write(request).await.expect("write should succeed");
 
-    // Wait for replication
+    // Wait for replication (global + data region)
     cluster.wait_for_sync(Duration::from_secs(5)).await;
+    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // Simulate vault divergence using the admin API
     let mut admin_client =
@@ -889,8 +865,9 @@ async fn test_follower_state_root_verification() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization =
-        create_organization(leader.addr, "state-root-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "state-root-ns", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Wait for org/vault creation to replicate
@@ -974,23 +951,12 @@ async fn test_idempotency_survives_leader_failover() {
     let leader_addr = leader.addr;
 
     // Create organization and vault before writing
-    let mut org_client =
-        common::create_organization_client(leader_addr).await.expect("connect to organization");
-    let mut vault_client =
-        common::create_vault_client(leader_addr).await.expect("connect to vault service");
-
-    let ns_response = org_client
-        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: "failover-test-ns".to_string(),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            admin: None,
-        })
+    let organization = create_organization(leader_addr, "failover-test-ns", leader)
         .await
         .expect("create organization");
 
-    let organization =
-        ns_response.into_inner().slug.map(|n| OrganizationSlug::new(n.slug)).expect("organization");
+    let mut vault_client =
+        common::create_vault_client(leader_addr).await.expect("connect to vault service");
 
     let vault_response = vault_client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
@@ -1043,8 +1009,9 @@ async fn test_idempotency_survives_leader_failover() {
         other => panic!("first write should succeed, got: {:?}", other),
     };
 
-    // Wait for replication to all followers before triggering failover
+    // Wait for replication to all followers before triggering failover (global + data region)
     cluster.wait_for_sync(Duration::from_secs(5)).await;
+    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // Trigger leader failover by having the leader remove itself from the cluster.
     // This will cause a new leader election among the remaining nodes.
@@ -1083,6 +1050,12 @@ async fn test_idempotency_survives_leader_failover() {
     .expect("new leader should be elected within timeout");
 
     assert_ne!(new_leader_id, original_leader_id, "new leader should be different from original");
+
+    // Wait for data regions to elect new leaders after the old node departed.
+    // The departed node was the data region leader — remaining nodes need to
+    // hold a new election (election timeout ~150-300ms in test config).
+    cluster.wait_for_leaders(Duration::from_secs(10)).await;
+    cluster.wait_for_data_region_sync(Duration::from_secs(10)).await;
 
     // Connect to the new leader
     let new_leader = cluster.node(new_leader_id).expect("new leader node should exist");

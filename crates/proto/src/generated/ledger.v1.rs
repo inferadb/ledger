@@ -3043,6 +3043,9 @@ pub struct RotateSigningKeyRequest {
     /// 0 = use default from JwtConfig
     #[prost(uint64, tag = "2")]
     pub grace_period_secs: u64,
+    /// true = immediately revoke old key (skip grace period)
+    #[prost(bool, tag = "3")]
+    pub force_revoke: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RotateSigningKeyResponse {

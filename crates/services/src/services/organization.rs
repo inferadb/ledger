@@ -719,15 +719,9 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             })?;
         ctx.set_organization(organization_slug_val);
 
-        // Validate caller is a member of the organization (skip if caller absent —
-        // allows internal/system callers to read org status without authentication)
-        let profile = if req.caller.is_some() {
-            let (_, profile) =
-                self.validate_org_member(&slug_resolver, organization_id, &req.caller, &mut ctx)?;
-            Some(profile)
-        } else {
-            None
-        };
+        // Validate caller is a member of the organization
+        let (_, profile) =
+            self.validate_org_member(&slug_resolver, organization_id, &req.caller, &mut ctx)?;
 
         let org_meta = self.ctx.applied_state.get_organization(organization_id);
 
@@ -740,7 +734,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             Some(org) => {
                 ctx.set_success();
                 let organization = slug_resolver.resolve_slug(org.organization)?;
-                Ok(Response::new(self.build_org_response(org, organization, profile)))
+                Ok(Response::new(self.build_org_response(org, organization, Some(profile))))
             },
             None => {
                 ctx.set_error("NotFound", "Organization not found");

@@ -323,6 +323,7 @@ impl LedgerClient {
         &self,
         kid: &str,
         grace_period_secs: Option<u64>,
+        force_revoke: bool,
     ) -> Result<crate::token::PublicKeyInfo> {
         self.check_shutdown(None)?;
 
@@ -343,6 +344,7 @@ impl LedgerClient {
                     let request = proto::RotateSigningKeyRequest {
                         kid: kid.clone(),
                         grace_period_secs: grace_period_secs.unwrap_or(0),
+                        force_revoke,
                     };
 
                     let response =

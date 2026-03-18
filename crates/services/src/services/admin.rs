@@ -803,24 +803,74 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         }
 
         ctx.start_raft_timer();
-        match self.raft.change_membership(new_voters, false).await {
-            Ok(_) => {
-                ctx.end_raft_timer();
-                ctx.set_success();
-                Ok(Response::new(LeaveClusterResponse {
-                    success: true,
-                    message: "Node left cluster successfully".to_string(),
-                }))
-            },
-            Err(e) => {
-                ctx.end_raft_timer();
-                ctx.set_error("MembershipChangeFailed", &e.to_string());
-                Ok(Response::new(LeaveClusterResponse {
-                    success: false,
-                    message: format!("Failed to remove node: {}", e),
-                }))
-            },
+
+        // Cascade: remove from ALL data region Raft clusters FIRST.
+        // Data region removal must happen BEFORE the GLOBAL leave because
+        // after the node leaves GLOBAL, other nodes may refuse connections
+        // from the departed node, preventing data region membership changes.
+        if let Some(ref manager) = self.raft_manager {
+            for region in manager.list_regions() {
+                if region == inferadb_ledger_types::Region::GLOBAL {
+                    continue; // Handled below
+                }
+                if let Ok(rg) = manager.get_region_group(region) {
+                    let region_metrics = rg.raft().metrics().borrow().clone();
+                    // Only attempt if this node is the leader for this region
+                    if region_metrics.current_leader == Some(region_metrics.id) {
+                        let region_voters: std::collections::BTreeSet<u64> = region_metrics
+                            .membership_config
+                            .membership()
+                            .voter_ids()
+                            .filter(|id| *id != req.node_id)
+                            .collect();
+                        if !region_voters.is_empty() {
+                            // Use a timeout to prevent blocking indefinitely if the
+                            // data region's Raft can't achieve quorum.
+                            let result = tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                rg.raft().change_membership(region_voters, false),
+                            )
+                            .await;
+                            match result {
+                                Ok(Ok(_)) => {},
+                                Ok(Err(e)) => {
+                                    tracing::warn!(
+                                        region = region.as_str(),
+                                        node_id = req.node_id,
+                                        error = %e,
+                                        "Failed to remove node from data region (non-fatal)"
+                                    );
+                                },
+                                Err(_) => {
+                                    tracing::warn!(
+                                        region = region.as_str(),
+                                        node_id = req.node_id,
+                                        "Timed out removing node from data region (non-fatal)"
+                                    );
+                                },
+                            }
+                        }
+                    }
+                }
+            }
         }
+
+        // Remove from GLOBAL Raft last (after data regions are updated)
+        if let Err(e) = self.raft.change_membership(new_voters, false).await {
+            ctx.end_raft_timer();
+            ctx.set_error("MembershipChangeFailed", &e.to_string());
+            return Ok(Response::new(LeaveClusterResponse {
+                success: false,
+                message: format!("Failed to remove node from GLOBAL: {e}"),
+            }));
+        }
+
+        ctx.end_raft_timer();
+        ctx.set_success();
+        Ok(Response::new(LeaveClusterResponse {
+            success: true,
+            message: "Node left cluster successfully".to_string(),
+        }))
     }
 
     /// Returns current cluster membership, leader ID, and Raft term.
@@ -1352,36 +1402,42 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             recovery_started_at: None,
         };
 
+        // Write to BOTH the GLOBAL and DATA REGION Raft groups.
+        // - GLOBAL: HealthService reads vault health from GLOBAL applied state
+        // - DATA REGION: WriteService's apply handler checks vault health at write time
         ctx.start_raft_timer();
-        match self.raft.client_write(RaftPayload::new(health_request)).await {
-            Ok(_) => {
-                ctx.end_raft_timer();
-                ctx.set_success();
 
-                Ok(Response::new(inferadb_ledger_proto::proto::SimulateDivergenceResponse {
-                    success: true,
-                    message: format!(
-                        "Vault {}:{} marked as diverged at height {}",
-                        organization_id.value(),
-                        vault_id.value(),
-                        at_height
-                    ),
-                    health_status: VaultHealthProto::Diverged.into(),
-                }))
-            },
-            Err(e) => {
-                ctx.end_raft_timer();
-                ctx.set_error("RaftError", &e.to_string());
-                tracing::error!(
-                    organization_id = organization_id.value(),
-                    vault_id = vault_id.value(),
-                    error = %e,
-                    "Failed to simulate divergence"
-                );
-
-                Err(Status::internal(format!("Failed to update vault health: {}", e)))
-            },
+        // GLOBAL write (for HealthService)
+        if let Err(e) = self.raft.client_write(RaftPayload::new(health_request.clone())).await {
+            ctx.end_raft_timer();
+            ctx.set_error("RaftError", &e.to_string());
+            return Err(Status::internal(format!("Failed to update vault health (GLOBAL): {e}")));
         }
+
+        // DATA REGION write (for WriteService apply-time checks)
+        if let Some(ref manager) = self.raft_manager {
+            let sys_svc =
+                inferadb_ledger_state::system::SystemOrganizationService::new(self.state.clone());
+            if let Ok(Some(region)) = sys_svc.get_region_for_organization(organization_id)
+                && let Ok(rg) = manager.get_region_group(region)
+            {
+                let _ = rg.raft().client_write(RaftPayload::new(health_request)).await;
+            }
+        }
+
+        ctx.end_raft_timer();
+        ctx.set_success();
+
+        Ok(Response::new(inferadb_ledger_proto::proto::SimulateDivergenceResponse {
+            success: true,
+            message: format!(
+                "Vault {}:{} marked as diverged at height {}",
+                organization_id.value(),
+                vault_id.value(),
+                at_height
+            ),
+            health_status: VaultHealthProto::Diverged.into(),
+        }))
     }
 
     /// Forces TTL garbage collection on all vaults, removing expired entities.
@@ -1441,10 +1497,30 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         for ((organization_id, vault_id), _height) in vault_heights {
             vaults_scanned += 1;
 
+            // Resolve the vault's region to read entities from the correct state layer.
+            // Entity data lives in REGIONAL state, not GLOBAL.
+            let (regional_state, regional_raft) = if let Some(ref manager) = self.raft_manager {
+                let sys_svc = inferadb_ledger_state::system::SystemOrganizationService::new(
+                    self.state.clone(),
+                );
+                let region = sys_svc
+                    .get_region_for_organization(organization_id)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(inferadb_ledger_types::Region::GLOBAL);
+                if let Ok(rg) = manager.get_region_group(region) {
+                    (rg.state().clone(), Some(rg.raft().clone()))
+                } else {
+                    (self.state.clone(), None)
+                }
+            } else {
+                // Single-Raft mode: GLOBAL state has everything
+                (self.state.clone(), None)
+            };
+
             // Find expired entities in this vault
             let expired = {
-                let state = &*self.state;
-                match state.list_entities(vault_id, None, None, 1000) {
+                match regional_state.list_entities(vault_id, None, None, 1000) {
                     Ok(entities) => entities
                         .into_iter()
                         .filter(|e| e.expires_at > 0 && e.expires_at < now)
@@ -1492,7 +1568,9 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 request_hash: 0,
             };
 
-            match self.raft.client_write(RaftPayload::new(gc_request)).await {
+            // Propose to REGIONAL Raft (where entity data lives), or fall back to GLOBAL
+            let raft_target = regional_raft.as_ref().unwrap_or(&self.raft);
+            match raft_target.client_write(RaftPayload::new(gc_request)).await {
                 Ok(_) => {
                     total_expired += count as u64;
                 },

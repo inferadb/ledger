@@ -2473,7 +2473,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     /// Creates a pending TOTP challenge after primary authentication.
     ///
     /// The challenge is stored as a `_tmp:` record with the given expiry.
-    /// Rate-limited to [`MAX_ACTIVE_TOTP_CHALLENGES`] per user.
+    /// Rate-limited to `MAX_ACTIVE_TOTP_CHALLENGES` per user.
     ///
     /// # Errors
     ///
@@ -6078,9 +6078,7 @@ mod tests {
                 svc.update_invitation_status(org, invite_id, initial, now).unwrap();
 
                 // Attempt second transition — must fail
-                let err = svc
-                    .update_invitation_status(org, invite_id, attempt, now)
-                    .unwrap_err();
+                let err = svc.update_invitation_status(org, invite_id, attempt, now).unwrap_err();
                 assert!(
                     matches!(err, SystemError::FailedPrecondition { .. }),
                     "transition from {initial:?} to {attempt:?} should be rejected"

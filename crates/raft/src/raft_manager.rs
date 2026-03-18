@@ -727,7 +727,13 @@ impl RaftManager {
         let applied_state = log_store.accessor();
         let commitment_buffer = log_store.commitment_buffer();
 
-        let network = GrpcRaftNetworkFactory::with_trace_config(self.config.trace_raft_rpcs);
+        // Use region-aware network factory so Raft RPCs include the region identifier.
+        // This ensures the target node routes messages to the correct regional Raft group.
+        let network = if region == Region::GLOBAL {
+            GrpcRaftNetworkFactory::with_trace_config(self.config.trace_raft_rpcs)
+        } else {
+            GrpcRaftNetworkFactory::for_region(region, self.config.trace_raft_rpcs)
+        };
 
         // Build Raft config
         let raft_config = openraft::Config {

@@ -8058,12 +8058,9 @@ mod tests {
         // Verify old HMAC index key exists
         let state_layer = store.state_layer.as_ref().unwrap();
         let old_key = inferadb_ledger_state::system::SystemKeys::invite_email_hash_index_key(
-            "deadbeef",
-            invite_id,
+            "deadbeef", invite_id,
         );
-        let old_entry = state_layer
-            .get_entity(VaultId::new(0), old_key.as_bytes())
-            .unwrap();
+        let old_entry = state_layer.get_entity(VaultId::new(0), old_key.as_bytes()).unwrap();
         assert!(old_entry.is_some(), "old HMAC index entry should exist");
 
         // Rehash: old_hmac="deadbeef" → new_hmac="cafebabe"
@@ -8081,19 +8078,14 @@ mod tests {
         );
 
         // Verify old HMAC index key is deleted
-        let old_entry_after = state_layer
-            .get_entity(VaultId::new(0), old_key.as_bytes())
-            .unwrap();
+        let old_entry_after = state_layer.get_entity(VaultId::new(0), old_key.as_bytes()).unwrap();
         assert!(old_entry_after.is_none(), "old HMAC index entry should be deleted after rehash");
 
         // Verify new HMAC index key exists
         let new_key = inferadb_ledger_state::system::SystemKeys::invite_email_hash_index_key(
-            "cafebabe",
-            invite_id,
+            "cafebabe", invite_id,
         );
-        let new_entry = state_layer
-            .get_entity(VaultId::new(0), new_key.as_bytes())
-            .unwrap();
+        let new_entry = state_layer.get_entity(VaultId::new(0), new_key.as_bytes()).unwrap();
         assert!(new_entry.is_some(), "new HMAC index entry should exist after rehash");
 
         // Verify the new entry deserializes with correct org_id and status
@@ -8146,7 +8138,10 @@ mod tests {
 
         // Retry resolve — CAS rejects (already Accepted), simulating duplicate call
         let (retry_resolve, _) = store.apply_request(&resolve_req, &mut state);
-        assert!(matches!(retry_resolve, LedgerResponse::Error { code: ErrorCode::InvitationAlreadyResolved, .. }));
+        assert!(matches!(
+            retry_resolve,
+            LedgerResponse::Error { code: ErrorCode::InvitationAlreadyResolved, .. }
+        ));
 
         // AddOrganizationMember — first time
         let add_req = LedgerRequest::AddOrganizationMember {

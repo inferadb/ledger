@@ -2741,6 +2741,7 @@ message CreateSigningKeyResponse {
 message RotateSigningKeyRequest {
   string kid = 1;
   uint64 grace_period_secs = 2;          // 0 = use default from JwtConfig
+  bool force_revoke = 3;                 // true = immediately revoke old key (skip grace period)
 }
 
 message RotateSigningKeyResponse {

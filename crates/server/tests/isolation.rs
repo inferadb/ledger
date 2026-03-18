@@ -19,10 +19,7 @@ use std::time::Duration;
 
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
-use crate::common::{
-    TestCluster, create_organization_client, create_read_client, create_vault_client,
-    create_write_client,
-};
+use crate::common::{TestCluster, TestNode, create_read_client, create_write_client};
 
 // ============================================================================
 // Test Helpers
@@ -32,24 +29,10 @@ use crate::common::{
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
+    node: &TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let mut client = create_organization_client(addr).await?;
-    let response = client
-        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: name.to_string(),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            admin: None,
-        })
-        .await?;
-
-    let organization = response
-        .into_inner()
-        .slug
-        .map(|n| OrganizationSlug::new(n.slug))
-        .ok_or("No organization slug in response")?;
-
-    Ok(organization)
+    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
+    Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
@@ -57,25 +40,7 @@ async fn create_vault(
     addr: std::net::SocketAddr,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    let mut client = create_vault_client(addr).await?;
-    let response = client
-        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization.value(),
-            }),
-            replication_factor: 0,  // Default, ignored for single-region setup
-            initial_nodes: vec![],  // Auto-assigned
-            retention_policy: None, // Default: FULL
-        })
-        .await?;
-
-    let vault = response
-        .into_inner()
-        .vault
-        .map(|v| VaultSlug::new(v.slug))
-        .ok_or("No vault in response")?;
-
-    Ok(vault)
+    crate::common::create_test_vault(addr, organization).await
 }
 
 /// Writes a key-value pair to a vault.
@@ -159,8 +124,9 @@ async fn test_vault_isolation_same_organization() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create an organization
-    let ns_id =
-        create_organization(leader.addr, "isolation-test-ns").await.expect("create organization");
+    let ns_id = create_organization(leader.addr, "isolation-test-ns", leader)
+        .await
+        .expect("create organization");
 
     // Create two vaults in the same organization
     let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
@@ -202,7 +168,7 @@ async fn test_vault_isolation_key_not_found() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vaults
-    let ns_id = create_organization(leader.addr, "isolation-not-found-ns")
+    let ns_id = create_organization(leader.addr, "isolation-not-found-ns", leader)
         .await
         .expect("create organization");
 
@@ -230,8 +196,9 @@ async fn test_multi_vault_isolation() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization
-    let ns_id =
-        create_organization(leader.addr, "multi-vault-ns").await.expect("create organization");
+    let ns_id = create_organization(leader.addr, "multi-vault-ns", leader)
+        .await
+        .expect("create organization");
 
     // Create 5 vaults
     let mut vaults = Vec::new();
@@ -285,8 +252,10 @@ async fn test_organization_isolation() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create two organizations
-    let ns_1 = create_organization(leader.addr, "org-alpha").await.expect("create organization 1");
-    let ns_2 = create_organization(leader.addr, "org-beta").await.expect("create organization 2");
+    let ns_1 =
+        create_organization(leader.addr, "org-alpha", leader).await.expect("create organization 1");
+    let ns_2 =
+        create_organization(leader.addr, "org-beta", leader).await.expect("create organization 2");
 
     assert_ne!(ns_1, ns_2, "Organization IDs should be different");
 
@@ -339,8 +308,9 @@ async fn test_vault_is_authoritative_identifier() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let ns_1 =
-        create_organization(leader.addr, "vault-auth-ns-1").await.expect("create organization 1");
+    let ns_1 = create_organization(leader.addr, "vault-auth-ns-1", leader)
+        .await
+        .expect("create organization 1");
     let vault_1 = create_vault(leader.addr, ns_1).await.expect("create vault in ns1");
 
     // Write data to vault_1
@@ -349,8 +319,9 @@ async fn test_vault_is_authoritative_identifier() {
         .expect("write to vault");
 
     // Create a second organization with its own vault
-    let ns_2 =
-        create_organization(leader.addr, "vault-auth-ns-2").await.expect("create organization 2");
+    let ns_2 = create_organization(leader.addr, "vault-auth-ns-2", leader)
+        .await
+        .expect("create organization 2");
     let vault_2 = create_vault(leader.addr, ns_2).await.expect("create vault in ns2");
 
     // Vault IDs are different (globally unique)
@@ -398,8 +369,9 @@ async fn test_concurrent_vault_writes() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vaults
-    let ns_id =
-        create_organization(leader.addr, "concurrent-ns").await.expect("create organization");
+    let ns_id = create_organization(leader.addr, "concurrent-ns", leader)
+        .await
+        .expect("create organization");
 
     let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
     let vault_b = create_vault(leader.addr, ns_id).await.expect("create vault B");
@@ -475,9 +447,12 @@ async fn test_vault_global_uniqueness() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create multiple organizations
-    let ns_1 = create_organization(leader.addr, "uniqueness-ns-1").await.expect("create ns1");
-    let ns_2 = create_organization(leader.addr, "uniqueness-ns-2").await.expect("create ns2");
-    let ns_3 = create_organization(leader.addr, "uniqueness-ns-3").await.expect("create ns3");
+    let ns_1 =
+        create_organization(leader.addr, "uniqueness-ns-1", leader).await.expect("create ns1");
+    let ns_2 =
+        create_organization(leader.addr, "uniqueness-ns-2", leader).await.expect("create ns2");
+    let ns_3 =
+        create_organization(leader.addr, "uniqueness-ns-3", leader).await.expect("create ns3");
 
     // Collect vault IDs from all organizations
     let mut all_vaults = Vec::new();
@@ -526,7 +501,7 @@ async fn test_isolation_across_replicas() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vaults via leader
-    let ns_id = create_organization(leader.addr, "replica-isolation-ns")
+    let ns_id = create_organization(leader.addr, "replica-isolation-ns", leader)
         .await
         .expect("create organization");
 
@@ -542,9 +517,10 @@ async fn test_isolation_across_replicas() {
         .await
         .expect("write to vault B");
 
-    // Wait for replication
+    // Wait for replication (global + data region)
     let synced = cluster.wait_for_sync(Duration::from_secs(5)).await;
     assert!(synced, "cluster should sync");
+    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // Verify isolation on each follower
     for follower in cluster.followers() {
@@ -574,8 +550,9 @@ async fn test_empty_vault_isolation() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization
-    let ns_id =
-        create_organization(leader.addr, "empty-vault-ns").await.expect("create organization");
+    let ns_id = create_organization(leader.addr, "empty-vault-ns", leader)
+        .await
+        .expect("create organization");
 
     // Create two vaults
     let vault_a = create_vault(leader.addr, ns_id).await.expect("create vault A");
@@ -601,7 +578,7 @@ async fn test_deletion_isolation() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vaults
-    let ns_id = create_organization(leader.addr, "deletion-isolation-ns")
+    let ns_id = create_organization(leader.addr, "deletion-isolation-ns", leader)
         .await
         .expect("create organization");
 

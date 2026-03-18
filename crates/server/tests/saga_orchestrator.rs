@@ -12,10 +12,7 @@ use std::time::Duration;
 
 use inferadb_ledger_types::{OrganizationId, OrganizationSlug, UserId, VaultSlug};
 
-use crate::common::{
-    TestCluster, create_organization_client, create_read_client, create_vault_client,
-    create_write_client,
-};
+use crate::common::{TestCluster, create_read_client, create_write_client};
 
 // ============================================================================
 // Test Helpers
@@ -25,23 +22,9 @@ use crate::common::{
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
+    node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let mut client = create_organization_client(addr).await?;
-    let response = client
-        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: name.to_string(),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            admin: None,
-        })
-        .await?;
-
-    let slug = response
-        .into_inner()
-        .slug
-        .map(|n| OrganizationSlug::new(n.slug))
-        .ok_or("No organization slug in response")?;
-
+    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
     Ok(slug)
 }
 
@@ -50,25 +33,7 @@ async fn create_vault(
     addr: std::net::SocketAddr,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    let mut client = create_vault_client(addr).await?;
-    let response = client
-        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization.value(),
-            }),
-            replication_factor: 0,
-            initial_nodes: vec![],
-            retention_policy: None,
-        })
-        .await?;
-
-    let vault = response
-        .into_inner()
-        .vault
-        .map(|v| VaultSlug::new(v.slug))
-        .ok_or("No vault in response")?;
-
-    Ok(vault)
+    crate::common::create_test_vault(addr, organization).await
 }
 
 /// Writes an entity to an organization.
@@ -187,8 +152,9 @@ async fn test_delete_user_saga_state_transitions() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization =
-        create_organization(leader.addr, "delete-user-saga-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "delete-user-saga-ns", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // First, create a user entity
@@ -256,8 +222,9 @@ async fn test_completed_saga_not_reexecuted() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization =
-        create_organization(leader.addr, "completed-saga-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "completed-saga-ns", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Create a saga that's already completed
@@ -320,8 +287,9 @@ async fn test_saga_serialization_roundtrip() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization =
-        create_organization(leader.addr, "roundtrip-saga-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "roundtrip-saga-ns", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Create saga with various field values

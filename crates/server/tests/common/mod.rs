@@ -126,11 +126,11 @@ impl TestNode {
 /// CPU contention from parallel test execution.
 fn test_rate_limit_config() -> inferadb_ledger_types::config::RateLimitConfig {
     inferadb_ledger_types::config::RateLimitConfig::builder()
-        .client_burst(5_u64)
-        .client_rate(2.0)
+        .client_burst(100_u64)
+        .client_rate(1.0)
         .organization_burst(1000_u64)
         .organization_rate(500.0)
-        .backpressure_threshold(100_u64)
+        .backpressure_threshold(1000_u64)
         .build()
         .expect("valid rate limit config")
 }
@@ -490,6 +490,87 @@ impl TestCluster {
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
+
+            // Start data regions on the joining node WITHOUT bootstrap (bootstrap: false).
+            // The joining node creates the Raft group but doesn't initialize it — it will
+            // receive the cluster membership from the leader via Raft log replication.
+            let joining_manager = nodes.last().unwrap().manager.clone();
+            let joining_node_id = node_id;
+            let _joining_addr = addr;
+            for &data_region in data_regions.iter().take(num_data_regions) {
+                let data_region_config = RegionConfig {
+                    region: data_region,
+                    initial_members: vec![], // empty — will be added via change_membership
+                    bootstrap: false,        // don't bootstrap — join existing cluster
+                    enable_background_jobs: true,
+                    batch_writer_config: None,
+                    event_writer: None,
+                };
+                joining_manager.start_data_region(data_region_config).await.unwrap_or_else(|e| {
+                    panic!(
+                        "start data region {:?} on joining node {}: {e}",
+                        data_region, joining_node_id
+                    )
+                });
+
+                // Add this joining node to the bootstrap node's data region cluster
+                // via Raft membership change (same pattern as GLOBAL cluster join).
+                let bootstrap_manager = &nodes[0].manager;
+                if let Ok(bootstrap_rg) = bootstrap_manager.get_region_group(data_region) {
+                    let bootstrap_raft = bootstrap_rg.raft();
+
+                    // Step 1: Add as learner first (required before voter promotion)
+                    let _ = bootstrap_raft
+                        .add_learner(
+                            joining_node_id,
+                            openraft::BasicNode::new(addr.to_string()),
+                            true,
+                        )
+                        .await;
+
+                    // Step 2: Wait for learner to sync before promoting to voter
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+
+                    // Step 3: Promote to voter via change_membership
+                    let metrics = bootstrap_raft.metrics().borrow().clone();
+                    let mut new_members: std::collections::BTreeSet<u64> =
+                        metrics.membership_config.membership().voter_ids().collect();
+                    new_members.insert(joining_node_id);
+                    let _ = bootstrap_raft.change_membership(new_members, false).await;
+
+                    // Step 4: Wait for membership to stabilize
+                    let stabilize_start = tokio::time::Instant::now();
+                    while stabilize_start.elapsed() < Duration::from_secs(5) {
+                        let m = bootstrap_raft.metrics().borrow().clone();
+                        if m.membership_config.membership().get_joint_config().len() == 1 {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+            }
+
+            // Wait for data region leader elections on this joining node (it should
+            // see a leader from the bootstrap node's cluster after membership change)
+            let dr_wait_start = tokio::time::Instant::now();
+            while dr_wait_start.elapsed() < Duration::from_secs(10) {
+                let mut all_ready = true;
+                for &dr in data_regions.iter().take(num_data_regions) {
+                    if let Ok(rg) = joining_manager.get_region_group(dr) {
+                        if rg.raft().metrics().borrow().current_leader.is_none() {
+                            all_ready = false;
+                            break;
+                        }
+                    } else {
+                        all_ready = false;
+                        break;
+                    }
+                }
+                if all_ready {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
         }
 
         Self { nodes, num_data_regions }
@@ -581,6 +662,42 @@ impl TestCluster {
                     return true;
                 }
 
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    /// Waits for data region Raft groups to sync across all nodes.
+    ///
+    /// Checks that all nodes' data regions have the same last_applied index.
+    /// This is separate from `wait_for_sync` which only checks GLOBAL Raft.
+    #[allow(dead_code)]
+    pub async fn wait_for_data_region_sync(&self, timeout_duration: Duration) -> bool {
+        let data_regions = &inferadb_ledger_types::ALL_REGIONS[1..];
+        timeout(timeout_duration, async {
+            loop {
+                let mut all_synced = true;
+                for &dr in data_regions.iter().take(self.num_data_regions) {
+                    let mut indices = Vec::new();
+                    for node in &self.nodes {
+                        if let Some(rg) = node.region_group(dr) {
+                            let metrics = rg.raft().metrics().borrow().clone();
+                            indices.push(metrics.last_applied.map_or(0, |id| id.index));
+                        }
+                    }
+                    if indices.len() < self.nodes.len()
+                        || indices.is_empty()
+                        || !indices.iter().all(|&i| i == indices[0] && i > 0)
+                    {
+                        all_synced = false;
+                        break;
+                    }
+                }
+                if all_synced {
+                    return true;
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -1222,4 +1339,333 @@ pub async fn create_invitation_client(
         endpoint,
     )
     .await
+}
+
+// ============================================================================
+// Shared Organization & Vault Helpers (saga-aware)
+// ============================================================================
+
+/// Creates an organization and waits for the saga to reach Active status.
+///
+/// Returns the organization's external slug. Retries if the saga orchestrator
+/// isn't ready yet and polls `GetOrganization` until the status is Active.
+#[allow(dead_code)]
+pub async fn create_test_organization(
+    addr: SocketAddr,
+    name: &str,
+    node: &TestNode,
+) -> Result<(inferadb_ledger_types::OrganizationSlug, u64), Box<dyn std::error::Error>> {
+    let start = tokio::time::Instant::now();
+    let timeout_dur = Duration::from_secs(30);
+
+    // Create an admin user for the organization (direct Raft write, bypasses saga)
+    let admin_email = format!("admin-{}@test.example.com", name.to_lowercase().replace(' ', "-"));
+    let admin_slug = setup_user(addr, "Admin", &admin_email, node).await;
+
+    // Create org with admin (retry if saga orchestrator not ready)
+    let slug = loop {
+        let mut client = create_organization_client(addr).await?;
+        let result = client
+            .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
+                name: name.to_string(),
+                region: 10, // US_EAST_VA
+                tier: None,
+                admin: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
+            })
+            .await;
+
+        match result {
+            Ok(resp) => {
+                break resp
+                    .into_inner()
+                    .slug
+                    .map(|n| inferadb_ledger_types::OrganizationSlug::new(n.slug))
+                    .ok_or("No organization slug in response")?;
+            },
+            Err(status) if status.code() == tonic::Code::Unavailable => {
+                if start.elapsed() > timeout_dur {
+                    return Err(format!("org creation not ready: {}", status.message()).into());
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            },
+            Err(status) => return Err(format!("create org failed: {status}").into()),
+        }
+    };
+
+    // Poll until Active (using the admin as caller for GetOrganization auth)
+    loop {
+        let mut client = create_organization_client(addr).await?;
+        let result = client
+            .get_organization(inferadb_ledger_proto::proto::GetOrganizationRequest {
+                slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: slug.value() }),
+                caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
+            })
+            .await;
+
+        if let Ok(resp) = result {
+            // OrganizationStatus::Active = 1
+            if resp.into_inner().status == 1 {
+                return Ok((slug, admin_slug));
+            }
+        }
+        if start.elapsed() > timeout_dur {
+            return Err(format!(
+                "org {} did not become Active within {timeout_dur:?}",
+                slug.value()
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Creates a vault in an organization and returns its slug.
+///
+/// Retries if the organization is not yet ready (saga still provisioning).
+#[allow(dead_code)]
+pub async fn create_test_vault(
+    addr: SocketAddr,
+    organization: inferadb_ledger_types::OrganizationSlug,
+) -> Result<inferadb_ledger_types::VaultSlug, Box<dyn std::error::Error>> {
+    let start = tokio::time::Instant::now();
+    let timeout_dur = Duration::from_secs(15);
+
+    loop {
+        let mut client = create_vault_client(addr).await?;
+        let result = client
+            .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
+                organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                    slug: organization.value(),
+                }),
+                replication_factor: 0,
+                initial_nodes: vec![],
+                retention_policy: None,
+            })
+            .await;
+
+        match result {
+            Ok(resp) => {
+                return resp
+                    .into_inner()
+                    .vault
+                    .map(|v| inferadb_ledger_types::VaultSlug::new(v.slug))
+                    .ok_or_else(|| "No vault slug in response".into());
+            },
+            Err(status)
+                if status.code() == tonic::Code::NotFound
+                    || status.code() == tonic::Code::FailedPrecondition =>
+            {
+                // Org not yet ready — retry
+                if start.elapsed() > timeout_dur {
+                    return Err(
+                        format!("vault creation failed after retry: {}", status.message()).into()
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            },
+            Err(status) => return Err(format!("create vault failed: {status}").into()),
+        }
+    }
+}
+
+// ============================================================================
+// High-Level Test Helpers
+// ============================================================================
+
+/// The test blinding key used by `TestCluster` (32 bytes, hex-encoded).
+const TEST_BLINDING_KEY_HEX: &str =
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+/// Parses the test blinding key into an `EmailBlindingKey`.
+fn test_blinding_key() -> inferadb_ledger_types::EmailBlindingKey {
+    TEST_BLINDING_KEY_HEX.parse().expect("valid test blinding key")
+}
+
+/// Creates a user by directly proposing through the GLOBAL Raft group.
+///
+/// Uses `SystemRequest::CreateUser` (the same request the saga uses in Step 1)
+/// followed by `SystemRequest::RegisterEmailHash` (Step 0). This bypasses the
+/// saga orchestrator, which is appropriate for test setup — tests need users
+/// to exist immediately, not after async saga completion.
+///
+/// Returns the user's external slug.
+#[allow(dead_code)]
+pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &TestNode) -> u64 {
+    use inferadb_ledger_raft::types::{LedgerRequest, RaftPayload, SystemRequest};
+
+    let blinding_key = test_blinding_key();
+    let email_hmac = inferadb_ledger_types::compute_email_hmac(&blinding_key, email);
+    let user_slug =
+        inferadb_ledger_types::snowflake::generate_user_slug().expect("generate user slug");
+
+    // Step 0: Register email HMAC (reserves uniqueness in GLOBAL)
+    let register_req = LedgerRequest::System(SystemRequest::RegisterEmailHash {
+        hmac_hex: email_hmac,
+        user_id: inferadb_ledger_types::UserId::new(0), /* placeholder — CreateUser allocates
+                                                         * real ID */
+    });
+    let _ = node.raft.client_write(RaftPayload::new(register_req)).await;
+
+    // Step 1: Create user directory entry (allocates UserId, registers slug)
+    let create_req = LedgerRequest::System(SystemRequest::CreateUser {
+        user: inferadb_ledger_types::UserId::new(0), // 0 = auto-allocate from sequence
+        admin: false,
+        slug: user_slug,
+        region: inferadb_ledger_types::Region::US_EAST_VA,
+    });
+    let result = node.raft.client_write(RaftPayload::new(create_req)).await;
+
+    match result {
+        Ok(resp) => match resp.data {
+            inferadb_ledger_raft::types::LedgerResponse::UserCreated { user_id, slug } => {
+                // Step 2: Activate the user directory entry
+                let activate_req =
+                    LedgerRequest::System(SystemRequest::UpdateUserDirectoryStatus {
+                        user_id,
+                        status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
+                        region: Some(inferadb_ledger_types::Region::US_EAST_VA),
+                    });
+                let _ = node.raft.client_write(RaftPayload::new(activate_req)).await;
+
+                // Step 3: Write slug index to entity store (so get_user_id_by_slug works).
+                // The CreateUser SystemRequest only writes to the in-memory index;
+                // the entity store entry is normally written by the REGIONAL saga step.
+                let slug_key = inferadb_ledger_state::system::SystemKeys::user_slug_index_key(slug);
+                let slug_op = inferadb_ledger_types::Operation::SetEntity {
+                    key: slug_key,
+                    value: user_id.value().to_string().into_bytes(),
+                    condition: None,
+                    expires_at: None,
+                };
+                let slug_txn = inferadb_ledger_types::Transaction {
+                    id: *uuid::Uuid::new_v4().as_bytes(),
+                    client_id: inferadb_ledger_types::ClientId::new("test:setup"),
+                    sequence: 0,
+                    operations: vec![slug_op],
+                    timestamp: std::time::SystemTime::now().into(),
+                    actor: "test:setup".to_string(),
+                };
+                let slug_write = LedgerRequest::Write {
+                    organization: inferadb_ledger_types::OrganizationId::new(0),
+                    vault: inferadb_ledger_types::VaultId::new(0),
+                    transactions: vec![slug_txn],
+                    idempotency_key: [0; 16],
+                    request_hash: 0,
+                };
+                let _ = node.raft.client_write(RaftPayload::new(slug_write)).await;
+
+                // Step 4: Write User entity to GLOBAL state layer.
+                // Token services (CreateUserSession) read the User entity from
+                // GLOBAL state. In production, this is written to REGIONAL by the
+                // user creation saga, but tests need it in GLOBAL for service access.
+                let user_entity = inferadb_ledger_state::system::User {
+                    id: user_id,
+                    slug,
+                    region: inferadb_ledger_types::Region::US_EAST_VA,
+                    name: String::new(),
+                    email: inferadb_ledger_types::UserEmailId::new(0),
+                    status: inferadb_ledger_state::system::UserStatus::Active,
+                    role: inferadb_ledger_types::UserRole::User,
+                    created_at: std::time::SystemTime::now().into(),
+                    updated_at: std::time::SystemTime::now().into(),
+                    deleted_at: None,
+                    version: inferadb_ledger_types::TokenVersion::new(1),
+                };
+                let user_key = inferadb_ledger_state::system::SystemKeys::user_key(user_id);
+                let user_value =
+                    inferadb_ledger_types::encode(&user_entity).expect("encode user entity");
+                let user_op = inferadb_ledger_types::Operation::SetEntity {
+                    key: user_key,
+                    value: user_value,
+                    condition: None,
+                    expires_at: None,
+                };
+                let user_txn = inferadb_ledger_types::Transaction {
+                    id: *uuid::Uuid::new_v4().as_bytes(),
+                    client_id: inferadb_ledger_types::ClientId::new("test:setup"),
+                    sequence: 0,
+                    operations: vec![user_op],
+                    timestamp: std::time::SystemTime::now().into(),
+                    actor: "test:setup".to_string(),
+                };
+                let user_write = LedgerRequest::Write {
+                    organization: inferadb_ledger_types::OrganizationId::new(0),
+                    vault: inferadb_ledger_types::VaultId::new(0),
+                    transactions: vec![user_txn],
+                    idempotency_key: [0; 16],
+                    request_hash: 0,
+                };
+                let _ = node.raft.client_write(RaftPayload::new(user_write)).await;
+
+                slug.value()
+            },
+            other => panic!("setup_user: expected UserCreated, got {other}"),
+        },
+        Err(e) => panic!("setup_user: Raft write failed: {e}"),
+    }
+}
+
+/// Creates an organization with a real admin user and waits for it to become Active.
+///
+/// Returns `(org_slug, admin_user_slug)`. The admin user is created via
+/// `setup_user` first, then the org is created with that user as admin.
+#[allow(dead_code)]
+pub async fn setup_org_with_admin(
+    addr: SocketAddr,
+    org_name: &str,
+    admin_email: &str,
+    node: &TestNode,
+) -> (u64, u64) {
+    // Create a user to serve as org admin (direct Raft write, bypasses saga)
+    let admin_slug = setup_user(addr, "Admin", admin_email, node).await;
+
+    let start = tokio::time::Instant::now();
+    let timeout = Duration::from_secs(30);
+
+    // Create org with the admin user
+    let org_slug = loop {
+        let mut client = create_organization_client(addr).await.expect("connect org");
+        let result = client
+            .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
+                name: org_name.to_string(),
+                region: 10, // US_EAST_VA
+                tier: None,
+                admin: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
+            })
+            .await;
+
+        match result {
+            Ok(resp) => break resp.into_inner().slug.expect("org slug").slug,
+            Err(status) if status.code() == tonic::Code::Unavailable => {
+                if start.elapsed() > timeout {
+                    panic!("org creation not ready after {timeout:?}: {}", status.message());
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            },
+            Err(status) => panic!("create org '{org_name}' failed: {status}"),
+        }
+    };
+
+    // Poll until org is Active
+    loop {
+        let mut client = create_organization_client(addr).await.expect("connect org");
+        let result = client
+            .get_organization(inferadb_ledger_proto::proto::GetOrganizationRequest {
+                slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
+                caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
+            })
+            .await;
+
+        if let Ok(resp) = result {
+            // OrganizationStatus::Active = 1
+            if resp.into_inner().status == 1 {
+                return (org_slug, admin_slug);
+            }
+        }
+
+        if start.elapsed() > timeout {
+            panic!("org {org_slug} did not become Active within {timeout:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }

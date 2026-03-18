@@ -5,7 +5,7 @@
 //! - **Phase 2**: Reaps terminal invitations older than the retention window (90 days).
 //!
 //! Only runs on the leader node. Proposals go through Raft for deterministic
-//! state machine replay. Follows the [`TokenMaintenanceJob`] pattern.
+//! state machine replay. Follows the `TokenMaintenanceJob` pattern.
 
 use std::{
     sync::{

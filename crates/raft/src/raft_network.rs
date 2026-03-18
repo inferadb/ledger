@@ -86,17 +86,28 @@ pub struct GrpcRaftNetworkFactory {
     network: GrpcRaftNetwork,
     /// Whether to inject trace context into outgoing RPCs.
     trace_raft_rpcs: bool,
+    /// Region identifier included in outgoing Raft RPCs.
+    /// `None` = GLOBAL (default), `Some(region)` = data region.
+    region: Option<inferadb_ledger_types::Region>,
 }
 
 impl GrpcRaftNetworkFactory {
     /// Creates a new network factory.
     pub fn new() -> Self {
-        Self { network: GrpcRaftNetwork::new(), trace_raft_rpcs: true }
+        Self { network: GrpcRaftNetwork::new(), trace_raft_rpcs: true, region: None }
     }
 
     /// Creates a new network factory with trace context injection configured.
     pub fn with_trace_config(trace_raft_rpcs: bool) -> Self {
-        Self { network: GrpcRaftNetwork::new(), trace_raft_rpcs }
+        Self { network: GrpcRaftNetwork::new(), trace_raft_rpcs, region: None }
+    }
+
+    /// Creates a new network factory for a specific region.
+    ///
+    /// Outgoing Raft RPCs will include this region identifier so the target
+    /// node routes them to the correct regional Raft group.
+    pub fn for_region(region: inferadb_ledger_types::Region, trace_raft_rpcs: bool) -> Self {
+        Self { network: GrpcRaftNetwork::new(), trace_raft_rpcs, region: Some(region) }
     }
 }
 
@@ -115,6 +126,7 @@ impl RaftNetworkFactory<LedgerTypeConfig> for GrpcRaftNetworkFactory {
             node: node.clone(),
             network: self.network.clone(),
             trace_raft_rpcs: self.trace_raft_rpcs,
+            region: self.region,
         }
     }
 }
@@ -124,6 +136,8 @@ pub struct GrpcRaftNetworkConnection {
     target: LedgerNodeId,
     node: BasicNode,
     network: GrpcRaftNetwork,
+    /// Region identifier for routing RPCs to the correct Raft group.
+    region: Option<inferadb_ledger_types::Region>,
     /// Whether to inject trace context into outgoing RPCs.
     trace_raft_rpcs: bool,
 }
@@ -161,7 +175,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
                 term: id.leader_id.term,
                 index: id.index,
             }),
-            region: None, // Default to GLOBAL region
+            region: self.region.map(|r| inferadb_ledger_proto::proto::Region::from(r) as i32),
         };
 
         let response = client
@@ -213,7 +227,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
                 term: id.leader_id.term,
                 index: id.index,
             }),
-            region: None, // Default to GLOBAL region
+            region: self.region.map(|r| inferadb_ledger_proto::proto::Region::from(r) as i32),
         };
 
         let response = client
@@ -277,7 +291,7 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
             offset: rpc.offset,
             data: rpc.data.clone(),
             done: rpc.done,
-            region: None, // Default to GLOBAL region
+            region: self.region.map(|r| inferadb_ledger_proto::proto::Region::from(r) as i32),
         };
 
         let response = client

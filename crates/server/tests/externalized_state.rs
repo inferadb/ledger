@@ -27,10 +27,7 @@ use std::time::Duration;
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
-use crate::common::{
-    TestCluster, create_organization_client, create_read_client, create_vault_client,
-    create_write_client,
-};
+use crate::common::{TestCluster, create_read_client, create_vault_client, create_write_client};
 
 // =============================================================================
 // Helpers
@@ -40,21 +37,9 @@ use crate::common::{
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
+    node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let mut client = create_organization_client(addr).await?;
-    let response = client
-        .create_organization(proto::CreateOrganizationRequest {
-            name: name.to_string(),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            admin: None,
-        })
-        .await?;
-    let slug = response
-        .into_inner()
-        .slug
-        .map(|n| OrganizationSlug::new(n.slug))
-        .ok_or("No organization slug")?;
+    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
     Ok(slug)
 }
 
@@ -63,18 +48,7 @@ async fn create_vault(
     addr: std::net::SocketAddr,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    let mut client = create_vault_client(addr).await?;
-    let response = client
-        .create_vault(proto::CreateVaultRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-            replication_factor: 0,
-            initial_nodes: vec![],
-            retention_policy: None,
-        })
-        .await?;
-    let slug =
-        response.into_inner().vault.map(|v| VaultSlug::new(v.slug)).ok_or("No vault slug")?;
-    Ok(slug)
+    crate::common::create_test_vault(addr, organization).await
 }
 
 /// Writes an entity and returns the assigned sequence number.
@@ -208,9 +182,9 @@ async fn test_snapshot_with_deleted_entities() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create 3 orgs, each with 2 vaults.
-    let org1 = create_organization(leader.addr, "del-org-1").await.expect("create org 1");
-    let org2 = create_organization(leader.addr, "del-org-2").await.expect("create org 2");
-    let org3 = create_organization(leader.addr, "del-org-3").await.expect("create org 3");
+    let org1 = create_organization(leader.addr, "del-org-1", leader).await.expect("create org 1");
+    let org2 = create_organization(leader.addr, "del-org-2", leader).await.expect("create org 2");
+    let org3 = create_organization(leader.addr, "del-org-3", leader).await.expect("create org 3");
 
     let v1a = create_vault(leader.addr, org1).await.expect("vault 1a");
     let v1b = create_vault(leader.addr, org1).await.expect("vault 1b");
@@ -233,9 +207,10 @@ async fn test_snapshot_with_deleted_entities() {
         .await
         .expect("write after delete");
 
-    // Wait for replication.
+    // Wait for replication (global + data region).
     let synced = cluster.wait_for_sync(Duration::from_secs(15)).await;
     assert!(synced, "cluster should sync after deletions");
+    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // Verify on a follower that:
     // 1. org1/v1a data is still readable.
@@ -267,7 +242,7 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
     let leader = cluster.leader().expect("should have leader");
 
     let organization =
-        create_organization(leader.addr, "failover-ns").await.expect("create organization");
+        create_organization(leader.addr, "failover-ns", leader).await.expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Write a batch of entities.
@@ -298,9 +273,10 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
         other => panic!("batch write should succeed, got: {:?}", other),
     }
 
-    // Wait for replication.
+    // Wait for replication (global + data region).
     let synced = cluster.wait_for_sync(Duration::from_secs(10)).await;
     assert!(synced, "cluster should sync before failover");
+    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // Find a follower to verify data from after "failover" (we verify from
     // a follower, which simulates reading from a new leader after the old
@@ -332,7 +308,7 @@ async fn test_idempotency_dedup_same_key_returns_cached() {
     let leader = cluster.leader().expect("should have leader");
 
     let organization =
-        create_organization(leader.addr, "dedup-ns").await.expect("create organization");
+        create_organization(leader.addr, "dedup-ns", leader).await.expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Write with a specific idempotency key.
@@ -424,8 +400,9 @@ async fn test_sequence_counters_persisted_and_restored() {
     let mut organizations = Vec::new();
     let mut vaults = Vec::new();
     for i in 0..3 {
-        let org =
-            create_organization(leader.addr, &format!("seq-org-{}", i)).await.expect("create org");
+        let org = create_organization(leader.addr, &format!("seq-org-{}", i), leader)
+            .await
+            .expect("create org");
         organizations.push(org);
 
         for _v in 0..2 {
@@ -449,14 +426,15 @@ async fn test_sequence_counters_persisted_and_restored() {
         .expect("write entity");
     }
 
-    // Wait for replication.
+    // Wait for replication (global + data region).
     let synced = cluster.wait_for_sync(Duration::from_secs(15)).await;
     assert!(synced, "cluster should sync after sequence operations");
+    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // After replication, create additional resources to verify sequences
     // didn't reset. If sequences were corrupted, these would get duplicate IDs
     // or fail.
-    let extra_org = create_organization(leader.addr, "seq-extra-org")
+    let extra_org = create_organization(leader.addr, "seq-extra-org", leader)
         .await
         .expect("create extra org after sync");
     let extra_vault =
@@ -512,7 +490,7 @@ async fn test_client_sequence_eviction_infrastructure() {
     let leader = cluster.leader().expect("should have leader");
 
     let organization =
-        create_organization(leader.addr, "eviction-ns").await.expect("create organization");
+        create_organization(leader.addr, "eviction-ns", leader).await.expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Write with a unique client ID.
@@ -569,8 +547,9 @@ async fn test_post_eviction_retry_accepted() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization =
-        create_organization(leader.addr, "post-evict-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "post-evict-ns", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Write with a specific client and key.
@@ -642,8 +621,9 @@ async fn test_snapshot_install_events_best_effort() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization =
-        create_organization(leader.addr, "snap-events-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "snap-events-ns", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Write enough data to make a meaningful snapshot.
@@ -660,9 +640,10 @@ async fn test_snapshot_install_events_best_effort() {
         .expect("write");
     }
 
-    // Wait for all nodes to be in sync.
+    // Wait for all nodes to be in sync (global + data region).
     let synced = cluster.wait_for_sync(Duration::from_secs(15)).await;
     assert!(synced, "all nodes should sync");
+    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // Verify data is present on both followers.
     for follower in cluster.followers() {

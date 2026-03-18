@@ -327,7 +327,8 @@ impl LedgerServer {
             system.state().clone(),
             system.applied_state().clone(),
             self.health_state,
-        );
+        )
+        .with_manager(self.manager.clone());
         // Attach dependency health checker if data_dir is provided
         let health_service = if let Some(data_dir) = self.data_dir {
             let config = self.health_check_config.unwrap_or_default();

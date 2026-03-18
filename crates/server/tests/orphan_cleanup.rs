@@ -12,10 +12,7 @@ use std::time::Duration;
 
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
-use crate::common::{
-    TestCluster, create_organization_client, create_read_client, create_vault_client,
-    create_write_client,
-};
+use crate::common::{TestCluster, create_read_client, create_write_client};
 
 // ============================================================================
 // Test Helpers
@@ -25,24 +22,10 @@ use crate::common::{
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
+    node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let mut client = create_organization_client(addr).await?;
-    let response = client
-        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: name.to_string(),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            admin: None,
-        })
-        .await?;
-
-    let organization = response
-        .into_inner()
-        .slug
-        .map(|n| OrganizationSlug::new(n.slug))
-        .ok_or("No organization slug in response")?;
-
-    Ok(organization)
+    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
+    Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
@@ -50,23 +33,7 @@ async fn create_vault(
     addr: std::net::SocketAddr,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    let mut client = create_vault_client(addr).await?;
-    let response = client
-        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization.value(),
-            }),
-            replication_factor: 0,
-            initial_nodes: vec![],
-            retention_policy: None,
-        })
-        .await?;
-    let slug = response
-        .into_inner()
-        .vault
-        .map(|v| VaultSlug::new(v.slug))
-        .ok_or("No vault slug in response")?;
-    Ok(slug)
+    crate::common::create_test_vault(addr, organization).await
 }
 
 /// Writes an entity to a specific organization.
@@ -185,8 +152,9 @@ async fn test_deleted_user_detection() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault for test data
-    let ns_id =
-        create_organization(leader.addr, "deleted-user-ns").await.expect("create organization");
+    let ns_id = create_organization(leader.addr, "deleted-user-ns", leader)
+        .await
+        .expect("create organization");
     let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     // Create a user with deleted_at timestamp
@@ -280,8 +248,9 @@ async fn test_membership_data_format() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create an organization and vault
-    let ns_id =
-        create_organization(leader.addr, "membership-test-ns").await.expect("create organization");
+    let ns_id = create_organization(leader.addr, "membership-test-ns", leader)
+        .await
+        .expect("create organization");
     let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     // Create a membership record
@@ -318,8 +287,9 @@ async fn test_orphan_cleanup_skips_active_records() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let ns_id =
-        create_organization(leader.addr, "skip-active-ns").await.expect("create organization");
+    let ns_id = create_organization(leader.addr, "skip-active-ns", leader)
+        .await
+        .expect("create organization");
     let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
 
     // Write a "member" record that should not be cleaned up
@@ -355,7 +325,8 @@ async fn test_orphan_cleanup_handles_empty_organization() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create an organization with no memberships
-    let _ns_id = create_organization(leader.addr, "empty-ns").await.expect("create organization");
+    let _ns_id =
+        create_organization(leader.addr, "empty-ns", leader).await.expect("create organization");
 
     // Give cleanup time to run
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -372,40 +343,22 @@ async fn test_orphan_cleanup_with_concurrent_jobs() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("has leader");
 
-    // Create some state to exercise all background jobs
-    let mut org_client = create_organization_client(leader.addr).await.unwrap();
-    let mut vault_client = create_vault_client(leader.addr).await.unwrap();
-
-    // Create organization
-    let ns_response = org_client
-        .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: "concurrent-jobs-test".to_string(),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            admin: None,
-        })
+    // Create some state to exercise all background jobs.
+    // Use the saga-aware helper that waits for Active status to avoid
+    // "Organization with slug not found" races on multi-node clusters.
+    let organization = create_organization(leader.addr, "concurrent-jobs-test", leader)
         .await
-        .unwrap();
+        .expect("create organization");
 
-    let organization =
-        OrganizationSlug::new(ns_response.into_inner().slug.map(|n| n.slug).unwrap());
+    // Allow GLOBAL Raft propagation to all nodes before creating vault
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Create vault
-    let _vault_response = vault_client
-        .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization.value(),
-            }),
-            replication_factor: 0,
-            initial_nodes: vec![],
-            retention_policy: None,
-        })
-        .await
-        .unwrap();
+    let _vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Let all background jobs run concurrently for a bit
     // OrphanCleanup, TtlGC, SagaOrchestrator, AutoRecovery, LearnerRefresh
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Verify cluster is still healthy
     let leader_id = cluster.wait_for_leader().await;

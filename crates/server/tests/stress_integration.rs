@@ -23,10 +23,7 @@ use inferadb_ledger_proto::{
 };
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
-use crate::common::{
-    TestCluster, create_organization_client, create_read_client, create_vault_client,
-    create_write_client,
-};
+use crate::common::{TestCluster, create_read_client, create_write_client};
 
 // =============================================================================
 // Helpers
@@ -36,21 +33,9 @@ use crate::common::{
 async fn create_organization(
     addr: std::net::SocketAddr,
     name: &str,
+    node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let mut client = create_organization_client(addr).await?;
-    let response = client
-        .create_organization(proto::CreateOrganizationRequest {
-            name: name.to_string(),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            admin: None,
-        })
-        .await?;
-    let slug = response
-        .into_inner()
-        .slug
-        .map(|n| OrganizationSlug::new(n.slug))
-        .ok_or("No organization slug")?;
+    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
     Ok(slug)
 }
 
@@ -59,18 +44,7 @@ async fn create_vault(
     addr: std::net::SocketAddr,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    let mut client = create_vault_client(addr).await?;
-    let response = client
-        .create_vault(proto::CreateVaultRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-            replication_factor: 0,
-            initial_nodes: vec![],
-            retention_policy: None,
-        })
-        .await?;
-    let slug =
-        response.into_inner().vault.map(|v| VaultSlug::new(v.slug)).ok_or("No vault slug")?;
-    Ok(slug)
+    crate::common::create_test_vault(addr, organization).await
 }
 
 /// Writes an entity and returns the assigned sequence number.
@@ -170,8 +144,9 @@ async fn test_2000_unique_client_ids_no_page_full() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization =
-        create_organization(leader.addr, "pagefull-2000-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "pagefull-2000-ns", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     for i in 0..2000 {
@@ -212,7 +187,7 @@ async fn test_snapshot_20_orgs_5_vaults_round_trip() {
     // Create 20 organizations, each with 5 vaults.
     let mut organizations = Vec::with_capacity(20);
     for i in 0..20 {
-        let organization = create_organization(leader.addr, &format!("snap-org-{}", i))
+        let organization = create_organization(leader.addr, &format!("snap-org-{}", i), leader)
             .await
             .expect("create organization");
         organizations.push(organization);
@@ -278,8 +253,9 @@ async fn test_bulk_writes_replicated_state_roots_match() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization =
-        create_organization(leader.addr, "bulk-writes-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "bulk-writes-ns", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Write 1,000 entities using a single client ID (to focus on entity storage,
@@ -351,8 +327,9 @@ async fn test_snapshot_during_active_apply_loop() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization =
-        create_organization(leader.addr, "concurrent-snap-ns").await.expect("create organization");
+    let organization = create_organization(leader.addr, "concurrent-snap-ns", leader)
+        .await
+        .expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     // Spawn a background writer that continuously writes entities.
@@ -417,7 +394,7 @@ async fn test_snapshot_determinism_all_nodes_identical_state() {
     // multiple table sections in the snapshot.
     let mut org_vault_pairs = Vec::new();
     for i in 0..3 {
-        let organization = create_organization(leader.addr, &format!("determ-org-{i}"))
+        let organization = create_organization(leader.addr, &format!("determ-org-{i}"), leader)
             .await
             .expect("create organization");
         for j in 0..2 {
@@ -511,7 +488,7 @@ async fn test_large_batch_writes() {
 
     // Create organization and vault
     let organization =
-        create_organization(leader.addr, "batch-ns").await.expect("create organization");
+        create_organization(leader.addr, "batch-ns", leader).await.expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
     let mut client = create_write_client(leader.addr).await.expect("connect to leader");

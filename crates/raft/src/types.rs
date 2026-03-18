@@ -1194,7 +1194,7 @@ pub enum SystemRequest {
     // ── User Credential Management ──
     /// Creates a new user credential (passkey, TOTP, or recovery code).
     ///
-    /// Proposed via [`EncryptedUserSystemRequest`] — credential data is
+    /// Proposed via `EncryptedUserSystemRequest` — credential data is
     /// encrypted with the user's `UserShredKey` before entering the Raft log.
     ///
     /// The state machine allocates a `UserCredentialId` from the REGIONAL
@@ -1214,7 +1214,7 @@ pub enum SystemRequest {
 
     /// Updates an existing user credential.
     ///
-    /// Proposed via [`EncryptedUserSystemRequest`].
+    /// Proposed via `EncryptedUserSystemRequest`.
     /// Only passkey-specific fields (`sign_count`, `backup_state`) and
     /// common fields (`name`, `enabled`) can be updated. TOTP credentials
     /// are immutable after creation.
@@ -1233,7 +1233,7 @@ pub enum SystemRequest {
 
     /// Deletes a user credential.
     ///
-    /// Proposed via [`EncryptedUserSystemRequest`].
+    /// Proposed via `EncryptedUserSystemRequest`.
     /// The last-credential guard in the state machine prevents deleting
     /// the only remaining credential for a user.
     DeleteUserCredential {

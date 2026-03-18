@@ -8,20 +8,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
-use std::time::Duration;
-
 use inferadb_ledger_proto::proto;
 use tonic::Code;
 
-use crate::common::{TestCluster, create_invitation_client, create_organization_client};
-
-// ============================================================================
-// Constants
-// ============================================================================
-
-/// Proto region value for US_EAST_VA (10). Organizations must be assigned to
-/// a data residency region, not GLOBAL.
-const REGION_US_EAST_VA: i32 = 10;
+use crate::common::{
+    TestCluster, create_invitation_client, create_organization_client, setup_org_with_admin,
+};
 
 // ============================================================================
 // Helpers
@@ -30,66 +22,16 @@ const REGION_US_EAST_VA: i32 = 10;
 type InvClient =
     proto::invitation_service_client::InvitationServiceClient<tonic::transport::Channel>;
 
-/// Creates an organization and waits for it to become Active.
-/// Retries creation if the saga orchestrator isn't ready yet, then polls
-/// until the saga completes provisioning (Provisioning → Active).
-async fn setup_org(addr: std::net::SocketAddr, name: &str) -> u64 {
-    let start = tokio::time::Instant::now();
-    let timeout = Duration::from_secs(30);
-
-    // Step 1: Create org (retry if saga orchestrator not ready)
-    let slug = loop {
-        let mut client = create_organization_client(addr).await.expect("connect org");
-        let result = client
-            .create_organization(proto::CreateOrganizationRequest {
-                name: name.to_string(),
-                region: REGION_US_EAST_VA,
-                tier: None,
-                admin: None,
-            })
-            .await;
-
-        match result {
-            Ok(resp) => break resp.into_inner().slug.expect("org slug").slug,
-            Err(status) if status.code() == Code::Unavailable => {
-                if start.elapsed() > timeout {
-                    panic!("org creation not ready after {timeout:?}: {}", status.message());
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            },
-            Err(status) => panic!("create org failed: {status}"),
-        }
-    };
-
-    // Step 2: Poll until org is Active (saga completes provisioning)
-    loop {
-        let mut client = create_organization_client(addr).await.expect("connect org");
-        let result = client
-            .get_organization(proto::GetOrganizationRequest {
-                slug: Some(proto::OrganizationSlug { slug }),
-                caller: None,
-            })
-            .await;
-
-        match result {
-            Ok(resp) => {
-                let org = resp.into_inner();
-                // OrganizationStatus::Active = 1
-                if org.status == 1 {
-                    return slug;
-                }
-                println!("org {slug} status = {} (waiting for Active=1)", org.status);
-            },
-            Err(e) => {
-                println!("org {slug} get failed: code={:?} msg={}", e.code(), e.message());
-            },
-        }
-
-        if start.elapsed() > timeout {
-            panic!("org {slug} did not become Active within {timeout:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+/// Creates an organization with a real admin user and waits for Active status.
+/// Returns `(org_slug, admin_user_slug)`.
+/// Uses a unique admin email derived from the org name to avoid collisions.
+async fn setup_org(
+    addr: std::net::SocketAddr,
+    name: &str,
+    node: &crate::common::TestNode,
+) -> (u64, u64) {
+    let admin_email = format!("admin-{}@test.example.com", name.to_lowercase().replace(' ', "-"));
+    setup_org_with_admin(addr, name, &admin_email, node).await
 }
 
 /// Creates an invitation and returns (slug, token).
@@ -118,7 +60,6 @@ async fn create_invite(
     (slug, token)
 }
 
-
 // ============================================================================
 // Tests: Full Lifecycle
 // ============================================================================
@@ -127,14 +68,15 @@ async fn create_invite(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_create_and_list_invitations() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let node = &cluster.nodes()[0];
+    let addr = node.addr;
 
-    let org = setup_org(addr, "Lifecycle Org").await;
+    let (org, admin) = setup_org(addr, "Lifecycle Org", node).await;
     let mut client = create_invitation_client(addr).await.expect("connect inv");
 
     // Create two invitations
-    let (slug1, token1) = create_invite(&mut client, org, "alice@example.com", 24).await;
-    let (slug2, _token2) = create_invite(&mut client, org, "bob@example.com", 48).await;
+    let (slug1, token1) = create_invite(&mut client, org, admin, "alice@example.com", 24).await;
+    let (slug2, _token2) = create_invite(&mut client, org, admin, "bob@example.com", 48).await;
 
     assert_ne!(slug1, slug2, "invitation slugs should be unique");
     assert!(!token1.is_empty(), "token should be non-empty");
@@ -144,7 +86,7 @@ async fn test_create_and_list_invitations() {
     let list_resp = client
         .list_organization_invites(proto::ListOrganizationInvitesRequest {
             organization: Some(proto::OrganizationSlug { slug: org }),
-            caller: Some(proto::UserSlug { slug: 1 }),
+            caller: Some(proto::UserSlug { slug: admin }),
             status_filter: None,
             page_token: None,
             page_size: 50,
@@ -164,18 +106,19 @@ async fn test_create_and_list_invitations() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_create_and_revoke_invitation() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let node = &cluster.nodes()[0];
+    let addr = node.addr;
 
-    let org = setup_org(addr, "Revoke Org").await;
+    let (org, admin) = setup_org(addr, "Revoke Org", node).await;
     let mut client = create_invitation_client(addr).await.expect("connect inv");
 
-    let (slug, _token) = create_invite(&mut client, org, "revokee@example.com", 24).await;
+    let (slug, _token) = create_invite(&mut client, org, admin, "revokee@example.com", 24).await;
 
     // Revoke the invitation
     let revoke_resp = client
         .revoke_organization_invite(proto::RevokeOrganizationInviteRequest {
             slug: Some(proto::InviteSlug { slug }),
-            caller: Some(proto::UserSlug { slug: 1 }),
+            caller: Some(proto::UserSlug { slug: admin }),
         })
         .await
         .expect("revoke invitation");
@@ -186,7 +129,7 @@ async fn test_create_and_revoke_invitation() {
     let err = client
         .revoke_organization_invite(proto::RevokeOrganizationInviteRequest {
             slug: Some(proto::InviteSlug { slug }),
-            caller: Some(proto::UserSlug { slug: 1 }),
+            caller: Some(proto::UserSlug { slug: admin }),
         })
         .await
         .unwrap_err();
@@ -202,19 +145,20 @@ async fn test_create_and_revoke_invitation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_duplicate_pending_returns_already_exists() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let node = &cluster.nodes()[0];
+    let addr = node.addr;
 
-    let org = setup_org(addr, "Dup Org").await;
+    let (org, admin) = setup_org(addr, "Dup Org", node).await;
     let mut client = create_invitation_client(addr).await.expect("connect inv");
 
     // First invitation succeeds
-    let (_slug1, _) = create_invite(&mut client, org, "dup@example.com", 24).await;
+    let (_slug1, _) = create_invite(&mut client, org, admin, "dup@example.com", 24).await;
 
     // Second invitation to the same email should fail
     let err = client
         .create_organization_invite(proto::CreateOrganizationInviteRequest {
             organization: Some(proto::OrganizationSlug { slug: org }),
-            caller: Some(proto::UserSlug { slug: 1 }),
+            caller: Some(proto::UserSlug { slug: admin }),
             email: "dup@example.com".to_string(),
             role: proto::OrganizationMemberRole::Member as i32,
             ttl_hours: 24,
@@ -234,7 +178,8 @@ async fn test_duplicate_pending_returns_already_exists() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_per_email_pending_cap() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let node = &cluster.nodes()[0];
+    let addr = node.addr;
 
     let target_email = "popular@example.com";
     let mut client = create_invitation_client(addr).await.expect("connect inv");
@@ -242,17 +187,17 @@ async fn test_per_email_pending_cap() {
     // Create 10 organizations and send one invitation each to the same email
     let mut slugs = Vec::new();
     for i in 0..10 {
-        let org = setup_org(addr, &format!("Cap Org {i}")).await;
-        let (slug, _) = create_invite(&mut client, org, target_email, 168).await;
+        let (org, admin) = setup_org(addr, &format!("Cap Org {i}"), node).await;
+        let (slug, _) = create_invite(&mut client, org, admin, target_email, 168).await;
         slugs.push(slug);
     }
 
     // 11th invitation from a new org should be rejected (pending cap = 10)
-    let org_11 = setup_org(addr, "Cap Org 10").await;
+    let (org_11, admin_11) = setup_org(addr, "Cap Org 10", node).await;
     let err = client
         .create_organization_invite(proto::CreateOrganizationInviteRequest {
             organization: Some(proto::OrganizationSlug { slug: org_11 }),
-            caller: Some(proto::UserSlug { slug: 1 }),
+            caller: Some(proto::UserSlug { slug: admin_11 }),
             email: target_email.to_string(),
             role: proto::OrganizationMemberRole::Member as i32,
             ttl_hours: 168,
@@ -272,7 +217,8 @@ async fn test_per_email_pending_cap() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_per_email_total_limit() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let node = &cluster.nodes()[0];
+    let addr = node.addr;
 
     let target_email = "targeted@example.com";
     let mut client = create_invitation_client(addr).await.expect("connect inv");
@@ -280,25 +226,25 @@ async fn test_per_email_total_limit() {
     // Create 20 invitations from 20 different orgs, revoking each one to stay
     // under the pending cap (10) but accumulate total entries.
     for i in 0..20 {
-        let org = setup_org(addr, &format!("Total Org {i}")).await;
-        let (slug, _) = create_invite(&mut client, org, target_email, 168).await;
+        let (org, admin) = setup_org(addr, &format!("Total Org {i}"), node).await;
+        let (slug, _) = create_invite(&mut client, org, admin, target_email, 168).await;
 
         // Revoke to free up pending cap
         client
             .revoke_organization_invite(proto::RevokeOrganizationInviteRequest {
                 slug: Some(proto::InviteSlug { slug }),
-                caller: Some(proto::UserSlug { slug: 1 }),
+                caller: Some(proto::UserSlug { slug: admin }),
             })
             .await
             .expect("revoke");
     }
 
     // 21st invitation should be rejected (total limit = 20)
-    let org_21 = setup_org(addr, "Total Org 20").await;
+    let (org_21, admin_21) = setup_org(addr, "Total Org 20", node).await;
     let err = client
         .create_organization_invite(proto::CreateOrganizationInviteRequest {
             organization: Some(proto::OrganizationSlug { slug: org_21 }),
-            caller: Some(proto::UserSlug { slug: 1 }),
+            caller: Some(proto::UserSlug { slug: admin_21 }),
             email: target_email.to_string(),
             role: proto::OrganizationMemberRole::Member as i32,
             ttl_hours: 168,
@@ -306,19 +252,11 @@ async fn test_per_email_total_limit() {
         })
         .await
         .unwrap_err();
-    assert_eq!(
-        err.code(),
-        Code::ResourceExhausted,
-        "21st total invitation should be rate-limited"
-    );
+    assert_eq!(err.code(), Code::ResourceExhausted, "21st total invitation should be rate-limited");
 }
 
-/// Scan ceiling: an email with more than 500 index entries should trigger
-/// a rate-limited response immediately. This is hard to test directly
-/// (requires 500+ entries), so we test that the mechanism is functional
-/// via the total limit (which is lower and easier to exercise).
-/// This test exists as a marker — the scan ceiling is exercised implicitly
-/// by any test that accumulates entries near the limit.
+// Scan ceiling (500 entries) is exercised implicitly by the per-email
+// total limit test. A dedicated test would require 500+ entries.
 
 // ============================================================================
 // Tests: Cross-Org Team Validation
@@ -328,17 +266,18 @@ async fn test_per_email_total_limit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_cross_org_team_rejected() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let node = &cluster.nodes()[0];
+    let addr = node.addr;
 
-    let org_a = setup_org(addr, "Team Org A").await;
-    let org_b = setup_org(addr, "Team Org B").await;
+    let (org_a, admin_a) = setup_org(addr, "Team Org A", node).await;
+    let (org_b, admin_b) = setup_org(addr, "Team Org B", node).await;
 
     // Create a team in org B
     let mut org_client = create_organization_client(addr).await.expect("connect org");
     let team_resp = org_client
         .create_organization_team(proto::CreateOrganizationTeamRequest {
             organization: Some(proto::OrganizationSlug { slug: org_b }),
-            initiator: Some(proto::UserSlug { slug: 1 }),
+            initiator: Some(proto::UserSlug { slug: admin_b }),
             name: "Team B".to_string(),
         })
         .await
@@ -350,7 +289,7 @@ async fn test_cross_org_team_rejected() {
     let err = inv_client
         .create_organization_invite(proto::CreateOrganizationInviteRequest {
             organization: Some(proto::OrganizationSlug { slug: org_a }),
-            caller: Some(proto::UserSlug { slug: 1 }),
+            caller: Some(proto::UserSlug { slug: admin_a }),
             email: "crossorg@example.com".to_string(),
             role: proto::OrganizationMemberRole::Member as i32,
             ttl_hours: 24,
@@ -358,11 +297,7 @@ async fn test_cross_org_team_rejected() {
         })
         .await
         .unwrap_err();
-    assert_eq!(
-        err.code(),
-        Code::InvalidArgument,
-        "team from different org should be rejected"
-    );
+    assert_eq!(err.code(), Code::InvalidArgument, "team from different org should be rejected");
     assert!(
         err.message().contains("different organization"),
         "error message should mention organization mismatch: {}",
@@ -379,20 +314,21 @@ async fn test_cross_org_team_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_plus_addressing_dedup() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let node = &cluster.nodes()[0];
+    let addr = node.addr;
 
-    let org = setup_org(addr, "Plus Org").await;
+    let (org, admin) = setup_org(addr, "Plus Org", node).await;
     let mut client = create_invitation_client(addr).await.expect("connect inv");
 
     // Create invitation to user@example.com
-    create_invite(&mut client, org, "user@example.com", 24).await;
+    create_invite(&mut client, org, admin, "user@example.com", 24).await;
 
     // Try to create invitation to user+tag@example.com in the same org
     // Should return ALREADY_EXISTS (normalizes to the same HMAC → duplicate pending)
     let err = client
         .create_organization_invite(proto::CreateOrganizationInviteRequest {
             organization: Some(proto::OrganizationSlug { slug: org }),
-            caller: Some(proto::UserSlug { slug: 1 }),
+            caller: Some(proto::UserSlug { slug: admin }),
             email: "user+tag@example.com".to_string(),
             role: proto::OrganizationMemberRole::Member as i32,
             ttl_hours: 24,
@@ -411,19 +347,20 @@ async fn test_plus_addressing_dedup() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_gmail_dot_dedup() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let node = &cluster.nodes()[0];
+    let addr = node.addr;
 
-    let org = setup_org(addr, "Gmail Org").await;
+    let (org, admin) = setup_org(addr, "Gmail Org", node).await;
     let mut client = create_invitation_client(addr).await.expect("connect inv");
 
     // Create invitation to user@gmail.com
-    create_invite(&mut client, org, "user@gmail.com", 24).await;
+    create_invite(&mut client, org, admin, "user@gmail.com", 24).await;
 
     // Try to create invitation to u.s.e.r@gmail.com in the same org
     let err = client
         .create_organization_invite(proto::CreateOrganizationInviteRequest {
             organization: Some(proto::OrganizationSlug { slug: org }),
-            caller: Some(proto::UserSlug { slug: 1 }),
+            caller: Some(proto::UserSlug { slug: admin }),
             email: "u.s.e.r@gmail.com".to_string(),
             role: proto::OrganizationMemberRole::Member as i32,
             ttl_hours: 24,
@@ -447,12 +384,13 @@ async fn test_gmail_dot_dedup() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_wrong_user_gets_not_found() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let node = &cluster.nodes()[0];
+    let addr = node.addr;
 
-    let org = setup_org(addr, "Auth Org").await;
+    let (org, admin) = setup_org(addr, "Auth Org", node).await;
     let mut client = create_invitation_client(addr).await.expect("connect inv");
 
-    let (slug, _) = create_invite(&mut client, org, "real@example.com", 24).await;
+    let (slug, _) = create_invite(&mut client, org, admin, "real@example.com", 24).await;
 
     // A different user (slug 999) tries to get details — should get NOT_FOUND
     let err = client
@@ -473,7 +411,8 @@ async fn test_wrong_user_gets_not_found() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_nonexistent_slug_gets_not_found() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let node = &cluster.nodes()[0];
+    let addr = node.addr;
 
     let mut client = create_invitation_client(addr).await.expect("connect inv");
 

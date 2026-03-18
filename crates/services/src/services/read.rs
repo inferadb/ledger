@@ -102,10 +102,10 @@ impl ReadService {
     ) -> Result<(OrganizationId, VaultId, RegionContext), Status> {
         let system = self.resolver.system_region()?;
         let organization_id =
-            SlugResolver::new(system.applied_state).extract_and_resolve(organization)?;
+            SlugResolver::new(system.applied_state.clone()).extract_and_resolve(organization)?;
         let region = self.resolver.resolve(organization_id)?;
-        let vault_id =
-            SlugResolver::new(region.applied_state.clone()).extract_and_resolve_vault(vault)?;
+        // Vault slug indexes are in GLOBAL applied state, not the data region's.
+        let vault_id = SlugResolver::new(system.applied_state).extract_and_resolve_vault(vault)?;
         Ok((organization_id, vault_id, region))
     }
 
@@ -1329,29 +1329,41 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             start_height - 1 // Will accept blocks at start_height and above
         };
 
-        // Capture raw slug value for broadcast stream filtering (compare slug-to-slug,
-        // not slug-to-internal-id, since announcements carry the original slug)
-        let watch_slug = req.organization.as_ref().map_or(0u64, |n| n.slug);
-        let vault_raw = req.vault.as_ref().map_or(0u64, |v| v.slug);
+        // Filter by internal IDs and normalize announcement slugs.
+        // REGIONAL Raft apply handlers populate announcement org/vault fields from
+        // internal-ID-to-slug maps that may be empty in the REGIONAL applied state.
+        // We filter by internal ID and then replace the announcement's org/vault
+        // slugs with the correct external Snowflake slugs.
+        let watch_org_id = organization_id;
+        let watch_vault_id = vault_id;
+        let org_slug_proto = req.organization;
+        let vault_slug_proto = req.vault;
         let broadcast_stream =
             tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(move |result| {
+                let org_slug_proto = org_slug_proto;
+                let vault_slug_proto = vault_slug_proto;
                 async move {
                     match result {
-                        Ok(announcement) => {
-                            // Filter by organization
-                            if announcement.organization.as_ref().map_or(0, |n| n.slug)
-                                != watch_slug
-                            {
+                        Ok(mut announcement) => {
+                            let ann_org = announcement.organization.as_ref().map_or(0, |n| n.slug);
+                            let ann_vault = announcement.vault.as_ref().map_or(0, |v| v.slug);
+
+                            // Match on internal ID (REGIONAL) or external slug (GLOBAL).
+                            // In REGIONAL mode, announcements carry internal IDs as fallback.
+                            if ann_org != watch_org_id.value() as u64 {
                                 return None;
                             }
-                            // Filter by vault
-                            if announcement.vault.as_ref().map_or(0, |v| v.slug) != vault_raw {
+                            if ann_vault != watch_vault_id.value() as u64 {
                                 return None;
                             }
                             // Skip blocks we already sent from history
                             if announcement.height <= last_historical_height {
                                 return None;
                             }
+                            // Normalize: ensure announcement carries external slugs,
+                            // not internal IDs (REGIONAL apply handler may set internal IDs)
+                            announcement.organization = org_slug_proto;
+                            announcement.vault = vault_slug_proto;
                             Some(Ok(announcement))
                         },
                         Err(_) => Some(Err(Status::internal("Stream error"))),

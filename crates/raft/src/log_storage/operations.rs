@@ -361,6 +361,12 @@ fn require_active_org_with_state<'a, B: StorageBackend>(
 /// Provisioning, Suspended, Migrating, and Deleted states.
 ///
 /// Used for write and vault creation operations that require a fully ready org.
+///
+/// In multi-Raft mode, data regions don't have organization metadata — only
+/// the GLOBAL region does. When the org isn't found in the local state, we
+/// allow the write to proceed (the service layer already validated the org
+/// exists and is Active using GLOBAL state). When the org IS found locally
+/// (GLOBAL region), we enforce the status check.
 fn require_fully_active_org(
     organization: &OrganizationId,
     state: &AppliedState,
@@ -384,10 +390,10 @@ fn require_fully_active_org(
             }),
         }
     } else {
-        Err(LedgerResponse::Error {
-            code: ErrorCode::NotFound,
-            message: format!("Organization {} not found", organization),
-        })
+        // Organization not in local state — this is expected in data regions
+        // where only the GLOBAL region has org metadata. The service layer
+        // validated the org before routing the proposal here.
+        Ok(())
     }
 }
 
@@ -493,13 +499,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 idempotency_key,
                 request_hash,
             } => {
-                // System writes (org_id=0) bypass the active-org check.
-                // The saga orchestrator uses org_id=0 + vault_id=0 to persist
-                // saga records (_meta:saga:*) before the target org exists.
-                if organization.value() != 0 {
-                    if let Err(resp) = require_fully_active_org(organization, state) {
-                        return (resp, None);
-                    }
+                if let Err(resp) = require_fully_active_org(organization, state) {
+                    return (resp, None);
                 }
 
                 let key = (*organization, *vault);
