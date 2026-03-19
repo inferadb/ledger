@@ -296,7 +296,7 @@ pub enum LedgerRequest {
     },
 
     /// Removes GLOBAL invitation indexes during retention reaping.
-    /// Used by `InviteMaintenanceJob` — deletes slug, email hash entries.
+    /// Used by `InviteMaintenanceJob` — deletes slug, email hash, and token hash entries.
     PurgeOrganizationInviteIndexes {
         /// Invitation being purged.
         invite: InviteId,
@@ -304,6 +304,8 @@ pub enum LedgerRequest {
         slug: InviteSlug,
         /// HMAC hex for email hash index cleanup.
         invitee_email_hmac: String,
+        /// SHA-256 hash of the invitation token for token hash index cleanup.
+        token_hash: [u8; 32],
     },
 
     /// Re-keys the GLOBAL `_idx:invite:email_hash` index during blinding
@@ -4103,6 +4105,7 @@ mod tests {
             invite: InviteId::new(1),
             slug: InviteSlug::new(100),
             invitee_email_hmac: "hmac".to_string(),
+            token_hash: [0; 32],
         };
         assert_eq!(classify_ledger_request(&purge), RaftScope::Global);
 
@@ -4119,18 +4122,28 @@ mod tests {
 
     #[test]
     fn test_purge_organization_invite_indexes_serialization_roundtrip() {
+        let mut test_hash = [0u8; 32];
+        test_hash[0] = 0xAB;
+        test_hash[31] = 0xCD;
         let request = LedgerRequest::PurgeOrganizationInviteIndexes {
             invite: InviteId::new(42),
             slug: InviteSlug::new(9999),
             invitee_email_hmac: "deadbeef".to_string(),
+            token_hash: test_hash,
         };
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
         match deserialized {
-            LedgerRequest::PurgeOrganizationInviteIndexes { invite, slug, invitee_email_hmac } => {
+            LedgerRequest::PurgeOrganizationInviteIndexes {
+                invite,
+                slug,
+                invitee_email_hmac,
+                token_hash,
+            } => {
                 assert_eq!(invite, InviteId::new(42));
                 assert_eq!(slug, InviteSlug::new(9999));
                 assert_eq!(invitee_email_hmac, "deadbeef");
+                assert_eq!(token_hash, test_hash);
             },
             _ => panic!("unexpected variant"),
         }

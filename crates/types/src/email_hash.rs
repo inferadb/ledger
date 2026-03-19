@@ -156,7 +156,11 @@ pub fn generate_verification_code(key: &EmailBlindingKey) -> (String, [u8; 32]) 
 }
 
 /// Converts a byte slice to a lowercase hex string.
-fn bytes_to_hex(bytes: &[u8]) -> String {
+///
+/// Pre-allocates an exact-sized buffer (`bytes.len() * 2`) and uses
+/// `fmt::Write` — more efficient than the per-byte `format!("{b:02x}")`
+/// pattern that was previously inlined across multiple crates.
+pub fn bytes_to_hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
         let _ = write!(acc, "{b:02x}");

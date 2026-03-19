@@ -1558,10 +1558,9 @@ impl RaftLogStore {
                 if entry.state_root == commitment.state_root {
                     metrics::record_state_root_verification();
                 } else {
-                    let local_hex: String =
-                        entry.state_root.iter().map(|b| format!("{b:02x}")).collect();
+                    let local_hex: String = inferadb_ledger_types::bytes_to_hex(&entry.state_root);
                     let leader_hex: String =
-                        commitment.state_root.iter().map(|b| format!("{b:02x}")).collect();
+                        inferadb_ledger_types::bytes_to_hex(&commitment.state_root);
                     tracing::error!(
                         organization = commitment.organization.value(),
                         vault = commitment.vault.value(),

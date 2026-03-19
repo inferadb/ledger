@@ -869,8 +869,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                         // Write token hash index: _idx:invite:token_hash:{hex} →
                         // InviteIndexEntry
-                        let token_hex: String =
-                            token_hash.iter().map(|b| format!("{b:02x}")).collect();
+                        let token_hex: String = inferadb_ledger_types::bytes_to_hex(token_hash);
                         let token_key = SystemKeys::invite_token_hash_index_key(&token_hex);
                         let token_value = match encode(&slug_entry) {
                             Ok(v) => v,
@@ -1033,8 +1032,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         };
 
                         // Construct token hash index key for removal
-                        let token_hex: String =
-                            token_hash.iter().map(|b| format!("{b:02x}")).collect();
+                        let token_hex: String = inferadb_ledger_types::bytes_to_hex(token_hash);
                         let token_key = SystemKeys::invite_token_hash_index_key(&token_hex);
 
                         let ops = vec![
@@ -1078,16 +1076,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             // ── PurgeOrganizationInviteIndexes (GLOBAL) ──────────
             // Removes GLOBAL invitation indexes during retention reaping.
-            // Deletes: slug index, email hash index entry.
-            LedgerRequest::PurgeOrganizationInviteIndexes { invite, slug, invitee_email_hmac } => {
+            // Deletes: slug index, email hash index entry, token hash index entry.
+            LedgerRequest::PurgeOrganizationInviteIndexes {
+                invite,
+                slug,
+                invitee_email_hmac,
+                token_hash,
+            } => {
                 let response = if let Some(ref state_layer) = self.state_layer {
                     let slug_key = SystemKeys::invite_slug_index_key(*slug);
                     let email_key =
                         SystemKeys::invite_email_hash_index_key(invitee_email_hmac, *invite);
+                    let token_hex: String = inferadb_ledger_types::bytes_to_hex(token_hash);
+                    let token_key = SystemKeys::invite_token_hash_index_key(&token_hex);
 
                     let ops = vec![
                         Operation::DeleteEntity { key: slug_key },
                         Operation::DeleteEntity { key: email_key },
+                        Operation::DeleteEntity { key: token_key },
                     ];
 
                     if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {

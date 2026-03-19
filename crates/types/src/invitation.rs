@@ -8,6 +8,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{InviteId, InviteSlug, OrganizationId, OrganizationMemberRole, TeamId, UserId};
 
+/// Returns the effective invitation status, accounting for lazy expiration.
+///
+/// If the stored status is [`Pending`](InvitationStatus::Pending) and the
+/// invitation has passed its `expires_at` timestamp, returns
+/// [`Expired`](InvitationStatus::Expired). Otherwise returns the stored status
+/// unchanged.
+///
+/// This is a free function (not a method) because it's used on both
+/// [`OrganizationInvitation`] and [`InviteEmailEntry`] fields.
+pub fn effective_invitation_status(
+    status: InvitationStatus,
+    expires_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> InvitationStatus {
+    if status == InvitationStatus::Pending && expires_at < now {
+        InvitationStatus::Expired
+    } else {
+        status
+    }
+}
+
 /// State of an organization invitation.
 ///
 /// All transitions originate from [`Pending`](InvitationStatus::Pending).
@@ -186,6 +207,41 @@ mod tests {
         let bytes = postcard::to_allocvec(&entry).unwrap();
         let deserialized: InviteIndexEntry = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(deserialized, entry);
+    }
+
+    #[test]
+    fn effective_status_pending_not_expired() {
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::hours(1);
+        assert_eq!(
+            effective_invitation_status(InvitationStatus::Pending, expires_at, now),
+            InvitationStatus::Pending,
+        );
+    }
+
+    #[test]
+    fn effective_status_pending_expired() {
+        let now = Utc::now();
+        let expires_at = now - chrono::Duration::seconds(1);
+        assert_eq!(
+            effective_invitation_status(InvitationStatus::Pending, expires_at, now),
+            InvitationStatus::Expired,
+        );
+    }
+
+    #[test]
+    fn effective_status_terminal_unchanged() {
+        let now = Utc::now();
+        let expires_at = now - chrono::Duration::hours(1);
+        // Terminal statuses remain unchanged even if past expires_at
+        for status in [
+            InvitationStatus::Accepted,
+            InvitationStatus::Declined,
+            InvitationStatus::Expired,
+            InvitationStatus::Revoked,
+        ] {
+            assert_eq!(effective_invitation_status(status, expires_at, now), status);
+        }
     }
 
     #[test]

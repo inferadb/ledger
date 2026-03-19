@@ -43,7 +43,7 @@ pub mod validation;
 
 pub use codec::{CodecError, decode, encode};
 pub use email_hash::{
-    EmailBlindingKey, EmailBlindingKeyParseError, compute_email_hmac, normalize_email,
+    EmailBlindingKey, EmailBlindingKeyParseError, bytes_to_hex, compute_email_hmac, normalize_email,
 };
 pub use error::{DiagnosticCode, LedgerError, Result};
 pub use error_code::ErrorCode;
@@ -53,6 +53,7 @@ pub use hash::{
 };
 pub use invitation::{
     InvitationStatus, InviteEmailEntry, InviteIndexEntry, OrganizationInvitation,
+    effective_invitation_status,
 };
 pub use token::{
     SESSION_AUDIENCE, SIGNING_KEY_ENVELOPE_SIZE, SigningKeyEnvelope, TokenError, TokenSubject,

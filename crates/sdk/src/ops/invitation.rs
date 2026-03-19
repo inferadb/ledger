@@ -304,12 +304,13 @@ impl LedgerClient {
     /// Accepts a pending invitation.
     ///
     /// On success, the user is added as an organization member with the
-    /// designated role and optional team membership.
+    /// designated role and optional team membership. Returns user-view data
+    /// (organization name, no invitee email).
     pub async fn accept_invitation(
         &self,
         slug: InviteSlug,
         acceptor: UserSlug,
-    ) -> Result<InvitationInfo> {
+    ) -> Result<ReceivedInvitationInfo> {
         self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
@@ -333,9 +334,9 @@ impl LedgerClient {
                     let response =
                         client.accept_invitation(tonic::Request::new(request)).await?.into_inner();
 
-                    response.invitation.as_ref().map(InvitationInfo::from_proto).ok_or_else(|| {
-                        missing_response_field("invitation", "AcceptInvitationResponse")
-                    })
+                    response.invitation.as_ref().map(ReceivedInvitationInfo::from_proto).ok_or_else(
+                        || missing_response_field("invitation", "AcceptInvitationResponse"),
+                    )
                 },
             ),
         )

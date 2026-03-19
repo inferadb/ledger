@@ -411,7 +411,7 @@ fn test_domain_separation_code_hash_vs_email_hmac() {
     assert_eq!(hmac1, hmac2, "HMAC should be deterministic");
 
     // code_hash is [u8; 32], hmac is hex string — format them consistently
-    let code_hash_hex = code_hash.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let code_hash_hex = inferadb_ledger_types::bytes_to_hex(&code_hash);
     assert_ne!(
         hmac1, code_hash_hex,
         "email HMAC and code hash should use different derivation domains"

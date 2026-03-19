@@ -52,6 +52,9 @@ jsonwebtoken.workspace = true
 zeroize.workspace = true
 subtle.workspace = true
 
+# Metrics
+metrics.workspace = true
+
 # Utilities
 chrono.workspace = true
 tracing.workspace = true

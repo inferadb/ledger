@@ -110,6 +110,13 @@ impl InvitationService {
             })?;
 
         if entities.len() > SCAN_CEILING {
+            metrics::counter!("ledger_invitation_scan_ceiling_breached_total").increment(1);
+            tracing::warn!(
+                hmac_prefix = %hmac_hex.get(..8).unwrap_or(hmac_hex),
+                scan_count = entities.len(),
+                ceiling = SCAN_CEILING,
+                "Invitation scan ceiling breached; rejecting request"
+            );
             return Err(Status::resource_exhausted(
                 "Invitation rate limit exceeded. Try again later.",
             ));
@@ -295,40 +302,63 @@ impl InvitationService {
         match self.resolve_invite_slug(invite_slug)? {
             Some(entry) => Ok(entry),
             None => {
-                self.timing_equalization_reads();
+                self.timing_equalization_reads(None);
                 ctx.set_error("NotFound", "Invitation not found");
                 Err(Status::not_found("Invitation not found"))
             },
         }
     }
 
-    /// Performs dummy reads for timing equalization when slug is not found.
-    fn timing_equalization_reads(&self) {
-        // Perform dummy REGIONAL read to match the exists-but-wrong-email path
+    /// Performs dummy reads and HMAC computation for timing equalization when
+    /// slug is not found. When a `region` is available, the dummy read targets
+    /// the REGIONAL state layer to match the real code path; otherwise falls
+    /// back to a GLOBAL read.
+    fn timing_equalization_reads(&self, region: Option<inferadb_ledger_types::Region>) {
         let dummy_key = SystemKeys::invite_key(OrganizationId::new(0), InviteId::new(0));
-        let _ = self.ctx.state.get_entity(SYSTEM_VAULT_ID, dummy_key.as_bytes());
+
+        if let Some(r) = region {
+            // REGIONAL read — matches the real `read_regional_invitation` path.
+            if let Ok(state) = self.ctx.regional_state(r) {
+                let _ = state.get_entity(SYSTEM_VAULT_ID, dummy_key.as_bytes());
+            } else {
+                // Region unavailable — fall back to GLOBAL read.
+                let _ = self.ctx.state.get_entity(SYSTEM_VAULT_ID, dummy_key.as_bytes());
+            }
+        } else {
+            // No region available (slug-not-found path) — GLOBAL read fallback.
+            let _ = self.ctx.state.get_entity(SYSTEM_VAULT_ID, dummy_key.as_bytes());
+        }
+
+        // Dummy HMAC computation to match the real email-comparison path.
+        if let Ok(key) = self.blinding_key() {
+            let _ = compute_email_hmac(key, "timing-equalization@invalid.example");
+        }
     }
 
     /// Builds a proto `Invitation` with role-based field population.
     ///
     /// Admin view: `invitee_email` populated, `organization_name` empty.
     /// User view: `invitee_email` empty, `organization_name` populated.
+    ///
+    /// If `status_override` is `Some`, uses that status directly (avoids
+    /// recomputing lazy expiration when the caller already checked).
     fn build_invitation(
         &self,
         inv: &OrganizationInvitation,
         slug_resolver: &SlugResolver,
         admin_view: bool,
+        status_override: Option<DomainInvitationStatus>,
     ) -> Result<proto::Invitation, Status> {
         let org_slug = slug_resolver.resolve_slug(inv.organization)?;
         let inviter_slug = slug_resolver.resolve_user_slug(inv.inviter)?;
 
-        // Lazy expiration check
-        let status = if inv.status == DomainInvitationStatus::Pending && inv.expires_at < Utc::now()
-        {
-            DomainInvitationStatus::Expired
-        } else {
-            inv.status
-        };
+        let status = status_override.unwrap_or_else(|| {
+            inferadb_ledger_types::effective_invitation_status(
+                inv.status,
+                inv.expires_at,
+                Utc::now(),
+            )
+        });
 
         let team_slug = inv.team.and_then(|team_id| {
             self.ctx
@@ -422,13 +452,63 @@ impl InvitationService {
         Ok(())
     }
 
+    /// Grants organization membership and optional team membership.
+    ///
+    /// Used in both the normal acceptance path and the partial-failure recovery
+    /// path (GLOBAL shows Accepted but membership was not yet granted).
+    async fn grant_membership(
+        &self,
+        org_id: OrganizationId,
+        user_id: UserId,
+        user_slug: inferadb_ledger_types::UserSlug,
+        role: DomainMemberRole,
+        team_id: Option<inferadb_ledger_types::TeamId>,
+        grpc_metadata: &tonic::metadata::MetadataMap,
+        ctx: &mut RequestContext,
+    ) -> Result<(), Status> {
+        let _ = self
+            .ctx
+            .propose_request(
+                LedgerRequest::AddOrganizationMember {
+                    organization: org_id,
+                    user: user_id,
+                    user_slug,
+                    role,
+                },
+                grpc_metadata,
+                ctx,
+            )
+            .await?;
+
+        if let Some(team_id) = team_id {
+            let region = self.org_region(org_id)?;
+            let _ = self
+                .ctx
+                .propose_regional_org_encrypted(
+                    region,
+                    SystemRequest::AddTeamMember {
+                        organization: org_id,
+                        team: team_id,
+                        user_id,
+                        role: inferadb_ledger_state::system::TeamMemberRole::Member,
+                    },
+                    org_id,
+                    grpc_metadata,
+                    ctx,
+                )
+                .await;
+        }
+
+        Ok(())
+    }
+
     /// Generates a 32-byte CSPRNG token and returns (hex_token, sha256_hash).
     fn generate_token() -> (String, [u8; 32]) {
         use rand::RngExt;
         let mut rng = rand::rng();
         let mut raw = [0u8; 32];
         rng.fill(&mut raw);
-        let hex = raw.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let hex = inferadb_ledger_types::bytes_to_hex(&raw);
         let hash: [u8; 32] = Sha256::digest(raw).into();
         (hex, hash)
     }
@@ -552,8 +632,10 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
                     if entry.organization == org_id {
                         return Err(super::helpers::error_code_to_status(
                             inferadb_ledger_types::ErrorCode::InvitationDuplicatePending,
-                            "A pending invitation already exists for this email in this organization"
-                                .to_owned(),
+                            format!(
+                                "A pending invitation already exists for this email in this organization (slug: {})",
+                                inv.slug.value()
+                            ),
                         ));
                     }
                 }
@@ -730,13 +812,8 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
                 continue;
             };
 
-            // Lazy expiration
             let effective_status =
-                if inv.status == DomainInvitationStatus::Pending && inv.expires_at < now {
-                    DomainInvitationStatus::Expired
-                } else {
-                    inv.status
-                };
+                inferadb_ledger_types::effective_invitation_status(inv.status, inv.expires_at, now);
 
             // Apply status filter
             if let Some(filter) = status_filter
@@ -745,7 +822,9 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
                 continue;
             }
 
-            if let Ok(proto_inv) = self.build_invitation(&inv, &slug_resolver, true) {
+            if let Ok(proto_inv) =
+                self.build_invitation(&inv, &slug_resolver, true, Some(effective_status))
+            {
                 invitations.push((inv.slug.value(), proto_inv));
             }
         }
@@ -793,7 +872,7 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
                 Status::not_found("Invitation not found")
             })?;
 
-        let proto_inv = self.build_invitation(&inv, &slug_resolver, true)?;
+        let proto_inv = self.build_invitation(&inv, &slug_resolver, true, None)?;
         ctx.set_success();
 
         Ok(Response::new(GetOrganizationInviteResponse { invitation: Some(proto_inv) }))
@@ -853,7 +932,7 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         let updated_inv = self
             .read_regional_invitation(index_entry.organization, index_entry.invite)?
             .unwrap_or(inv);
-        let proto_inv = self.build_invitation(&updated_inv, &slug_resolver, true)?;
+        let proto_inv = self.build_invitation(&updated_inv, &slug_resolver, true, None)?;
 
         ctx.set_success();
 
@@ -904,13 +983,11 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
                     continue;
                 };
 
-                // Lazy expiration
-                let effective_status =
-                    if entry.status == DomainInvitationStatus::Pending && inv.expires_at < now {
-                        DomainInvitationStatus::Expired
-                    } else {
-                        entry.status
-                    };
+                let effective_status = inferadb_ledger_types::effective_invitation_status(
+                    entry.status,
+                    inv.expires_at,
+                    now,
+                );
 
                 if let Some(filter) = status_filter
                     && effective_status != filter
@@ -918,7 +995,9 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
                     continue;
                 }
 
-                if let Ok(proto_inv) = self.build_invitation(&inv, &slug_resolver, false) {
+                if let Ok(proto_inv) =
+                    self.build_invitation(&inv, &slug_resolver, false, Some(effective_status))
+                {
                     invitations.push((inv.slug.value(), proto_inv));
                 }
             }
@@ -970,7 +1049,7 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
             return Err(Status::not_found("Invitation not found"));
         }
 
-        let proto_inv = self.build_invitation(&inv, &slug_resolver, false)?;
+        let proto_inv = self.build_invitation(&inv, &slug_resolver, false, None)?;
         ctx.set_success();
 
         Ok(Response::new(GetInvitationDetailsResponse { invitation: Some(proto_inv) }))
@@ -1031,7 +1110,7 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
                 if let Ok(Some(inv)) =
                     self.read_regional_invitation(index_entry.organization, index_entry.invite)
                 {
-                    let proto_inv = self.build_invitation(&inv, &slug_resolver, false)?;
+                    let proto_inv = self.build_invitation(&inv, &slug_resolver, false, None)?;
                     ctx.set_success();
                     return Ok(Response::new(AcceptInvitationResponse {
                         invitation: Some(proto_inv),
@@ -1048,40 +1127,18 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
                     Status::internal("REGIONAL invitation missing after GLOBAL accept")
                 })?;
 
-            let _ = self
-                .ctx
-                .propose_request(
-                    LedgerRequest::AddOrganizationMember {
-                        organization: index_entry.organization,
-                        user: user_id,
-                        user_slug,
-                        role: inv.role,
-                    },
-                    &grpc_metadata,
-                    &mut ctx,
-                )
-                .await?;
+            self.grant_membership(
+                index_entry.organization,
+                user_id,
+                user_slug,
+                inv.role,
+                inv.team,
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
-            if let Some(team_id) = inv.team {
-                let region = self.org_region(index_entry.organization)?;
-                let _ = self
-                    .ctx
-                    .propose_regional_org_encrypted(
-                        region,
-                        SystemRequest::AddTeamMember {
-                            organization: index_entry.organization,
-                            team: team_id,
-                            user_id,
-                            role: inferadb_ledger_state::system::TeamMemberRole::Member,
-                        },
-                        index_entry.organization,
-                        &grpc_metadata,
-                        &mut ctx,
-                    )
-                    .await;
-            }
-
-            let proto_inv = self.build_invitation(&inv, &slug_resolver, false)?;
+            let proto_inv = self.build_invitation(&inv, &slug_resolver, false, None)?;
             ctx.set_success();
             return Ok(Response::new(AcceptInvitationResponse { invitation: Some(proto_inv) }));
         }
@@ -1118,46 +1175,23 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         )
         .await?;
 
-        // 9. GLOBAL proposal: AddOrganizationMember (idempotent)
-        let _ = self
-            .ctx
-            .propose_request(
-                LedgerRequest::AddOrganizationMember {
-                    organization: index_entry.organization,
-                    user: user_id,
-                    user_slug,
-                    role: inv.role,
-                },
-                &grpc_metadata,
-                &mut ctx,
-            )
-            .await?;
-
-        // 10. REGIONAL proposal: AddTeamMember (if team specified and exists)
-        if let Some(team_id) = inv.team {
-            let region = self.org_region(index_entry.organization)?;
-            let _ = self
-                .ctx
-                .propose_regional_org_encrypted(
-                    region,
-                    SystemRequest::AddTeamMember {
-                        organization: index_entry.organization,
-                        team: team_id,
-                        user_id,
-                        role: inferadb_ledger_state::system::TeamMemberRole::Member,
-                    },
-                    index_entry.organization,
-                    &grpc_metadata,
-                    &mut ctx,
-                )
-                .await;
-        }
+        // 9. Grant membership (org + optional team)
+        self.grant_membership(
+            index_entry.organization,
+            user_id,
+            user_slug,
+            inv.role,
+            inv.team,
+            &grpc_metadata,
+            &mut ctx,
+        )
+        .await?;
 
         // Re-read for updated state
         let updated_inv = self
             .read_regional_invitation(index_entry.organization, index_entry.invite)?
             .unwrap_or(inv);
-        let proto_inv = self.build_invitation(&updated_inv, &slug_resolver, false)?;
+        let proto_inv = self.build_invitation(&updated_inv, &slug_resolver, false, None)?;
 
         ctx.set_success();
 
@@ -1184,7 +1218,7 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
 
         let index_entry = self.resolve_invite_slug_or_not_found(&req.slug, &mut ctx)?;
 
-        // Multi-email HMAC match
+        // Multi-email HMAC match via GLOBAL index (matches accept_invitation pattern)
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_id = slug_resolver.extract_and_resolve_user(&req.user).inspect_err(|status| {
             ctx.set_error("InvalidArgument", status.message());
@@ -1193,19 +1227,33 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         let blinding_key = self.blinding_key()?;
         let user_hmacs = self.get_user_email_hmacs(user_id, blinding_key)?;
 
+        // Email match via GLOBAL index (authoritative after CAS)
+        let email_entry = self
+            .check_email_match_global(&user_hmacs, index_entry.invite, index_entry.organization)?
+            .ok_or_else(|| {
+                ctx.set_error("NotFound", "Invitation not found");
+                Status::not_found("Invitation not found")
+            })?;
+
+        // Check current status from GLOBAL InviteEmailEntry (authoritative after CAS).
+        // Terminal non-Pending statuses are rejected without a REGIONAL read.
+        if email_entry.status.is_terminal() {
+            return Err(super::helpers::error_code_to_status(
+                inferadb_ledger_types::ErrorCode::InvitationAlreadyResolved,
+                format!("Invitation is already {}", email_entry.status),
+            ));
+        }
+
+        // Read REGIONAL for proposal fields (email HMAC, token hash)
         let inv = self
             .read_regional_invitation(index_entry.organization, index_entry.invite)?
             .ok_or_else(|| Status::not_found("Invitation not found"))?;
 
-        if !Self::email_matches(&user_hmacs, &inv.invitee_email_hmac) {
-            ctx.set_error("NotFound", "Invitation not found");
-            return Err(Status::not_found("Invitation not found"));
-        }
-
-        if inv.status != DomainInvitationStatus::Pending {
+        // Check expiration from REGIONAL record
+        if inv.expires_at < Utc::now() {
             return Err(super::helpers::error_code_to_status(
                 inferadb_ledger_types::ErrorCode::InvitationAlreadyResolved,
-                format!("Invitation is already {}", inv.status),
+                "Invitation has expired".to_owned(),
             ));
         }
 
@@ -1224,7 +1272,7 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         let updated_inv = self
             .read_regional_invitation(index_entry.organization, index_entry.invite)?
             .unwrap_or(inv);
-        let proto_inv = self.build_invitation(&updated_inv, &slug_resolver, false)?;
+        let proto_inv = self.build_invitation(&updated_inv, &slug_resolver, false, None)?;
 
         ctx.set_success();
 

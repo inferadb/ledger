@@ -1807,6 +1807,7 @@ dependencies = [
  "inferadb-ledger-test-utils",
  "inferadb-ledger-types",
  "jsonwebtoken",
+ "metrics",
  "moka",
  "openraft",
  "parking_lot",

@@ -697,7 +697,7 @@ async fn read_exact_or_truncated<R: AsyncRead + Unpin>(
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    inferadb_ledger_types::bytes_to_hex(bytes)
 }
 
 #[cfg(test)]

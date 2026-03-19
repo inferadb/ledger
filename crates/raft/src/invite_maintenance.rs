@@ -316,11 +316,13 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
                 Ok(Some(inv)) => inv,
                 Ok(None) => {
                     // REGIONAL record already gone — still clean up GLOBAL indexes.
-                    // Use a dummy slug; the delete operation is idempotent.
+                    // Use dummy slug and zeroed token hash; the delete operations
+                    // are idempotent (no-op if already gone).
                     let global_request = LedgerRequest::PurgeOrganizationInviteIndexes {
                         invite: scanned.invite_id,
                         slug: inferadb_ledger_types::InviteSlug::new(0),
                         invitee_email_hmac: scanned.email_hmac.clone(),
+                        token_hash: [0; 32],
                     };
                     if let Err(e) = self.raft.client_write(RaftPayload::new(global_request)).await {
                         warn!(
@@ -352,28 +354,8 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
                 continue;
             }
 
-            // Propose GLOBAL index cleanup
-            let global_request = LedgerRequest::PurgeOrganizationInviteIndexes {
-                invite: scanned.invite_id,
-                slug: invitation.slug,
-                invitee_email_hmac: scanned.email_hmac.clone(),
-            };
-
-            match self.raft.client_write(RaftPayload::new(global_request)).await {
-                Ok(_) => {},
-                Err(e) => {
-                    warn!(
-                        trace_id = %trace_id,
-                        invite_id = scanned.invite_id.value(),
-                        error = %e,
-                        "Failed to purge GLOBAL invite indexes"
-                    );
-                    had_errors = true;
-                    continue;
-                },
-            }
-
-            // Propose REGIONAL record deletion
+            // Propose REGIONAL record deletion first — if this fails, GLOBAL
+            // indexes still point to the record so the next cycle can retry.
             let regional_request = LedgerRequest::System(SystemRequest::DeleteOrganizationInvite {
                 organization: scanned.entry.organization,
                 invite: scanned.invite_id,
@@ -384,8 +366,31 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
                     trace_id = %trace_id,
                     invite_id = scanned.invite_id.value(),
                     error = %e,
-                    "REGIONAL delete failed after GLOBAL purge; maintenance will reconcile"
+                    "REGIONAL delete failed; skipping GLOBAL purge to allow retry next cycle"
                 );
+                had_errors = true;
+                continue;
+            }
+
+            // REGIONAL succeeded — now propose GLOBAL index cleanup.
+            // If this fails, the orphaned GLOBAL indexes are harmless (they
+            // point to a deleted REGIONAL record, resolved as "not found")
+            // and will be retried next cycle.
+            let global_request = LedgerRequest::PurgeOrganizationInviteIndexes {
+                invite: scanned.invite_id,
+                slug: invitation.slug,
+                invitee_email_hmac: scanned.email_hmac.clone(),
+                token_hash: invitation.token_hash,
+            };
+
+            if let Err(e) = self.raft.client_write(RaftPayload::new(global_request)).await {
+                warn!(
+                    trace_id = %trace_id,
+                    invite_id = scanned.invite_id.value(),
+                    error = %e,
+                    "GLOBAL purge failed after REGIONAL delete; orphaned indexes will be retried"
+                );
+                had_errors = true;
             }
 
             reaped_count += 1;
