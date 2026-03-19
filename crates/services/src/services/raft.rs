@@ -76,10 +76,10 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
 
         let vote_request = openraft::raft::VoteRequest { vote: raft_vote, last_log_id };
 
-        let response = raft
-            .vote(vote_request)
-            .await
-            .map_err(|e| Status::internal(format!("Vote failed: {}", e)))?;
+        let response = raft.vote(vote_request).await.map_err(|e| {
+            tracing::error!(error = %e, "Vote failed");
+            Status::internal("Internal error")
+        })?;
 
         Ok(Response::new(RaftVoteResponse {
             vote: Some((&response.vote).into()),
@@ -121,10 +121,10 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         let append_request: AppendEntriesRequest<LedgerTypeConfig> =
             AppendEntriesRequest { vote: raft_vote, prev_log_id, entries, leader_commit };
 
-        let response = raft
-            .append_entries(append_request)
-            .await
-            .map_err(|e| Status::internal(format!("AppendEntries failed: {}", e)))?;
+        let response = raft.append_entries(append_request).await.map_err(|e| {
+            tracing::error!(error = %e, "AppendEntries failed");
+            Status::internal("Internal error")
+        })?;
 
         use openraft::raft::AppendEntriesResponse::*;
         let (success, conflict, higher_vote) = match response {
@@ -193,10 +193,10 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
             done: req.done,
         };
 
-        let response = raft
-            .install_snapshot(install_request)
-            .await
-            .map_err(|e| Status::internal(format!("InstallSnapshot failed: {}", e)))?;
+        let response = raft.install_snapshot(install_request).await.map_err(|e| {
+            tracing::error!(error = %e, "InstallSnapshot failed");
+            Status::internal("Internal error")
+        })?;
 
         Ok(Response::new(RaftInstallSnapshotResponse { vote: Some((&response.vote).into()) }))
     }
@@ -225,7 +225,8 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
 
         raft.trigger().elect().await.map_err(|e| {
             inferadb_ledger_raft::metrics::record_trigger_election(false);
-            Status::internal(format!("Failed to trigger election: {}", e))
+            tracing::error!(error = %e, "Failed to trigger election");
+            Status::internal("Internal error")
         })?;
 
         inferadb_ledger_raft::metrics::record_trigger_election(true);

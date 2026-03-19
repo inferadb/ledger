@@ -53,6 +53,12 @@ pub fn validate_key(key: &str, config: &ValidationConfig) -> Result<(), Validati
             constraint: "must not be empty".to_string(),
         });
     }
+    if key.starts_with('_') {
+        return Err(ValidationError {
+            field: "key".to_string(),
+            constraint: "must not start with '_' (reserved for system keys)".to_string(),
+        });
+    }
     if key.len() > config.max_key_bytes {
         return Err(ValidationError {
             field: "key".to_string(),

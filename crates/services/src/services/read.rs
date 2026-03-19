@@ -11,7 +11,13 @@
 //!
 //! Use linearizable reads when you need read-after-write consistency guarantees.
 
-use std::{pin::Pin, sync::Arc};
+use std::{
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use futures::StreamExt;
 use inferadb_ledger_proto::{
@@ -89,6 +95,42 @@ pub struct ReadService {
     /// per forwarded read.
     #[builder(default)]
     leader_channel_cache: LeaderChannelCache,
+    /// Shared counter for active `WatchBlocks` streams across all connections.
+    ///
+    /// Incremented when a stream starts, decremented on drop via `StreamGuard`.
+    #[builder(default = Arc::new(AtomicUsize::new(0)))]
+    active_streams: Arc<AtomicUsize>,
+    /// Maximum concurrent `WatchBlocks` streams allowed.
+    #[builder(default = 1000)]
+    max_streams: usize,
+}
+
+/// RAII guard that decrements the active stream counter on drop.
+///
+/// Wraps a `WatchBlocks` response stream so the counter is always
+/// decremented when the client disconnects or the stream completes,
+/// regardless of how the stream ends. The inner stream is boxed to
+/// satisfy `Unpin` without requiring `pin_project`.
+struct StreamGuard {
+    inner: Pin<Box<dyn Stream<Item = Result<BlockAnnouncement, Status>> + Send>>,
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl Stream for StreamGuard {
+    type Item = Result<BlockAnnouncement, Status>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
 }
 
 impl ReadService {
@@ -1282,6 +1324,13 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             ));
         }
 
+        // Enforce global concurrent stream limit
+        let prev = self.active_streams.fetch_add(1, Ordering::Relaxed);
+        if prev >= self.max_streams {
+            self.active_streams.fetch_sub(1, Ordering::Relaxed);
+            return Err(Status::resource_exhausted("Maximum concurrent watch streams exceeded"));
+        }
+
         // Get current tip for this vault
         let current_tip = region.applied_state.vault_height(organization_id, vault_id);
 
@@ -1292,14 +1341,31 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         })?;
         let receiver = announcements.subscribe();
 
-        // Build historical blocks stream if start_height <= current_tip
+        // Build historical blocks stream if start_height <= current_tip.
+        // Cap historical replay to 10,000 blocks to prevent memory exhaustion.
+        // If the gap exceeds 10,000, start from (current_tip - 10,000 + 1) and
+        // log the skipped range.
+        const MAX_HISTORICAL_BLOCKS: u64 = 10_000;
         let historical_blocks: Vec<BlockAnnouncement> = if start_height <= current_tip {
+            let effective_start = if current_tip - start_height + 1 > MAX_HISTORICAL_BLOCKS {
+                let effective = current_tip.saturating_sub(MAX_HISTORICAL_BLOCKS - 1);
+                warn!(
+                    requested_start = start_height,
+                    effective_start = effective,
+                    current_tip,
+                    skipped = effective - start_height,
+                    "WatchBlocks historical replay exceeds limit, skipping oldest blocks"
+                );
+                effective
+            } else {
+                start_height
+            };
             Self::fetch_historical_announcements(
                 &region.block_archive,
                 &region.applied_state,
                 organization_id,
                 vault_id,
-                start_height,
+                effective_start,
                 current_tip,
             )
         } else {
@@ -1371,10 +1437,14 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 }
             });
 
-        // Chain historical blocks followed by broadcast
+        // Chain historical blocks followed by broadcast, wrapped in a guard
+        // that decrements the active stream counter when the stream ends or
+        // the client disconnects.
         let combined = historical_stream.chain(broadcast_stream);
+        let guarded =
+            StreamGuard { inner: Box::pin(combined), counter: Arc::clone(&self.active_streams) };
 
-        Ok(Response::new(Box::pin(combined)))
+        Ok(Response::new(Box::pin(guarded)))
     }
 
     /// Retrieves a single block by height from the block archive.

@@ -498,6 +498,12 @@ impl EnvKeyManager {
     /// Creates a new env-based key manager by scanning environment variables.
     ///
     /// Loads all `LEDGER_RMK_*` variables at construction time.
+    ///
+    /// Note: ideally we would clear these env vars after loading to prevent
+    /// key material from appearing in `/proc/self/environ`. However,
+    /// `std::env::remove_var` and `std::env::set_var` are `unsafe` in
+    /// edition 2024, and this crate denies `unsafe_code`. Operators should
+    /// use the SecretsManager backend for production deployments.
     pub fn new() -> Self {
         let mut keys = HashMap::new();
 

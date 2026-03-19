@@ -361,6 +361,17 @@ pub struct Config {
     #[builder(default)]
     pub max_read_forward_lag: u64,
 
+    // === gRPC Reflection ===
+    /// Enable gRPC server reflection for service discovery.
+    ///
+    /// When enabled, tools like `grpcurl` can introspect the server's services
+    /// without requiring proto files on the client side. Disabled by default
+    /// to reduce the attack surface in production.
+    #[arg(long = "enable-grpc-reflection", env = "INFERADB__LEDGER__ENABLE_GRPC_REFLECTION")]
+    #[serde(default)]
+    #[builder(default)]
+    pub enable_grpc_reflection: bool,
+
     // === Rate Limiting ===
     /// Rate limit configuration for per-client and per-organization request throttling.
     ///
@@ -441,6 +452,7 @@ impl Default for Config {
             tiered_storage: inferadb_ledger_types::config::TieredStorageConfig::default(),
             max_read_forward_lag: 0,
             health_check: None,
+            enable_grpc_reflection: false,
             rate_limit: None,
             token_maintenance_interval_secs: default_token_maintenance_interval_secs(),
             email_blinding_key: None,

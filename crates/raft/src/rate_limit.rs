@@ -15,7 +15,10 @@
 
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -341,14 +344,44 @@ impl RateLimiter {
     /// clients or decommissioned organizations.
     pub fn cleanup_stale(&self, max_idle: Duration) {
         let now = Instant::now();
+        let client_removed;
+        let org_removed;
         {
             let mut buckets = self.client_buckets.lock();
+            let before = buckets.len();
             buckets.retain(|_, bucket| now.duration_since(bucket.last_refill) < max_idle);
+            client_removed = before - buckets.len();
         }
         {
             let mut buckets = self.organization_buckets.lock();
+            let before = buckets.len();
             buckets.retain(|_, bucket| now.duration_since(bucket.last_refill) < max_idle);
+            org_removed = before - buckets.len();
         }
+        if client_removed > 0 || org_removed > 0 {
+            tracing::debug!(client_removed, org_removed, "Rate limiter stale bucket cleanup");
+        }
+    }
+
+    /// Spawns a background task that periodically cleans up stale token buckets.
+    ///
+    /// Runs every `interval` duration, removing buckets that have been idle
+    /// for longer than `max_idle`. Returns a `JoinHandle` that can be used
+    /// to abort the task on shutdown.
+    pub fn start_cleanup_task(
+        self: &Arc<Self>,
+        cleanup_interval: Duration,
+        max_idle: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let limiter = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(cleanup_interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                limiter.cleanup_stale(max_idle);
+            }
+        })
     }
 
     /// Returns the current token count for a specific organization (for testing/metrics).

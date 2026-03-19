@@ -415,6 +415,7 @@ pub async fn bootstrap_node(
         .proposal_timeout(proposal_timeout)
         .health_check_config(config.health_check.clone())
         .max_read_forward_lag(config.max_read_forward_lag)
+        .enable_grpc_reflection(config.enable_grpc_reflection)
         .email_blinding_key(email_blinding_key)
         .build();
     // Wire backup support post-construction because bon's type-state builders

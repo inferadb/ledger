@@ -115,10 +115,32 @@ pub enum BackupError {
         /// The offending path.
         path: String,
     },
+
+    /// Invalid backup ID (path traversal attempt).
+    #[snafu(display("Invalid backup ID: must not contain path separators or '..' ({backup_id})"))]
+    InvalidBackupId {
+        /// The offending backup ID.
+        backup_id: String,
+    },
 }
 
 /// Result type for backup operations.
 pub type Result<T> = std::result::Result<T, BackupError>;
+
+/// Validates that a backup ID does not contain path traversal sequences.
+///
+/// Rejects IDs containing `/`, `\`, or `..` to prevent directory traversal
+/// attacks when the ID is used in file path construction.
+fn validate_backup_id(backup_id: &str) -> Result<()> {
+    if backup_id.contains('/')
+        || backup_id.contains('\\')
+        || backup_id.contains("..")
+        || backup_id.is_empty()
+    {
+        return Err(BackupError::InvalidBackupId { backup_id: backup_id.to_string() });
+    }
+    Ok(())
+}
 
 /// Type of backup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -338,6 +360,7 @@ impl BackupManager {
     /// Returns [`BackupError::NotFound`] if no backup with the given ID exists,
     /// or [`BackupError::Snapshot`] if the file is corrupt or unreadable.
     pub fn load_backup(&self, backup_id: &str) -> Result<Snapshot> {
+        validate_backup_id(backup_id)?;
         let backup_path = self.backup_dir.join(format!("{backup_id}{BACKUP_EXT}"));
 
         if !backup_path.exists() {
@@ -355,6 +378,7 @@ impl BackupManager {
     /// given ID, or [`BackupError::Io`] / [`BackupError::Serialization`] if
     /// the file cannot be read or parsed.
     pub fn get_metadata(&self, backup_id: &str) -> Result<BackupMetadata> {
+        validate_backup_id(backup_id)?;
         let meta_path = self.backup_dir.join(format!("{backup_id}{META_EXT}"));
 
         if !meta_path.exists() {
@@ -577,6 +601,7 @@ impl BackupManager {
     /// [`BackupError::Io`] if the file cannot be read, or [`BackupError::Invalid`]
     /// if the checksum fails or the binary format is corrupt.
     pub fn load_page_backup(&self, backup_id: &str) -> Result<PageBackupData> {
+        validate_backup_id(backup_id)?;
         let path = self.backup_dir.join(format!("{backup_id}{PAGE_BACKUP_EXT}"));
         if !path.exists() {
             return Err(BackupError::NotFound { backup_id: backup_id.to_string() });

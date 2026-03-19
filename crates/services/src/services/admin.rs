@@ -1411,7 +1411,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         if let Err(e) = self.raft.client_write(RaftPayload::new(health_request.clone())).await {
             ctx.end_raft_timer();
             ctx.set_error("RaftError", &e.to_string());
-            return Err(Status::internal(format!("Failed to update vault health (GLOBAL): {e}")));
+            tracing::error!(error = %e, "Failed to update vault health (GLOBAL)");
+            return Err(Status::internal("Internal error"));
         }
 
         // DATA REGION write (for WriteService apply-time checks)
@@ -1725,7 +1726,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 )
                 .map_err(|e| {
                     ctx.set_error("BackupError", &e.to_string());
-                    Status::internal(format!("Failed to create incremental backup: {e}"))
+                    tracing::error!(error = %e, "Failed to create incremental backup");
+                    Status::internal("Internal error")
                 })?;
 
             // Clear dirty bitmap after successful incremental backup
@@ -1759,15 +1761,13 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
                 let entities =
                     self.state.list_entities(*vault_id, None, None, usize::MAX).map_err(|e| {
-                        Status::internal(format!(
-                            "Failed to list entities for vault {vault_id}: {e}"
-                        ))
+                        tracing::error!(error = %e, vault_id = %vault_id, "Failed to list entities for vault");
+                        Status::internal("Internal error")
                     })?;
 
                 let state_root = self.state.compute_state_root(*vault_id).map_err(|e| {
-                    Status::internal(format!(
-                        "Failed to compute state root for vault {vault_id}: {e}"
-                    ))
+                    tracing::error!(error = %e, vault_id = %vault_id, "Failed to compute state root for vault");
+                    Status::internal("Internal error")
                 })?;
 
                 vault_states.push(VaultSnapshotMeta::new(
@@ -1791,12 +1791,14 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             )
             .map_err(|e: inferadb_ledger_state::SnapshotError| {
                 ctx.set_error("SnapshotError", &e.to_string());
-                Status::internal(format!("Failed to create snapshot: {e}"))
+                tracing::error!(error = %e, "Failed to create snapshot");
+                Status::internal("Internal error")
             })?;
 
             backup_manager.create_backup(&snapshot, &tag).map_err(|e| {
                 ctx.set_error("BackupError", &e.to_string());
-                Status::internal(format!("Failed to create backup: {e}"))
+                tracing::error!(error = %e, "Failed to create backup");
+                Status::internal("Internal error")
             })?
         };
 
@@ -1839,9 +1841,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             .as_ref()
             .ok_or_else(|| Status::failed_precondition("Backup is not configured on this node"))?;
 
-        let backups = backup_manager
-            .list_backups(req.limit as usize)
-            .map_err(|e| Status::internal(format!("Failed to list backups: {e}")))?;
+        let backups = backup_manager.list_backups(req.limit as usize).map_err(|e| {
+            tracing::error!(error = %e, "Failed to list backups");
+            Status::internal("Internal error")
+        })?;
 
         let backup_infos: Vec<BackupInfo> = backups
             .into_iter()
@@ -1913,13 +1916,15 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             // Page-level backup (full page or incremental): resolve chain and restore pages
             let chain = backup_manager.resolve_backup_chain(&req.backup_id).map_err(|e| {
                 ctx.set_error("ChainResolutionError", &e.to_string());
-                Status::internal(format!("Failed to resolve backup chain: {e}"))
+                tracing::error!(error = %e, "Failed to resolve backup chain");
+                Status::internal("Internal error")
             })?;
 
             let db = self.state.database();
             let height = backup_manager.restore_page_chain(&chain, db.as_ref()).map_err(|e| {
                 ctx.set_error("RestoreError", &e.to_string());
-                Status::internal(format!("Failed to restore page backup chain: {e}"))
+                tracing::error!(error = %e, "Failed to restore page backup chain");
+                Status::internal("Internal error")
             })?;
 
             let msg = format!(
@@ -1933,7 +1938,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             // Snapshot-based backup (existing behavior)
             let snapshot = backup_manager.load_backup(&req.backup_id).map_err(|e| {
                 ctx.set_error("BackupLoadError", &e.to_string());
-                Status::internal(format!("Failed to load backup: {e}"))
+                tracing::error!(error = %e, "Failed to load backup");
+                Status::internal("Internal error")
             })?;
 
             // Verify schema version compatibility
@@ -1959,7 +1965,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
             snapshot_manager.save(&snapshot).map_err(|e| {
                 ctx.set_error("RestoreError", &e.to_string());
-                Status::internal(format!("Failed to save backup as snapshot: {e}"))
+                tracing::error!(error = %e, "Failed to save backup as snapshot");
+                Status::internal("Internal error")
             })?;
 
             let height = snapshot.header.region_height;
@@ -2047,7 +2054,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                     },
                     inferadb_ledger_raft::leader_transfer::LeaderTransferError::Connection { .. }
                     | inferadb_ledger_raft::leader_transfer::LeaderTransferError::Rpc { .. } => {
-                        Status::internal(e.to_string())
+                        tracing::error!(error = %e, "Leader transfer failed");
+                        Status::internal("Internal error")
                     },
                 };
                 Err(status)
@@ -2083,7 +2091,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let system_service = SystemOrganizationService::new(Arc::clone(&self.state));
         let current_version = system_service
             .get_blinding_key_version()
-            .map_err(|e| Status::internal(format!("Failed to read blinding key version: {e}")))?
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to read blinding key version");
+                Status::internal("Internal error")
+            })?
             .unwrap_or(0);
 
         if req.new_key_version <= current_version {
@@ -2098,9 +2109,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         }
 
         // Check if a rotation is already in progress
-        let rotation_in_progress = system_service
-            .is_rotation_in_progress()
-            .map_err(|e| Status::internal(format!("Failed to check rotation status: {e}")))?;
+        let rotation_in_progress = system_service.is_rotation_in_progress().map_err(|e| {
+            tracing::error!(error = %e, "Failed to check rotation status");
+            Status::internal("Internal error")
+        })?;
 
         if rotation_in_progress {
             ctx.set_error("FailedPrecondition", "A blinding key rotation is already in progress");
@@ -2171,7 +2183,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
         let active_key_version = system_service
             .get_blinding_key_version()
-            .map_err(|e| Status::internal(format!("Failed to read blinding key version: {e}")))?
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to read blinding key version");
+                Status::internal("Internal error")
+            })?
             .unwrap_or(0);
 
         // Collect per-region progress
@@ -2187,10 +2202,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 Ok(None) => {},
                 Err(e) => {
                     ctx.set_error("Internal", &e.to_string());
-                    return Err(Status::internal(format!(
-                        "Failed to read rehash progress for region {}: {e}",
-                        region.as_str()
-                    )));
+                    tracing::error!(error = %e, region = region.as_str(), "Failed to read rehash progress");
+                    return Err(Status::internal("Internal error"));
                 },
             }
         }
@@ -2230,7 +2243,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         // Get total page count from the state layer
         let total_pages = self.state.sidecar_page_count().map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
-            Status::internal(format!("Failed to read sidecar page count: {e}"))
+            tracing::error!(error = %e, "Failed to read sidecar page count");
+            Status::internal("Internal error")
         })?;
 
         let target_version = if req.target_version > 0 { req.target_version } else { 0 };
@@ -2347,7 +2361,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             Ok(u) => u,
             Err(e) => {
                 ctx.set_error("Internal", &format!("failed to list users: {e}"));
-                return Err(Status::internal(format!("Failed to list users: {e}")));
+                tracing::error!(error = %e, "Failed to list users");
+                return Err(Status::internal("Internal error"));
             },
         };
 
@@ -2513,7 +2528,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             inferadb_ledger_raft::raft_manager::RegionConfig::data(region, vec![(node_id, addr)]);
         let (_group, created) = manager.ensure_data_region(region_config).await.map_err(|e| {
             ctx.set_error("Internal", &format!("{e}"));
-            Status::internal(format!("Failed to provision region {}: {e}", region.as_str()))
+            tracing::error!(error = %e, region = region.as_str(), "Failed to provision region");
+            Status::internal("Internal error")
         })?;
 
         tracing::info!(

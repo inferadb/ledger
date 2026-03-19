@@ -1701,6 +1701,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "snafu",
+ "subtle",
  "tempfile",
  "tokio",
  "tokio-stream",

@@ -1359,6 +1359,7 @@ mod tests {
         assert_eq!(config.vault_refresh_ttl_secs, 3600);
         assert_eq!(config.clock_skew_secs, 30);
         assert_eq!(config.key_rotation_grace_secs, 14400);
+        assert_eq!(config.max_family_lifetime_secs, 2_592_000);
     }
 
     #[test]
@@ -1399,6 +1400,7 @@ mod tests {
             ("vault_access", JwtConfig::builder().vault_access_ttl_secs(0).build()),
             ("vault_refresh", JwtConfig::builder().vault_refresh_ttl_secs(0).build()),
             ("key_rotation_grace", JwtConfig::builder().key_rotation_grace_secs(0).build()),
+            ("max_family_lifetime", JwtConfig::builder().max_family_lifetime_secs(0).build()),
         ];
         for (name, result) in fields {
             assert!(result.is_err(), "{name} should reject zero");
@@ -1418,6 +1420,22 @@ mod tests {
         let result =
             JwtConfig::builder().vault_access_ttl_secs(900).vault_refresh_ttl_secs(900).build();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_jwt_config_family_lifetime_must_be_at_least_refresh_ttl() {
+        let result = JwtConfig::builder()
+            .session_refresh_ttl_secs(1_209_600)
+            .max_family_lifetime_secs(86400) // 1 day < 14 day refresh TTL
+            .build();
+        assert!(result.is_err());
+
+        // Equal is fine
+        let result = JwtConfig::builder()
+            .session_refresh_ttl_secs(86400)
+            .max_family_lifetime_secs(86400)
+            .build();
+        assert!(result.is_ok());
     }
 
     #[test]

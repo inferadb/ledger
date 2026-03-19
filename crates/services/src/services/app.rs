@@ -182,11 +182,13 @@ impl AppService {
     /// REGIONAL PII (name, description) from `AppProfile` records.
     fn list_apps_internal(&self, org_id: DomainOrganizationId) -> Result<Vec<App>, Status> {
         let prefix = SystemKeys::app_prefix(org_id);
-        let entities = self
-            .ctx
-            .state
-            .list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, 10000)
-            .map_err(|e| Status::internal(format!("Failed to list apps: {e}")))?;
+        let entities =
+            self.ctx.state.list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, 10000).map_err(
+                |e| {
+                    tracing::error!(error = %e, "Failed to list apps");
+                    Status::internal("Internal error")
+                },
+            )?;
 
         let mut apps = Vec::with_capacity(entities.len());
         for entity in &entities {
@@ -210,11 +212,13 @@ impl AppService {
         app_id: DomainAppId,
     ) -> Result<Vec<AppVaultConnection>, Status> {
         let prefix = SystemKeys::app_vault_prefix(org_id, app_id);
-        let entities = self
-            .ctx
-            .state
-            .list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, 10000)
-            .map_err(|e| Status::internal(format!("Failed to list vault connections: {e}")))?;
+        let entities =
+            self.ctx.state.list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, 10000).map_err(
+                |e| {
+                    tracing::error!(error = %e, "Failed to list vault connections");
+                    Status::internal("Internal error")
+                },
+            )?;
 
         let mut connections = Vec::with_capacity(entities.len());
         for entity in &entities {
@@ -261,11 +265,13 @@ impl AppService {
         app_id: DomainAppId,
     ) -> Result<Vec<ClientAssertionEntry>, Status> {
         let prefix = SystemKeys::app_assertion_prefix(org_id, app_id);
-        let entities = self
-            .ctx
-            .state
-            .list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, 10000)
-            .map_err(|e| Status::internal(format!("Failed to list assertions: {e}")))?;
+        let entities =
+            self.ctx.state.list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, 10000).map_err(
+                |e| {
+                    tracing::error!(error = %e, "Failed to list assertions");
+                    Status::internal("Internal error")
+                },
+            )?;
 
         let mut entries = Vec::with_capacity(entities.len());
         for entity in &entities {
@@ -361,8 +367,10 @@ impl proto::app_service_server::AppService for AppService {
         let resolver = self.resolver();
         let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
-        let slug = inferadb_ledger_types::snowflake::generate_app_slug()
-            .map_err(|e| Status::internal(format!("Failed to generate app slug: {e}")))?;
+        let slug = inferadb_ledger_types::snowflake::generate_app_slug().map_err(|e| {
+            tracing::error!(error = %e, "Failed to generate app slug");
+            Status::internal("Internal error")
+        })?;
 
         let name = inner.name.trim().to_string();
         if name.is_empty() {
@@ -783,8 +791,14 @@ impl proto::app_service_server::AppService for AppService {
         let secret_hash =
             tokio::task::spawn_blocking(move || bcrypt::hash(secret_to_hash, bcrypt::DEFAULT_COST))
                 .await
-                .map_err(|e| Status::internal(format!("Hash task panicked: {e}")))?
-                .map_err(|e| Status::internal(format!("Failed to hash secret: {e}")))?;
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Hash task panicked");
+                    Status::internal("Internal error")
+                })?
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Failed to hash secret");
+                    Status::internal("Internal error")
+                })?;
 
         let response = self
             .ctx
@@ -897,7 +911,10 @@ impl proto::app_service_server::AppService for AppService {
             let pk = signing_key.verifying_key().to_bytes().to_vec();
             let pem: Zeroizing<String> = signing_key
                 .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
-                .map_err(|e| Status::internal(format!("Failed to encode private key: {e}")))?
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Failed to encode private key");
+                    Status::internal("Internal error")
+                })?
                 .to_string()
                 .into();
 

@@ -57,6 +57,7 @@ rand.workspace = true
 ed25519-dalek.workspace = true
 zeroize.workspace = true
 aes-gcm.workspace = true
+subtle.workspace = true
 
 # Utilities
 bytes.workspace = true

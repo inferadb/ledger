@@ -331,7 +331,8 @@ impl ServiceContext {
         let regional_state = self.regional_state(region)?;
         let sys_svc = inferadb_ledger_state::system::SystemOrganizationService::new(regional_state);
         let shred_key = sys_svc.get_user_shred_key(user_id).map_err(|e| {
-            Status::internal(format!("Failed to read UserShredKey for user {user_id}: {e}"))
+            tracing::error!(error = %e, user_id = %user_id, "Failed to read UserShredKey");
+            Status::internal("Internal error")
         })?;
 
         let shred_key = shred_key.ok_or_else(|| {
@@ -345,7 +346,10 @@ impl ServiceContext {
             &shred_key.key,
             user_id,
         )
-        .map_err(|e| Status::internal(format!("Failed to encrypt Raft entry: {e}")))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to encrypt Raft entry");
+            Status::internal("Internal error")
+        })?;
 
         self.propose_regional_ledger_request(
             region,
@@ -379,9 +383,8 @@ impl ServiceContext {
         let regional_state = self.regional_state(region)?;
         let sys_svc = inferadb_ledger_state::system::SystemOrganizationService::new(regional_state);
         let shred_key = sys_svc.get_org_shred_key(organization).map_err(|e| {
-            Status::internal(format!(
-                "Failed to read OrgShredKey for organization {organization}: {e}"
-            ))
+            tracing::error!(error = %e, organization = %organization, "Failed to read OrgShredKey");
+            Status::internal("Internal error")
         })?;
 
         let shred_key = shred_key.ok_or_else(|| {
@@ -395,7 +398,10 @@ impl ServiceContext {
             &shred_key.key,
             organization,
         )
-        .map_err(|e| Status::internal(format!("Failed to encrypt Raft entry: {e}")))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to encrypt Raft entry");
+            Status::internal("Internal error")
+        })?;
 
         self.propose_regional_ledger_request(
             region,

@@ -988,6 +988,7 @@ mod tests {
             created_at: now,
             used_at: None,
             revoked_at: None,
+            family_created_at: Some(now),
         }
     }
 

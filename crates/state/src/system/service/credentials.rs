@@ -237,9 +237,29 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         }
 
         // Apply passkey-specific updates (sign_count, backup_state).
+        // Per WebAuthn spec (section 7.2 step 21), sign_count must be strictly
+        // increasing to detect cloned authenticators. A value of 0 for both old
+        // and new indicates the authenticator doesn't support counters.
         if let Some(pk_update) = passkey_update
             && let CredentialData::Passkey(ref mut pk) = cred.credential_data
         {
+            if pk_update.sign_count > 0
+                && pk.sign_count > 0
+                && pk_update.sign_count <= pk.sign_count
+            {
+                warn!(
+                    credential_id = cred.id.value(),
+                    old_count = pk.sign_count,
+                    new_count = pk_update.sign_count,
+                    "Passkey sign_count not monotonically increasing — possible cloned authenticator"
+                );
+                return Err(SystemError::FailedPrecondition {
+                    message: format!(
+                        "Passkey sign_count regression: new {} <= current {} (possible cloned authenticator)",
+                        pk_update.sign_count, pk.sign_count
+                    ),
+                });
+            }
             pk.sign_count = pk_update.sign_count;
             pk.backup_state = pk_update.backup_state;
         }

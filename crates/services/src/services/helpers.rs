@@ -17,7 +17,7 @@ use inferadb_ledger_types::{
 };
 use tempfile::TempDir;
 use tonic::Status;
-use tracing::warn;
+use tracing::{error, warn};
 
 /// Rejects the request if the node is draining (not accepting new proposals).
 ///
@@ -206,9 +206,15 @@ pub(crate) fn load_app(
     let key = SystemKeys::app_key(org_id, app_id);
     let entity = state
         .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
-        .map_err(|e| Status::internal(format!("Failed to read app: {e}")))?
+        .map_err(|e| {
+            error!(error = %e, "Failed to read app");
+            Status::internal("Internal error")
+        })?
         .ok_or_else(|| Status::not_found(format!("App {} not found", app_id)))?;
-    decode::<App>(&entity.value).map_err(|e| Status::internal(format!("Failed to decode app: {e}")))
+    decode::<App>(&entity.value).map_err(|e| {
+        error!(error = %e, "Failed to decode app");
+        Status::internal("Internal error")
+    })
 }
 
 /// Computes a hash of operations for idempotency payload comparison.
@@ -277,11 +283,15 @@ pub(crate) fn hash_operations(operations: &[proto::Operation]) -> Vec<u8> {
 ///
 /// Returns `tonic::Status::internal` if temp dir or database creation fails.
 pub(crate) fn create_replay_context() -> Result<(TempDir, StateLayer<FileBackend>), Status> {
-    let temp_dir =
-        TempDir::new().map_err(|e| Status::internal(format!("Failed to create temp dir: {e}")))?;
+    let temp_dir = TempDir::new().map_err(|e| {
+        error!(error = %e, "Failed to create temp dir");
+        Status::internal("Internal error")
+    })?;
     let temp_db = Arc::new(
-        Database::<FileBackend>::create(temp_dir.path().join("replay.db"))
-            .map_err(|e| Status::internal(format!("Failed to create temp db: {e}")))?,
+        Database::<FileBackend>::create(temp_dir.path().join("replay.db")).map_err(|e| {
+            error!(error = %e, "Failed to create temp db");
+            Status::internal("Internal error")
+        })?,
     );
     let temp_state = StateLayer::new(temp_db);
     Ok((temp_dir, temp_state))
@@ -289,10 +299,11 @@ pub(crate) fn create_replay_context() -> Result<(TempDir, StateLayer<FileBackend
 
 /// Maps a storage error to `Status::internal`.
 ///
-/// Consolidates the repeated `.map_err(|e| Status::internal(format!("Storage error: {e}")))`
-/// pattern used across read service methods.
+/// Consolidates the repeated storage error mapping pattern used across read
+/// service methods. Logs the full error and returns a generic `Status::internal`.
 pub(crate) fn storage_err(e: impl Display) -> Status {
-    Status::internal(format!("Storage error: {e}"))
+    error!(error = %e, "Storage error");
+    Status::internal("Internal error")
 }
 
 /// Reads and decodes an [`AppVaultConnection`] from the system vault.
@@ -310,10 +321,15 @@ pub(crate) fn read_vault_connection(
     let key = SystemKeys::app_vault_key(org_id, app_id, vault_id);
     let entity = state
         .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
-        .map_err(|e| Status::internal(format!("Failed to read vault connection: {e}")))?
+        .map_err(|e| {
+            error!(error = %e, "Failed to read vault connection");
+            Status::internal("Internal error")
+        })?
         .ok_or(not_found)?;
-    decode::<AppVaultConnection>(&entity.value)
-        .map_err(|e| Status::internal(format!("Failed to decode vault connection: {e}")))
+    decode::<AppVaultConnection>(&entity.value).map_err(|e| {
+        error!(error = %e, "Failed to decode vault connection");
+        Status::internal("Internal error")
+    })
 }
 
 /// Maps a [`ErrorCode`] to the corresponding gRPC [`Status`].

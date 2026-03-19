@@ -47,7 +47,10 @@ fn classify_batch_error(err: &BatchError) -> Status {
     match err {
         BatchError::RaftError(msg) => classify_raft_error(msg),
         BatchError::Dropped => Status::unavailable("Batch writer dropped request"),
-        BatchError::Internal(msg) => Status::internal(format!("Batch error: {}", msg)),
+        BatchError::Internal(msg) => {
+            tracing::error!(error = %msg, "Batch error");
+            Status::internal("Internal error")
+        },
     }
 }
 

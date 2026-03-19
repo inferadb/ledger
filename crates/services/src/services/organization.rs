@@ -67,7 +67,8 @@ impl OrganizationService {
         }
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let nodes = sys_svc.list_nodes().map_err(|e| {
-            Status::internal(format!("Failed to list nodes for region validation: {e}"))
+            tracing::error!(error = %e, "Failed to list nodes for region validation");
+            Status::internal("Internal error")
         })?;
         let in_region_count = nodes.iter().filter(|n| n.region == region).count();
         if in_region_count >= 3 {
@@ -475,7 +476,10 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             let sys_svc_admin = SystemOrganizationService::new(self.ctx.state.clone());
             sys_svc_admin
                 .get_user_id_by_slug(admin_user_slug)
-                .map_err(|e| Status::internal(format!("Failed to resolve admin slug: {e}")))?
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Failed to resolve admin slug");
+                    Status::internal("Internal error")
+                })?
                 .ok_or_else(|| {
                     Status::invalid_argument(format!(
                         "Admin user with slug {} not found",
@@ -487,8 +491,10 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         };
 
         // Generate a Snowflake slug for the organization
-        let slug = inferadb_ledger_types::snowflake::generate_organization_slug()
-            .map_err(|e| Status::internal(format!("Failed to generate organization slug: {e}")))?;
+        let slug = inferadb_ledger_types::snowflake::generate_organization_slug().map_err(|e| {
+            tracing::error!(error = %e, "Failed to generate organization slug");
+            Status::internal("Internal error")
+        })?;
 
         let tier = crate::proto_compat::organization_tier_from_proto(req.tier());
 
@@ -939,8 +945,10 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
 
         let saga_key = format!("_meta:saga:{}", saga.id);
         let saga_wrapped = inferadb_ledger_state::system::Saga::MigrateOrg(saga);
-        let saga_bytes = serde_json::to_vec(&saga_wrapped)
-            .map_err(|e| Status::internal(format!("Failed to serialize migration saga: {e}")))?;
+        let saga_bytes = serde_json::to_vec(&saga_wrapped).map_err(|e| {
+            tracing::error!(error = %e, "Failed to serialize migration saga");
+            Status::internal("Internal error")
+        })?;
 
         let saga_op = inferadb_ledger_types::Operation::SetEntity {
             key: saga_key,
@@ -1595,7 +1603,8 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Generate team slug
         let team_slug = inferadb_ledger_types::snowflake::generate_team_slug().map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
-            Status::internal(format!("Failed to generate team slug: {e}"))
+            tracing::error!(error = %e, "Failed to generate team slug");
+            Status::internal("Internal error")
         })?;
 
         // Step 1 (GLOBAL): Create team directory entry (ID + slug only, no PII).

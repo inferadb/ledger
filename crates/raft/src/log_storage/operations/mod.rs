@@ -3639,6 +3639,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 created_at: block_timestamp,
                                 used_at: None,
                                 revoked_at: None,
+                                family_created_at: Some(block_timestamp),
                             };
                             if let Err(e) = sys.store_refresh_token(&token) {
                                 return (
@@ -4605,6 +4606,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 created_at: block_timestamp,
                                 used_at: None,
                                 revoked_at: None,
+                                family_created_at: Some(block_timestamp),
                             };
 
                             if let Err(e) = sys.store_refresh_token(&token) {
@@ -4738,6 +4740,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 created_at: block_timestamp,
                                 used_at: None,
                                 revoked_at: None,
+                                family_created_at: Some(block_timestamp),
                             };
 
                             if let Err(e) = sys.store_refresh_token(&token) {
@@ -5375,6 +5378,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     created_at: block_timestamp,
                     used_at: None,
                     revoked_at: None,
+                    family_created_at: Some(block_timestamp),
                 };
 
                 if let Err(e) = sys.store_refresh_token(&token) {
@@ -5393,6 +5397,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 new_kid,
                 ttl_secs,
                 expected_version,
+                max_family_lifetime_secs,
             } => {
                 let Some(state_layer) = &self.state_layer else {
                     return error_result(ErrorCode::Internal, "State layer not available");
@@ -5449,6 +5454,19 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // Check revocation.
                 if old_token.revoked_at.is_some() {
                     return error_result(ErrorCode::Unauthenticated, "Refresh token revoked");
+                }
+
+                // Check family lifetime. For tokens created before this field
+                // existed, fall back to `created_at` (conservative: treats the
+                // individual token's creation as the family origin).
+                let family_origin = old_token.family_created_at.unwrap_or(old_token.created_at);
+                let family_deadline =
+                    family_origin + saturating_duration_secs(*max_family_lifetime_secs);
+                if family_deadline <= block_timestamp {
+                    return error_result(
+                        ErrorCode::Expired,
+                        "Refresh token family lifetime exceeded \u{2014} re-authentication required",
+                    );
                 }
 
                 // For user session refresh: validate TokenVersion.
@@ -5583,6 +5601,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     created_at: block_timestamp,
                     used_at: None,
                     revoked_at: None,
+                    family_created_at: Some(family_origin),
                 };
 
                 if let Err(e) = sys.store_refresh_token(&new_token) {

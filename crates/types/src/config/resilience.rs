@@ -153,6 +153,32 @@ impl RateLimitConfig {
                 message: "backpressure_threshold must be > 0".to_string(),
             });
         }
+        // Upper bounds — prevent disabling protective controls via runtime reconfiguration.
+        if self.client_burst > 1_000_000 {
+            return Err(ConfigError::Validation {
+                message: "client_burst must be <= 1000000".to_string(),
+            });
+        }
+        if self.client_rate > 1_000_000.0 {
+            return Err(ConfigError::Validation {
+                message: "client_rate must be <= 1000000".to_string(),
+            });
+        }
+        if self.organization_burst > 10_000_000 {
+            return Err(ConfigError::Validation {
+                message: "organization_burst must be <= 10000000".to_string(),
+            });
+        }
+        if self.organization_rate > 10_000_000.0 {
+            return Err(ConfigError::Validation {
+                message: "organization_rate must be <= 10000000".to_string(),
+            });
+        }
+        if self.backpressure_threshold > 1_000_000 {
+            return Err(ConfigError::Validation {
+                message: "backpressure_threshold must be <= 1000000".to_string(),
+            });
+        }
         Ok(())
     }
 }
@@ -649,6 +675,37 @@ impl ValidationConfig {
         if self.max_relationship_string_bytes == 0 {
             return Err(ConfigError::Validation {
                 message: "max_relationship_string_bytes must be >= 1".to_string(),
+            });
+        }
+        // Upper bounds — prevent disabling protective controls via runtime reconfiguration.
+        if self.max_key_bytes > 65_536 {
+            return Err(ConfigError::Validation {
+                message: "max_key_bytes must be <= 65536".to_string(),
+            });
+        }
+        if self.max_value_bytes > 268_435_456 {
+            return Err(ConfigError::Validation {
+                message: "max_value_bytes must be <= 268435456".to_string(),
+            });
+        }
+        if self.max_operations_per_write > 100_000 {
+            return Err(ConfigError::Validation {
+                message: "max_operations_per_write must be <= 100000".to_string(),
+            });
+        }
+        if self.max_batch_payload_bytes > 536_870_912 {
+            return Err(ConfigError::Validation {
+                message: "max_batch_payload_bytes must be <= 536870912".to_string(),
+            });
+        }
+        if self.max_organization_name_chars > 1_000 {
+            return Err(ConfigError::Validation {
+                message: "max_organization_name_chars must be <= 1000".to_string(),
+            });
+        }
+        if self.max_relationship_string_bytes > 65_536 {
+            return Err(ConfigError::Validation {
+                message: "max_relationship_string_bytes must be <= 65536".to_string(),
             });
         }
         Ok(())

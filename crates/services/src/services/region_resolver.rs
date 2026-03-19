@@ -255,7 +255,10 @@ impl RegionResolver for RegionResolverService {
                 status,
                 ..
             } => Status::unavailable(format!("Organization {} is {:?}", organization, status)),
-            _ => Status::internal(format!("Routing error: {}", e)),
+            _ => {
+                tracing::error!(error = %e, "Routing error");
+                Status::internal("Internal error")
+            },
         })?;
 
         let org_region = routing.region;

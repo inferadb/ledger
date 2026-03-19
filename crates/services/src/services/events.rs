@@ -232,10 +232,10 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         };
 
         // Read from events database
-        let txn = self
-            .events_db
-            .read()
-            .map_err(|e| Status::internal(format!("Events database error: {e}")))?;
+        let txn = self.events_db.read().map_err(|e| {
+            tracing::error!(error = %e, "Events database error");
+            Status::internal("Internal error")
+        })?;
 
         // We need to over-fetch because in-memory filtering may discard some entries.
         // Fetch in batches until we have enough matching entries or run out.
@@ -247,7 +247,10 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         loop {
             let (batch, next_cursor) =
                 EventStore::list(&txn, org_id, start_ns, end_ns, batch_size, cursor.as_deref())
-                    .map_err(|e| Status::internal(format!("Events query error: {e}")))?;
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "Events query error");
+                        Status::internal("Internal error")
+                    })?;
 
             if batch.is_empty() {
                 break;
@@ -335,16 +338,18 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         }
 
         // O(log n) index lookup: (org_id, event_id) → primary key → entry.
-        let txn = self
-            .events_db
-            .read()
-            .map_err(|e| Status::internal(format!("Events database error: {e}")))?;
+        let txn = self.events_db.read().map_err(|e| {
+            tracing::error!(error = %e, "Events database error");
+            Status::internal("Internal error")
+        })?;
 
         let mut event_id_arr = [0u8; 16];
         event_id_arr.copy_from_slice(&req.event_id);
 
-        let found = EventStore::get_by_id(&txn, org_id, &event_id_arr)
-            .map_err(|e| Status::internal(format!("Events query error: {e}")))?;
+        let found = EventStore::get_by_id(&txn, org_id, &event_id_arr).map_err(|e| {
+            tracing::error!(error = %e, "Events query error");
+            Status::internal("Internal error")
+        })?;
 
         match found {
             Some(entry) => {
@@ -380,10 +385,10 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         let start_ns = timestamp_to_ns(&req.filter.as_ref().and_then(|f| f.start_time), 0);
         let end_ns = timestamp_to_ns(&req.filter.as_ref().and_then(|f| f.end_time), u64::MAX);
 
-        let txn = self
-            .events_db
-            .read()
-            .map_err(|e| Status::internal(format!("Events database error: {e}")))?;
+        let txn = self.events_db.read().map_err(|e| {
+            tracing::error!(error = %e, "Events database error");
+            Status::internal("Internal error")
+        })?;
 
         // If no filters beyond time range, use the fast count path
         let has_memory_filters = req.filter.as_ref().is_some_and(|f| {
@@ -397,8 +402,10 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
 
         let count = if !has_memory_filters && start_ns == 0 && end_ns == u64::MAX {
             // Fast path: count all events for the org
-            EventStore::count(&txn, org_id)
-                .map_err(|e| Status::internal(format!("Events count error: {e}")))?
+            EventStore::count(&txn, org_id).map_err(|e| {
+                tracing::error!(error = %e, "Events count error");
+                Status::internal("Internal error")
+            })?
         } else {
             // Slow path: scan with filters
             let mut count = 0u64;
@@ -408,7 +415,10 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
             loop {
                 let (batch, next_cursor) =
                     EventStore::list(&txn, org_id, start_ns, end_ns, batch_size, cursor.as_deref())
-                        .map_err(|e| Status::internal(format!("Events count error: {e}")))?;
+                        .map_err(|e| {
+                            tracing::error!(error = %e, "Events count error");
+                            Status::internal("Internal error")
+                        })?;
 
                 if batch.is_empty() {
                     break;
@@ -679,18 +689,22 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         let rejected_count = rejections.len() as u32;
 
         if !accepted_entries.is_empty() {
-            let mut txn = self
-                .events_db
-                .write()
-                .map_err(|e| Status::internal(format!("Events write transaction failed: {e}")))?;
+            let mut txn = self.events_db.write().map_err(|e| {
+                tracing::error!(error = %e, "Events write transaction failed");
+                Status::internal("Internal error")
+            })?;
 
             for entry in &accepted_entries {
-                EventStore::write(&mut txn, entry)
-                    .map_err(|e| Status::internal(format!("Event write failed: {e}")))?;
+                EventStore::write(&mut txn, entry).map_err(|e| {
+                    tracing::error!(error = %e, "Event write failed");
+                    Status::internal("Internal error")
+                })?;
             }
 
-            txn.commit()
-                .map_err(|e| Status::internal(format!("Events transaction commit failed: {e}")))?;
+            txn.commit().map_err(|e| {
+                tracing::error!(error = %e, "Events transaction commit failed");
+                Status::internal("Internal error")
+            })?;
 
             // Emit per-event metrics
             for entry in &accepted_entries {

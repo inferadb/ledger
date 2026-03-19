@@ -12,7 +12,11 @@
 //! - HealthService: Health checks
 //! - SystemDiscoveryService: Peer discovery
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, atomic::AtomicUsize},
+    time::Duration,
+};
 
 use inferadb_ledger_proto::proto::{
     admin_service_server::AdminServiceServer, app_service_server::AppServiceServer,
@@ -144,6 +148,20 @@ pub struct LedgerServer {
     /// session/vault token lifecycle RPCs.
     #[builder(default)]
     token_service: Option<TokenServiceConfig>,
+    /// Maximum concurrent `WatchBlocks` streams across all connections.
+    ///
+    /// Prevents resource exhaustion from too many open server-streaming RPCs.
+    /// Each `WatchBlocks` call increments a shared atomic counter; the stream
+    /// is rejected with `RESOURCE_EXHAUSTED` when the limit is reached.
+    #[builder(default = 1000)]
+    max_watch_streams: usize,
+    /// Enables gRPC server reflection.
+    ///
+    /// When true, tools like `grpcurl` can discover services without
+    /// requiring proto files on the client side. Disabled by default
+    /// in production to reduce the attack surface.
+    #[builder(default = false)]
+    enable_grpc_reflection: bool,
     /// HMAC key for privacy-preserving email uniqueness enforcement.
     ///
     /// When present, onboarding RPCs (email verification, registration) are
@@ -212,11 +230,16 @@ impl LedgerServer {
         let resolver: Arc<dyn RegionResolver> =
             Arc::new(RegionResolverService::new(self.manager.clone()));
 
+        // Shared counter for active WatchBlocks streams
+        let active_watch_streams = Arc::new(AtomicUsize::new(0));
+
         // Create service implementations
         let read_service = ReadService::builder()
             .resolver(resolver.clone())
             .manager(Some(self.manager.clone()))
             .max_read_forward_lag(self.max_read_forward_lag)
+            .active_streams(active_watch_streams)
+            .max_streams(self.max_watch_streams)
             .build();
 
         // Create write service using the resolver. Batch writers are per-region
@@ -352,15 +375,13 @@ impl LedgerServer {
         // RaftService routes inter-node Raft RPCs to the correct region.
         let raft_service = RaftService::new(self.manager.clone());
 
-        // gRPC reflection allows tools like grpcurl to discover services
-        // without requiring proto files on the client side.
-        let reflection_service = tonic_reflection::server::Builder::configure()
-            .register_encoded_file_descriptor_set(inferadb_ledger_proto::FILE_DESCRIPTOR_SET)
-            .build_v1()?;
-
         tracing::info!("Starting Ledger gRPC server on {}", self.addr);
 
         let mut router = Server::builder()
+            // HTTP/2 and TCP keepalive for long-lived connections
+            .http2_keepalive_interval(Some(Duration::from_secs(60)))
+            .http2_keepalive_timeout(Some(Duration::from_secs(20)))
+            .tcp_keepalive(Some(Duration::from_secs(60)))
             // Track in-flight requests for connection draining during shutdown.
             // Outermost layer so it counts every request, including those rejected
             // by concurrency limits or load shedding.
@@ -396,8 +417,17 @@ impl LedgerServer {
             ))
             .add_service(HealthServiceServer::new(health_service))
             .add_service(SystemDiscoveryServiceServer::new(discovery_service))
-            .add_service(RaftServiceServer::new(raft_service))
-            .add_service(reflection_service);
+            .add_service(RaftServiceServer::new(raft_service));
+
+        // gRPC reflection allows tools like grpcurl to discover services
+        // without requiring proto files on the client side.
+        // Disabled by default to reduce attack surface in production.
+        if self.enable_grpc_reflection {
+            let reflection_service = tonic_reflection::server::Builder::configure()
+                .register_encoded_file_descriptor_set(inferadb_ledger_proto::FILE_DESCRIPTOR_SET)
+                .build_v1()?;
+            router = router.add_service(reflection_service);
+        }
 
         // Register TokenService if JWT support is configured
         if let Some(token_svc) = token_service {

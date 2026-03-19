@@ -11,6 +11,7 @@ use hmac::{Hmac, Mac};
 use inferadb_ledger_types::{OrganizationId, VaultId, decode, encode};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 /// Page token format version for forward compatibility.
 const TOKEN_VERSION: u8 = 1;
@@ -133,8 +134,8 @@ impl PageTokenCodec {
         let result = mac.finalize();
         let expected_hmac = result.into_bytes();
 
-        // Compare truncated HMAC
-        if encoded_token.hmac[..] != expected_hmac[..HMAC_LENGTH] {
+        // Compare truncated HMAC (constant-time to prevent timing attacks)
+        if encoded_token.hmac[..].ct_eq(&expected_hmac[..HMAC_LENGTH]).unwrap_u8() != 1 {
             return Err(PageTokenError::InvalidHmac);
         }
 
@@ -293,7 +294,7 @@ impl PageTokenCodec {
         let result = mac.finalize();
         let expected_hmac = result.into_bytes();
 
-        if encoded_token.hmac[..] != expected_hmac[..HMAC_LENGTH] {
+        if encoded_token.hmac[..].ct_eq(&expected_hmac[..HMAC_LENGTH]).unwrap_u8() != 1 {
             return Err(PageTokenError::InvalidHmac);
         }
 

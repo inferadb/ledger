@@ -84,8 +84,10 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         });
 
         // Generate vault slug via Snowflake before Raft proposal
-        let vault = inferadb_ledger_types::snowflake::generate_vault_slug()
-            .map_err(|e| Status::internal(format!("Failed to generate vault slug: {}", e)))?;
+        let vault = inferadb_ledger_types::snowflake::generate_vault_slug().map_err(|e| {
+            tracing::error!(error = %e, "Failed to generate vault slug");
+            Status::internal("Internal error")
+        })?;
 
         let ledger_request = LedgerRequest::CreateVault {
             organization: organization_id,

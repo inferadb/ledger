@@ -625,6 +625,9 @@ pub enum LedgerRequest {
         /// State machine rejects if current version differs.
         /// None for vault token refresh.
         expected_version: Option<TokenVersion>,
+        /// Maximum family lifetime in seconds. The state machine rejects
+        /// the refresh if the family has exceeded this age.
+        max_family_lifetime_secs: u64,
     },
 
     /// Revokes all tokens in a family.
@@ -2800,6 +2803,7 @@ mod tests {
             new_kid: "active-kid".to_string(),
             ttl_secs: 1_209_600,
             expected_version: Some(TokenVersion::new(5)),
+            max_family_lifetime_secs: 2_592_000,
         };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
@@ -2812,12 +2816,14 @@ mod tests {
                 new_kid,
                 ttl_secs,
                 expected_version,
+                max_family_lifetime_secs,
             } => {
                 assert_eq!(old_token_hash, [0x33; 32]);
                 assert_eq!(new_token_hash, [0x44; 32]);
                 assert_eq!(new_kid, "active-kid");
                 assert_eq!(ttl_secs, 1_209_600);
                 assert_eq!(expected_version, Some(TokenVersion::new(5)));
+                assert_eq!(max_family_lifetime_secs, 2_592_000);
             },
             _ => panic!("unexpected variant"),
         }
@@ -2831,6 +2837,7 @@ mod tests {
             new_kid: "vault-kid".to_string(),
             ttl_secs: 3600,
             expected_version: None,
+            max_family_lifetime_secs: 2_592_000,
         };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");

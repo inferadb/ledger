@@ -35,6 +35,10 @@ const fn default_key_rotation_grace() -> u64 {
     14400
 }
 
+const fn default_max_family_lifetime() -> u64 {
+    2_592_000 // 30 days
+}
+
 // ─── Config ──────────────────────────────────────────────────────────
 
 /// JWT signing and validation configuration.
@@ -87,6 +91,13 @@ pub struct JwtConfig {
     /// Rotated keys remain valid for verification during this window.
     #[serde(default = "default_key_rotation_grace")]
     pub key_rotation_grace_secs: u64,
+
+    /// Maximum lifetime of a refresh token family in seconds (default: 2592000 = 30 days).
+    ///
+    /// Limits how long a session can be extended by refreshing tokens. After this
+    /// duration elapses from the initial authentication, the user must re-authenticate.
+    #[serde(default = "default_max_family_lifetime")]
+    pub max_family_lifetime_secs: u64,
 }
 
 #[bon::bon]
@@ -107,6 +118,7 @@ impl JwtConfig {
         #[builder(default = default_vault_refresh_ttl())] vault_refresh_ttl_secs: u64,
         #[builder(default = default_clock_skew())] clock_skew_secs: u64,
         #[builder(default = default_key_rotation_grace())] key_rotation_grace_secs: u64,
+        #[builder(default = default_max_family_lifetime())] max_family_lifetime_secs: u64,
     ) -> Result<Self, ConfigError> {
         let config = Self {
             issuer,
@@ -116,6 +128,7 @@ impl JwtConfig {
             vault_refresh_ttl_secs,
             clock_skew_secs,
             key_rotation_grace_secs,
+            max_family_lifetime_secs,
         };
         config.validate()?;
         Ok(config)
@@ -177,6 +190,19 @@ impl JwtConfig {
                 ),
             });
         }
+        if self.max_family_lifetime_secs == 0 {
+            return Err(ConfigError::Validation {
+                message: "max_family_lifetime_secs must be > 0".to_string(),
+            });
+        }
+        if self.max_family_lifetime_secs < self.session_refresh_ttl_secs {
+            return Err(ConfigError::Validation {
+                message: format!(
+                    "max_family_lifetime_secs ({}) must be >= session_refresh_ttl_secs ({})",
+                    self.max_family_lifetime_secs, self.session_refresh_ttl_secs
+                ),
+            });
+        }
         let min_access_ttl = self.session_access_ttl_secs.min(self.vault_access_ttl_secs);
         if self.clock_skew_secs >= min_access_ttl {
             return Err(ConfigError::Validation {
@@ -201,6 +227,7 @@ impl Default for JwtConfig {
             vault_refresh_ttl_secs: default_vault_refresh_ttl(),
             clock_skew_secs: default_clock_skew(),
             key_rotation_grace_secs: default_key_rotation_grace(),
+            max_family_lifetime_secs: default_max_family_lifetime(),
         }
     }
 }

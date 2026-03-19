@@ -758,6 +758,13 @@ pub struct RefreshToken {
     /// When this token was revoked.
     #[serde(default)]
     pub revoked_at: Option<DateTime<Utc>>,
+    /// When the token family was first created (initial authentication).
+    ///
+    /// Used to enforce maximum family lifetime — sessions cannot be extended
+    /// indefinitely by refreshing. Defaults to `created_at` for tokens
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub family_created_at: Option<DateTime<Utc>>,
 }
 
 // ============================================================================
@@ -1300,6 +1307,7 @@ mod tests {
             created_at: now,
             used_at: None,
             revoked_at: None,
+            family_created_at: Some(now),
         }
     }
 
