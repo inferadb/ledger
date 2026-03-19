@@ -270,6 +270,58 @@ impl LedgerClient {
         .await
     }
 
+    /// Authenticates a client assertion JWT and returns a vault access token.
+    ///
+    /// Ledger verifies the JWT signature against the app's registered client
+    /// assertion public keys, validates claims (iss, sub, exp, aud), and issues
+    /// a scoped vault token if the app is authorized.
+    pub async fn authenticate_client_assertion(
+        &self,
+        organization: OrganizationSlug,
+        vault: VaultSlug,
+        assertion_jwt: &str,
+        scopes: &[String],
+    ) -> Result<crate::token::TokenPair> {
+        self.check_shutdown(None)?;
+
+        let assertion_jwt = assertion_jwt.to_owned();
+        let scopes = scopes.to_vec();
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "authenticate_client_assertion",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "authenticate_client_assertion",
+                || async {
+                    let mut client = crate::connected_client!(pool, create_token_client);
+
+                    let request = proto::AuthenticateClientAssertionRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        vault: Some(proto::VaultSlug { slug: vault.value() }),
+                        assertion_jwt: assertion_jwt.clone(),
+                        scopes: scopes.clone(),
+                    };
+
+                    let response = client
+                        .authenticate_client_assertion(tonic::Request::new(request))
+                        .await?
+                        .into_inner();
+
+                    let tokens = response
+                        .tokens
+                        .ok_or_else(|| missing_response_field("tokens", "AuthenticateClientAssertionResponse"))?;
+
+                    Ok(crate::token::TokenPair::from_proto(tokens))
+                },
+            ),
+        )
+        .await
+    }
+
     /// Creates a new signing key for the given scope.
     pub async fn create_signing_key(
         &self,

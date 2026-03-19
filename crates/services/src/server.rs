@@ -473,6 +473,15 @@ impl LedgerServer {
             ));
         }
 
+        // Start periodic cleanup of stale rate limiter buckets to prevent
+        // unbounded HashMap growth from departed clients/organizations.
+        let _cleanup_handle = self.organization_rate_limiter.as_ref().map(|limiter| {
+            limiter.start_cleanup_task(
+                Duration::from_secs(60),  // run cleanup every 60 seconds
+                Duration::from_secs(300), // remove buckets idle for 5 minutes
+            )
+        });
+
         if let Some(mut shutdown_rx) = self.shutdown_rx {
             router
                 .serve_with_shutdown(self.addr, async move {

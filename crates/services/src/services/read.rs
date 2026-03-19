@@ -55,6 +55,20 @@ use super::{
     slug_resolver::SlugResolver,
 };
 
+/// Validates that a read key does not target system-reserved prefixes.
+///
+/// System keys (prefixed with `_`) are internal infrastructure and must not be
+/// readable through the public Read API. This mirrors the write-path validation
+/// in [`inferadb_ledger_types::validation::validate_key`].
+fn validate_read_key(key: &str) -> Result<(), Status> {
+    if key.starts_with('_') {
+        return Err(Status::invalid_argument(
+            "key must not start with '_' (reserved for system keys)",
+        ));
+    }
+    Ok(())
+}
+
 /// Handles read operations including verified reads, entity/relationship listing, and block
 /// streaming.
 ///
@@ -599,6 +613,10 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Set read operation fields
         ctx.set_key(&req.key);
+
+        // Reject system-reserved key prefixes on read path
+        validate_read_key(&req.key)?;
+
         let consistency = match ReadConsistency::try_from(req.consistency)
             .unwrap_or(ReadConsistency::Unspecified)
         {
@@ -791,6 +809,11 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
+        // Reject system-reserved key prefixes on read path
+        for key in &req.keys {
+            validate_read_key(key)?;
+        }
+
         // Read all keys from state layer
         let state = &*region.state;
         let mut results = Vec::with_capacity(req.keys.len());
@@ -916,6 +939,10 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Set read operation fields
         ctx.set_key(&req.key);
+
+        // Reject system-reserved key prefixes on read path
+        validate_read_key(&req.key)?;
+
         ctx.set_include_proof(true);
         ctx.set_consistency("linearizable"); // verified reads are always linearizable
         let organization = req.organization.as_ref().map_or(0, |n| n.slug);
@@ -1094,6 +1121,10 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Set read operation fields
         ctx.set_key(&req.key);
+
+        // Reject system-reserved key prefixes on read path
+        validate_read_key(&req.key)?;
+
         ctx.set_at_height(req.at_height);
         ctx.set_include_proof(req.include_proof);
         ctx.set_consistency("historical");
@@ -2074,6 +2105,15 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
         let prefix = if req.key_prefix.is_empty() { None } else { Some(req.key_prefix.as_str()) };
+
+        // Reject system-reserved key prefixes on list path
+        if let Some(p) = prefix
+            && p.starts_with('_')
+        {
+            return Err(Status::invalid_argument(
+                "key_prefix must not start with '_' (reserved for system keys)",
+            ));
+        }
 
         // Compute query hash from filter parameters for token validation
         // This prevents clients from changing filters mid-pagination

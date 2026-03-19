@@ -2617,6 +2617,12 @@ service TokenService {
 
   // Get active public keys for token verification (JWKS-style).
   rpc GetPublicKeys(GetPublicKeysRequest) returns (GetPublicKeysResponse);
+
+  // Authenticate a client assertion JWT and return a vault access token.
+  // Ledger verifies the JWT signature against the app's registered client
+  // assertion public keys, validates claims (iss, sub, exp, aud), and issues
+  // a scoped vault token if the app is authorized.
+  rpc AuthenticateClientAssertion(AuthenticateClientAssertionRequest) returns (AuthenticateClientAssertionResponse);
 }
 
 // Scope discriminator for signing keys.
@@ -2691,6 +2697,19 @@ message CreateVaultTokenRequest {
 }
 
 message CreateVaultTokenResponse {
+  TokenPair tokens = 1;
+}
+
+// ── Client Assertion Authentication ──
+
+message AuthenticateClientAssertionRequest {
+  OrganizationSlug organization = 1;
+  VaultSlug vault = 2;
+  string assertion_jwt = 3;
+  repeated string scopes = 4;
+}
+
+message AuthenticateClientAssertionResponse {
   TokenPair tokens = 1;
 }
 
