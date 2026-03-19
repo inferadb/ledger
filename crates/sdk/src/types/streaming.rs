@@ -30,6 +30,7 @@ use crate::proto_util::proto_timestamp_to_system_time;
 /// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlockAnnouncement {
     /// Organization containing the vault.
     pub organization: OrganizationSlug,

@@ -69,5 +69,8 @@ tempfile = { workspace = true }
 proptest = { workspace = true }
 openraft = { workspace = true }
 
+[features]
+serde = []
+
 [lints]
 workspace = true

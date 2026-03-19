@@ -21,6 +21,8 @@ use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 /// # }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum EventSource {
     /// The authorization engine component.
     Engine,
@@ -46,6 +48,8 @@ impl std::fmt::Display for EventSource {
 
 /// Scope of an event (system-wide or organization-scoped).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum EventScope {
     /// Cluster-wide administrative event.
     System,
@@ -65,6 +69,8 @@ impl EventScope {
 
 /// Outcome of an audited operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum EventOutcome {
     /// Operation completed successfully.
     Success,
@@ -117,6 +123,8 @@ impl EventOutcome {
 
 /// Emission path of an event (how it was generated).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum EventEmissionPath {
     /// Deterministic, Raft-replicated — identical on all nodes.
     ApplyPhase,
@@ -140,6 +148,7 @@ impl EventEmissionPath {
 /// or system event. Events follow the canonical log line pattern with rich
 /// contextual fields for compliance and debugging.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SdkEventEntry {
     /// Unique event identifier (UUID, 16 bytes).
     pub event_id: Vec<u8>,
@@ -232,6 +241,7 @@ impl SdkEventEntry {
 
 /// Paginated result from event queries.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EventPage {
     /// Matching events in chronological order.
     pub entries: Vec<SdkEventEntry>,
@@ -470,6 +480,7 @@ impl SdkIngestEventEntry {
 
 /// Result of an event ingestion request.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct IngestResult {
     /// Number of events accepted and written.
     pub accepted_count: u32,
@@ -481,6 +492,7 @@ pub struct IngestResult {
 
 /// A single rejected event from an ingestion batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct IngestRejection {
     /// Zero-based index into the request's entries array.
     pub index: u32,

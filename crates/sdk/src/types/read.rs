@@ -7,6 +7,8 @@ use inferadb_ledger_proto::proto;
 /// Controls whether reads are served from any replica (eventual) or must
 /// go through the leader (linearizable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum ReadConsistency {
     /// Reads from any replica (fastest, may be stale).
     #[default]
@@ -30,6 +32,7 @@ impl ReadConsistency {
 /// Contains the transaction ID, block height, and server-assigned sequence number
 /// for the committed write.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WriteSuccess {
     /// Unique transaction ID assigned by the server.
     pub tx_id: String,

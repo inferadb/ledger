@@ -7,6 +7,7 @@ use crate::proto_util::proto_timestamp_to_system_time;
 
 /// SDK representation of a client application.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AppInfo {
     /// External Snowflake slug.
     pub slug: AppSlug,
@@ -26,6 +27,7 @@ pub struct AppInfo {
 
 /// Credential configuration for an app.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AppCredentialsInfo {
     /// Client secret credential.
     pub client_secret_enabled: bool,
@@ -39,6 +41,7 @@ pub struct AppCredentialsInfo {
 
 /// A client assertion entry (public metadata only — private key is never returned after creation).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AppClientAssertionInfo {
     /// Server-assigned assertion ID.
     pub id: DomainClientAssertionId,
@@ -54,6 +57,7 @@ pub struct AppClientAssertionInfo {
 
 /// A vault connection for an app.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AppVaultConnectionInfo {
     /// Vault slug (external identifier).
     pub vault_slug: VaultSlug,
@@ -65,6 +69,7 @@ pub struct AppVaultConnectionInfo {
 
 /// Result of creating a client assertion — includes the private key PEM (returned only once).
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CreateAppClientAssertionResult {
     /// The created assertion metadata.
     pub assertion: AppClientAssertionInfo,
@@ -83,6 +88,7 @@ impl std::fmt::Debug for CreateAppClientAssertionResult {
 
 /// Result of getting a client secret's status.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AppClientSecretStatus {
     /// Whether the client secret credential is enabled.
     pub enabled: bool,
@@ -92,6 +98,8 @@ pub struct AppClientSecretStatus {
 
 /// Credential type for enable/disable operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum AppCredentialType {
     /// Client secret (shared secret).
     ClientSecret,

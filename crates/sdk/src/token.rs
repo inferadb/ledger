@@ -12,6 +12,7 @@ use crate::proto_util::proto_timestamp_to_system_time;
 
 /// An access + refresh token pair returned by session/vault token creation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TokenPair {
     /// JWT access token (short-lived).
     pub access_token: String,
@@ -43,6 +44,8 @@ impl TokenPair {
 
 /// Parsed claims from a validated access token.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum ValidatedToken {
     /// User session token claims.
     UserSession {
@@ -86,6 +89,7 @@ impl ValidatedToken {
 
 /// Public key metadata for token verification (JWKS-style).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PublicKeyInfo {
     /// Key identifier (kid).
     pub kid: String,

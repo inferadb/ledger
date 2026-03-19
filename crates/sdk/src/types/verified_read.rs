@@ -10,6 +10,8 @@ use crate::proto_util::proto_timestamp_to_system_time;
 /// Indicates whether the sibling hash should be placed on the left or right
 /// when computing the parent hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Direction {
     /// Sibling is on the left: `hash(sibling || current)`.
     Left,
@@ -32,6 +34,7 @@ impl Direction {
 /// Each sibling contains the hash of the neighboring node and which side
 /// it appears on for hash computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MerkleSibling {
     /// Hash of the sibling node.
     pub hash: Vec<u8>,
@@ -54,6 +57,7 @@ impl MerkleSibling {
 /// Contains the leaf hash and a path of sibling hashes from leaf to root.
 /// Used to verify that a value is included in the state tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MerkleProof {
     /// Hash of the leaf (the entity key-value).
     pub leaf_hash: Vec<u8>,
@@ -118,6 +122,7 @@ impl MerkleProof {
 /// The block header is the cryptographic anchor for all state at a given height.
 /// It contains the state root which can be used to verify Merkle proofs.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlockHeader {
     /// Block height (1-indexed).
     pub height: u64,
@@ -172,6 +177,7 @@ impl BlockHeader {
 /// Used to verify that a block at response_height descends from trusted_height.
 /// Contains block headers in ascending order from trusted_height + 1 to response_height.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ChainProof {
     /// Block headers from trusted_height + 1 to response_height (ascending order).
     pub headers: Vec<BlockHeader>,
@@ -225,6 +231,7 @@ impl ChainProof {
 ///
 /// Controls which proofs to include and at what height to read.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VerifyOpts {
     /// Reads at a specific block height (None = current height).
     pub at_height: Option<u64>,

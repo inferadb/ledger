@@ -13,6 +13,7 @@ use crate::types::{
 /// Used by `list_entities`, `list_relationships`, and `list_resources` operations.
 /// The `next_page_token` can be passed to subsequent calls to continue pagination.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PagedResult<T> {
     /// Items returned in this page.
     pub items: Vec<T>,
@@ -34,6 +35,7 @@ impl<T> PagedResult<T> {
 /// Entities are key-value pairs that can have optional expiration times
 /// and track their version (block height when last modified).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Entity {
     /// Entity key (max 1024 bytes, UTF-8).
     pub key: String,
@@ -67,6 +69,7 @@ impl Entity {
 /// Relationships connect resources to subjects via relations, forming
 /// the basis for permission checking.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Relationship {
     /// Resource identifier in format "type:id" (max 512 chars).
     pub resource: String,
@@ -333,6 +336,7 @@ impl ListResourcesOpts {
 /// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VerifiedValue {
     /// The entity value (None if key not found).
     pub value: Option<Vec<u8>>,
@@ -390,6 +394,8 @@ impl VerifiedValue {
 /// a single transaction. Use [`Operation::set_entity`] for key-value writes
 /// and [`Operation::create_relationship`] for authorization tuples.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Operation {
     /// Sets an entity value (key-value write).
     SetEntity {
@@ -432,6 +438,8 @@ pub enum Operation {
 /// Allows conditional writes that only succeed if the current state matches
 /// the expected condition. Useful for coordination primitives like locks.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum SetCondition {
     /// Only set if the key doesn't exist.
     NotExists,

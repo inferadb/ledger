@@ -9,6 +9,8 @@ use crate::proto_util::{proto_timestamp_to_system_time, region_from_proto_i32};
 
 /// Status of an organization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum OrganizationStatus {
     /// Status is unknown or unspecified.
     #[default]
@@ -41,6 +43,8 @@ impl OrganizationStatus {
 
 /// Billing tier for an organization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum OrganizationTier {
     /// Free tier with basic features.
     #[default]
@@ -71,6 +75,8 @@ impl OrganizationTier {
 
 /// Status of a vault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum VaultStatus {
     /// Status is unknown or unspecified.
     #[default]
@@ -97,6 +103,7 @@ impl VaultStatus {
 
 /// Information about an in-progress organization migration.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MigrationInfo {
     /// Organization slug (Snowflake ID).
     pub slug: OrganizationSlug,
@@ -110,6 +117,7 @@ pub struct MigrationInfo {
 
 /// SDK representation of a user record.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct UserInfo {
     /// External Snowflake slug.
     pub slug: UserSlug,
@@ -133,6 +141,7 @@ pub struct UserInfo {
 
 /// SDK representation of a user email record.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct UserEmailInfo {
     /// Email record ID.
     pub id: UserEmailId,
@@ -148,6 +157,7 @@ pub struct UserEmailInfo {
 
 /// Information about a user region migration.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct UserMigrationInfo {
     /// User slug.
     pub slug: UserSlug,
@@ -162,6 +172,7 @@ pub struct UserMigrationInfo {
 /// Status of a blinding key rotation initiated by
 /// [`LedgerClient::rotate_blinding_key`](crate::LedgerClient::rotate_blinding_key).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlindingKeyRotationStatus {
     /// Total email hash entries to re-hash.
     pub total_entries: u64,
@@ -176,6 +187,7 @@ pub struct BlindingKeyRotationStatus {
 /// Returned by
 /// [`LedgerClient::get_blinding_key_rehash_status`](crate::LedgerClient::get_blinding_key_rehash_status).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlindingKeyRehashStatus {
     /// Total email hash entries to re-hash.
     pub total_entries: u64,
@@ -192,6 +204,7 @@ pub struct BlindingKeyRehashStatus {
 /// Verification code returned by
 /// [`LedgerClient::initiate_email_verification`](crate::LedgerClient::initiate_email_verification).
 #[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EmailVerificationCode {
     /// 6-character verification code (A-Z, 0-9).
     pub code: String,
@@ -208,6 +221,8 @@ impl std::fmt::Debug for EmailVerificationCode {
 /// Either a session for an existing user, or an onboarding token for
 /// a new user who must complete registration.
 #[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum EmailVerificationResult {
     /// The email belongs to an existing user; a session was created.
     ExistingUser {
@@ -248,6 +263,7 @@ impl std::fmt::Debug for EmailVerificationResult {
 
 /// Result of [`LedgerClient::complete_registration`](crate::LedgerClient::complete_registration).
 #[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegistrationResult {
     /// The newly created user's external slug.
     pub user: UserSlug,
@@ -269,6 +285,8 @@ impl std::fmt::Debug for RegistrationResult {
 
 /// Role of a member within an organization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum OrganizationMemberRole {
     /// Organization administrator — can manage members and settings.
     Admin,
@@ -296,6 +314,7 @@ impl OrganizationMemberRole {
 
 /// Information about an organization member.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OrganizationMemberInfo {
     /// User identifier.
     pub user: UserSlug,
@@ -318,6 +337,8 @@ impl OrganizationMemberInfo {
 
 /// Role within a team.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum TeamMemberRole {
     /// Team manager — can update team settings.
     Manager,
@@ -345,6 +366,7 @@ impl TeamMemberRole {
 
 /// A member of a team.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TeamMemberInfo {
     /// User identifier.
     pub user: UserSlug,
@@ -366,6 +388,7 @@ impl TeamMemberInfo {
 
 /// Information about an organization team.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TeamInfo {
     /// Team identifier.
     pub slug: TeamSlug,
@@ -399,6 +422,7 @@ impl TeamInfo {
 /// Contains metadata about an organization including its ID, name, region assignment,
 /// and current status.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OrganizationInfo {
     /// Unique organization slug (Snowflake ID).
     pub slug: OrganizationSlug,
@@ -420,6 +444,7 @@ pub struct OrganizationInfo {
 
 /// Information returned when an organization is soft-deleted.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OrganizationDeleteInfo {
     /// When the soft-delete was initiated (absent if server omitted timestamp).
     pub deleted_at: Option<std::time::SystemTime>,
@@ -485,6 +510,7 @@ impl OrganizationInfo {
 /// Contains metadata about a vault including its ID, current height,
 /// state root, and node membership.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VaultInfo {
     /// Organization slug for this vault.
     pub organization: OrganizationSlug,
@@ -519,6 +545,8 @@ impl VaultInfo {
 
 /// Health status of a node or vault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum HealthStatus {
     /// Status is unknown or unspecified.
     #[default]
@@ -545,6 +573,7 @@ impl HealthStatus {
 
 /// Result of a health check operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HealthCheckResult {
     /// The health status.
     pub status: HealthStatus,

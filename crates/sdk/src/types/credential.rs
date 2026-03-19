@@ -17,6 +17,8 @@ use crate::proto_util::proto_timestamp_to_system_time;
 
 /// The type of authentication credential.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum CredentialType {
     /// WebAuthn passkey (FIDO2).
     Passkey,
@@ -63,6 +65,8 @@ impl CredentialType {
 
 /// TOTP hash algorithm (RFC 6238).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum TotpAlgorithm {
     /// SHA-1 (default, widest authenticator compatibility).
     Sha1,
@@ -100,6 +104,7 @@ impl TotpAlgorithm {
 
 /// WebAuthn passkey credential data.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PasskeyCredentialInfo {
     /// WebAuthn credential ID.
     pub credential_id: Vec<u8>,
@@ -152,6 +157,7 @@ impl PasskeyCredentialInfo {
 /// The `secret` field is only populated on the initial create response.
 /// All subsequent reads return an empty secret (stripped by the server).
 #[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TotpCredentialInfo {
     /// 20-byte HMAC secret (only present on create response).
     pub secret: Vec<u8>,
@@ -196,6 +202,7 @@ impl TotpCredentialInfo {
 
 /// Recovery code credential data.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecoveryCodeCredentialInfo {
     /// SHA-256 hashes of unused recovery codes.
     pub code_hashes: Vec<Vec<u8>>,
@@ -218,6 +225,8 @@ impl RecoveryCodeCredentialInfo {
 
 /// Type-specific credential data.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum CredentialData {
     /// WebAuthn passkey data.
     Passkey(PasskeyCredentialInfo),
@@ -233,6 +242,7 @@ pub enum CredentialData {
 
 /// A user authentication credential as returned by the Ledger API.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct UserCredentialInfo {
     /// Credential identifier.
     pub id: UserCredentialId,
@@ -287,6 +297,7 @@ impl UserCredentialInfo {
 
 /// Result of consuming a recovery code.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecoveryCodeResult {
     /// The session tokens created after recovery code verification.
     pub tokens: crate::token::TokenPair,

@@ -7,6 +7,8 @@ use crate::{proto_util::proto_timestamp_to_system_time, types::admin::Organizati
 
 /// Status of an organization invitation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum InvitationStatus {
     /// Invitation is awaiting a response.
     Pending,
@@ -49,6 +51,7 @@ impl InvitationStatus {
 /// The `token` field is the raw invitation token returned only at creation time.
 /// It is redacted from [`Debug`] output to prevent accidental logging.
 #[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InvitationCreated {
     /// External invitation slug.
     pub slug: InviteSlug,
@@ -91,6 +94,7 @@ impl InvitationCreated {
 ///
 /// Contains the invitee email (visible to org admins) but no organization name.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InvitationInfo {
     /// External invitation slug.
     pub slug: InviteSlug,
@@ -136,6 +140,7 @@ impl InvitationInfo {
 ///
 /// Contains the organization name (visible to invitees) but no invitee email.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ReceivedInvitationInfo {
     /// External invitation slug.
     pub slug: InviteSlug,
@@ -173,6 +178,7 @@ impl ReceivedInvitationInfo {
 
 /// Paginated list of admin-facing invitations.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InvitationPage {
     /// Invitation records.
     pub invitations: Vec<InvitationInfo>,
@@ -182,6 +188,7 @@ pub struct InvitationPage {
 
 /// Paginated list of user-facing received invitations.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ReceivedInvitationPage {
     /// Invitation records.
     pub invitations: Vec<ReceivedInvitationInfo>,
