@@ -161,9 +161,10 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
         debug!(trace_id = %trace_ctx.trace_id, "Starting GC cycle");
 
         // Get all active vaults from the applied state registry
-        let vault_heights = self.applied_state.all_vault_heights();
+        let mut vault_keys = Vec::new();
+        self.applied_state.for_each_vault_height(|org, vault, _| vault_keys.push((org, vault)));
 
-        for ((organization, vault), _height) in vault_heights {
+        for (organization, vault) in vault_keys {
             let expired = self.find_expired_entities(vault);
             if expired.is_empty() {
                 continue;

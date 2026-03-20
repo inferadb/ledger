@@ -80,7 +80,6 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
 
         // Get all vault metadata to check retention policies
         let vaults = self.applied_state.all_vaults();
-        let vault_heights = self.applied_state.all_vault_heights();
 
         let mut total_compacted = 0u64;
         let mut had_error = false;
@@ -92,10 +91,10 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
             }
 
             // Get current vault height
-            let current_height = match vault_heights.get(&(organization_id, vault_id)) {
-                Some(h) => *h,
-                None => continue,
-            };
+            let current_height = self.applied_state.vault_height(organization_id, vault_id);
+            if current_height == 0 {
+                continue;
+            }
 
             // Calculate compaction watermark
             let retention_blocks = meta.retention_policy.retention_blocks;

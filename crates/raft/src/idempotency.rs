@@ -36,8 +36,9 @@ pub struct IdempotencyKey {
     pub organization: OrganizationId,
     /// Vault internal ID (0 if not specified).
     pub vault: VaultId,
-    /// Client identifier.
-    pub client_id: String,
+    /// Client identifier (`Box<str>` saves 8 bytes vs `String` — no capacity field for immutable
+    /// keys).
+    pub client_id: Box<str>,
     /// Client-provided idempotency key (16-byte UUID).
     pub idempotency_key: [u8; 16],
 }
@@ -47,10 +48,10 @@ impl IdempotencyKey {
     pub fn new(
         organization: OrganizationId,
         vault: VaultId,
-        client_id: String,
+        client_id: impl Into<Box<str>>,
         idempotency_key: [u8; 16],
     ) -> Self {
-        Self { organization, vault, client_id, idempotency_key }
+        Self { organization, vault, client_id: client_id.into(), idempotency_key }
     }
 }
 
@@ -119,7 +120,7 @@ impl IdempotencyCache {
         idempotency_key: [u8; 16],
         request_hash: u64,
     ) -> IdempotencyCheckResult {
-        let key = IdempotencyKey::new(organization, vault, client_id.to_string(), idempotency_key);
+        let key = IdempotencyKey::new(organization, vault, client_id, idempotency_key);
         match self.cache.get(&key) {
             Some(entry) => {
                 if entry.request_hash == request_hash {
@@ -139,7 +140,7 @@ impl IdempotencyCache {
         &self,
         organization: OrganizationId,
         vault: VaultId,
-        client_id: String,
+        client_id: impl Into<Box<str>>,
         idempotency_key: [u8; 16],
         request_hash: u64,
         result: WriteSuccess,
@@ -169,14 +170,7 @@ impl IdempotencyCache {
 
         if matches!(check_result, IdempotencyCheckResult::NewRequest) {
             // Not in cache, insert the new result
-            self.insert(
-                organization,
-                vault,
-                client_id.to_string(),
-                idempotency_key,
-                request_hash,
-                result,
-            );
+            self.insert(organization, vault, client_id, idempotency_key, request_hash, result);
         }
 
         check_result

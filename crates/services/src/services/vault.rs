@@ -362,40 +362,42 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         // Build (vault_slug, response) pairs for pagination
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let org_filter = req.organization.as_ref().map(|o| o.slug);
-        let vaults_with_slugs: Vec<(u64, inferadb_ledger_proto::proto::GetVaultResponse)> = self
-            .ctx
-            .applied_state
-            .all_vault_heights()
-            .keys()
-            .filter_map(|(org_id, vault_id)| {
-                self.ctx.applied_state.get_vault(*org_id, *vault_id).map(|v| {
-                    let height = self.ctx.applied_state.vault_height(v.organization, v.vault);
-                    let organization = slug_resolver.resolve_slug(v.organization)?;
-                    // Skip if org filter is set and doesn't match
-                    if let Some(filter_slug) = org_filter {
-                        if organization.value() != filter_slug {
+        // Collect vault identifiers without cloning the entire heights map
+        let mut vault_keys = Vec::new();
+        self.ctx.applied_state.for_each_vault_height(|org, vault, _| vault_keys.push((org, vault)));
+
+        let vaults_with_slugs: Vec<(u64, inferadb_ledger_proto::proto::GetVaultResponse)> =
+            vault_keys
+                .iter()
+                .filter_map(|(org_id, vault_id)| {
+                    self.ctx.applied_state.get_vault(*org_id, *vault_id).map(|v| {
+                        let height = self.ctx.applied_state.vault_height(v.organization, v.vault);
+                        let organization = slug_resolver.resolve_slug(v.organization)?;
+                        // Skip if org filter is set and doesn't match
+                        if let Some(filter_slug) = org_filter
+                            && organization.value() != filter_slug
+                        {
                             return Ok(None);
                         }
-                    }
-                    Ok(Some((
-                        v.slug.value(),
-                        inferadb_ledger_proto::proto::GetVaultResponse {
-                            organization: Some(OrganizationSlug { slug: organization.value() }),
-                            vault: Some(ProtoVaultSlug { slug: v.slug.value() }),
-                            height,
-                            state_root: None,
-                            nodes: vec![],
-                            leader: None,
-                            status: inferadb_ledger_proto::proto::VaultStatus::Active.into(),
-                            retention_policy: None,
-                        },
-                    )))
+                        Ok(Some((
+                            v.slug.value(),
+                            inferadb_ledger_proto::proto::GetVaultResponse {
+                                organization: Some(OrganizationSlug { slug: organization.value() }),
+                                vault: Some(ProtoVaultSlug { slug: v.slug.value() }),
+                                height,
+                                state_root: None,
+                                nodes: vec![],
+                                leader: None,
+                                status: inferadb_ledger_proto::proto::VaultStatus::Active.into(),
+                                retention_policy: None,
+                            },
+                        )))
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>, Status>>()?
-            .into_iter()
-            .flatten()
-            .collect();
+                .collect::<Result<Vec<_>, Status>>()?
+                .into_iter()
+                .flatten()
+                .collect();
 
         let (vaults, next_page_token) =
             crate::proto_compat::paginate_by_slug(vaults_with_slugs, start_after, page_size);

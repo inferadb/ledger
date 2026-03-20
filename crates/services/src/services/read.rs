@@ -1697,17 +1697,10 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             region.applied_state.vault_height(organization_id, vault_id)
         } else if organization_id.value() != 0 {
             // Organization requested - return max height across all vaults in organization
-            region
-                .applied_state
-                .all_vault_heights()
-                .iter()
-                .filter(|((ns, _), _)| *ns == organization_id)
-                .map(|(_, h)| *h)
-                .max()
-                .unwrap_or(0)
+            region.applied_state.org_max_vault_height(organization_id)
         } else {
             // No filter - return max height across all vaults
-            region.applied_state.all_vault_heights().values().copied().max().unwrap_or(0)
+            region.applied_state.max_vault_height()
         };
 
         // Get block_hash and state_root from archive
@@ -2129,14 +2122,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             region.applied_state.vault_height(organization_id, vault_id)
         } else {
             // Organization-level entities - use max height across all vaults in organization
-            region
-                .applied_state
-                .all_vault_heights()
-                .iter()
-                .filter(|((ns, _), _)| *ns == organization_id)
-                .map(|(_, h)| *h)
-                .max()
-                .unwrap_or(0)
+            region.applied_state.org_max_vault_height(organization_id)
         };
 
         // Decode and validate page token if provided

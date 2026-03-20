@@ -2489,9 +2489,8 @@ mod tests {
         assert_eq!(accessor.vault_height(OrganizationId::new(1), VaultId::new(99)), 0); // Non-existent returns 0
         assert_eq!(accessor.region_height(), 99);
 
-        let all_heights = accessor.all_vault_heights();
-        assert_eq!(all_heights.len(), 2);
-        assert_eq!(all_heights.get(&(OrganizationId::new(1), VaultId::new(1))), Some(&42));
+        assert_eq!(accessor.vault_height_count(), 2);
+        assert_eq!(accessor.vault_height(OrganizationId::new(1), VaultId::new(1)), 42);
 
         assert!(accessor.get_organization(OrganizationId::new(1)).is_some());
         assert!(accessor.get_organization(OrganizationId::new(99)).is_none());

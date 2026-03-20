@@ -33,7 +33,7 @@ mod tests {
         let config = DatabaseConfig::builder().page_size(16384).build();
 
         assert_eq!(config.page_size, 16384);
-        assert_eq!(config.cache_size, 1024); // default
+        assert_eq!(config.cache_size, 16_384); // default
         assert!(config.sync_on_commit); // default
     }
 

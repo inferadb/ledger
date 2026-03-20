@@ -64,8 +64,10 @@ pub struct DatabaseConfig {
     /// Page size (must be power of 2, default 4096).
     #[builder(default = DEFAULT_PAGE_SIZE)]
     pub page_size: usize,
-    /// Maximum pages to cache in memory.
-    #[builder(default = 1024)]
+    /// Maximum pages to cache in memory (default 16384 = 64MB with 4KB pages).
+    ///
+    /// Production deployments should tune this to 10-25% of available memory.
+    #[builder(default = 16_384)]
     pub cache_size: usize,
     /// Whether to sync on every commit (default true for durability).
     #[builder(default = true)]
@@ -76,7 +78,7 @@ impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             page_size: DEFAULT_PAGE_SIZE,
-            cache_size: 1024, // ~4MB with 4KB pages
+            cache_size: 16_384, // ~64MB with 4KB pages
             sync_on_commit: true,
         }
     }
@@ -151,9 +153,24 @@ impl Database<FileBackend> {
         Self::from_backend(backend, config)
     }
 
+    /// Opens an existing database with custom configuration.
+    ///
+    /// The `page_size` field in `config` is ignored — the on-disk page size
+    /// is always used for an existing database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the file cannot be opened or read.
+    /// Returns [`Error::InvalidMagic`] if the file is not an InferaDB database.
+    pub fn open_with_config<P: AsRef<Path>>(path: P, config: DatabaseConfig) -> Result<Self> {
+        let backend = FileBackend::open(path)?;
+        let config = DatabaseConfig { page_size: backend.page_size(), ..config };
+        Self::from_backend(backend, config)
+    }
+
     /// Creates a new database at the given path with default configuration.
     ///
-    /// Uses 4KB pages, 1024-entry cache, and sync-on-commit.
+    /// Uses 4KB pages, 16384-entry cache (64MB), and sync-on-commit.
     /// For custom settings, use [`create_with_config`](Self::create_with_config).
     ///
     /// # Errors

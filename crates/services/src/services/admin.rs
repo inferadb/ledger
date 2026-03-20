@@ -333,11 +333,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 if height > 0 { vec![(org, v, height)] } else { vec![] }
             } else {
                 // All vaults
+                let mut heights = Vec::new();
                 self.applied_state
-                    .all_vault_heights()
-                    .into_iter()
-                    .map(|((ns, v), h)| (ns, v, h))
-                    .collect()
+                    .for_each_vault_height(|org, vault, h| heights.push((org, vault, h)));
+                heights
             };
 
         if vault_heights.is_empty() {
@@ -1491,7 +1490,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 vec![((org_id, v_id), height)]
             } else {
                 // All vaults
-                self.applied_state.all_vault_heights().into_iter().collect()
+                let mut heights = Vec::new();
+                self.applied_state
+                    .for_each_vault_height(|org, vault, h| heights.push(((org, vault), h)));
+                heights
             };
 
         ctx.start_raft_timer();
@@ -1748,13 +1750,12 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
             let region_height = self.applied_state.region_height();
             let all_vaults = self.applied_state.all_vaults();
-            let vault_heights = self.applied_state.all_vault_heights();
 
             let mut vault_states = Vec::new();
             let mut vault_entities = HashMap::new();
 
             for (org_id, vault_id) in all_vaults.keys() {
-                let height = vault_heights.get(&(*org_id, *vault_id)).copied().unwrap_or(0);
+                let height = self.applied_state.vault_height(*org_id, *vault_id);
 
                 let bucket_roots =
                     self.state.get_bucket_roots(*vault_id).unwrap_or([EMPTY_HASH; NUM_BUCKETS]);

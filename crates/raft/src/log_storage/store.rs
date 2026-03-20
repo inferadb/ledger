@@ -118,6 +118,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// Max supported: 64KB. Minimum: 512 bytes (must be power of 2).
     pub const RAFT_PAGE_SIZE: usize = 16 * 1024; // 16KB
 
+    /// Cache size for the Raft log database (1024 × 16KB = 16MB).
+    ///
+    /// The Raft log has a sequential write pattern with infrequent random reads
+    /// (only during catch-up and snapshot). A smaller cache than the default
+    /// is appropriate here; the state database benefits more from large caches.
+    const RAFT_CACHE_SIZE: usize = 1024;
+
     /// Opens or creates a Raft log storage database.
     ///
     /// New databases are created with 16KB pages to support larger batch sizes.
@@ -128,14 +135,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// Returns `StorageError` if the database file cannot be opened or created,
     /// or if the cached vote/purge metadata cannot be loaded.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError<LedgerNodeId>> {
+        let raft_config = DatabaseConfig::builder()
+            .page_size(Self::RAFT_PAGE_SIZE)
+            .cache_size(Self::RAFT_CACHE_SIZE)
+            .build();
+
         // Try to open existing database, otherwise create new one with larger pages
         let db = if path.as_ref().exists() {
-            // Existing database - use whatever page size it was created with
-            Database::open(path.as_ref()).map_err(|e| to_storage_error(&e))?
+            // Existing database - page_size from disk, cache_size from config
+            Database::open_with_config(path.as_ref(), raft_config)
+                .map_err(|e| to_storage_error(&e))?
         } else {
             // New database - use larger pages for bigger batch sizes
-            let config = DatabaseConfig { page_size: Self::RAFT_PAGE_SIZE, ..Default::default() };
-            Database::create_with_config(path.as_ref(), config).map_err(|e| to_storage_error(&e))?
+            Database::create_with_config(path.as_ref(), raft_config)
+                .map_err(|e| to_storage_error(&e))?
         };
 
         let store = Self {

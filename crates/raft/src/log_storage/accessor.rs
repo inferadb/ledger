@@ -56,9 +56,45 @@ impl AppliedStateAccessor {
         self.state.read().vault_health.get(&(organization, vault)).cloned().unwrap_or_default()
     }
 
-    /// Returns all vault heights (for GetTip when no specific vault is requested).
-    pub fn all_vault_heights(&self) -> HashMap<(OrganizationId, VaultId), u64> {
-        self.state.read().vault_heights.clone()
+    /// Calls `f` for each `(organization, vault, height)` triple under a single read lock.
+    pub fn for_each_vault_height(&self, mut f: impl FnMut(OrganizationId, VaultId, u64)) {
+        let state = self.state.read();
+        for (&(org, vault), &height) in &state.vault_heights {
+            f(org, vault, height);
+        }
+    }
+
+    /// Returns vault heights filtered to a single organization.
+    pub fn org_vault_heights(&self, organization: OrganizationId) -> Vec<(VaultId, u64)> {
+        let state = self.state.read();
+        state
+            .vault_heights
+            .iter()
+            .filter(|&(&(org, _), _)| org == organization)
+            .map(|(&(_, vault), &height)| (vault, height))
+            .collect()
+    }
+
+    /// Returns the maximum vault height across all vaults.
+    pub fn max_vault_height(&self) -> u64 {
+        self.state.read().vault_heights.values().copied().max().unwrap_or(0)
+    }
+
+    /// Returns the maximum vault height within a specific organization.
+    pub fn org_max_vault_height(&self, organization: OrganizationId) -> u64 {
+        let state = self.state.read();
+        state
+            .vault_heights
+            .iter()
+            .filter(|&(&(org, _), _)| org == organization)
+            .map(|(_, &h)| h)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Returns the total number of tracked vault heights.
+    pub fn vault_height_count(&self) -> usize {
+        self.state.read().vault_heights.len()
     }
 
     /// Returns organization metadata by internal ID.

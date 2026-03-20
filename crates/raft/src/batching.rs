@@ -319,8 +319,9 @@ where
             metrics::record_eager_commit();
         }
 
-        // Extract requests
-        let requests: Vec<LedgerRequest> = batch.iter().map(|w| w.request.clone()).collect();
+        // Destructure batch into requests and response senders (zero clones)
+        let (requests, senders): (Vec<LedgerRequest>, Vec<_>) =
+            batch.into_iter().map(|w| (w.request, w.response_tx)).unzip();
 
         // Submit to Raft
         let result = (self.submit_fn)(requests).await;
@@ -335,8 +336,8 @@ where
                     warn!(expected = batch_size, got = responses.len(), "Response count mismatch");
                 }
 
-                for (write, response) in batch.into_iter().zip(responses.into_iter()) {
-                    let _ = write.response_tx.send(Ok(response));
+                for (sender, response) in senders.into_iter().zip(responses) {
+                    let _ = sender.send(Ok(response));
                 }
 
                 info!(
@@ -348,8 +349,8 @@ where
             },
             Err(e) => {
                 warn!(error = %e, batch_size, "Batch flush failed");
-                for write in batch {
-                    let _ = write.response_tx.send(Err(BatchError::RaftError(e.clone())));
+                for sender in senders {
+                    let _ = sender.send(Err(BatchError::RaftError(e.clone())));
                 }
             },
         }
