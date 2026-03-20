@@ -11,6 +11,7 @@ mod invitation;
 mod list;
 mod onboarding;
 mod organization;
+mod schema;
 mod token;
 mod user;
 mod vault;

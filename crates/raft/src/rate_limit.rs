@@ -113,8 +113,8 @@ impl TokenBucket {
     /// Creates a new token bucket starting at full capacity.
     fn new(capacity: u64, refill_rate: f64) -> Self {
         Self {
-            tokens_millis: capacity * 1000,
-            capacity_millis: capacity * 1000,
+            tokens_millis: capacity.saturating_mul(1000),
+            capacity_millis: capacity.saturating_mul(1000),
             refill_rate,
             last_refill: Instant::now(),
         }

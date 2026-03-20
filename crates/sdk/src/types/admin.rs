@@ -1,5 +1,7 @@
 //! Administrative domain types: organizations, vaults, users, teams, health.
 
+use std::fmt;
+
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{
     OrganizationSlug, Region, TeamSlug, UserEmailId, UserRole, UserSlug, UserStatus, VaultSlug,
@@ -25,6 +27,19 @@ pub enum OrganizationStatus {
     Suspended,
     /// Organization has been deleted.
     Deleted,
+}
+
+impl fmt::Display for OrganizationStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unspecified => write!(f, "unspecified"),
+            Self::Active => write!(f, "active"),
+            Self::Provisioning => write!(f, "provisioning"),
+            Self::Migrating => write!(f, "migrating"),
+            Self::Suspended => write!(f, "suspended"),
+            Self::Deleted => write!(f, "deleted"),
+        }
+    }
 }
 
 impl OrganizationStatus {
@@ -53,6 +68,16 @@ pub enum OrganizationTier {
     Pro,
     /// Enterprise tier with full features.
     Enterprise,
+}
+
+impl fmt::Display for OrganizationTier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Free => write!(f, "free"),
+            Self::Pro => write!(f, "pro"),
+            Self::Enterprise => write!(f, "enterprise"),
+        }
+    }
 }
 
 impl OrganizationTier {
@@ -87,6 +112,17 @@ pub enum VaultStatus {
     ReadOnly,
     /// Vault has been deleted.
     Deleted,
+}
+
+impl fmt::Display for VaultStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unspecified => write!(f, "unspecified"),
+            Self::Active => write!(f, "active"),
+            Self::ReadOnly => write!(f, "read_only"),
+            Self::Deleted => write!(f, "deleted"),
+        }
+    }
 }
 
 impl VaultStatus {
@@ -294,6 +330,15 @@ pub enum OrganizationMemberRole {
     Member,
 }
 
+impl fmt::Display for OrganizationMemberRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Admin => write!(f, "admin"),
+            Self::Member => write!(f, "member"),
+        }
+    }
+}
+
 impl OrganizationMemberRole {
     /// Converts from protobuf enum value.
     pub(crate) fn from_proto(value: i32) -> Self {
@@ -344,6 +389,15 @@ pub enum TeamMemberRole {
     Manager,
     /// Regular team member.
     Member,
+}
+
+impl fmt::Display for TeamMemberRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Manager => write!(f, "manager"),
+            Self::Member => write!(f, "member"),
+        }
+    }
 }
 
 impl TeamMemberRole {

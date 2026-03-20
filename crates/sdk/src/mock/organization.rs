@@ -558,4 +558,22 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
         self.state.check_injection().await?;
         Ok(Response::new(proto::RemoveTeamMemberResponse {}))
     }
+
+    async fn update_team_member_role(
+        &self,
+        request: Request<proto::UpdateTeamMemberRoleRequest>,
+    ) -> Result<Response<proto::UpdateTeamMemberRoleResponse>, Status> {
+        self.state.check_injection().await?;
+        let req = request.into_inner();
+
+        let team = proto::OrganizationTeam {
+            slug: req.team,
+            organization: None,
+            name: String::new(),
+            members: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        Ok(Response::new(proto::UpdateTeamMemberRoleResponse { team: Some(team) }))
+    }
 }

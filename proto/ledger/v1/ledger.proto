@@ -848,6 +848,9 @@ service OrganizationService {
 
   // Remove a member from a team. Caller must be org admin or team manager.
   rpc RemoveTeamMember(RemoveTeamMemberRequest) returns (RemoveTeamMemberResponse);
+
+  // Update a team member's role. Caller must be org admin or team manager.
+  rpc UpdateTeamMemberRole(UpdateTeamMemberRoleRequest) returns (UpdateTeamMemberRoleResponse);
 }
 
 // =============================================================================
@@ -869,6 +872,125 @@ service VaultService {
 
   // Update vault metadata (retention policy).
   rpc UpdateVault(UpdateVaultRequest) returns (UpdateVaultResponse);
+}
+
+// =============================================================================
+// Schema Service
+// =============================================================================
+
+// Manages versioned schema definitions within a vault's entity store.
+// Schemas are JSON blobs with version tracking and activation semantics.
+service SchemaService {
+  // Deploy a new schema version (atomic version + pointer write).
+  rpc DeploySchema(DeploySchemaRequest) returns (DeploySchemaResponse);
+
+  // List all schema versions without loading definitions (avoids N+1).
+  rpc ListSchemaVersions(ListSchemaVersionsRequest) returns (ListSchemaVersionsResponse);
+
+  // Get a single schema version with its definition.
+  rpc GetSchema(GetSchemaRequest) returns (GetSchemaResponse);
+
+  // Activate a specific schema version (atomic pointer update).
+  rpc ActivateSchema(ActivateSchemaRequest) returns (ActivateSchemaResponse);
+
+  // Rollback to the previous activated version (not just current-1).
+  rpc RollbackSchema(RollbackSchemaRequest) returns (RollbackSchemaResponse);
+
+  // Get the currently active schema version and definition.
+  rpc GetActiveSchema(GetActiveSchemaRequest) returns (GetActiveSchemaResponse);
+
+  // Compare two schema versions.
+  rpc DiffSchemas(DiffSchemasRequest) returns (DiffSchemasResponse);
+}
+
+message DeploySchemaRequest {
+  OrganizationSlug organization = 1;
+  VaultSlug vault = 2;
+  bytes definition = 3;              // JSON schema definition
+  optional uint32 version = 4;       // Explicit version, or auto-increment
+  optional string description = 5;
+}
+
+message DeploySchemaResponse {
+  uint32 version = 1;
+  string status = 2;
+}
+
+message ListSchemaVersionsRequest {
+  OrganizationSlug organization = 1;
+  VaultSlug vault = 2;
+}
+
+message SchemaVersionEntry {
+  uint32 version = 1;
+  bool has_definition = 2;
+  bool is_active = 3;
+}
+
+message ListSchemaVersionsResponse {
+  repeated SchemaVersionEntry versions = 1;
+}
+
+message GetSchemaRequest {
+  OrganizationSlug organization = 1;
+  VaultSlug vault = 2;
+  uint32 version = 3;
+}
+
+message GetSchemaResponse {
+  uint32 version = 1;
+  bytes definition = 2;              // JSON schema definition
+  optional string description = 3;
+}
+
+message ActivateSchemaRequest {
+  OrganizationSlug organization = 1;
+  VaultSlug vault = 2;
+  uint32 version = 3;
+}
+
+message ActivateSchemaResponse {
+  uint32 version = 1;
+  string status = 2;
+}
+
+message RollbackSchemaRequest {
+  OrganizationSlug organization = 1;
+  VaultSlug vault = 2;
+}
+
+message RollbackSchemaResponse {
+  uint32 version = 1;
+  string status = 2;
+}
+
+message GetActiveSchemaRequest {
+  OrganizationSlug organization = 1;
+  VaultSlug vault = 2;
+}
+
+message GetActiveSchemaResponse {
+  uint32 version = 1;
+  bytes definition = 2;
+  optional string description = 3;
+}
+
+message DiffSchemasRequest {
+  OrganizationSlug organization = 1;
+  VaultSlug vault = 2;
+  uint32 from_version = 3;
+  uint32 to_version = 4;
+}
+
+message DiffFieldChange {
+  string field = 1;
+  string change_type = 2;            // "added", "removed", "changed"
+}
+
+message DiffSchemasResponse {
+  uint32 from_version = 1;
+  uint32 to_version = 2;
+  repeated DiffFieldChange changes = 3;
 }
 
 // =============================================================================
@@ -1269,6 +1391,17 @@ message RemoveTeamMemberRequest {
 
 message RemoveTeamMemberResponse {}
 
+message UpdateTeamMemberRoleRequest {
+  TeamSlug team = 1;
+  UserSlug user = 2;
+  OrganizationTeamMemberRole role = 3;
+  UserSlug initiator = 4; // Must be org admin or team manager
+}
+
+message UpdateTeamMemberRoleResponse {
+  OrganizationTeam team = 1;
+}
+
 // Request to migrate a user's PII to a different region.
 message MigrateUserRegionRequest {
   UserSlug slug = 1;
@@ -1356,6 +1489,7 @@ enum VaultStatus {
 message ListVaultsRequest {
   optional bytes page_token = 1; // Opaque cursor
   uint32 page_size = 2; // Max items per page
+  optional OrganizationSlug organization = 3; // Filter by organization
 }
 
 message ListVaultsResponse {

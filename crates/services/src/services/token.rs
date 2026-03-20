@@ -7,9 +7,11 @@
 
 use std::sync::Arc;
 
+use base64::Engine as _;
 use chrono::Utc;
 use inferadb_ledger_proto::proto::{
-    self, CreateSigningKeyRequest, CreateSigningKeyResponse, CreateUserSessionRequest,
+    self, AuthenticateClientAssertionRequest, AuthenticateClientAssertionResponse,
+    CreateSigningKeyRequest, CreateSigningKeyResponse, CreateUserSessionRequest,
     CreateUserSessionResponse, CreateVaultTokenRequest, CreateVaultTokenResponse,
     GetPublicKeysRequest, GetPublicKeysResponse, PublicKeyInfo, RefreshTokenRequest,
     RefreshTokenResponse, RevokeAllAppSessionsRequest, RevokeAllAppSessionsResponse,
@@ -23,15 +25,20 @@ use inferadb_ledger_raft::{
     types::{LedgerRequest, LedgerResponse},
 };
 use inferadb_ledger_state::system::{
-    App, AppVaultConnection, SigningKey, SigningKeyScope, SigningKeyStatus,
+    App, AppVaultConnection, ClientAssertionEntry, SYSTEM_VAULT_ID, SigningKey, SigningKeyScope,
+    SigningKeyStatus, SystemKeys,
 };
 use inferadb_ledger_store::crypto::RegionKeyManager;
 use inferadb_ledger_types::{
-    OrganizationId as DomainOrganizationId, UserRole, VaultId as DomainVaultId,
+    AppId, ClientAssertionId, OrganizationId as DomainOrganizationId, UserRole,
+    VaultId as DomainVaultId,
     config::JwtConfig,
+    decode,
     events::{EventAction, EventOutcome as EventOutcomeType},
     token::{TokenSubject, TokenType, ValidatedToken},
+    types::AppSlug,
 };
+use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use sha2::{Digest, Sha256};
 use tonic::{Request, Response, Status};
 
@@ -1089,6 +1096,275 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             .collect();
 
         Ok(Response::new(GetPublicKeysResponse { keys }))
+    }
+
+    /// Authenticates a client assertion JWT and returns a vault access token pair.
+    ///
+    /// The assertion JWT is signed by the client app using its registered Ed25519
+    /// private key. Ledger verifies the signature against the app's stored public
+    /// key, validates claims, and issues a scoped vault token if authorized.
+    async fn authenticate_client_assertion(
+        &self,
+        request: Request<AuthenticateClientAssertionRequest>,
+    ) -> Result<Response<AuthenticateClientAssertionResponse>, Status> {
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
+
+        let mut ctx = self.ctx.make_request_context(
+            "TokenService",
+            "authenticate_client_assertion",
+            &grpc_metadata,
+            &trace_ctx,
+        );
+
+        if req.assertion_jwt.is_empty() {
+            return Err(Status::invalid_argument("assertion_jwt is required"));
+        }
+
+        // Resolve organization and vault slugs
+        let resolver = self.resolver();
+        let org_slug = SlugResolver::extract_slug(&req.organization)?;
+        let org_id = resolver.resolve(org_slug)?;
+        let vault_slug = SlugResolver::extract_vault_slug(&req.vault)?;
+        let vault_id = resolver.resolve_vault(vault_slug)?;
+
+        // Rate limit per organization for assertion auth
+        let rate_limit_key = format!("assertion_auth:{}", org_id.value());
+        super::helpers::check_rate_limit(self.rate_limiter.as_ref(), &rate_limit_key, org_id)?;
+
+        // Parse assertion JWT header to extract kid (assertion ID) and verify alg
+        let (kid_str, assertion_id) = Self::parse_assertion_header(&req.assertion_jwt)?;
+
+        // Parse unverified payload to extract iss (app slug) for app lookup
+        let app_slug = Self::extract_issuer_from_jwt(&req.assertion_jwt)?;
+
+        // Resolve the app from the issuer claim
+        let (resolved_org, app_id) = resolver.resolve_app(app_slug)?;
+        if org_id != resolved_org {
+            return Err(Status::unauthenticated("App not found in the specified organization"));
+        }
+
+        // Load the app and verify it is enabled
+        let app = self.load_app(org_id, app_id)?;
+        if !app.enabled {
+            return Err(Status::failed_precondition("App is disabled"));
+        }
+
+        // Verify client assertion authentication is enabled for this app
+        if !app.credentials.client_assertion.enabled {
+            return Err(Status::failed_precondition(
+                "Client assertion authentication is not enabled for this app",
+            ));
+        }
+
+        // Look up the specific assertion entry by kid
+        let entry = self.load_assertion_entry(org_id, app_id, assertion_id)?;
+
+        if !entry.enabled {
+            return Err(Status::unauthenticated("Client assertion entry is disabled"));
+        }
+
+        // Check assertion entry expiry
+        if entry.expires_at < Utc::now() {
+            return Err(Status::unauthenticated("Client assertion entry has expired"));
+        }
+
+        // Verify JWT signature and validate claims against the assertion's public key
+        Self::verify_assertion_jwt(
+            &req.assertion_jwt,
+            &entry.public_key_bytes,
+            app_slug,
+            &self.jwt_config.issuer,
+            &kid_str,
+        )?;
+
+        // Verify vault connection exists and scopes are allowed
+        let connection = self.read_vault_connection(org_id, app_id, vault_id)?;
+        for scope in &req.scopes {
+            if !connection.allowed_scopes.contains(scope) {
+                return Err(Status::permission_denied(format!(
+                    "Scope '{scope}' not allowed for this app-vault connection"
+                )));
+            }
+        }
+
+        // Get active org signing key
+        let signing_key = self.active_key_for_scope(&SigningKeyScope::Organization(org_id))?;
+
+        // Sign vault access token
+        let (access_token, access_expires_at) = self
+            .jwt_engine
+            .sign_vault_token(org_slug, app_slug, vault_slug, &req.scopes, &signing_key.kid)
+            .map_err(Self::jwt_error_to_status)?;
+
+        // Generate refresh token
+        let (refresh_token_str, refresh_token_hash) = generate_refresh_token();
+        let family = generate_family_id();
+
+        // Propose CreateRefreshToken through Raft
+        let ledger_request = LedgerRequest::CreateRefreshToken {
+            token_hash: refresh_token_hash,
+            family,
+            token_type: TokenType::VaultAccess,
+            subject: TokenSubject::App(app_slug),
+            organization: Some(org_id),
+            vault: Some(vault_id),
+            kid: signing_key.kid.clone(),
+            ttl_secs: self.jwt_config.vault_refresh_ttl_secs,
+        };
+
+        self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+
+        let refresh_expires_at =
+            Utc::now() + chrono::Duration::seconds(self.jwt_config.vault_refresh_ttl_secs as i64);
+
+        self.emit_event(EventAction::TokenCreated, &trace_ctx);
+        ctx.set_success();
+
+        let token_pair = proto::TokenPair {
+            access_token,
+            refresh_token: refresh_token_str,
+            access_expires_at: Some(datetime_to_proto(&access_expires_at)),
+            refresh_expires_at: Some(datetime_to_proto(&refresh_expires_at)),
+        };
+
+        Ok(Response::new(AuthenticateClientAssertionResponse { tokens: Some(token_pair) }))
+    }
+}
+
+impl TokenServiceImpl {
+    /// Parses the assertion JWT header to extract the `kid` (assertion ID) and
+    /// validates the algorithm is `EdDSA`.
+    ///
+    /// Returns `(kid_string, ClientAssertionId)` on success.
+    fn parse_assertion_header(token: &str) -> Result<(String, ClientAssertionId), Status> {
+        let header_part = token
+            .split('.')
+            .next()
+            .ok_or_else(|| Status::unauthenticated("Invalid assertion JWT format"))?;
+
+        let header_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(header_part)
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(header_part))
+            .map_err(|_| Status::unauthenticated("Invalid assertion JWT header encoding"))?;
+
+        let header: serde_json::Value = serde_json::from_slice(&header_bytes)
+            .map_err(|_| Status::unauthenticated("Invalid assertion JWT header"))?;
+
+        // Reject any algorithm other than EdDSA
+        let alg = header
+            .get("alg")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Status::unauthenticated("Missing alg in assertion JWT header"))?;
+        if alg != "EdDSA" {
+            return Err(Status::unauthenticated("Unsupported algorithm in assertion JWT"));
+        }
+
+        let kid_str = header
+            .get("kid")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Status::unauthenticated("Missing kid in assertion JWT header"))?;
+
+        let kid_i64: i64 = kid_str
+            .parse()
+            .map_err(|_| Status::unauthenticated("Invalid kid format in assertion JWT header"))?;
+
+        Ok((kid_str.to_string(), ClientAssertionId::new(kid_i64)))
+    }
+
+    /// Extracts the `iss` (issuer) claim from an unverified JWT payload and
+    /// parses it as an `AppSlug`.
+    fn extract_issuer_from_jwt(token: &str) -> Result<AppSlug, Status> {
+        let parts: Vec<&str> = token.split('.').collect();
+        if parts.len() != 3 {
+            return Err(Status::unauthenticated("Invalid assertion JWT format"));
+        }
+
+        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(parts[1])
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(parts[1]))
+            .map_err(|_| Status::unauthenticated("Invalid assertion JWT payload encoding"))?;
+
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
+            .map_err(|_| Status::unauthenticated("Invalid assertion JWT payload"))?;
+
+        let iss = payload
+            .get("iss")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Status::unauthenticated("Missing iss claim in assertion JWT"))?;
+
+        let slug_u64: u64 = iss.parse().map_err(|_| {
+            Status::unauthenticated("Invalid iss claim in assertion JWT: expected app slug")
+        })?;
+
+        Ok(AppSlug::new(slug_u64))
+    }
+
+    /// Loads a `ClientAssertionEntry` from state by organization, app, and assertion ID.
+    fn load_assertion_entry(
+        &self,
+        org_id: DomainOrganizationId,
+        app_id: AppId,
+        assertion_id: ClientAssertionId,
+    ) -> Result<ClientAssertionEntry, Status> {
+        let key = SystemKeys::app_assertion_key(org_id, app_id, assertion_id);
+        let entity = self
+            .ctx
+            .state
+            .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to read client assertion entry");
+                Status::internal("Internal error")
+            })?
+            .ok_or_else(|| Status::unauthenticated("Unknown client assertion"))?;
+
+        decode::<ClientAssertionEntry>(&entity.value).map_err(|e| {
+            tracing::error!(error = %e, "Failed to decode client assertion entry");
+            Status::internal("Internal error")
+        })
+    }
+
+    /// Verifies the assertion JWT signature and validates standard claims.
+    ///
+    /// Checks:
+    /// - Signature using the assertion entry's Ed25519 public key
+    /// - `iss` matches the app slug
+    /// - `aud` matches the ledger issuer (ledger is the intended audience)
+    /// - `exp` is not in the past
+    fn verify_assertion_jwt(
+        token: &str,
+        public_key_bytes: &[u8],
+        expected_app_slug: AppSlug,
+        ledger_issuer: &str,
+        expected_kid: &str,
+    ) -> Result<(), Status> {
+        let decoding_key = DecodingKey::from_ed_der(public_key_bytes);
+
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&[&expected_app_slug.value().to_string()]);
+        validation.set_audience(&[ledger_issuer]);
+        validation.leeway = 30; // 30 seconds clock skew tolerance
+
+        let token_data = jsonwebtoken::decode::<serde_json::Value>(
+            token,
+            &decoding_key,
+            &validation,
+        )
+        .map_err(|e| {
+            tracing::debug!(error = %e, kid = %expected_kid, "Assertion JWT verification failed");
+            Status::unauthenticated("Invalid client assertion")
+        })?;
+
+        // Defense-in-depth: verify sub is present (optional but logged)
+        if token_data.claims.get("sub").is_none() {
+            tracing::debug!(kid = %expected_kid, "Assertion JWT missing sub claim");
+        }
+
+        Ok(())
     }
 }
 

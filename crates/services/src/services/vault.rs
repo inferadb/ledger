@@ -361,6 +361,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
 
         // Build (vault_slug, response) pairs for pagination
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
+        let org_filter = req.organization.as_ref().map(|o| o.slug);
         let vaults_with_slugs: Vec<(u64, inferadb_ledger_proto::proto::GetVaultResponse)> = self
             .ctx
             .applied_state
@@ -370,7 +371,13 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                 self.ctx.applied_state.get_vault(*org_id, *vault_id).map(|v| {
                     let height = self.ctx.applied_state.vault_height(v.organization, v.vault);
                     let organization = slug_resolver.resolve_slug(v.organization)?;
-                    Ok((
+                    // Skip if org filter is set and doesn't match
+                    if let Some(filter_slug) = org_filter {
+                        if organization.value() != filter_slug {
+                            return Ok(None);
+                        }
+                    }
+                    Ok(Some((
                         v.slug.value(),
                         inferadb_ledger_proto::proto::GetVaultResponse {
                             organization: Some(OrganizationSlug { slug: organization.value() }),
@@ -382,10 +389,13 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                             status: inferadb_ledger_proto::proto::VaultStatus::Active.into(),
                             retention_policy: None,
                         },
-                    ))
+                    )))
                 })
             })
-            .collect::<Result<Vec<_>, Status>>()?;
+            .collect::<Result<Vec<_>, Status>>()?
+            .into_iter()
+            .flatten()
+            .collect();
 
         let (vaults, next_page_token) =
             crate::proto_compat::paginate_by_slug(vaults_with_slugs, start_after, page_size);

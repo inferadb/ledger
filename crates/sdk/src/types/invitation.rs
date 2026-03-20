@@ -22,6 +22,18 @@ pub enum InvitationStatus {
     Revoked,
 }
 
+impl std::fmt::Display for InvitationStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "pending"),
+            Self::Accepted => write!(f, "accepted"),
+            Self::Declined => write!(f, "declined"),
+            Self::Expired => write!(f, "expired"),
+            Self::Revoked => write!(f, "revoked"),
+        }
+    }
+}
+
 impl InvitationStatus {
     /// Converts from protobuf enum value.
     pub(crate) fn from_proto(value: i32) -> Self {

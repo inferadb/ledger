@@ -2985,6 +2985,22 @@ pub struct CreateVaultTokenResponse {
     pub tokens: ::core::option::Option<TokenPair>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AuthenticateClientAssertionRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    #[prost(string, tag = "3")]
+    pub assertion_jwt: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "4")]
+    pub scopes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AuthenticateClientAssertionResponse {
+    #[prost(message, optional, tag = "1")]
+    pub tokens: ::core::option::Option<TokenPair>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RefreshTokenRequest {
     #[prost(string, tag = "1")]
     pub refresh_token: ::prost::alloc::string::String,
@@ -15322,6 +15338,39 @@ pub mod token_service_client {
                 .insert(GrpcMethod::new("ledger.v1.TokenService", "GetPublicKeys"));
             self.inner.unary(req, path, codec).await
         }
+        /// Authenticate a client assertion JWT and return a vault access token.
+        /// Ledger verifies the JWT signature against the app's registered client
+        /// assertion public keys, validates claims (iss, sub, exp, aud), and issues
+        /// a scoped vault token if the app is authorized.
+        pub async fn authenticate_client_assertion(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AuthenticateClientAssertionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AuthenticateClientAssertionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.TokenService/AuthenticateClientAssertion",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "ledger.v1.TokenService",
+                        "AuthenticateClientAssertion",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -15425,6 +15474,17 @@ pub mod token_service_server {
             request: tonic::Request<super::GetPublicKeysRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetPublicKeysResponse>,
+            tonic::Status,
+        >;
+        /// Authenticate a client assertion JWT and return a vault access token.
+        /// Ledger verifies the JWT signature against the app's registered client
+        /// assertion public keys, validates claims (iss, sub, exp, aud), and issues
+        /// a scoped vault token if the app is authorized.
+        async fn authenticate_client_assertion(
+            &self,
+            request: tonic::Request<super::AuthenticateClientAssertionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AuthenticateClientAssertionResponse>,
             tonic::Status,
         >;
     }
@@ -15999,6 +16059,58 @@ pub mod token_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetPublicKeysSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.TokenService/AuthenticateClientAssertion" => {
+                    #[allow(non_camel_case_types)]
+                    struct AuthenticateClientAssertionSvc<T: TokenService>(pub Arc<T>);
+                    impl<
+                        T: TokenService,
+                    > tonic::server::UnaryService<
+                        super::AuthenticateClientAssertionRequest,
+                    > for AuthenticateClientAssertionSvc<T> {
+                        type Response = super::AuthenticateClientAssertionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::AuthenticateClientAssertionRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TokenService>::authenticate_client_assertion(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AuthenticateClientAssertionSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -311,9 +311,9 @@ impl LedgerClient {
                         .await?
                         .into_inner();
 
-                    let tokens = response
-                        .tokens
-                        .ok_or_else(|| missing_response_field("tokens", "AuthenticateClientAssertionResponse"))?;
+                    let tokens = response.tokens.ok_or_else(|| {
+                        missing_response_field("tokens", "AuthenticateClientAssertionResponse")
+                    })?;
 
                     Ok(crate::token::TokenPair::from_proto(tokens))
                 },

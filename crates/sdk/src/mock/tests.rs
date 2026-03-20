@@ -739,7 +739,7 @@ mod integration_tests {
         server.add_vault(ORG, VaultSlug::new(1));
         let client = create_client_for_mock(&server).await;
 
-        let (vaults, _next) = client.list_vaults(0, None).await.unwrap();
+        let (vaults, _next) = client.list_vaults(0, None, None).await.unwrap();
 
         assert_eq!(vaults.len(), 2);
     }

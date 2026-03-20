@@ -908,6 +908,57 @@ impl LedgerClient {
         .await
     }
 
+    /// Updates a team member's role.
+    ///
+    /// # Arguments
+    ///
+    /// * `team` - Team slug (external identifier).
+    /// * `user` - User slug of the member whose role to update.
+    /// * `role` - New role to assign.
+    /// * `initiator` - User slug of the caller (must be org admin or team manager).
+    pub async fn update_team_member_role(
+        &self,
+        team: TeamSlug,
+        user: UserSlug,
+        role: TeamMemberRole,
+        initiator: UserSlug,
+    ) -> Result<TeamInfo> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "update_team_member_role",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "update_team_member_role",
+                || async {
+                    let mut client = crate::connected_client!(pool, create_organization_client);
+
+                    let request = proto::UpdateTeamMemberRoleRequest {
+                        team: Some(proto::TeamSlug { slug: team.value() }),
+                        user: Some(proto::UserSlug { slug: user.value() }),
+                        role: role.to_proto().into(),
+                        initiator: Some(proto::UserSlug { slug: initiator.value() }),
+                    };
+
+                    let response = client
+                        .update_team_member_role(tonic::Request::new(request))
+                        .await?
+                        .into_inner();
+
+                    response.team.as_ref().map(TeamInfo::from_proto).ok_or_else(|| {
+                        missing_response_field("team", "UpdateTeamMemberRoleResponse")
+                    })
+                },
+            ),
+        )
+        .await
+    }
+
     /// Initiates migration of an organization to a different region.
     ///
     /// Transitions the organization to `Migrating` status and creates a background

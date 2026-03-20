@@ -4225,6 +4225,43 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         }
                     },
 
+                    // ── UpdateTeamMemberRole (REGIONAL) ──
+                    // Updates a member's role within a team.
+                    SystemRequest::UpdateTeamMemberRole { organization, team, user_id, role } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            match load_team(state_layer, *organization, *team) {
+                                Ok(mut t) => {
+                                    if let Some(member) =
+                                        t.members.iter_mut().find(|m| m.user_id == *user_id)
+                                    {
+                                        member.role = *role;
+                                        t.updated_at = block_timestamp;
+                                        match save_team(state_layer, *organization, *team, &t) {
+                                            Ok(()) => LedgerResponse::OrganizationUpdated {
+                                                organization_id: *organization,
+                                            },
+                                            Err(e) => e,
+                                        }
+                                    } else {
+                                        ledger_error(
+                                            ErrorCode::NotFound,
+                                            format!(
+                                                "User {} is not a member of team {}",
+                                                user_id, team
+                                            ),
+                                        )
+                                    }
+                                },
+                                Err(e) => e,
+                            }
+                        } else {
+                            ledger_error(
+                                ErrorCode::Internal,
+                                "State layer unavailable for update team member role",
+                            )
+                        }
+                    },
+
                     // ── WriteClientAssertionName (REGIONAL) ──
                     // Writes the user-provided assertion name to REGIONAL state.
                     SystemRequest::WriteClientAssertionName {

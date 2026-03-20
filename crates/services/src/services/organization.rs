@@ -21,7 +21,8 @@ use inferadb_ledger_proto::proto::{
     RemoveOrganizationMemberRequest, RemoveOrganizationMemberResponse, RemoveTeamMemberRequest,
     RemoveTeamMemberResponse, UpdateOrganizationMemberRoleRequest,
     UpdateOrganizationMemberRoleResponse, UpdateOrganizationRequest, UpdateOrganizationResponse,
-    UpdateOrganizationTeamRequest, UpdateOrganizationTeamResponse,
+    UpdateOrganizationTeamRequest, UpdateOrganizationTeamResponse, UpdateTeamMemberRoleRequest,
+    UpdateTeamMemberRoleResponse,
 };
 use inferadb_ledger_raft::{
     error::ServiceError,
@@ -2020,6 +2021,91 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             other => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
                 tracing::error!(response = %other, "Unexpected Raft response for RemoveTeamMember");
+                Err(Status::internal("Unexpected response type"))
+            },
+        }
+    }
+
+    async fn update_team_member_role(
+        &self,
+        request: Request<UpdateTeamMemberRoleRequest>,
+    ) -> Result<Response<UpdateTeamMemberRoleResponse>, Status> {
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let grpc_metadata = request.metadata().clone();
+        let inner = request.into_inner();
+        let mut ctx = self.ctx.make_request_context(
+            "OrganizationService",
+            "update_team_member_role",
+            &grpc_metadata,
+            &trace_ctx,
+        );
+
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
+        let (organization_id, team_id) = slug_resolver
+            .extract_and_resolve_team(&inner.team)
+            .inspect_err(|status| ctx.set_error("InvalidArgument", status.message()))?;
+        let org_slug = slug_resolver.resolve_slug(organization_id)?;
+
+        self.validate_org_admin_or_team_manager(
+            &slug_resolver,
+            organization_id,
+            team_id,
+            &inner.initiator,
+            &mut ctx,
+        )?;
+
+        let user_id =
+            slug_resolver.extract_and_resolve_user(&inner.user).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
+
+        let role = crate::proto_compat::proto_to_team_member_role(inner.role());
+
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+
+        let system_request = inferadb_ledger_raft::types::SystemRequest::UpdateTeamMemberRole {
+            organization: organization_id,
+            team: team_id,
+            user_id,
+            role,
+        };
+        let response = self
+            .ctx
+            .propose_regional_org_encrypted(
+                org_meta.region,
+                system_request,
+                organization_id,
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
+
+        match response {
+            LedgerResponse::OrganizationUpdated { .. } => {
+                ctx.set_success();
+                let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+                let team = self
+                    .read_team(organization_id, team_id)
+                    .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));
+                Ok(Response::new(UpdateTeamMemberRoleResponse { team }))
+            },
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
+                Err(super::helpers::error_code_to_status(code, message))
+            },
+            other => {
+                ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                tracing::error!(
+                    response = %other,
+                    "Unexpected Raft response for UpdateTeamMemberRole"
+                );
                 Err(Status::internal("Unexpected response type"))
             },
         }

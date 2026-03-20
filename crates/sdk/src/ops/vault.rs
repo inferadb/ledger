@@ -174,7 +174,7 @@ impl LedgerClient {
     /// # use inferadb_ledger_sdk::LedgerClient;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// let (vaults, _next) = client.list_vaults(100, None).await?;
+    /// let (vaults, _next) = client.list_vaults(100, None, None).await?;
     /// for v in vaults {
     ///     println!("Vault {} in {}", v.vault, v.organization);
     /// }
@@ -185,6 +185,7 @@ impl LedgerClient {
         &self,
         page_size: u32,
         page_token: Option<Vec<u8>>,
+        organization: Option<OrganizationSlug>,
     ) -> Result<(Vec<VaultInfo>, Option<Vec<u8>>)> {
         self.check_shutdown(None)?;
 
@@ -201,8 +202,12 @@ impl LedgerClient {
                 || async {
                     let mut client = crate::connected_client!(pool, create_vault_client);
 
-                    let request =
-                        proto::ListVaultsRequest { page_token: page_token.clone(), page_size };
+                    let request = proto::ListVaultsRequest {
+                        page_token: page_token.clone(),
+                        page_size,
+                        organization: organization
+                            .map(|o| proto::OrganizationSlug { slug: o.value() }),
+                    };
 
                     let response =
                         client.list_vaults(tonic::Request::new(request)).await?.into_inner();

@@ -423,6 +423,9 @@ mod tests {
             ("a", true, ""),
             // Invalid keys
             ("", false, "empty"),
+            ("_meta:sequence", false, "reserved for system"),
+            ("_dir:user:123", false, "reserved for system"),
+            ("_idx:email:hash", false, "reserved for system"),
             ("key\x00value", false, "invalid character"),
             ("key\0", false, "invalid character"),
             ("key_\u{00e9}", false, "invalid character"),

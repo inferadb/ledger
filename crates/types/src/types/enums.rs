@@ -49,6 +49,36 @@ pub enum OrganizationMemberRole {
     Member,
 }
 
+impl fmt::Display for UserStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Active => write!(f, "active"),
+            Self::PendingOrg => write!(f, "pending_org"),
+            Self::Suspended => write!(f, "suspended"),
+            Self::Deleting => write!(f, "deleting"),
+            Self::Deleted => write!(f, "deleted"),
+        }
+    }
+}
+
+impl fmt::Display for UserRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::User => write!(f, "user"),
+            Self::Admin => write!(f, "admin"),
+        }
+    }
+}
+
+impl fmt::Display for OrganizationMemberRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Admin => write!(f, "admin"),
+            Self::Member => write!(f, "member"),
+        }
+    }
+}
+
 // ============================================================================
 // App Types
 // ============================================================================

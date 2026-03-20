@@ -243,10 +243,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         if let Some(pk_update) = passkey_update
             && let CredentialData::Passkey(ref mut pk) = cred.credential_data
         {
-            if pk_update.sign_count > 0
-                && pk.sign_count > 0
-                && pk_update.sign_count <= pk.sign_count
-            {
+            if pk.sign_count > 0 && pk_update.sign_count <= pk.sign_count {
                 warn!(
                     credential_id = cred.id.value(),
                     old_count = pk.sign_count,
@@ -907,6 +904,123 @@ mod tests {
         };
         assert_eq!(pk.sign_count, 42);
         assert!(pk.backup_state);
+    }
+
+    #[test]
+    fn test_passkey_sign_count_reset_to_zero_rejected() {
+        let svc = create_test_service();
+        let user_id = UserId::new(1);
+        let now = Utc::now();
+
+        let cred = svc
+            .create_user_credential(
+                user_id,
+                CredentialType::Passkey,
+                make_passkey_data(b"pk-reset"),
+                "Key",
+                now,
+            )
+            .unwrap();
+
+        // First update: set sign_count to 5 (counter starts)
+        let pk_update_5 = PasskeyCredential {
+            credential_id: vec![],
+            public_key: vec![],
+            sign_count: 5,
+            transports: vec![],
+            backup_eligible: false,
+            backup_state: false,
+            attestation_format: None,
+            aaguid: None,
+        };
+        svc.update_user_credential(user_id, cred.id, None, None, None, Some(&pk_update_5)).unwrap();
+
+        // Attempt to reset to 0 — should be rejected (cloned authenticator)
+        let pk_update_0 = PasskeyCredential {
+            credential_id: vec![],
+            public_key: vec![],
+            sign_count: 0,
+            transports: vec![],
+            backup_eligible: false,
+            backup_state: false,
+            attestation_format: None,
+            aaguid: None,
+        };
+        let err = svc
+            .update_user_credential(user_id, cred.id, None, None, None, Some(&pk_update_0))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("sign_count regression"),
+            "Expected sign_count regression error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_passkey_sign_count_zero_to_zero_allowed() {
+        let svc = create_test_service();
+        let user_id = UserId::new(1);
+        let now = Utc::now();
+
+        // Create with sign_count=0 (authenticator doesn't support counters)
+        let cred = svc
+            .create_user_credential(
+                user_id,
+                CredentialType::Passkey,
+                make_passkey_data(b"pk-nocount"),
+                "Key",
+                now,
+            )
+            .unwrap();
+
+        // Update with sign_count=0 — should succeed (both sides indicate no counter)
+        let pk_update = PasskeyCredential {
+            credential_id: vec![],
+            public_key: vec![],
+            sign_count: 0,
+            transports: vec![],
+            backup_eligible: false,
+            backup_state: false,
+            attestation_format: None,
+            aaguid: None,
+        };
+        svc.update_user_credential(user_id, cred.id, None, None, None, Some(&pk_update)).unwrap();
+    }
+
+    #[test]
+    fn test_passkey_sign_count_same_value_rejected() {
+        let svc = create_test_service();
+        let user_id = UserId::new(1);
+        let now = Utc::now();
+
+        let cred = svc
+            .create_user_credential(
+                user_id,
+                CredentialType::Passkey,
+                make_passkey_data(b"pk-same"),
+                "Key",
+                now,
+            )
+            .unwrap();
+
+        // Set to 10
+        let pk_update_10 = PasskeyCredential {
+            credential_id: vec![],
+            public_key: vec![],
+            sign_count: 10,
+            transports: vec![],
+            backup_eligible: false,
+            backup_state: false,
+            attestation_format: None,
+            aaguid: None,
+        };
+        svc.update_user_credential(user_id, cred.id, None, None, None, Some(&pk_update_10))
+            .unwrap();
+
+        // Same value (10→10) — should be rejected (not strictly increasing)
+        let err = svc
+            .update_user_credential(user_id, cred.id, None, None, None, Some(&pk_update_10))
+            .unwrap_err();
+        assert!(err.to_string().contains("sign_count regression"));
     }
 
     #[test]

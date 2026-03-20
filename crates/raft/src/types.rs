@@ -1145,6 +1145,19 @@ pub enum SystemRequest {
         user_id: UserId,
     },
 
+    /// Update a team member's role atomically.
+    /// Proposed to the REGIONAL Raft group via `propose_regional_org_encrypted()`.
+    UpdateTeamMemberRole {
+        /// Organization containing the team.
+        organization: OrganizationId,
+        /// Team containing the member.
+        team: TeamId,
+        /// User whose role to update.
+        user_id: UserId,
+        /// New role.
+        role: inferadb_ledger_state::system::TeamMemberRole,
+    },
+
     /// Writes a client assertion's user-provided name to REGIONAL state.
     ///
     /// Proposed to the REGIONAL Raft group after the GLOBAL
@@ -3602,6 +3615,7 @@ mod tests {
             SystemRequest::DeleteTeam { .. } => RaftScope::Regional,
             SystemRequest::PurgeOrganizationRegional { .. } => RaftScope::Regional,
             SystemRequest::RemoveTeamMember { .. } => RaftScope::Regional,
+            SystemRequest::UpdateTeamMemberRole { .. } => RaftScope::Regional,
             SystemRequest::UpdateOrganizationProfile { .. } => RaftScope::Regional,
             SystemRequest::UpdateUserProfile { .. } => RaftScope::Regional,
             SystemRequest::VerifyEmailCode { .. } => RaftScope::Regional,
@@ -3773,6 +3787,15 @@ mod tests {
             user_id: UserId::new(1),
         };
         assert_eq!(classify_system_request(&remove_member), RaftScope::Regional);
+
+        // UpdateTeamMemberRole — REGIONAL
+        let update_role = SystemRequest::UpdateTeamMemberRole {
+            organization: OrganizationId::new(1),
+            team: TeamId::new(1),
+            user_id: UserId::new(1),
+            role: inferadb_ledger_state::system::TeamMemberRole::Manager,
+        };
+        assert_eq!(classify_system_request(&update_role), RaftScope::Regional);
 
         // WriteClientAssertionName — REGIONAL (assertion name is potential PII)
         let write_assertion_name = SystemRequest::WriteClientAssertionName {

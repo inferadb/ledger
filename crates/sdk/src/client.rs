@@ -890,7 +890,7 @@ mod tests {
             ),
             (
                 "list_vaults",
-                Box::new(|c| Box::pin(async move { c.list_vaults(0, None).await.is_err() })),
+                Box::new(|c| Box::pin(async move { c.list_vaults(0, None, None).await.is_err() })),
             ),
             (
                 "health_check",
@@ -2825,7 +2825,7 @@ mod tests {
                 "list_vaults",
                 Box::pin(async {
                     matches!(
-                        client.list_vaults(0, None).await,
+                        client.list_vaults(0, None, None).await,
                         Err(crate::error::SdkError::Shutdown)
                     )
                 }),

@@ -7,5 +7,6 @@ pub mod events;
 pub mod invitation;
 pub mod query;
 pub mod read;
+pub mod schema;
 pub mod streaming;
 pub mod verified_read;
