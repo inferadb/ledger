@@ -404,7 +404,7 @@ impl<B: StorageBackend> StateLayer<B> {
     }
 
     /// Marks all 256 buckets dirty for a vault, forcing a full state root
-    /// recomputation on the next [`compute_state_root`] call.
+    /// recomputation on the next [`StateLayer::compute_state_root`] call.
     ///
     /// Used during crash recovery when entity data is already in the B+ tree
     /// but vault commitment tracking has been lost (in-memory state was reset).

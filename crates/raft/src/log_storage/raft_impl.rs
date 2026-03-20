@@ -5,6 +5,7 @@
 
 use std::{fmt::Debug, ops::RangeBounds, sync::Arc};
 
+use chrono::DateTime;
 use inferadb_ledger_state::EventsDatabase;
 use inferadb_ledger_store::{FileBackend, TableId, tables};
 use inferadb_ledger_types::{
@@ -698,13 +699,17 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         // Event accumulation — deterministic timestamp from leader's proposal.
         // All replicas apply with the same timestamp, guaranteeing byte-identical
         // event storage, B+ tree keys, and pagination cursors across the cluster.
+        //
+        // For Blank/Membership-only batches, use UNIX_EPOCH as a deterministic
+        // sentinel. No events are emitted for these entry types, so the timestamp
+        // is unused. Avoids Utc::now() non-determinism across replicas.
         let block_timestamp = entries
             .last()
             .and_then(|e| match &e.payload {
                 EntryPayload::Normal(payload) => Some(payload.proposed_at),
                 _ => None,
             })
-            .unwrap_or_else(chrono::Utc::now);
+            .unwrap_or(DateTime::UNIX_EPOCH);
         let mut events = Vec::new();
         let mut op_index = 0u32;
         let mut pending = PendingExternalWrites::default();

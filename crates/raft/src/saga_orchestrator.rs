@@ -392,6 +392,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     }
 
     /// Proposes a write through Raft for the given organization and vault.
+    ///
+    /// Routes the write to the correct Raft group based on the organization's
+    /// region. System organization writes (`SYSTEM_ORGANIZATION_ID`) always go
+    /// through GLOBAL Raft. Other organizations are looked up via
+    /// [`SystemOrganizationService`] and routed to their home region via
+    /// [`propose_to_region`](Self::propose_to_region).
     async fn propose_write(
         &self,
         organization: OrganizationId,
@@ -408,12 +414,30 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             request_hash: 0,
         };
 
-        self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
-            SagaError::SagaRaftWrite {
-                message: format!("{e:?}"),
-                backtrace: snafu::Backtrace::generate(),
+        let region = if organization == SYSTEM_ORGANIZATION_ID {
+            Region::GLOBAL
+        } else {
+            match self.system_service().get_organization(organization) {
+                Ok(Some(registry)) => registry.region,
+                Ok(None) => {
+                    warn!(
+                        organization = organization.value(),
+                        "Organization not found in state layer, falling back to GLOBAL"
+                    );
+                    Region::GLOBAL
+                },
+                Err(e) => {
+                    warn!(
+                        organization = organization.value(),
+                        error = %e,
+                        "Failed to look up organization region, falling back to GLOBAL"
+                    );
+                    Region::GLOBAL
+                },
             }
-        })?;
+        };
+
+        self.propose_to_region(region, request).await?;
 
         Ok(())
     }
