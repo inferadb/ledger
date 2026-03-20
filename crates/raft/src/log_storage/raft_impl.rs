@@ -715,6 +715,32 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         // Term is stored in the leader_id
         let term = entries.last().map(|e| e.log_id.leader_id.term).unwrap_or(0);
 
+        // Read atomicity sentinel from state layer to detect entries that were
+        // already committed to the state layer DB before a crash. Entries at or
+        // before the sentinel skip state layer writes (data already persisted)
+        // but still update in-memory AppliedState for correct downstream
+        // processing.
+        //
+        // Deserialize to LogId for proper Ord comparison — postcard's varint
+        // encoding does not preserve numeric ordering in byte form.
+        let state_layer_sentinel: Option<LogId<LedgerNodeId>> = self
+            .state_layer
+            .as_ref()
+            .and_then(|sl| match sl.read_last_applied() {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to read atomicity sentinel, all entries will be applied");
+                    None
+                },
+            })
+            .and_then(|bytes| match decode(&bytes) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to decode atomicity sentinel, all entries will be applied");
+                    None
+                },
+            });
+
         for entry in entries {
             // Verify state root commitments piggybacked from the previous batch.
             // The leader attached its locally-computed state roots to this entry;
@@ -729,15 +755,30 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
             let (response, vault_entry) = match &entry.payload {
                 EntryPayload::Blank => (crate::types::LedgerResponse::Empty, None),
-                EntryPayload::Normal(payload) => self.apply_request_with_events(
-                    &payload.request,
-                    &mut state,
-                    block_timestamp,
-                    &mut op_index,
-                    &mut events,
-                    ttl_days,
-                    &mut pending,
-                ),
+                EntryPayload::Normal(payload) => {
+                    // Serialize log_id for sentinel persistence (only needed for Normal entries)
+                    let log_id_bytes = encode(&entry.log_id).ok();
+                    let skip_state_writes = state_layer_sentinel
+                        .as_ref()
+                        .is_some_and(|sentinel| entry.log_id <= *sentinel);
+                    if skip_state_writes {
+                        tracing::info!(
+                            log_id = %entry.log_id,
+                            "Skipping state layer writes for already-applied entry"
+                        );
+                    }
+                    self.apply_request_with_events(
+                        &payload.request,
+                        &mut state,
+                        block_timestamp,
+                        &mut op_index,
+                        &mut events,
+                        ttl_days,
+                        &mut pending,
+                        log_id_bytes.as_deref(),
+                        skip_state_writes,
+                    )
+                },
                 EntryPayload::Membership(membership) => {
                     state.membership =
                         StoredMembership::new(Some(entry.log_id), membership.clone());

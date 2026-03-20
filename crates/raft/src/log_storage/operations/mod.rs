@@ -83,6 +83,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
             &mut events,
             0,
             &mut pending,
+            None,
+            false,
         )
     }
 
@@ -94,6 +96,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// emitted, ensuring unique UUID v5 event IDs across a batch.
     ///
     /// `ttl_days` controls event expiry (from [`EventConfig::default_ttl_days`]).
+    ///
+    /// `log_id_bytes`, when `Some`, causes the serialized Raft log ID to be
+    /// persisted as an atomicity sentinel in the state layer's write
+    /// transaction (crash-recovery protocol).
+    ///
+    /// `skip_state_writes`, when `true`, skips state layer entity writes
+    /// for crash-recovery of already-applied entries. In-memory state
+    /// updates still execute so subsequent entries see correct state.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_request_with_events(
         &self,
         request: &LedgerRequest,
@@ -103,6 +114,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
         events: &mut Vec<EventEntry>,
         ttl_days: u32,
         pending: &mut PendingExternalWrites,
+        log_id_bytes: Option<&[u8]>,
+        skip_state_writes: bool,
     ) -> (LedgerResponse, Option<VaultEntry>) {
         // Block height for event emission (from region chain state)
         let block_height = self.region_chain.read().height + 1;
@@ -145,70 +158,102 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 // Apply transactions to state layer if configured
                 let state_root = if let Some(state_layer) = &self.state_layer {
-                    // Apply all transactions' operations in a single storage transaction
-                    // for atomicity: either all operations in the block commit, or none do.
-                    let mut write_txn = match state_layer.begin_write() {
-                        Ok(txn) => txn,
-                        Err(e) => {
-                            return (
-                                LedgerResponse::Error {
-                                    code: ErrorCode::Internal,
-                                    message: format!("Failed to begin write txn: {e}"),
-                                },
-                                None,
-                            );
-                        },
-                    };
-                    let mut all_dirty_keys = Vec::new();
-                    for tx in transactions.iter() {
-                        match state_layer.apply_operations_in_txn(
-                            &mut write_txn,
-                            *vault,
-                            &tx.operations,
-                            new_height,
-                        ) {
-                            Ok((_statuses, dirty_keys)) => {
-                                all_dirty_keys.extend(dirty_keys);
-                            },
+                    if skip_state_writes {
+                        // Crash recovery: entity data already committed to state
+                        // layer DB. Force full state root recomputation from
+                        // existing data instead of re-applying operations (which
+                        // would fail CAS conditions).
+                        state_layer.mark_all_dirty(*vault);
+                    } else {
+                        // Normal path: apply all transactions' operations in a
+                        // single storage transaction for atomicity.
+                        let mut write_txn = match state_layer.begin_write() {
+                            Ok(txn) => txn,
                             Err(e) => {
-                                // On CAS failure, return current state for conflict resolution.
-                                // Write txn is dropped (rolled back) automatically.
-                                return match e {
-                                    StateError::PreconditionFailed {
-                                        key,
-                                        current_version,
-                                        current_value,
-                                        failed_condition,
-                                    } => (
-                                        LedgerResponse::PreconditionFailed {
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::Internal,
+                                        message: format!("Failed to begin write txn: {e}"),
+                                    },
+                                    None,
+                                );
+                            },
+                        };
+                        let mut all_dirty_keys = Vec::new();
+                        for tx in transactions.iter() {
+                            match state_layer.apply_operations_in_txn(
+                                &mut write_txn,
+                                *vault,
+                                &tx.operations,
+                                new_height,
+                            ) {
+                                Ok((_statuses, dirty_keys)) => {
+                                    all_dirty_keys.extend(dirty_keys);
+                                },
+                                Err(e) => {
+                                    // On CAS failure, return current state for
+                                    // conflict resolution. Write txn is dropped
+                                    // (rolled back) automatically.
+                                    return match e {
+                                        StateError::PreconditionFailed {
                                             key,
                                             current_version,
                                             current_value,
                                             failed_condition,
-                                        },
-                                        None,
+                                        } => (
+                                            LedgerResponse::PreconditionFailed {
+                                                key,
+                                                current_version,
+                                                current_value,
+                                                failed_condition,
+                                            },
+                                            None,
+                                        ),
+                                        other => (
+                                            LedgerResponse::Error {
+                                                code: ErrorCode::Internal,
+                                                message: format!(
+                                                    "Failed to apply operations: {other}"
+                                                ),
+                                            },
+                                            None,
+                                        ),
+                                    };
+                                },
+                            }
+                        }
+                        // Persist atomicity sentinel in the same transaction as
+                        // entity data so crash recovery can detect
+                        // already-applied entries.
+                        if let Some(lid_bytes) = log_id_bytes
+                            && let Err(e) = inferadb_ledger_state::StateLayer::persist_last_applied(
+                                &mut write_txn,
+                                lid_bytes,
+                            )
+                        {
+                            return (
+                                LedgerResponse::Error {
+                                    code: ErrorCode::Internal,
+                                    message: format!(
+                                        "Failed to persist last_applied sentinel: {e}"
                                     ),
-                                    other => (
-                                        LedgerResponse::Error {
-                                            code: ErrorCode::Internal,
-                                            message: format!("Failed to apply operations: {other}"),
-                                        },
-                                        None,
-                                    ),
-                                };
-                            },
+                                },
+                                None,
+                            );
+                        }
+                        // Mark dirty before commit: dirty marks are conservative
+                        // (trigger re-hash from storage). Safe on commit failure.
+                        state_layer.mark_dirty_keys(*vault, &all_dirty_keys);
+                        if let Err(e) = write_txn.commit() {
+                            return (
+                                LedgerResponse::Error {
+                                    code: ErrorCode::Internal,
+                                    message: format!("Failed to commit write txn: {e}"),
+                                },
+                                None,
+                            );
                         }
                     }
-                    if let Err(e) = write_txn.commit() {
-                        return (
-                            LedgerResponse::Error {
-                                code: ErrorCode::Internal,
-                                message: format!("Failed to commit write txn: {e}"),
-                            },
-                            None,
-                        );
-                    }
-                    state_layer.mark_dirty_keys(*vault, &all_dirty_keys);
 
                     // Compute state root
                     match state_layer.compute_state_root(*vault) {
@@ -5855,6 +5900,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     events,
                     ttl_days,
                     pending,
+                    log_id_bytes,
+                    skip_state_writes,
                 )
             },
 
@@ -5953,6 +6000,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     events,
                     ttl_days,
                     pending,
+                    log_id_bytes,
+                    skip_state_writes,
                 )
             },
 
@@ -5972,6 +6021,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         events,
                         ttl_days,
                         pending,
+                        log_id_bytes,
+                        skip_state_writes,
                     );
                     responses.push(response);
                     if vault_entry.is_some() {

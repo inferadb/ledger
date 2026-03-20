@@ -161,6 +161,47 @@ impl<B: StorageBackend> StateLayer<B> {
         self.db.write().context(StoreSnafu)
     }
 
+    /// Sentinel key for crash-recovery atomicity.
+    ///
+    /// Stored in the Entities table with a raw byte key (no vault/bucket prefix)
+    /// so it cannot collide with vault-scoped entity keys which always start with
+    /// an 8-byte big-endian `VaultId`.
+    const LAST_APPLIED_KEY: &[u8] = b"_meta:last_applied";
+
+    /// Persists a Raft log ID sentinel in the same write transaction as entity data.
+    ///
+    /// On crash recovery, comparing this sentinel against the Raft DB's
+    /// `AppliedStateCore.last_applied` reveals whether the state layer is
+    /// already up-to-date, preventing re-application of committed entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the table insert fails.
+    pub fn persist_last_applied(
+        txn: &mut WriteTransaction<'_, B>,
+        log_id_bytes: &[u8],
+    ) -> Result<()> {
+        txn.insert_raw(
+            inferadb_ledger_store::tables::TableId::Entities,
+            Self::LAST_APPLIED_KEY,
+            log_id_bytes,
+        )
+        .context(StoreSnafu)
+    }
+
+    /// Reads the last-applied Raft log ID sentinel from the state layer DB.
+    ///
+    /// Returns `None` on first boot (no sentinel written yet).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the read transaction fails.
+    pub fn read_last_applied(&self) -> Result<Option<Vec<u8>>> {
+        let txn = self.db.read().context(StoreSnafu)?;
+        let key = Self::LAST_APPLIED_KEY.to_vec();
+        txn.get::<inferadb_ledger_store::tables::Entities>(&key).context(StoreSnafu)
+    }
+
     /// Restores a single entity during snapshot installation.
     ///
     /// Writes a raw key/value pair directly into the Entities table within the
@@ -362,6 +403,19 @@ impl<B: StorageBackend> StateLayer<B> {
         });
     }
 
+    /// Marks all 256 buckets dirty for a vault, forcing a full state root
+    /// recomputation on the next [`compute_state_root`] call.
+    ///
+    /// Used during crash recovery when entity data is already in the B+ tree
+    /// but vault commitment tracking has been lost (in-memory state was reset).
+    pub fn mark_all_dirty(&self, vault: VaultId) {
+        self.with_commitment(vault, |commitment| {
+            for bucket in 0..NUM_BUCKETS as u8 {
+                commitment.mark_dirty(bucket);
+            }
+        });
+    }
+
     /// Applies a batch of operations to a vault's state.
     ///
     /// Executes all operations atomically within a single write transaction.
@@ -406,8 +460,12 @@ impl<B: StorageBackend> StateLayer<B> {
         let mut txn = self.begin_write()?;
         let (statuses, dirty_keys) =
             self.apply_operations_in_txn(&mut txn, vault, operations, block_height)?;
-        txn.commit().context(StoreSnafu)?;
+        // Mark dirty before commit: dirty marks are conservative (trigger re-hash
+        // from storage). If commit fails, the re-hash reads old data and produces
+        // the correct (pre-commit) state root. If commit succeeds, dirty buckets
+        // are correctly tracked for the new data.
         self.mark_dirty_keys(vault, &dirty_keys);
+        txn.commit().context(StoreSnafu)?;
         Ok(statuses)
     }
 
@@ -1708,5 +1766,170 @@ mod tests {
         // At least the stats struct should be populated (may or may not have merges
         // depending on actual page layout)
         let _ = stats;
+    }
+
+    // ================================================================
+    // Atomicity sentinel tests
+    // ================================================================
+
+    #[test]
+    fn test_read_last_applied_returns_none_on_fresh_db() {
+        let state = create_test_state();
+        let result = state.read_last_applied().unwrap();
+        assert!(result.is_none(), "fresh database should have no sentinel");
+    }
+
+    #[test]
+    fn test_persist_and_read_last_applied() {
+        let state = create_test_state();
+        let log_id_bytes = b"test_log_id_v1";
+
+        // Persist sentinel in a write transaction
+        let mut txn = state.begin_write().unwrap();
+        StateLayer::persist_last_applied(&mut txn, log_id_bytes).unwrap();
+        txn.commit().unwrap();
+
+        // Read it back
+        let result = state.read_last_applied().unwrap();
+        assert_eq!(result.as_deref(), Some(log_id_bytes.as_slice()));
+    }
+
+    #[test]
+    fn test_sentinel_overwrites_on_update() {
+        let state = create_test_state();
+
+        // Write first sentinel
+        let mut txn = state.begin_write().unwrap();
+        StateLayer::persist_last_applied(&mut txn, b"log_id_1").unwrap();
+        txn.commit().unwrap();
+
+        // Overwrite with second sentinel
+        let mut txn = state.begin_write().unwrap();
+        StateLayer::persist_last_applied(&mut txn, b"log_id_2").unwrap();
+        txn.commit().unwrap();
+
+        let result = state.read_last_applied().unwrap();
+        assert_eq!(result.as_deref(), Some(b"log_id_2".as_slice()));
+    }
+
+    #[test]
+    fn test_sentinel_atomic_with_entity_writes() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // Write entity data AND sentinel in the same transaction
+        let mut txn = state.begin_write().unwrap();
+        state
+            .apply_operations_in_txn(
+                &mut txn,
+                vault,
+                &[Operation::SetEntity {
+                    key: "key1".into(),
+                    value: b"value1".to_vec(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                1,
+            )
+            .unwrap();
+        StateLayer::persist_last_applied(&mut txn, b"log_id_100").unwrap();
+        txn.commit().unwrap();
+
+        // Both entity and sentinel should be readable
+        let entity = state.get_entity(vault, b"key1").unwrap();
+        assert!(entity.is_some());
+        assert_eq!(state.read_last_applied().unwrap().as_deref(), Some(b"log_id_100".as_slice()));
+    }
+
+    #[test]
+    fn test_sentinel_rolled_back_with_entity_writes() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // Write entity data AND sentinel, but drop txn (rollback)
+        let mut txn = state.begin_write().unwrap();
+        state
+            .apply_operations_in_txn(
+                &mut txn,
+                vault,
+                &[Operation::SetEntity {
+                    key: "key1".into(),
+                    value: b"value1".to_vec(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                1,
+            )
+            .unwrap();
+        StateLayer::persist_last_applied(&mut txn, b"log_id_100").unwrap();
+        drop(txn); // Rollback — don't commit
+
+        // Neither entity nor sentinel should exist
+        let entity = state.get_entity(vault, b"key1").unwrap();
+        assert!(entity.is_none());
+        assert!(state.read_last_applied().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_sentinel_does_not_collide_with_entity_keys() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // Write sentinel
+        let mut txn = state.begin_write().unwrap();
+        StateLayer::persist_last_applied(&mut txn, b"sentinel_value").unwrap();
+        txn.commit().unwrap();
+
+        // Write an entity with a key that starts with _meta:
+        state
+            .apply_operations(
+                vault,
+                &[Operation::SetEntity {
+                    key: "_meta:last_applied".into(),
+                    value: b"entity_value".to_vec(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                1,
+            )
+            .unwrap();
+
+        // Sentinel uses raw key (no vault+bucket prefix), so it's a
+        // different B+ tree key than the vault-scoped entity.
+        let sentinel = state.read_last_applied().unwrap();
+        assert_eq!(sentinel.as_deref(), Some(b"sentinel_value".as_slice()));
+
+        let entity = state.get_entity(vault, b"_meta:last_applied").unwrap();
+        assert!(entity.is_some());
+        assert_eq!(entity.unwrap().value, b"entity_value");
+    }
+
+    #[test]
+    fn test_mark_all_dirty_forces_full_recomputation() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // Write some entity data
+        state
+            .apply_operations(
+                vault,
+                &[Operation::SetEntity {
+                    key: "key1".into(),
+                    value: b"value1".to_vec(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                1,
+            )
+            .unwrap();
+
+        // Compute state root normally (dirty from apply_operations)
+        let root1 = state.compute_state_root(vault).unwrap();
+
+        // Mark all dirty and recompute — should produce the same root
+        state.mark_all_dirty(vault);
+        let root2 = state.compute_state_root(vault).unwrap();
+
+        assert_eq!(root1, root2, "mark_all_dirty recomputation should match normal computation");
     }
 }

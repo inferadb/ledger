@@ -4003,6 +4003,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         // Verify response is a successful write
@@ -4068,6 +4070,8 @@ mod tests {
             &mut events_a,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
         store_b.apply_request_with_events(
             &write_request,
@@ -4077,6 +4081,8 @@ mod tests {
             &mut events_b,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         // Both must produce the same number of events
@@ -4130,6 +4136,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         // Should have: 1 WriteCommitted + 2 EntityExpired = 3 events
@@ -4180,6 +4188,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         // Write events through the EventWriter (simulating what apply_to_state_machine does)
@@ -4231,6 +4241,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         let org_event = events
@@ -4271,6 +4283,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         let del_event = events
@@ -4314,6 +4328,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         let join_event = events
@@ -4350,6 +4366,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         let leave_event = events
@@ -4386,6 +4404,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         let user_event = events
@@ -4425,6 +4445,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         let suspend_event = events
@@ -4454,6 +4476,8 @@ mod tests {
             &mut resume_events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         let resume_event = resume_events
@@ -4497,6 +4521,8 @@ mod tests {
             &mut all_events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         // Emit an org-scoped event (WriteCommitted)
@@ -4509,6 +4535,8 @@ mod tests {
             &mut all_events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         // Persist all events
@@ -4568,6 +4596,8 @@ mod tests {
             &mut events_a,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
         store_b.apply_request_with_events(
             &request,
@@ -4577,6 +4607,8 @@ mod tests {
             &mut events_b,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         assert_eq!(events_a.len(), events_b.len());
@@ -4619,6 +4651,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
         assert!(
             matches!(resp, LedgerResponse::VaultCreated { .. }),
@@ -4656,6 +4690,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
         assert!(
             matches!(resp, LedgerResponse::VaultDeleted { success: true }),
@@ -4720,6 +4756,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
         assert!(matches!(resp, LedgerResponse::BatchWrite { .. }), "expected BatchWrite response");
 
@@ -4769,6 +4807,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         let health_event = events
@@ -4840,6 +4880,8 @@ mod tests {
             &mut all_events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         // Write to org B
@@ -4869,6 +4911,8 @@ mod tests {
             &mut all_events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         // Verify org isolation: filter events by org_id
@@ -4920,6 +4964,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         // Events are accumulated but the writer will filter org events on write.
@@ -4964,6 +5010,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         let write_event = events
@@ -5006,6 +5054,8 @@ mod tests {
             &mut events,
             90,
             &mut PendingExternalWrites::default(),
+            None,
+            false,
         );
 
         let second_write = events
@@ -6410,6 +6460,8 @@ mod tests {
             &mut events,
             0,
             &mut pending,
+            None,
+            false,
         );
         assert!(
             matches!(response, LedgerResponse::OnboardingUserActivated),
@@ -6721,6 +6773,8 @@ mod tests {
             &mut events,
             0,
             &mut pending,
+            None,
+            false,
         );
         response
     }
