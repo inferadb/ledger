@@ -221,6 +221,65 @@ impl LedgerClient {
         .await
     }
 
+    /// Deletes a vault from an organization.
+    ///
+    /// # Arguments
+    ///
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Vault slug (external identifier).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Connection fails after retry attempts
+    /// - The organization or vault does not exist
+    /// - The vault has active data preventing deletion
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
+    /// client.delete_vault(organization, vault).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn delete_vault(
+        &self,
+        organization: OrganizationSlug,
+        vault: VaultSlug,
+    ) -> Result<()> {
+        self.check_shutdown(None)?;
+
+        let pool = self.pool.clone();
+        let retry_policy = self.pool.config().retry_policy().clone();
+
+        self.with_metrics(
+            "delete_vault",
+            with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&pool),
+                "delete_vault",
+                || async {
+                    let mut client = crate::connected_client!(pool, create_vault_client);
+
+                    let request = proto::DeleteVaultRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        vault: Some(proto::VaultSlug { slug: vault.value() }),
+                    };
+
+                    client.delete_vault(tonic::Request::new(request)).await?;
+
+                    Ok(())
+                },
+            ),
+        )
+        .await
+    }
+
     /// Updates vault metadata (retention policy).
     pub async fn update_vault(
         &self,
