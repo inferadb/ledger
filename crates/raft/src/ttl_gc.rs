@@ -31,8 +31,8 @@ const GC_INTERVAL: Duration = Duration::from_secs(60);
 /// Maximum entities to expire per cycle.
 const MAX_BATCH_SIZE: usize = 1000;
 
-/// Actor identifier for GC operations.
-const GC_ACTOR: &str = "system:gc";
+/// Client ID for GC operations.
+const GC_CLIENT_ID: &str = "system:gc";
 
 /// TTL garbage collector for expired entities.
 ///
@@ -116,14 +116,13 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
 
         let transaction = Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
-            client_id: ClientId::new(GC_ACTOR),
+            client_id: ClientId::new(GC_CLIENT_ID),
             sequence: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0),
             operations,
             timestamp: chrono::Utc::now(),
-            actor: GC_ACTOR.to_string(),
         };
 
         let request = LedgerRequest::Write {
@@ -135,7 +134,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
         };
 
         self.raft
-            .client_write(RaftPayload::new(request))
+            .client_write(RaftPayload::system(request))
             .await
             .map_err(|e| format!("Raft write failed: {}", e))?;
 

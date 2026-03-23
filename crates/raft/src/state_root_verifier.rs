@@ -80,6 +80,7 @@ impl StateRootDivergenceHandler {
                 request,
                 proposed_at: chrono::Utc::now(),
                 state_root_commitments: vec![],
+                caller: 0,
             };
 
             match self.raft.client_write(payload).await {
@@ -127,6 +128,7 @@ impl StateRootDivergenceHandler {
             },
             proposed_at: chrono::Utc::now(),
             state_root_commitments: vec![],
+            caller: 0,
         }
     }
 }

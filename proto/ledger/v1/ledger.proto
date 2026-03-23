@@ -240,13 +240,6 @@ message Transaction {
   uint64 sequence = 3;
   repeated Operation operations = 4;
   google.protobuf.Timestamp timestamp = 5;
-  // Actor identity, ALWAYS server-assigned from authenticated context.
-  // Clients cannot specify this - derived from auth:
-  //   - Session token → "user:{user_id}"
-  //   - API key → "client:{client_id}"
-  //   - Internal operation → "system:{component}" (e.g., "system:gc")
-  // Format: {type}:{id}, max 128 characters.
-  string actor = 6;
 }
 
 message Operation {
@@ -428,6 +421,8 @@ message ReadRequest {
   optional VaultSlug vault = 2; // Omit for organization-level reads
   string key = 3;
   ReadConsistency consistency = 4; // Default: EVENTUAL (any replica)
+  // Identity of the user performing this operation.
+  UserSlug caller = 5;
 }
 
 message ReadResponse {
@@ -442,6 +437,8 @@ message BatchReadRequest {
   optional VaultSlug vault = 2;
   repeated string keys = 3;           // Keys to read (max 1000)
   ReadConsistency consistency = 4;    // Applied to all reads
+  // Identity of the user performing this operation.
+  UserSlug caller = 5;
 }
 
 // Batch read response: results for all requested keys.
@@ -470,6 +467,8 @@ message VerifiedReadRequest {
   optional uint64 at_height = 4; // Read at specific height (0 or omit = current)
   bool include_chain_proof = 5; // Also include chain proof to trusted_height
   optional uint64 trusted_height = 6; // Chain proof starts from this checkpoint
+  // Identity of the user performing this operation.
+  UserSlug caller = 7;
 }
 
 message VerifiedReadResponse {
@@ -528,6 +527,8 @@ message WatchBlocksRequest {
   //     process(block)
   //     last_known_height = block.height
   uint64 start_height = 3;
+  // Identity of the user performing this operation.
+  UserSlug caller = 4;
 }
 
 message GetBlockRequest {
@@ -587,6 +588,8 @@ message ListRelationshipsRequest {
   // Encodes position and query context for consistent pagination across requests.
   string page_token = 8;
   ReadConsistency consistency = 9; // Default: EVENTUAL (any replica)
+  // Identity of the user performing this operation.
+  UserSlug caller = 10;
 }
 
 message ListRelationshipsResponse {
@@ -604,6 +607,8 @@ message ListResourcesRequest {
   // Opaque pagination cursor from previous response. Server-managed; do not parse or modify.
   string page_token = 6;
   ReadConsistency consistency = 7; // Default: EVENTUAL (any replica)
+  // Identity of the user performing this operation.
+  UserSlug caller = 8;
 }
 
 message ListResourcesResponse {
@@ -622,6 +627,8 @@ message ListEntitiesRequest {
   string page_token = 6;
   ReadConsistency consistency = 7; // Default: EVENTUAL (any replica)
   optional VaultSlug vault = 8; // Omit for organization-level entities
+  // Identity of the user performing this operation.
+  UserSlug caller = 9;
 }
 
 message ListEntitiesResponse {
@@ -642,8 +649,6 @@ service WriteService {
   rpc BatchWrite(BatchWriteRequest) returns (BatchWriteResponse);
 }
 
-// Note: actor is NOT specified by client. Server assigns Transaction.actor
-// from authenticated context (session token, API key, or system identity).
 message WriteRequest {
   OrganizationSlug organization = 1;
   optional VaultSlug vault = 2; // Required for relationships; omit for organization-level entities
@@ -651,6 +656,8 @@ message WriteRequest {
   bytes idempotency_key = 4; // 16-byte UUID for idempotent retries (server rejects reuse with different payload)
   repeated Operation operations = 5;
   bool include_tx_proof = 6; // Request block_header + tx_proof in response for verification
+  // Identity of the user performing this operation.
+  UserSlug caller = 7;
 }
 
 message WriteResponse {
@@ -756,6 +763,8 @@ message BatchWriteRequest {
   bytes idempotency_key = 4; // 16-byte UUID for idempotent retries (server rejects reuse with different payload)
   repeated BatchWriteOperation operations = 5; // Operations in this batch
   bool include_tx_proofs = 6; // Request block_header + tx_proofs in response for verification
+  // Identity of the user performing this operation.
+  UserSlug caller = 7;
 }
 
 // Logical grouping of operations within a BatchWriteRequest.
@@ -909,6 +918,8 @@ message DeploySchemaRequest {
   bytes definition = 3;              // JSON schema definition
   optional uint32 version = 4;       // Explicit version, or auto-increment
   optional string description = 5;
+  // Identity of the user performing this operation.
+  UserSlug caller = 6;
 }
 
 message DeploySchemaResponse {
@@ -919,6 +930,8 @@ message DeploySchemaResponse {
 message ListSchemaVersionsRequest {
   OrganizationSlug organization = 1;
   VaultSlug vault = 2;
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 message SchemaVersionEntry {
@@ -935,6 +948,8 @@ message GetSchemaRequest {
   OrganizationSlug organization = 1;
   VaultSlug vault = 2;
   uint32 version = 3;
+  // Identity of the user performing this operation.
+  UserSlug caller = 4;
 }
 
 message GetSchemaResponse {
@@ -947,6 +962,8 @@ message ActivateSchemaRequest {
   OrganizationSlug organization = 1;
   VaultSlug vault = 2;
   uint32 version = 3;
+  // Identity of the user performing this operation.
+  UserSlug caller = 4;
 }
 
 message ActivateSchemaResponse {
@@ -957,6 +974,8 @@ message ActivateSchemaResponse {
 message RollbackSchemaRequest {
   OrganizationSlug organization = 1;
   VaultSlug vault = 2;
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 message RollbackSchemaResponse {
@@ -967,6 +986,8 @@ message RollbackSchemaResponse {
 message GetActiveSchemaRequest {
   OrganizationSlug organization = 1;
   VaultSlug vault = 2;
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 message GetActiveSchemaResponse {
@@ -980,6 +1001,8 @@ message DiffSchemasRequest {
   VaultSlug vault = 2;
   uint32 from_version = 3;
   uint32 to_version = 4;
+  // Identity of the user performing this operation.
+  UserSlug caller = 5;
 }
 
 message DiffFieldChange {
@@ -1124,7 +1147,7 @@ message CreateOrganizationRequest {
   string name = 1; // Human-readable name (e.g., "acme_corp")
   Region region = 2; // Data residency region (required)
   optional OrganizationTier tier = 3; // Billing tier (Free if not specified)
-  UserSlug admin = 4; // First organization administrator (required)
+  UserSlug caller = 4; // Identity of the user performing this operation.
 }
 
 message CreateOrganizationResponse {
@@ -1142,7 +1165,7 @@ message CreateOrganizationResponse {
 
 message DeleteOrganizationRequest {
   OrganizationSlug slug = 1;
-  UserSlug initiator = 2; // Must be an organization administrator
+  UserSlug caller = 2; // Identity of the user performing this operation.
 }
 
 message DeleteOrganizationResponse {
@@ -1216,7 +1239,7 @@ message MigrateOrganizationRequest {
   OrganizationSlug slug = 1;
   Region target_region = 2;
   bool acknowledge_residency_downgrade = 3;
-  UserSlug initiator = 4; // Must be an organization administrator
+  UserSlug caller = 4; // Identity of the user performing this operation.
 }
 
 // Migration response with source/target region and current status.
@@ -1232,7 +1255,7 @@ message MigrateOrganizationResponse {
 // At least one optional field must be set.
 message UpdateOrganizationRequest {
   OrganizationSlug slug = 1;
-  UserSlug initiator = 2; // Must be an organization administrator
+  UserSlug caller = 2; // Identity of the user performing this operation.
   optional string name = 3; // New name (1-200 chars, validated)
 }
 
@@ -1268,7 +1291,7 @@ message ListOrganizationMembersResponse {
 // Removing others: initiator must be an admin.
 message RemoveOrganizationMemberRequest {
   OrganizationSlug slug = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   UserSlug target = 3;
 }
 
@@ -1278,7 +1301,7 @@ message RemoveOrganizationMemberResponse {}
 // Initiator must be an admin. Cannot demote the last admin.
 message UpdateOrganizationMemberRoleRequest {
   OrganizationSlug slug = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   UserSlug target = 3;
   OrganizationMemberRole role = 4;
 }
@@ -1332,7 +1355,7 @@ message ListOrganizationTeamsResponse {
 message CreateOrganizationTeamRequest {
   OrganizationSlug organization = 1;
   string name = 2;           // Unique within organization (1-200 chars)
-  UserSlug initiator = 3;    // For audit logging
+  UserSlug caller = 3;    // Identity of the user performing this operation.
 }
 
 message CreateOrganizationTeamResponse {
@@ -1345,7 +1368,7 @@ message DeleteOrganizationTeamRequest {
   // If set, move all members to this team before deleting.
   // If not set, members are simply removed from the team.
   optional TeamSlug move_members_to = 2;
-  UserSlug initiator = 3;        // Must be org admin or team manager
+  UserSlug caller = 3;        // Identity of the user performing this operation.
 }
 
 message DeleteOrganizationTeamResponse {}
@@ -1353,7 +1376,7 @@ message DeleteOrganizationTeamResponse {}
 // Update team metadata. Only organization admins or team managers can update.
 message UpdateOrganizationTeamRequest {
   TeamSlug slug = 1;
-  UserSlug initiator = 2;        // Must be org admin or team manager
+  UserSlug caller = 2;        // Identity of the user performing this operation.
   optional string name = 3;      // New name (1-200 chars, unique within org)
 }
 
@@ -1376,7 +1399,7 @@ message AddTeamMemberRequest {
   TeamSlug team = 1;
   UserSlug user = 2;
   OrganizationTeamMemberRole role = 3;
-  UserSlug initiator = 4; // Must be org admin or team manager
+  UserSlug caller = 4; // Identity of the user performing this operation.
 }
 
 message AddTeamMemberResponse {
@@ -1386,7 +1409,7 @@ message AddTeamMemberResponse {
 message RemoveTeamMemberRequest {
   TeamSlug team = 1;
   UserSlug user = 2;
-  UserSlug initiator = 3; // Must be org admin or team manager
+  UserSlug caller = 3; // Identity of the user performing this operation.
 }
 
 message RemoveTeamMemberResponse {}
@@ -1395,7 +1418,7 @@ message UpdateTeamMemberRoleRequest {
   TeamSlug team = 1;
   UserSlug user = 2;
   OrganizationTeamMemberRole role = 3;
-  UserSlug initiator = 4; // Must be org admin or team manager
+  UserSlug caller = 4; // Identity of the user performing this operation.
 }
 
 message UpdateTeamMemberRoleResponse {
@@ -1406,6 +1429,8 @@ message UpdateTeamMemberRoleResponse {
 message MigrateUserRegionRequest {
   UserSlug slug = 1;
   Region target_region = 2;
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 // Migration response with source/target region and current directory status.
@@ -1428,6 +1453,8 @@ message CreateVaultRequest {
   uint32 replication_factor = 2;
   repeated NodeId initial_nodes = 3;
   optional BlockRetentionPolicy retention_policy = 4; // Default: FULL
+  // Identity of the user performing this operation.
+  UserSlug caller = 5;
 }
 
 // Block retention modes for storage/compliance trade-off.
@@ -1457,6 +1484,8 @@ message CreateVaultResponse {
 message DeleteVaultRequest {
   OrganizationSlug organization = 1;
   VaultSlug vault = 2;
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 message DeleteVaultResponse {
@@ -1466,6 +1495,8 @@ message DeleteVaultResponse {
 message GetVaultRequest {
   OrganizationSlug organization = 1;
   VaultSlug vault = 2;
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 message GetVaultResponse {
@@ -1490,6 +1521,8 @@ message ListVaultsRequest {
   optional bytes page_token = 1; // Opaque cursor
   uint32 page_size = 2; // Max items per page
   optional OrganizationSlug organization = 3; // Filter by organization
+  // Identity of the user performing this operation.
+  UserSlug caller = 4;
 }
 
 message ListVaultsResponse {
@@ -1502,6 +1535,8 @@ message UpdateVaultRequest {
   OrganizationSlug organization = 1;
   VaultSlug vault = 2;
   optional BlockRetentionPolicy retention_policy = 3;
+  // Identity of the user performing this operation.
+  UserSlug caller = 4;
 }
 
 message UpdateVaultResponse {}
@@ -1621,6 +1656,8 @@ message CreateUserResponse {
 
 message GetUserRequest {
   UserSlug slug = 1;
+  // Identity of the user performing this operation.
+  UserSlug caller = 2;
 }
 
 message GetUserResponse {
@@ -1633,6 +1670,8 @@ message UpdateUserRequest {
   optional string name = 2;              // New display name
   optional UserRole role = 3;            // New role
   optional UserEmailId primary_email = 4; // Change primary email (must be owned by user)
+  // Identity of the user performing this operation.
+  UserSlug caller = 5;
 }
 
 message UpdateUserResponse {
@@ -1641,7 +1680,7 @@ message UpdateUserResponse {
 
 message DeleteUserRequest {
   UserSlug slug = 1;
-  string deleted_by = 2;          // Audit trail: who requested deletion
+  UserSlug caller = 2;          // Identity of the user performing this operation.
 }
 
 message DeleteUserResponse {
@@ -1654,6 +1693,8 @@ message ListUsersRequest {
   optional bytes page_token = 1;
   uint32 page_size = 2;           // Default: 100, Max: 1000
   optional Region region = 3;     // Filter by region
+  // Identity of the user performing this operation.
+  UserSlug caller = 4;
 }
 
 message ListUsersResponse {
@@ -1674,6 +1715,8 @@ message SearchUsersRequest {
   UserSearchFilter filter = 1;
   optional bytes page_token = 2;
   uint32 page_size = 3;           // Default: 100, Max: 1000
+  // Identity of the user performing this operation.
+  UserSlug caller = 4;
 }
 
 message SearchUsersResponse {
@@ -1689,6 +1732,8 @@ message CreateUserEmailRequest {
   UserSlug user = 1;              // Owning user
   string email = 2;               // Email address to add
   string email_hmac = 3;          // HMAC-SHA256 of normalized email (hex). Goes to GLOBAL; plaintext stays regional.
+  // Identity of the user performing this operation.
+  UserSlug caller = 4;
 }
 
 message CreateUserEmailResponse {
@@ -1698,6 +1743,8 @@ message CreateUserEmailResponse {
 message DeleteUserEmailRequest {
   UserSlug user = 1;
   UserEmailId email_id = 2;       // Email to remove (cannot be primary)
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 message DeleteUserEmailResponse {
@@ -1714,6 +1761,8 @@ message SearchUserEmailRequest {
   UserEmailSearchFilter filter = 1;
   optional bytes page_token = 2;
   uint32 page_size = 3;
+  // Identity of the user performing this operation.
+  UserSlug caller = 4;
 }
 
 message SearchUserEmailResponse {
@@ -1868,6 +1917,8 @@ message CreateUserCredentialRequest {
   UserSlug user = 1;
   CredentialType credential_type = 2;
   string name = 3;
+  // Identity of the user performing this operation.
+  UserSlug caller = 4;
   oneof data {
     PasskeyCredentialData passkey = 10;
     TotpCredentialData totp = 11;
@@ -1882,6 +1933,8 @@ message CreateUserCredentialResponse {
 message ListUserCredentialsRequest {
   UserSlug user = 1;
   optional CredentialType credential_type = 2;
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 message ListUserCredentialsResponse {
@@ -1893,6 +1946,8 @@ message UpdateUserCredentialRequest {
   int64 credential_id = 2;
   optional string name = 3;
   optional bool enabled = 4;
+  // Identity of the user performing this operation.
+  UserSlug caller = 5;
   // Only passkey updates are allowed (sign_count, backup_state).
   // TOTP and recovery code credentials are immutable after creation.
   optional PasskeyCredentialData passkey = 10;
@@ -1905,6 +1960,8 @@ message UpdateUserCredentialResponse {
 message DeleteUserCredentialRequest {
   UserSlug user = 1;
   int64 credential_id = 2;
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 message DeleteUserCredentialResponse {}
@@ -1914,6 +1971,8 @@ message DeleteUserCredentialResponse {}
 message CreateTotpChallengeRequest {
   UserSlug user = 1;
   string primary_method = 2;                  // "passkey" — audit trail
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 message CreateTotpChallengeResponse {
@@ -1925,6 +1984,8 @@ message VerifyTotpRequest {
   string totp_code = 2;                       // 6-digit TOTP code
   bytes challenge_nonce = 3;                  // Nonce from CreateTotpChallenge or VerifyEmailCode
   optional CredentialInfo credential_used = 4; // Audit trail for created session
+  // Identity of the user performing this operation.
+  UserSlug caller = 5;
 }
 
 message VerifyTotpResponse {
@@ -1938,6 +1999,8 @@ message ConsumeRecoveryCodeRequest {
   string code = 2;                            // 8-char alphanumeric recovery code
   bytes challenge_nonce = 3;                  // Nonce from the TOTP challenge
   optional CredentialInfo credential_used = 4; // Audit trail for created session
+  // Identity of the user performing this operation.
+  UserSlug caller = 5;
 }
 
 message ConsumeRecoveryCodeResponse {
@@ -2381,6 +2444,8 @@ message ListReceivedInvitationsRequest {
   optional InvitationStatus status_filter = 2;
   optional bytes page_token = 3;
   uint32 page_size = 4;
+  // Identity of the user performing this operation.
+  UserSlug caller = 5;
 }
 
 message ListReceivedInvitationsResponse {
@@ -2391,6 +2456,8 @@ message ListReceivedInvitationsResponse {
 message GetInvitationDetailsRequest {
   InviteSlug slug = 1;
   UserSlug user = 2;                          // Must match invitee email
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 message GetInvitationDetailsResponse {
@@ -2399,7 +2466,7 @@ message GetInvitationDetailsResponse {
 
 message AcceptInvitationRequest {
   InviteSlug slug = 1;
-  UserSlug acceptor = 2;                      // Authenticated user
+  UserSlug caller = 2;                      // Identity of the user performing this operation.
 }
 
 message AcceptInvitationResponse {
@@ -2408,7 +2475,7 @@ message AcceptInvitationResponse {
 
 message DeclineInvitationRequest {
   InviteSlug slug = 1;
-  UserSlug user = 2;                          // Authenticated user
+  UserSlug caller = 2;                          // Identity of the user performing this operation.
 }
 
 message DeclineInvitationResponse {
@@ -2522,7 +2589,7 @@ message AppVaultConnectionInfo {
 
 message CreateAppRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   string name = 3;
   optional string description = 4;
 }
@@ -2533,7 +2600,7 @@ message CreateAppResponse {
 
 message GetAppRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
 }
 
@@ -2543,7 +2610,7 @@ message GetAppResponse {
 
 message ListAppsRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
 }
 
 message ListAppsResponse {
@@ -2552,7 +2619,7 @@ message ListAppsResponse {
 
 message UpdateAppRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
   optional string name = 4;
   optional string description = 5;
@@ -2564,7 +2631,7 @@ message UpdateAppResponse {
 
 message DeleteAppRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
 }
 
@@ -2572,7 +2639,7 @@ message DeleteAppResponse {}
 
 message SetAppEnabledRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
   bool enabled = 4;
 }
@@ -2583,7 +2650,7 @@ message SetAppEnabledResponse {
 
 message SetAppCredentialEnabledRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
   AppCredentialType credential_type = 4;
   bool enabled = 5;
@@ -2595,7 +2662,7 @@ message SetAppCredentialEnabledResponse {
 
 message GetAppClientSecretRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
 }
 
@@ -2606,7 +2673,7 @@ message GetAppClientSecretResponse {
 
 message RotateAppClientSecretRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
   // Client-generated UUID (16 bytes) for idempotent retry.
   // If a previous request with the same key already committed, the cached
@@ -2621,7 +2688,7 @@ message RotateAppClientSecretResponse {
 
 message ListAppClientAssertionsRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
 }
 
@@ -2631,7 +2698,7 @@ message ListAppClientAssertionsResponse {
 
 message CreateAppClientAssertionRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
   string name = 4;
   google.protobuf.Timestamp expires_at = 5;
@@ -2650,7 +2717,7 @@ message CreateAppClientAssertionResponse {
 
 message DeleteAppClientAssertionRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
   ClientAssertionId assertion = 4;
 }
@@ -2659,7 +2726,7 @@ message DeleteAppClientAssertionResponse {}
 
 message SetAppClientAssertionEnabledRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
   ClientAssertionId assertion = 4;
   bool enabled = 5;
@@ -2669,7 +2736,7 @@ message SetAppClientAssertionEnabledResponse {}
 
 message ListAppVaultsRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
 }
 
@@ -2679,7 +2746,7 @@ message ListAppVaultsResponse {
 
 message AddAppVaultRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
   VaultSlug vault = 4;
   repeated string allowed_scopes = 5;
@@ -2691,7 +2758,7 @@ message AddAppVaultResponse {
 
 message UpdateAppVaultRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
   VaultSlug vault = 4;
   repeated string allowed_scopes = 5;
@@ -2703,7 +2770,7 @@ message UpdateAppVaultResponse {
 
 message RemoveAppVaultRequest {
   OrganizationSlug organization = 1;
-  UserSlug initiator = 2;
+  UserSlug caller = 2;
   AppSlug app = 3;
   VaultSlug vault = 4;
 }
@@ -2782,6 +2849,8 @@ message CreateUserSessionRequest {
   // Audit trail: which credential was used for primary authentication.
   // Required for passkey logins; omitted for email-code (implicit).
   optional CredentialInfo credential_used = 2;
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 message CreateUserSessionResponse {
@@ -2865,6 +2934,8 @@ message RevokeTokenResponse {}
 
 message RevokeAllUserSessionsRequest {
   UserSlug user = 1;
+  // Identity of the user performing this operation.
+  UserSlug caller = 2;
 }
 
 message RevokeAllUserSessionsResponse {
@@ -2885,6 +2956,8 @@ message RevokeAllAppSessionsResponse {
 message CreateSigningKeyRequest {
   SigningKeyScope scope = 1;
   optional OrganizationSlug organization = 2;  // Required when scope=SIGNING_KEY_SCOPE_ORGANIZATION
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 message CreateSigningKeyResponse {
@@ -2895,6 +2968,8 @@ message RotateSigningKeyRequest {
   string kid = 1;
   uint64 grace_period_secs = 2;          // 0 = use default from JwtConfig
   bool force_revoke = 3;                 // true = immediately revoke old key (skip grace period)
+  // Identity of the user performing this operation.
+  UserSlug caller = 4;
 }
 
 message RotateSigningKeyResponse {
@@ -2903,12 +2978,16 @@ message RotateSigningKeyResponse {
 
 message RevokeSigningKeyRequest {
   string kid = 1;
+  // Identity of the user performing this operation.
+  UserSlug caller = 2;
 }
 
 message RevokeSigningKeyResponse {}
 
 message GetPublicKeysRequest {
   optional OrganizationSlug organization = 1;  // Absent = global keys
+  // Identity of the user performing this operation.
+  UserSlug caller = 2;
 }
 
 message GetPublicKeysResponse {
@@ -3064,6 +3143,8 @@ message ListEventsRequest {
   uint32 limit = 3;
   // Opaque pagination cursor from previous response.
   string page_token = 4;
+  // Identity of the user performing this operation.
+  UserSlug caller = 5;
 }
 
 message ListEventsResponse {
@@ -3081,6 +3162,8 @@ message GetEventRequest {
   OrganizationSlug organization = 1;
   // Event identifier (UUID bytes).
   bytes event_id = 2;
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 message GetEventResponse {
@@ -3094,6 +3177,8 @@ message CountEventsRequest {
   OrganizationSlug organization = 1;
   // Optional filter criteria.
   EventFilter filter = 2;
+  // Identity of the user performing this operation.
+  UserSlug caller = 3;
 }
 
 message CountEventsResponse {
@@ -3135,6 +3220,8 @@ message IngestEventsRequest {
   OrganizationSlug organization = 2;
   // Events to ingest (max batch size enforced by server config).
   repeated IngestEventEntry entries = 3;
+  // Identity of the user performing this operation.
+  UserSlug caller = 4;
 }
 
 // Reason an individual event was rejected during ingestion.
@@ -3241,8 +3328,6 @@ message NodeInfo {
   // Connect via: addresses[i] + ":" + grpc_port
   repeated string addresses = 2;
   uint32 grpc_port = 3; // gRPC port (same for all addresses), typically 5000
-  // Field 4 reserved: was NodeRole role (now per-group, from openraft)
-  reserved 4;
   google.protobuf.Timestamp last_heartbeat = 5;
   google.protobuf.Timestamp joined_at = 6; // For voter election ordering
   Region region = 7;    // Geographic region this node belongs to
@@ -3401,6 +3486,8 @@ message TriggerElectionResponse {
 message RotateBlindingKeyRequest {
   // Version number of the new blinding key (monotonically increasing).
   uint32 new_key_version = 1;
+  // Identity of the user performing this operation.
+  UserSlug caller = 2;
 }
 
 // Response from initiating a blinding key rotation.
@@ -3416,7 +3503,10 @@ message RotateBlindingKeyResponse {
 }
 
 // Request to check blinding key rehash progress.
-message GetBlindingKeyRehashStatusRequest {}
+message GetBlindingKeyRehashStatusRequest {
+  // Identity of the user performing this operation.
+  UserSlug caller = 1;
+}
 
 // Status of an in-flight or completed blinding key rotation.
 message GetBlindingKeyRehashStatusResponse {
@@ -3488,8 +3578,8 @@ message EraseUserRequest {
   // User slug (Snowflake ID) to erase. The server resolves this to an
   // internal user ID.
   UserSlug user = 1;
-  // Identity of the actor requesting erasure (audit trail).
-  string erased_by = 2;
+  // Identity of the user performing this operation.
+  UserSlug caller = 2;
   // Region where the user's PII resides.
   Region region = 3;
 }

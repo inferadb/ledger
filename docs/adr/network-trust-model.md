@@ -34,7 +34,7 @@ Both Engine and Control authenticate end-users before forwarding requests to Led
 
 **3. Separation of concerns.** Authentication belongs at the API gateway (Engine/Control). Ledger's responsibility is durable, consistent storage with cryptographic integrity — not identity verification. This follows the sidecar/mesh pattern used by Istio, Linkerd, and similar infrastructure.
 
-**4. Actor field for audit.** The `Transaction.actor` field (e.g., `"user:alice"`, `"system:engine"`) is provided by the caller for audit logging. Ledger records what the caller claims, not a cryptographically verified identity. This is intentional — audit attribution is the caller's responsibility.
+**4. Audit attribution.** Audit records capture the caller's Snowflake slug (propagated from the gRPC `UserSlug caller` field). Ledger records what the caller claims, not a cryptographically verified identity. This is intentional — audit attribution is the caller's responsibility.
 
 ### Why Not mTLS?
 
@@ -74,12 +74,12 @@ TLS is supported for transport encryption (defense in depth) but not enforced fo
 - Default `listen_addr` is `127.0.0.1:50051` (localhost-only) — requires explicit override for cluster deployment
 - Optional TLS for transport encryption within the private network
 - Input validation (Task 1) and rate limiting (Task 4) protect against malformed or excessive requests from buggy upstream callers
-- Audit logging records all mutations with caller-provided actor identity
+- Audit logging records all mutations with caller slug for attribution
 
 ## References
 
 - `crates/services/src/server.rs` — Server setup with no auth middleware; only `api_version_interceptor`
-- `crates/types/src/types.rs` — `Transaction.actor` field for audit attribution
+- `crates/state/src/system/service/audit.rs` — `AuditRecord.caller` field for attribution
 - `crates/server/src/config.rs` — Default localhost binding, no auth configuration options
 - `docs/operations/security.md` — Network trust model documentation
 - `DESIGN.md` §Threat Model — "Trusted Operator Assumption"

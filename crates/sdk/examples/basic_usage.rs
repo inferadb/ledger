@@ -54,9 +54,10 @@ async fn main() -> Result<()> {
         )
         .await?;
     let organization = org.slug;
+    let caller = UserSlug::new(42); // placeholder caller slug
     println!("Created organization with slug: {organization}");
 
-    let vault_info = client.create_vault(organization).await?;
+    let vault_info = client.create_vault(caller, organization).await?;
     let vault = vault_info.vault;
     println!("Created vault: {vault}");
 
@@ -72,6 +73,7 @@ async fn main() -> Result<()> {
 
     let write_result = client
         .write(
+            caller,
             organization,
             Some(vault),
             vec![Operation::set_entity(
@@ -92,7 +94,7 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     // 4. Read the value back with eventual consistency (fast)
     // -------------------------------------------------------------------------
-    let value = client.read(organization, Some(vault), user_key, None, None).await?;
+    let value = client.read(caller, organization, Some(vault), user_key, None, None).await?;
 
     match value {
         Some(bytes) => {
@@ -107,6 +109,7 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     let value = client
         .read(
+            caller,
             organization,
             Some(vault),
             user_key,
@@ -133,14 +136,14 @@ async fn main() -> Result<()> {
         Operation::create_relationship("doc:readme", "editor", "user:bob"),
     ];
 
-    let result = client.write(organization, Some(vault), operations, None).await?;
+    let result = client.write(caller, organization, Some(vault), operations, None).await?;
     println!("Multi-entity write at block {}, tx: {}", result.block_height, result.tx_id);
 
     // -------------------------------------------------------------------------
     // 7. Batch read multiple keys
     // -------------------------------------------------------------------------
     let keys = vec!["user:alice", "user:bob", "user:charlie", "user:nonexistent"];
-    let results = client.batch_read(organization, Some(vault), keys, None, None).await?;
+    let results = client.batch_read(caller, organization, Some(vault), keys, None, None).await?;
 
     println!("Batch read results:");
     for (key, value) in results {

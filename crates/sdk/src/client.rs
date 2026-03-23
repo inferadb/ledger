@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, UserSlug, VaultSlug};
 
 // Re-export domain types for the test module's `use super::*`.
 #[cfg(test)]
@@ -282,11 +282,11 @@ impl LedgerClient {
     /// Creates a fluent write builder for the given organization and optional vault.
     ///
     /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, UserSlug, VaultSlug};
     /// # async fn example(client: &LedgerClient) -> inferadb_ledger_sdk::Result<()> {
     /// # let organization = OrganizationSlug::new(1);
     /// let result = client
-    ///     .write_builder(organization, Some(VaultSlug::new(1)))
+    ///     .write_builder(UserSlug::new(42), organization, Some(VaultSlug::new(1)))
     ///     .set("user:123", b"data".to_vec())
     ///     .create_relationship("doc:1", "viewer", "user:123")
     ///     .execute()
@@ -297,20 +297,21 @@ impl LedgerClient {
     #[must_use]
     pub fn write_builder(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
     ) -> crate::builders::WriteBuilder<'_> {
-        crate::builders::WriteBuilder::new(self, organization, vault)
+        crate::builders::WriteBuilder::new(self, caller, organization, vault)
     }
 
     /// Creates a fluent batch read builder for the given organization and optional vault.
     ///
     /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, UserSlug, VaultSlug};
     /// # async fn example(client: &LedgerClient) -> inferadb_ledger_sdk::Result<()> {
     /// # let organization = OrganizationSlug::new(1);
     /// let results = client
-    ///     .batch_read_builder(organization, Some(VaultSlug::new(1)))
+    ///     .batch_read_builder(UserSlug::new(42), organization, Some(VaultSlug::new(1)))
     ///     .key("user:123")
     ///     .key("user:456")
     ///     .linearizable()
@@ -322,20 +323,21 @@ impl LedgerClient {
     #[must_use]
     pub fn batch_read_builder(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
     ) -> crate::builders::BatchReadBuilder<'_> {
-        crate::builders::BatchReadBuilder::new(self, organization, vault)
+        crate::builders::BatchReadBuilder::new(self, caller, organization, vault)
     }
 
     /// Creates a fluent relationship query builder for the given organization and vault.
     ///
     /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, UserSlug, VaultSlug};
     /// # async fn example(client: &LedgerClient) -> inferadb_ledger_sdk::Result<()> {
     /// # let organization = OrganizationSlug::new(1);
     /// let page = client
-    ///     .relationship_query(organization, VaultSlug::new(1))
+    ///     .relationship_query(UserSlug::new(42), organization, VaultSlug::new(1))
     ///     .resource("document:report")
     ///     .relation("viewer")
     ///     .limit(50)
@@ -347,10 +349,11 @@ impl LedgerClient {
     #[must_use]
     pub fn relationship_query(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
     ) -> crate::builders::RelationshipQueryBuilder<'_> {
-        crate::builders::RelationshipQueryBuilder::new(self, organization, vault)
+        crate::builders::RelationshipQueryBuilder::new(self, caller, organization, vault)
     }
 
     /// Returns the client's cancellation token.
@@ -409,7 +412,7 @@ impl LedgerClient {
     /// let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     ///
     /// // Perform operations...
-    /// client.write(organization, Some(vault), operations, None).await?;
+    /// client.write(UserSlug::new(42), organization, Some(vault), operations, None).await?;
     ///
     /// // Graceful shutdown before application exit
     /// client.shutdown().await;
@@ -713,7 +716,16 @@ mod tests {
                 "read",
                 Box::new(|c| {
                     Box::pin(async move {
-                        c.read(ORG, Some(VaultSlug::new(0)), "test-key", None, None).await.is_err()
+                        c.read(
+                            UserSlug::new(42),
+                            ORG,
+                            Some(VaultSlug::new(0)),
+                            "test-key",
+                            None,
+                            None,
+                        )
+                        .await
+                        .is_err()
                     })
                 }),
             ),
@@ -722,6 +734,7 @@ mod tests {
                 Box::new(|c| {
                     Box::pin(async move {
                         c.read(
+                            UserSlug::new(42),
                             ORG,
                             Some(VaultSlug::new(0)),
                             "test-key",
@@ -736,9 +749,9 @@ mod tests {
             (
                 "read (none vault)",
                 Box::new(|c| {
-                    Box::pin(
-                        async move { c.read(ORG, None, "user:123", None, None).await.is_err() },
-                    )
+                    Box::pin(async move {
+                        c.read(UserSlug::new(42), ORG, None, "user:123", None, None).await.is_err()
+                    })
                 }),
             ),
             (
@@ -746,6 +759,7 @@ mod tests {
                 Box::new(|c| {
                     Box::pin(async move {
                         c.batch_read(
+                            UserSlug::new(42),
                             ORG,
                             Some(VaultSlug::new(0)),
                             vec!["key1", "key2", "key3"],
@@ -762,6 +776,7 @@ mod tests {
                 Box::new(|c| {
                     Box::pin(async move {
                         c.batch_read(
+                            UserSlug::new(42),
                             ORG,
                             Some(VaultSlug::new(0)),
                             vec!["key1", "key2"],
@@ -778,7 +793,9 @@ mod tests {
                 Box::new(|c| {
                     Box::pin(async move {
                         let ops = vec![Operation::set_entity("key", b"value".to_vec(), None, None)];
-                        c.write(ORG, Some(VaultSlug::new(0)), ops, None).await.is_err()
+                        c.write(UserSlug::new(42), ORG, Some(VaultSlug::new(0)), ops, None)
+                            .await
+                            .is_err()
                     })
                 }),
             ),
@@ -792,7 +809,9 @@ mod tests {
                             Operation::create_relationship("doc:1", "viewer", "user:1"),
                             Operation::create_relationship("doc:1", "editor", "user:2"),
                         ];
-                        c.write(ORG, Some(VaultSlug::new(0)), ops, None).await.is_err()
+                        c.write(UserSlug::new(42), ORG, Some(VaultSlug::new(0)), ops, None)
+                            .await
+                            .is_err()
                     })
                 }),
             ),
@@ -802,7 +821,15 @@ mod tests {
                     Box::pin(async move {
                         let batches =
                             vec![vec![Operation::set_entity("key", b"value".to_vec(), None, None)]];
-                        c.batch_write(ORG, Some(VaultSlug::new(0)), batches, None).await.is_err()
+                        c.batch_write(
+                            UserSlug::new(42),
+                            ORG,
+                            Some(VaultSlug::new(0)),
+                            batches,
+                            None,
+                        )
+                        .await
+                        .is_err()
                     })
                 }),
             ),
@@ -817,24 +844,34 @@ mod tests {
                                 Operation::create_relationship("folder:789", "editor", "user:123"),
                             ],
                         ];
-                        c.batch_write(ORG, Some(VaultSlug::new(0)), batches, None).await.is_err()
+                        c.batch_write(
+                            UserSlug::new(42),
+                            ORG,
+                            Some(VaultSlug::new(0)),
+                            batches,
+                            None,
+                        )
+                        .await
+                        .is_err()
                     })
                 }),
             ),
             (
                 "watch_blocks",
                 Box::new(|c| {
-                    Box::pin(
-                        async move { c.watch_blocks(ORG, VaultSlug::new(0), 1).await.is_err() },
-                    )
+                    Box::pin(async move {
+                        c.watch_blocks(UserSlug::new(42), ORG, VaultSlug::new(0), 1).await.is_err()
+                    })
                 }),
             ),
             (
                 "watch_blocks (different vaults)",
                 Box::new(|c| {
                     Box::pin(async move {
-                        c.watch_blocks(ORG, VaultSlug::new(1), 1).await.is_err()
-                            && c.watch_blocks(ORG, VaultSlug::new(2), 1).await.is_err()
+                        c.watch_blocks(UserSlug::new(42), ORG, VaultSlug::new(1), 1).await.is_err()
+                            && c.watch_blocks(UserSlug::new(42), ORG, VaultSlug::new(2), 1)
+                                .await
+                                .is_err()
                     })
                 }),
             ),
@@ -842,8 +879,10 @@ mod tests {
                 "watch_blocks (start heights)",
                 Box::new(|c| {
                     Box::pin(async move {
-                        c.watch_blocks(ORG, VaultSlug::new(0), 1).await.is_err()
-                            && c.watch_blocks(ORG, VaultSlug::new(0), 100).await.is_err()
+                        c.watch_blocks(UserSlug::new(42), ORG, VaultSlug::new(0), 1).await.is_err()
+                            && c.watch_blocks(UserSlug::new(42), ORG, VaultSlug::new(0), 100)
+                                .await
+                                .is_err()
                     })
                 }),
             ),
@@ -880,17 +919,25 @@ mod tests {
             ),
             (
                 "create_vault",
-                Box::new(|c| Box::pin(async move { c.create_vault(ORG).await.is_err() })),
+                Box::new(|c| {
+                    Box::pin(async move { c.create_vault(UserSlug::new(42), ORG).await.is_err() })
+                }),
             ),
             (
                 "get_vault",
                 Box::new(|c| {
-                    Box::pin(async move { c.get_vault(ORG, VaultSlug::new(1)).await.is_err() })
+                    Box::pin(async move {
+                        c.get_vault(UserSlug::new(42), ORG, VaultSlug::new(1)).await.is_err()
+                    })
                 }),
             ),
             (
                 "list_vaults",
-                Box::new(|c| Box::pin(async move { c.list_vaults(0, None, None).await.is_err() })),
+                Box::new(|c| {
+                    Box::pin(async move {
+                        c.list_vaults(UserSlug::new(42), 0, None, None).await.is_err()
+                    })
+                }),
             ),
             (
                 "health_check",
@@ -912,9 +959,15 @@ mod tests {
                 "verified_read",
                 Box::new(|c| {
                     Box::pin(async move {
-                        c.verified_read(ORG, Some(VaultSlug::new(0)), "key", VerifyOpts::new())
-                            .await
-                            .is_err()
+                        c.verified_read(
+                            UserSlug::new(42),
+                            ORG,
+                            Some(VaultSlug::new(0)),
+                            "key",
+                            VerifyOpts::new(),
+                        )
+                        .await
+                        .is_err()
                     })
                 }),
             ),
@@ -922,7 +975,13 @@ mod tests {
                 "list_entities",
                 Box::new(|c| {
                     Box::pin(async move {
-                        c.list_entities(ORG, ListEntitiesOpts::with_prefix("user:")).await.is_err()
+                        c.list_entities(
+                            UserSlug::new(42),
+                            ORG,
+                            ListEntitiesOpts::with_prefix("user:"),
+                        )
+                        .await
+                        .is_err()
                     })
                 }),
             ),
@@ -935,7 +994,7 @@ mod tests {
                             .include_expired()
                             .limit(50)
                             .linearizable();
-                        c.list_entities(ORG, opts).await.is_err()
+                        c.list_entities(UserSlug::new(42), ORG, opts).await.is_err()
                     })
                 }),
             ),
@@ -943,9 +1002,14 @@ mod tests {
                 "list_relationships",
                 Box::new(|c| {
                     Box::pin(async move {
-                        c.list_relationships(ORG, VaultSlug::new(0), ListRelationshipsOpts::new())
-                            .await
-                            .is_err()
+                        c.list_relationships(
+                            UserSlug::new(42),
+                            ORG,
+                            VaultSlug::new(0),
+                            ListRelationshipsOpts::new(),
+                        )
+                        .await
+                        .is_err()
                     })
                 }),
             ),
@@ -957,7 +1021,9 @@ mod tests {
                             .resource("document:1")
                             .relation("viewer")
                             .limit(100);
-                        c.list_relationships(ORG, VaultSlug::new(0), opts).await.is_err()
+                        c.list_relationships(UserSlug::new(42), ORG, VaultSlug::new(0), opts)
+                            .await
+                            .is_err()
                     })
                 }),
             ),
@@ -966,6 +1032,7 @@ mod tests {
                 Box::new(|c| {
                     Box::pin(async move {
                         c.list_resources(
+                            UserSlug::new(42),
                             ORG,
                             VaultSlug::new(0),
                             ListResourcesOpts::with_type("document"),
@@ -2709,7 +2776,16 @@ mod tests {
                 "read",
                 Box::pin(async {
                     matches!(
-                        client.read(ORG, Some(VaultSlug::new(0)), "key", None, None).await,
+                        client
+                            .read(
+                                UserSlug::new(42),
+                                ORG,
+                                Some(VaultSlug::new(0)),
+                                "key",
+                                None,
+                                None
+                            )
+                            .await,
                         Err(crate::error::SdkError::Shutdown)
                     )
                 }),
@@ -2720,6 +2796,7 @@ mod tests {
                     matches!(
                         client
                             .write(
+                                UserSlug::new(42),
                                 ORG,
                                 Some(VaultSlug::new(0)),
                                 vec![Operation::set_entity("key", vec![1, 2, 3], None, None)],
@@ -2736,6 +2813,7 @@ mod tests {
                     matches!(
                         client
                             .batch_write(
+                                UserSlug::new(42),
                                 ORG,
                                 Some(VaultSlug::new(0)),
                                 vec![vec![Operation::set_entity("key", vec![1, 2, 3], None, None)]],
@@ -2752,6 +2830,7 @@ mod tests {
                     matches!(
                         client
                             .batch_read(
+                                UserSlug::new(42),
                                 ORG,
                                 Some(VaultSlug::new(0)),
                                 vec!["key1".to_string(), "key2".to_string()],
@@ -2767,7 +2846,7 @@ mod tests {
                 "watch_blocks",
                 Box::pin(async {
                     matches!(
-                        client.watch_blocks(ORG, VaultSlug::new(0), 1).await,
+                        client.watch_blocks(UserSlug::new(42), ORG, VaultSlug::new(0), 1).await,
                         Err(crate::error::SdkError::Shutdown)
                     )
                 }),
@@ -2809,14 +2888,17 @@ mod tests {
             (
                 "create_vault",
                 Box::pin(async {
-                    matches!(client.create_vault(ORG).await, Err(crate::error::SdkError::Shutdown))
+                    matches!(
+                        client.create_vault(UserSlug::new(42), ORG).await,
+                        Err(crate::error::SdkError::Shutdown)
+                    )
                 }),
             ),
             (
                 "get_vault",
                 Box::pin(async {
                     matches!(
-                        client.get_vault(ORG, VaultSlug::new(0)).await,
+                        client.get_vault(UserSlug::new(42), ORG, VaultSlug::new(0)).await,
                         Err(crate::error::SdkError::Shutdown)
                     )
                 }),
@@ -2825,7 +2907,7 @@ mod tests {
                 "list_vaults",
                 Box::pin(async {
                     matches!(
-                        client.list_vaults(0, None, None).await,
+                        client.list_vaults(UserSlug::new(42), 0, None, None).await,
                         Err(crate::error::SdkError::Shutdown)
                     )
                 }),
@@ -2859,7 +2941,13 @@ mod tests {
                 Box::pin(async {
                     matches!(
                         client
-                            .verified_read(ORG, Some(VaultSlug::new(0)), "key", VerifyOpts::new())
+                            .verified_read(
+                                UserSlug::new(42),
+                                ORG,
+                                Some(VaultSlug::new(0)),
+                                "key",
+                                VerifyOpts::new()
+                            )
                             .await,
                         Err(crate::error::SdkError::Shutdown)
                     )
@@ -2869,7 +2957,13 @@ mod tests {
                 "list_entities",
                 Box::pin(async {
                     matches!(
-                        client.list_entities(ORG, ListEntitiesOpts::with_prefix("key")).await,
+                        client
+                            .list_entities(
+                                UserSlug::new(42),
+                                ORG,
+                                ListEntitiesOpts::with_prefix("key")
+                            )
+                            .await,
                         Err(crate::error::SdkError::Shutdown)
                     )
                 }),
@@ -2880,6 +2974,7 @@ mod tests {
                     matches!(
                         client
                             .list_relationships(
+                                UserSlug::new(42),
                                 ORG,
                                 VaultSlug::new(0),
                                 ListRelationshipsOpts::new()
@@ -2895,6 +2990,7 @@ mod tests {
                     matches!(
                         client
                             .list_resources(
+                                UserSlug::new(42),
                                 ORG,
                                 VaultSlug::new(0),
                                 ListResourcesOpts::with_type("doc")
@@ -2984,7 +3080,7 @@ mod tests {
                 Box::new(|c, t| {
                     Box::pin(async move {
                         matches!(
-                            c.read(ORG, None, "key", None, Some(t)).await,
+                            c.read(UserSlug::new(42), ORG, None, "key", None, Some(t)).await,
                             Err(crate::error::SdkError::Cancelled)
                         )
                     })
@@ -2996,6 +3092,7 @@ mod tests {
                     Box::pin(async move {
                         matches!(
                             c.write(
+                                UserSlug::new(42),
                                 ORG,
                                 None,
                                 vec![Operation::set_entity("key", b"val".to_vec(), None, None)],
@@ -3012,7 +3109,15 @@ mod tests {
                 Box::new(|c, t| {
                     Box::pin(async move {
                         matches!(
-                            c.batch_read(ORG, None, vec!["key1", "key2"], None, Some(t)).await,
+                            c.batch_read(
+                                UserSlug::new(42),
+                                ORG,
+                                None,
+                                vec!["key1", "key2"],
+                                None,
+                                Some(t)
+                            )
+                            .await,
                             Err(crate::error::SdkError::Cancelled)
                         )
                     })
@@ -3025,7 +3130,7 @@ mod tests {
                         let ops =
                             vec![vec![Operation::set_entity("key", b"val".to_vec(), None, None)]];
                         matches!(
-                            c.batch_write(ORG, None, ops, Some(t)).await,
+                            c.batch_write(UserSlug::new(42), ORG, None, ops, Some(t)).await,
                             Err(crate::error::SdkError::Cancelled)
                         )
                     })
@@ -3083,7 +3188,7 @@ mod tests {
         });
 
         let start = std::time::Instant::now();
-        let result = client.read(ORG, None, "key", None, Some(token)).await;
+        let result = client.read(UserSlug::new(42), ORG, None, "key", None, Some(token)).await;
         let elapsed = start.elapsed();
 
         // Should be cancelled during the backoff sleep (or get a transport error
@@ -3118,7 +3223,7 @@ mod tests {
         });
 
         let start = std::time::Instant::now();
-        let result = client.read(ORG, None, "key", None, None).await;
+        let result = client.read(UserSlug::new(42), ORG, None, "key", None, None).await;
         let elapsed = start.elapsed();
 
         // Should receive a shutdown/cancellation/transport error (the exact variant

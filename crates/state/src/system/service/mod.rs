@@ -16,6 +16,7 @@ use snafu::{ResultExt, Snafu};
 use super::keys::{KeyTier, SystemKeys};
 use crate::state::{StateError, StateLayer};
 
+pub mod audit;
 mod credentials;
 mod email;
 mod erasure;

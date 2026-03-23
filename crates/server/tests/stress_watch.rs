@@ -63,6 +63,7 @@ async fn write_entity(
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let response = client.write(request).await?.into_inner();
@@ -114,6 +115,7 @@ async fn test_watch_blocks_high_volume_reconnect() {
         }),
         vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         start_height: 1,
+        caller: None,
     };
 
     let mut stream =
@@ -178,6 +180,7 @@ async fn test_watch_blocks_high_volume_reconnect() {
         }),
         vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         start_height: reconnect_height,
+        caller: None,
     };
 
     let mut reconnect_stream = read_client2

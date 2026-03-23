@@ -20,7 +20,7 @@
 //! # async fn example(client: &LedgerClient) -> inferadb_ledger_sdk::Result<()> {
 //! # let organization = OrganizationSlug::new(1);
 //! let result = client
-//!     .write_builder(organization, Some(VaultSlug::new(1)))
+//!     .write_builder(UserSlug::new(42), organization, Some(VaultSlug::new(1)))
 //!     .if_not_exists()
 //!     .set("user:123", b"data".to_vec())
 //!     .delete("old-key")
@@ -35,7 +35,7 @@
 
 use std::marker::PhantomData;
 
-use inferadb_ledger_types::OrganizationSlug;
+use inferadb_ledger_types::{OrganizationSlug, UserSlug};
 
 use crate::{
     LedgerClient, VaultSlug,
@@ -64,6 +64,7 @@ pub struct HasOps(());
 /// This prevents submitting empty writes at compile time.
 pub struct WriteBuilder<'a, S = NoOps> {
     client: &'a LedgerClient,
+    caller: UserSlug,
     organization: OrganizationSlug,
     vault: Option<VaultSlug>,
     operations: Vec<Operation>,
@@ -77,11 +78,13 @@ impl<'a> WriteBuilder<'a, NoOps> {
     /// Creates a new write builder targeting a organization and optional vault.
     pub(crate) fn new(
         client: &'a LedgerClient,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
     ) -> Self {
         Self {
             client,
+            caller,
             organization,
             vault,
             operations: Vec::new(),
@@ -97,6 +100,7 @@ impl<'a, S> WriteBuilder<'a, S> {
     fn into_has_ops(self) -> WriteBuilder<'a, HasOps> {
         WriteBuilder {
             client: self.client,
+            caller: self.caller,
             organization: self.organization,
             vault: self.vault,
             operations: self.operations,
@@ -225,7 +229,9 @@ impl<'a> WriteBuilder<'a, HasOps> {
     /// exhausted, the client has been shut down, a CAS condition is not met,
     /// or the cancellation token is triggered.
     pub async fn execute(self) -> Result<WriteSuccess> {
-        self.client.write(self.organization, self.vault, self.operations, self.cancellation).await
+        self.client
+            .write(self.caller, self.organization, self.vault, self.operations, self.cancellation)
+            .await
     }
 }
 
@@ -248,7 +254,10 @@ mod tests {
     #[tokio::test]
     async fn write_builder_set_produces_correct_operation() {
         let client = test_client().await;
-        let ops = client.write_builder(ORG, None).set("key1", b"val1".to_vec()).into_operations();
+        let ops = client
+            .write_builder(UserSlug::new(42), ORG, None)
+            .set("key1", b"val1".to_vec())
+            .into_operations();
         assert_eq!(ops.len(), 1);
         assert!(matches!(
             &ops[0],
@@ -261,7 +270,7 @@ mod tests {
     async fn write_builder_set_with_expiry() {
         let client = test_client().await;
         let ops = client
-            .write_builder(ORG, Some(VaultSlug::new(1)))
+            .write_builder(UserSlug::new(42), ORG, Some(VaultSlug::new(1)))
             .set_with_expiry("k", b"v".to_vec(), 9999)
             .into_operations();
         assert!(matches!(&ops[0], Operation::SetEntity { expires_at: Some(9999), .. }));
@@ -270,7 +279,8 @@ mod tests {
     #[tokio::test]
     async fn write_builder_delete() {
         let client = test_client().await;
-        let ops = client.write_builder(ORG, None).delete("gone").into_operations();
+        let ops =
+            client.write_builder(UserSlug::new(42), ORG, None).delete("gone").into_operations();
         assert!(matches!(
             &ops[0],
             Operation::DeleteEntity { key } if key == "gone"
@@ -281,7 +291,7 @@ mod tests {
     async fn write_builder_create_relationship() {
         let client = test_client().await;
         let ops = client
-            .write_builder(ORG, Some(VaultSlug::new(1)))
+            .write_builder(UserSlug::new(42), ORG, Some(VaultSlug::new(1)))
             .create_relationship("doc:1", "viewer", "user:2")
             .into_operations();
         assert!(matches!(
@@ -295,7 +305,7 @@ mod tests {
     async fn write_builder_delete_relationship() {
         let client = test_client().await;
         let ops = client
-            .write_builder(ORG, Some(VaultSlug::new(1)))
+            .write_builder(UserSlug::new(42), ORG, Some(VaultSlug::new(1)))
             .delete_relationship("doc:1", "viewer", "user:2")
             .into_operations();
         assert!(matches!(
@@ -309,7 +319,7 @@ mod tests {
     async fn write_builder_if_not_exists_applies_to_next_set() {
         let client = test_client().await;
         let ops = client
-            .write_builder(ORG, None)
+            .write_builder(UserSlug::new(42), ORG, None)
             .if_not_exists()
             .set("key", b"val".to_vec())
             .into_operations();
@@ -323,7 +333,7 @@ mod tests {
     async fn write_builder_if_exists_applies_to_next_set() {
         let client = test_client().await;
         let ops = client
-            .write_builder(ORG, None)
+            .write_builder(UserSlug::new(42), ORG, None)
             .if_exists()
             .set("key", b"val".to_vec())
             .into_operations();
@@ -337,7 +347,7 @@ mod tests {
     async fn write_builder_if_version_applies_to_next_set() {
         let client = test_client().await;
         let ops = client
-            .write_builder(ORG, None)
+            .write_builder(UserSlug::new(42), ORG, None)
             .if_version(42)
             .set("key", b"val".to_vec())
             .into_operations();
@@ -351,7 +361,7 @@ mod tests {
     async fn write_builder_if_value_equals_applies_to_next_set() {
         let client = test_client().await;
         let ops = client
-            .write_builder(ORG, None)
+            .write_builder(UserSlug::new(42), ORG, None)
             .if_value_equals(b"old".to_vec())
             .set("key", b"new".to_vec())
             .into_operations();
@@ -366,7 +376,7 @@ mod tests {
     async fn write_builder_condition_consumed_after_set() {
         let client = test_client().await;
         let ops = client
-            .write_builder(ORG, None)
+            .write_builder(UserSlug::new(42), ORG, None)
             .if_not_exists()
             .set("key1", b"v1".to_vec())
             .set("key2", b"v2".to_vec())
@@ -386,7 +396,7 @@ mod tests {
         let client = test_client().await;
         // Condition set, then delete (non-set), then set — condition attaches to the set
         let ops = client
-            .write_builder(ORG, None)
+            .write_builder(UserSlug::new(42), ORG, None)
             .if_not_exists()
             .delete("old-key")
             .set("new-key", b"val".to_vec())
@@ -403,7 +413,7 @@ mod tests {
     async fn write_builder_chained_mixed_operations() {
         let client = test_client().await;
         let ops = client
-            .write_builder(ORG, Some(VaultSlug::new(1)))
+            .write_builder(UserSlug::new(42), ORG, Some(VaultSlug::new(1)))
             .set("k1", b"v1".to_vec())
             .delete("k2")
             .create_relationship("doc:1", "editor", "user:1")
@@ -422,7 +432,7 @@ mod tests {
     async fn write_builder_preserves_organization_and_vault() {
         let client = test_client().await;
         let builder = client
-            .write_builder(OrganizationSlug::new(42), Some(VaultSlug::new(99)))
+            .write_builder(UserSlug::new(42), OrganizationSlug::new(42), Some(VaultSlug::new(99)))
             .set("key", b"val".to_vec());
         assert_eq!(builder.organization, OrganizationSlug::new(42));
         assert_eq!(builder.vault, Some(VaultSlug::new(99)));
@@ -431,7 +441,8 @@ mod tests {
     #[tokio::test]
     async fn write_builder_vault_none() {
         let client = test_client().await;
-        let builder = client.write_builder(ORG, None).set("key", b"val".to_vec());
+        let builder =
+            client.write_builder(UserSlug::new(42), ORG, None).set("key", b"val".to_vec());
         assert_eq!(builder.vault, None);
     }
 
@@ -439,8 +450,10 @@ mod tests {
     async fn write_builder_with_cancellation() {
         let client = test_client().await;
         let token = tokio_util::sync::CancellationToken::new();
-        let builder =
-            client.write_builder(ORG, None).with_cancellation(token).set("k", b"v".to_vec());
+        let builder = client
+            .write_builder(UserSlug::new(42), ORG, None)
+            .with_cancellation(token)
+            .set("k", b"v".to_vec());
         assert!(builder.cancellation.is_some());
     }
 }

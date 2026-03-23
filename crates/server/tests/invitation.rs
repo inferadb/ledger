@@ -277,7 +277,7 @@ async fn test_cross_org_team_rejected() {
     let team_resp = org_client
         .create_organization_team(proto::CreateOrganizationTeamRequest {
             organization: Some(proto::OrganizationSlug { slug: org_b }),
-            initiator: Some(proto::UserSlug { slug: admin_b }),
+            caller: Some(proto::UserSlug { slug: admin_b }),
             name: "Team B".to_string(),
         })
         .await
@@ -397,6 +397,7 @@ async fn test_wrong_user_gets_not_found() {
         .get_invitation_details(proto::GetInvitationDetailsRequest {
             slug: Some(proto::InviteSlug { slug }),
             user: Some(proto::UserSlug { slug: 999 }),
+            caller: Some(proto::UserSlug { slug: 999 }),
         })
         .await
         .unwrap_err();
@@ -420,6 +421,7 @@ async fn test_nonexistent_slug_gets_not_found() {
         .get_invitation_details(proto::GetInvitationDetailsRequest {
             slug: Some(proto::InviteSlug { slug: 999_999_999 }),
             user: Some(proto::UserSlug { slug: 1 }),
+            caller: Some(proto::UserSlug { slug: 1 }),
         })
         .await
         .unwrap_err();

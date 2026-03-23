@@ -208,10 +208,6 @@ impl RegionBlock {
 #[derive(Debug, snafu::Snafu)]
 #[snafu(visibility(pub))]
 pub enum TransactionValidationError {
-    /// Actor identifier is empty.
-    #[snafu(display("Transaction actor cannot be empty"))]
-    EmptyActor,
-
     /// Operations list is empty.
     #[snafu(display("Transaction must contain at least one operation"))]
     EmptyOperations,
@@ -231,7 +227,6 @@ pub enum TransactionValidationError {
 ///     .id([1u8; 16])
 ///     .client_id("client-123")
 ///     .sequence(1)
-///     .actor("user:alice")
 ///     .operations(vec![Operation::CreateRelationship {
 ///         resource: "doc:1".into(),
 ///         relation: "owner".into(),
@@ -249,8 +244,6 @@ pub struct Transaction {
     pub client_id: ClientId,
     /// Monotonic sequence number per client.
     pub sequence: u64,
-    /// Actor identifier for audit logging (typically a user or service principal).
-    pub actor: String,
     /// Operations to apply atomically.
     pub operations: Vec<Operation>,
     /// Transaction submission timestamp.
@@ -264,7 +257,6 @@ impl Transaction {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - `actor` is empty
     /// - `operations` is empty
     /// - `sequence` is zero
     #[builder]
@@ -272,15 +264,13 @@ impl Transaction {
         id: TxId,
         #[builder(into)] client_id: ClientId,
         sequence: u64,
-        #[builder(into)] actor: String,
         operations: Vec<Operation>,
         timestamp: DateTime<Utc>,
     ) -> Result<Self, TransactionValidationError> {
-        snafu::ensure!(!actor.is_empty(), EmptyActorSnafu);
         snafu::ensure!(!operations.is_empty(), EmptyOperationsSnafu);
         snafu::ensure!(sequence > 0, ZeroSequenceSnafu);
 
-        Ok(Self { id, client_id, sequence, actor, operations, timestamp })
+        Ok(Self { id, client_id, sequence, operations, timestamp })
     }
 }
 

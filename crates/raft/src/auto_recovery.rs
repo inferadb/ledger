@@ -454,7 +454,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
             recovery_started_at,
         };
 
-        let result = self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+        let result = self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
             RecoveryError::RaftConsensus {
                 message: format!("{:?}", e),
                 backtrace: snafu::Backtrace::generate(),

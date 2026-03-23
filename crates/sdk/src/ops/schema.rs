@@ -7,7 +7,7 @@
 //! - `schema:latest` — version pointer for the highest deployed version
 //! - `schema:history` — JSON array of previously activated versions (for rollback)
 
-use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, UserSlug, VaultSlug};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -53,12 +53,17 @@ impl LedgerClient {
     /// `schema:latest` pointer. If `version` is `None`, auto-increments from
     /// the current latest version.
     ///
+    /// # Arguments
+    ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
+    ///
     /// # Errors
     ///
     /// Returns an error if the version is zero, serialization fails, or the
     /// underlying read/write operations fail.
     pub async fn deploy_schema(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
         definition: serde_json::Value,
@@ -75,8 +80,9 @@ impl LedgerClient {
                 v
             },
             None => {
-                let latest =
-                    self.read_version_pointer(organization, vault, SCHEMA_LATEST_KEY).await?;
+                let latest = self
+                    .read_version_pointer(caller, organization, vault, SCHEMA_LATEST_KEY)
+                    .await?;
                 latest.map_or(1, |p| p.version + 1)
             },
         };
@@ -96,7 +102,7 @@ impl LedgerClient {
             Operation::set_entity(&key, bytes, None, None),
             Operation::set_entity(SCHEMA_LATEST_KEY, latest_bytes, None, None),
         ];
-        self.write(organization, Some(vault), ops, None).await?;
+        self.write(caller, organization, Some(vault), ops, None).await?;
 
         Ok(SchemaDeployResult { version })
     }
@@ -107,28 +113,36 @@ impl LedgerClient {
     /// latest for existence. Also reads `schema:current` to mark the active
     /// version.
     ///
+    /// # Arguments
+    ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
+    ///
     /// # Errors
     ///
     /// Returns an error if the underlying read operations fail.
     pub async fn list_schema_versions(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
     ) -> Result<Vec<SchemaVersionSummary>> {
-        let latest = self.read_version_pointer(organization, vault, SCHEMA_LATEST_KEY).await?;
+        let latest =
+            self.read_version_pointer(caller, organization, vault, SCHEMA_LATEST_KEY).await?;
 
         let max_version = match latest {
             Some(p) => p.version,
             None => return Ok(vec![]),
         };
 
-        let current = self.read_version_pointer(organization, vault, SCHEMA_CURRENT_KEY).await?;
+        let current =
+            self.read_version_pointer(caller, organization, vault, SCHEMA_CURRENT_KEY).await?;
         let active_version = current.map(|p| p.version);
 
         let mut schemas = Vec::with_capacity(max_version as usize);
         for v in 1..=max_version {
             let key = schema_version_key(v);
-            let exists = self.read(organization, Some(vault), &key, None, None).await?.is_some();
+            let exists =
+                self.read(caller, organization, Some(vault), &key, None, None).await?.is_some();
             schemas.push(SchemaVersionSummary {
                 version: v,
                 has_definition: exists,
@@ -141,25 +155,30 @@ impl LedgerClient {
 
     /// Gets a specific schema version.
     ///
+    /// # Arguments
+    ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
+    ///
     /// # Errors
     ///
     /// Returns an error if the version does not exist or the underlying read
     /// operation fails.
     pub async fn get_schema(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
         version: u32,
     ) -> Result<SchemaVersion> {
-        let stored =
-            self.read_stored_schema(organization, vault, version).await?.ok_or_else(|| {
-                SdkError::Rpc {
-                    code: tonic::Code::NotFound,
-                    message: format!("schema version {version} not found"),
-                    request_id: None,
-                    trace_id: None,
-                    error_details: None,
-                }
+        let stored = self
+            .read_stored_schema(caller, organization, vault, version)
+            .await?
+            .ok_or_else(|| SdkError::Rpc {
+                code: tonic::Code::NotFound,
+                message: format!("schema version {version} not found"),
+                request_id: None,
+                trace_id: None,
+                error_details: None,
             })?;
 
         Ok(SchemaVersion {
@@ -184,13 +203,15 @@ impl LedgerClient {
     /// read/write operations fail.
     pub async fn activate_schema(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
         version: u32,
     ) -> Result<u32> {
         // Verify the version exists
         let key = schema_version_key(version);
-        let exists = self.read(organization, Some(vault), &key, None, None).await?.is_some();
+        let exists =
+            self.read(caller, organization, Some(vault), &key, None, None).await?.is_some();
         if !exists {
             return Err(SdkError::Rpc {
                 code: tonic::Code::NotFound,
@@ -202,8 +223,9 @@ impl LedgerClient {
         }
 
         // Read current active version and history
-        let current = self.read_version_pointer(organization, vault, SCHEMA_CURRENT_KEY).await?;
-        let mut history = self.read_history(organization, vault).await?;
+        let current =
+            self.read_version_pointer(caller, organization, vault, SCHEMA_CURRENT_KEY).await?;
+        let mut history = self.read_history(caller, organization, vault).await?;
 
         // Push current active version onto history (if one exists)
         if let Some(current_pointer) = current {
@@ -222,7 +244,7 @@ impl LedgerClient {
             Operation::set_entity(SCHEMA_CURRENT_KEY, pointer_bytes, None, None),
             Operation::set_entity(SCHEMA_HISTORY_KEY, history_bytes, None, None),
         ];
-        self.write(organization, Some(vault), ops, None).await?;
+        self.write(caller, organization, Some(vault), ops, None).await?;
 
         Ok(version)
     }
@@ -242,10 +264,11 @@ impl LedgerClient {
     /// or the underlying read/write operations fail.
     pub async fn rollback_schema(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
     ) -> Result<u32> {
-        let mut history = self.read_history(organization, vault).await?;
+        let mut history = self.read_history(caller, organization, vault).await?;
 
         let previous = history.pop().ok_or_else(|| SdkError::Validation {
             message: "no activation history to rollback to".to_string(),
@@ -263,7 +286,7 @@ impl LedgerClient {
             Operation::set_entity(SCHEMA_CURRENT_KEY, pointer_bytes, None, None),
             Operation::set_entity(SCHEMA_HISTORY_KEY, history_bytes, None, None),
         ];
-        self.write(organization, Some(vault), ops, None).await?;
+        self.write(caller, organization, Some(vault), ops, None).await?;
 
         Ok(previous)
     }
@@ -278,11 +301,12 @@ impl LedgerClient {
     /// is missing, or the underlying read operations fail.
     pub async fn get_active_schema(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
     ) -> Result<SchemaVersion> {
         let current = self
-            .read_version_pointer(organization, vault, SCHEMA_CURRENT_KEY)
+            .read_version_pointer(caller, organization, vault, SCHEMA_CURRENT_KEY)
             .await?
             .ok_or_else(|| SdkError::Rpc {
                 code: tonic::Code::NotFound,
@@ -293,15 +317,15 @@ impl LedgerClient {
             })?;
 
         let stored = self
-            .read_stored_schema(organization, vault, current.version)
+            .read_stored_schema(caller, organization, vault, current.version)
             .await?
             .ok_or_else(|| SdkError::Rpc {
-                code: tonic::Code::NotFound,
-                message: format!("active schema version {} has no definition", current.version),
-                request_id: None,
-                trace_id: None,
-                error_details: None,
-            })?;
+            code: tonic::Code::NotFound,
+            message: format!("active schema version {} has no definition", current.version),
+            request_id: None,
+            trace_id: None,
+            error_details: None,
+        })?;
 
         Ok(SchemaVersion {
             version: current.version,
@@ -318,31 +342,32 @@ impl LedgerClient {
     /// read operations fail.
     pub async fn diff_schemas(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
         from: u32,
         to: u32,
     ) -> Result<Vec<SchemaDiffChange>> {
-        let from_schema =
-            self.read_stored_schema(organization, vault, from).await?.ok_or_else(|| {
-                SdkError::Rpc {
-                    code: tonic::Code::NotFound,
-                    message: format!("schema version {from} not found"),
-                    request_id: None,
-                    trace_id: None,
-                    error_details: None,
-                }
+        let from_schema = self
+            .read_stored_schema(caller, organization, vault, from)
+            .await?
+            .ok_or_else(|| SdkError::Rpc {
+                code: tonic::Code::NotFound,
+                message: format!("schema version {from} not found"),
+                request_id: None,
+                trace_id: None,
+                error_details: None,
             })?;
 
-        let to_schema =
-            self.read_stored_schema(organization, vault, to).await?.ok_or_else(|| {
-                SdkError::Rpc {
-                    code: tonic::Code::NotFound,
-                    message: format!("schema version {to} not found"),
-                    request_id: None,
-                    trace_id: None,
-                    error_details: None,
-                }
+        let to_schema = self
+            .read_stored_schema(caller, organization, vault, to)
+            .await?
+            .ok_or_else(|| SdkError::Rpc {
+                code: tonic::Code::NotFound,
+                message: format!("schema version {to} not found"),
+                request_id: None,
+                trace_id: None,
+                error_details: None,
             })?;
 
         Ok(diff_json_objects(&from_schema.definition, &to_schema.definition))
@@ -352,11 +377,12 @@ impl LedgerClient {
 
     async fn read_version_pointer(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
         key: &str,
     ) -> Result<Option<VersionPointer>> {
-        let data = self.read(organization, Some(vault), key, None, None).await?;
+        let data = self.read(caller, organization, Some(vault), key, None, None).await?;
         match data {
             Some(bytes) => {
                 let pointer: VersionPointer =
@@ -371,12 +397,13 @@ impl LedgerClient {
 
     async fn read_stored_schema(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
         version: u32,
     ) -> Result<Option<StoredSchema>> {
         let key = schema_version_key(version);
-        let data = self.read(organization, Some(vault), &key, None, None).await?;
+        let data = self.read(caller, organization, Some(vault), &key, None, None).await?;
         match data {
             Some(bytes) => {
                 let schema: StoredSchema = serde_json::from_slice(&bytes).map_err(|e| {
@@ -390,10 +417,12 @@ impl LedgerClient {
 
     async fn read_history(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
     ) -> Result<Vec<u32>> {
-        let data = self.read(organization, Some(vault), SCHEMA_HISTORY_KEY, None, None).await?;
+        let data =
+            self.read(caller, organization, Some(vault), SCHEMA_HISTORY_KEY, None, None).await?;
         match data {
             Some(bytes) => {
                 let history: Vec<u32> = serde_json::from_slice(&bytes).map_err(|e| {

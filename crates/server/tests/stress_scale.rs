@@ -65,6 +65,7 @@ async fn write_entity(
                 })),
             }],
             include_tx_proof: false,
+            caller: None,
         })
         .await?;
     match response.into_inner().result {
@@ -124,6 +125,7 @@ async fn read_entity(
             vault: Some(proto::VaultSlug { slug: vault.value() }),
             key: key.to_string(),
             consistency: 0,
+            caller: None,
         })
         .await
         .ok()?;
@@ -171,6 +173,7 @@ async fn test_snapshot_over_10k_entities_per_vault_no_data_loss() {
                     })),
                 }],
                 include_tx_proof: false,
+                caller: None,
             },
             &format!("write {i}"),
         )
@@ -241,6 +244,7 @@ async fn test_10k_writes_replicated_state_roots_match() {
                     })),
                 }],
                 include_tx_proof: false,
+                caller: None,
             },
             &format!("write {i}"),
         )

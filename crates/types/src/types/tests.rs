@@ -78,7 +78,6 @@ fn test_transaction_builder_valid() {
         .id([1u8; 16])
         .client_id("client-123")
         .sequence(1)
-        .actor("user:alice")
         .operations(vec![Operation::CreateRelationship {
             resource: "doc:1".into(),
             relation: "owner".into(),
@@ -91,29 +90,8 @@ fn test_transaction_builder_valid() {
     assert_eq!(tx.id, [1u8; 16]);
     assert_eq!(tx.client_id, ClientId::new("client-123"));
     assert_eq!(tx.sequence, 1);
-    assert_eq!(tx.actor, "user:alice");
     assert_eq!(tx.operations.len(), 1);
     assert_eq!(tx.timestamp, timestamp);
-}
-
-#[test]
-fn test_transaction_builder_empty_actor_fails() {
-    let result = Transaction::builder()
-        .id([1u8; 16])
-        .client_id("client-123")
-        .sequence(1)
-        .actor("")
-        .operations(vec![Operation::CreateRelationship {
-            resource: "doc:1".into(),
-            relation: "owner".into(),
-            subject: "user:alice".into(),
-        }])
-        .timestamp(Utc::now())
-        .build();
-
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.to_string().contains("actor"));
 }
 
 #[test]
@@ -122,7 +100,6 @@ fn test_transaction_builder_empty_operations_fails() {
         .id([1u8; 16])
         .client_id("client-123")
         .sequence(1)
-        .actor("user:alice")
         .operations(vec![])
         .timestamp(Utc::now())
         .build();
@@ -138,7 +115,6 @@ fn test_transaction_builder_zero_sequence_fails() {
         .id([1u8; 16])
         .client_id("client-123")
         .sequence(0)
-        .actor("user:alice")
         .operations(vec![Operation::CreateRelationship {
             resource: "doc:1".into(),
             relation: "owner".into(),
@@ -159,7 +135,6 @@ fn test_transaction_builder_with_into_for_strings() {
         .id([2u8; 16])
         .client_id("client-456") // &str should work
         .sequence(1)
-        .actor("user:bob") // &str should work
         .operations(vec![Operation::SetEntity {
             key: "entity:1".into(),
             value: vec![1, 2, 3],
@@ -171,7 +146,6 @@ fn test_transaction_builder_with_into_for_strings() {
         .expect("valid transaction with &str");
 
     assert_eq!(tx.client_id, ClientId::new("client-456"));
-    assert_eq!(tx.actor, "user:bob");
 }
 
 #[test]
@@ -180,7 +154,6 @@ fn test_transaction_builder_multiple_operations() {
         .id([3u8; 16])
         .client_id("client-789")
         .sequence(5)
-        .actor("user:charlie")
         .operations(vec![
             Operation::SetEntity {
                 key: "entity:1".into(),

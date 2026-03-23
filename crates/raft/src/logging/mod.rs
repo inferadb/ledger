@@ -20,7 +20,7 @@
 //! | Group | Fields | Description |
 //! |-------|--------|-------------|
 //! | Identity | `request_id`, `service`, `method` | Request routing |
-//! | Client | `client_id`, `sequence`, `actor`, `sdk_version`, `source_ip` | Client metadata |
+//! | Client | `client_id`, `sequence`, `caller`, `sdk_version`, `source_ip` | Client metadata |
 //! | Target | `organization`, `vault` | Scope of the operation |
 //! | System | `node_id`, `is_leader`, `raft_term`, `region` | Cluster state |
 //! | Write | `operations_count`, `operation_types`, `bytes_written`, `raft_round_trips` | Write metrics |
@@ -52,7 +52,7 @@
 //!
 //! async fn handle_request() {
 //!     let mut ctx = CanonicalLogLine::new("WriteService", "write");
-//!     ctx.set_client_info("client_123", 42, Some("user:7kQ3xP9m".into()));
+//!     ctx.set_client_info("client_123", 42);
 //!     ctx.set_target(1, 2);
 //!
 //!     // ... process request ...

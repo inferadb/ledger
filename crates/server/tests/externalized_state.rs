@@ -76,6 +76,7 @@ async fn write_entity(
                 })),
             }],
             include_tx_proof: false,
+            caller: None,
         })
         .await?;
     match response.into_inner().result {
@@ -101,6 +102,7 @@ async fn read_entity(
             vault: Some(proto::VaultSlug { slug: vault.value() }),
             key: key.to_string(),
             consistency: 0,
+            caller: None,
         })
         .await
         .ok()?;
@@ -118,6 +120,7 @@ async fn delete_vault(
         .delete_vault(proto::DeleteVaultRequest {
             organization: Some(proto::OrganizationSlug { slug: organization.value() }),
             vault: Some(proto::VaultSlug { slug: vault.value() }),
+            caller: None,
         })
         .await?;
     Ok(())
@@ -265,6 +268,7 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
             })
             .collect(),
         include_tx_proofs: false,
+        caller: None,
     };
 
     let response = write_client.batch_write(batch_request).await.expect("batch write");
@@ -328,6 +332,7 @@ async fn test_idempotency_dedup_same_key_returns_cached() {
             })),
         }],
         include_tx_proof: false,
+        caller: None,
     };
     let response = write_client.write(request).await.expect("first write");
     let first_seq = match response.into_inner().result {
@@ -353,6 +358,7 @@ async fn test_idempotency_dedup_same_key_returns_cached() {
             })),
         }],
         include_tx_proof: false,
+        caller: None,
     };
     let retry_resp = write_client.write(retry).await.expect("retry write");
     match retry_resp.into_inner().result {
@@ -569,6 +575,7 @@ async fn test_post_eviction_retry_accepted() {
             })),
         }],
         include_tx_proof: false,
+        caller: None,
     };
     let resp = write_client.write(request).await.expect("first write");
     match resp.into_inner().result {
@@ -591,6 +598,7 @@ async fn test_post_eviction_retry_accepted() {
             })),
         }],
         include_tx_proof: false,
+        caller: None,
     };
     let retry_resp = write_client.write(retry).await.expect("retry write");
     match retry_resp.into_inner().result {

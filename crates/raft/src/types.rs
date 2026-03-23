@@ -96,15 +96,30 @@ pub struct RaftPayload {
     /// detect state machine divergence.
     #[serde(default)]
     pub state_root_commitments: Vec<StateRootCommitment>,
+    /// External slug of the user who initiated this request.
+    ///
+    /// Propagated from the gRPC `UserSlug caller` field through to
+    /// audit records. 0 for system-initiated operations (sagas,
+    /// background jobs).
+    #[serde(default)]
+    pub caller: u64,
 }
 
 impl RaftPayload {
+    /// Creates a payload for system-initiated operations (no caller).
+    ///
+    /// Used by background jobs, sagas, and internal operations where
+    /// there is no gRPC caller.
+    pub fn system(request: LedgerRequest) -> Self {
+        Self { request, proposed_at: chrono::Utc::now(), state_root_commitments: vec![], caller: 0 }
+    }
+
     /// Creates a payload with no state root commitments.
     ///
     /// Used by all proposal sites except the leader's write path, which
     /// drains the commitment buffer via [`Self::with_commitments`].
-    pub fn new(request: LedgerRequest) -> Self {
-        Self { request, proposed_at: chrono::Utc::now(), state_root_commitments: vec![] }
+    pub fn new(request: LedgerRequest, caller: u64) -> Self {
+        Self { request, proposed_at: chrono::Utc::now(), state_root_commitments: vec![], caller }
     }
 
     /// Creates a payload carrying piggybacked state root commitments.
@@ -115,8 +130,9 @@ impl RaftPayload {
     pub fn with_commitments(
         request: LedgerRequest,
         state_root_commitments: Vec<StateRootCommitment>,
+        caller: u64,
     ) -> Self {
-        Self { request, proposed_at: chrono::Utc::now(), state_root_commitments }
+        Self { request, proposed_at: chrono::Utc::now(), state_root_commitments, caller }
     }
 }
 
@@ -2449,6 +2465,7 @@ mod tests {
             }),
             proposed_at: Utc.with_ymd_and_hms(2099, 6, 15, 12, 30, 0).unwrap(),
             state_root_commitments: vec![],
+            caller: 0,
         };
 
         let bytes = postcard::to_allocvec(&payload).expect("serialize");
@@ -2479,6 +2496,7 @@ mod tests {
             },
             proposed_at: ts,
             state_root_commitments: vec![],
+            caller: 0,
         };
 
         let bytes1 = postcard::to_allocvec(&payload).expect("serialize");
@@ -2556,6 +2574,7 @@ mod tests {
             },
             proposed_at: Utc.with_ymd_and_hms(2099, 6, 15, 12, 0, 0).unwrap(),
             state_root_commitments: commitments.clone(),
+            caller: 0,
         };
 
         let bytes = postcard::to_allocvec(&payload).expect("serialize");
@@ -2585,6 +2604,7 @@ mod tests {
             }),
             proposed_at: Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap(),
             state_root_commitments: vec![],
+            caller: 0,
         };
 
         let bytes = postcard::to_allocvec(&payload_without).expect("serialize");
@@ -2612,6 +2632,7 @@ mod tests {
                 vault_height: 99,
                 state_root: [0xFF; 32],
             }],
+            caller: 0,
         };
 
         let bytes1 = postcard::to_allocvec(&payload).expect("serialize");

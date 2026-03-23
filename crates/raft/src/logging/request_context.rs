@@ -126,7 +126,7 @@ where
 ///     RequestContextGuard::run_with(ctx, async {
 ///         // Context is accessible here and across await points
 ///         with_current_context(|ctx| {
-///             ctx.set_client_info("client_123", 42, None);
+///             ctx.set_client_info("client_123", 42);
 ///         });
 ///
 ///         // Simulate async work
@@ -213,7 +213,9 @@ pub struct RequestContext {
     // Client info
     pub(crate) client_id: Option<String>,
     pub(crate) sequence: Option<u64>,
-    pub(crate) actor: Option<String>,
+
+    // Caller identity (UserSlug from gRPC request)
+    pub(crate) caller: Option<u64>,
 
     // Target
     pub(crate) organization: Option<u64>,
@@ -298,7 +300,7 @@ impl RequestContext {
             start_time: Instant::now(),
             client_id: None,
             sequence: None,
-            actor: None,
+            caller: None,
             organization: None,
             vault: None,
             node_id: None,
@@ -368,13 +370,9 @@ impl RequestContext {
     ///
     /// * `client_id` - Idempotency client identifier (truncated to 128 chars).
     /// * `sequence` - Per-client sequence number.
-    /// * `actor` - Identity performing the operation. Must be an opaque identifier (slug, numeric
-    ///   ID), never an email or display name. Canonical log lines may be shipped to external
-    ///   aggregators without data residency controls.
-    pub fn set_client_info(&mut self, client_id: &str, sequence: u64, actor: Option<String>) {
+    pub fn set_client_info(&mut self, client_id: &str, sequence: u64) {
         self.client_id = Some(truncate_string(&sanitize_string(client_id), 128));
         self.sequence = Some(sequence);
-        self.actor = actor.map(|a| sanitize_string(&a));
     }
 
     /// Sets the client ID only.
@@ -387,13 +385,17 @@ impl RequestContext {
         self.sequence = Some(sequence);
     }
 
-    /// Sets the actor only.
+    /// Sets the caller's user slug (external Snowflake identifier).
     ///
-    /// Must be an opaque identifier (slug, numeric ID), never an email or
-    /// display name. Canonical log lines may be shipped to external aggregators
-    /// without data residency controls.
-    pub fn set_actor(&mut self, actor: &str) {
-        self.actor = Some(sanitize_string(actor));
+    /// Extracted from the `UserSlug caller` field on gRPC request messages.
+    /// Logged as an opaque numeric identifier — never contains PII.
+    pub fn set_caller(&mut self, slug: u64) {
+        self.caller = Some(slug);
+    }
+
+    /// Returns the caller if set, or 0 for system-initiated requests.
+    pub fn caller_or_zero(&self) -> u64 {
+        self.caller.unwrap_or(0)
     }
 
     // =========================================================================
@@ -861,7 +863,7 @@ impl RequestContext {
             method = self.method,
             client_id = self.client_id.as_deref(),
             sequence = self.sequence,
-            actor = self.actor.as_deref(),
+            caller = self.caller,
             organization = self.organization,
             vault = self.vault,
             node_id = self.node_id,
@@ -919,7 +921,7 @@ impl RequestContext {
                 vault: self.vault,
                 service: Some(self.service),
                 method: Some(self.method),
-                actor: self.actor.clone(),
+                caller: self.caller,
                 node_id: self.node_id,
                 is_leader: self.is_leader,
                 raft_term: self.raft_term,

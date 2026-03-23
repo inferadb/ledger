@@ -51,7 +51,8 @@ async fn main() -> Result<()> {
         )
         .await?;
     let organization = org.slug;
-    let vault_info = client.create_vault(organization).await?;
+    let caller = UserSlug::new(42); // placeholder caller slug
+    let vault_info = client.create_vault(caller, organization).await?;
     let vault = vault_info.vault;
 
     println!("Using organization={organization}, vault={vault}\n");
@@ -62,6 +63,7 @@ async fn main() -> Result<()> {
 
     let write_result = client
         .write(
+            caller,
             organization,
             Some(vault),
             vec![Operation::set_entity(test_key, test_value.clone(), None, None)],
@@ -79,8 +81,9 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     println!("=== Example 1: Basic Verified Read ===");
 
-    let result =
-        client.verified_read(organization, Some(vault), test_key, VerifyOpts::new()).await?;
+    let result = client
+        .verified_read(caller, organization, Some(vault), test_key, VerifyOpts::new())
+        .await?;
 
     match result {
         Some(verified) => {
@@ -111,6 +114,7 @@ async fn main() -> Result<()> {
     // Write another value to advance the block height
     let result2 = client
         .write(
+            caller,
             organization,
             Some(vault),
             vec![Operation::set_entity(test_key, b"Updated value".to_vec(), None, None)],
@@ -122,7 +126,8 @@ async fn main() -> Result<()> {
 
     // Read at the ORIGINAL block height (before the update)
     let opts = VerifyOpts::new().at_height(write_result.block_height);
-    let historical = client.verified_read(organization, Some(vault), test_key, opts).await?;
+    let historical =
+        client.verified_read(caller, organization, Some(vault), test_key, opts).await?;
 
     match historical {
         Some(verified) => {
@@ -143,8 +148,9 @@ async fn main() -> Result<()> {
     }
 
     // Read at the CURRENT block height (after the update)
-    let current =
-        client.verified_read(organization, Some(vault), test_key, VerifyOpts::new()).await?;
+    let current = client
+        .verified_read(caller, organization, Some(vault), test_key, VerifyOpts::new())
+        .await?;
 
     if let Some(verified) = current {
         let value_str = verified

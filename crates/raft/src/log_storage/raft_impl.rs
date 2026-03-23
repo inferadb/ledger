@@ -782,6 +782,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                         &mut pending,
                         log_id_bytes.as_deref(),
                         skip_state_writes,
+                        payload.caller,
                     )
                 },
                 EntryPayload::Membership(membership) => {

@@ -283,6 +283,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Resolve user slug → (UserId, UserSlug)
         let resolver = self.resolver();
@@ -796,6 +797,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let resolver = self.resolver();
         let user_slug = SlugResolver::extract_user_slug(&req.user)?;
@@ -887,6 +889,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Parse scope
         let proto_scope = inferadb_ledger_proto::convert::signing_key_scope_from_i32(req.scope)?;
@@ -960,6 +963,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         if req.kid.is_empty() {
             return Err(Status::invalid_argument("kid is required"));
@@ -1047,6 +1051,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         if req.kid.is_empty() {
             return Err(Status::invalid_argument("kid is required"));

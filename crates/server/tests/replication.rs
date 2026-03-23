@@ -80,6 +80,7 @@ async fn test_ordered_replication() {
                 )),
             }],
             include_tx_proof: false,
+            caller: None,
         };
 
         let response = client.write(request).await.expect("write should succeed");
@@ -146,6 +147,7 @@ async fn test_follower_state_consistency() {
             })
             .collect(),
         include_tx_proofs: false,
+        caller: None,
     };
 
     let response = client.batch_write(batch_request).await.expect("batch write should succeed");
@@ -206,6 +208,7 @@ async fn test_replication_after_delay() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     client.write(request).await.expect("write should succeed");
@@ -232,6 +235,7 @@ async fn test_replication_after_delay() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     client.write(request2).await.expect("second write should succeed");

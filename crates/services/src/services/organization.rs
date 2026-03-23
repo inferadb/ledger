@@ -298,11 +298,11 @@ impl OrganizationService {
         &self,
         slug_resolver: &SlugResolver,
         organization_id: DomainOrganizationId,
-        caller_slug: &Option<proto::UserSlug>,
+        caller: &Option<proto::UserSlug>,
         ctx: &mut RequestContext,
     ) -> Result<(inferadb_ledger_types::UserId, Organization), Status> {
         let (caller_id, org) =
-            self.resolve_user_and_organization(slug_resolver, organization_id, caller_slug, ctx)?;
+            self.resolve_user_and_organization(slug_resolver, organization_id, caller, ctx)?;
 
         let is_member = org.members.iter().any(|m| m.user_id == caller_id);
         if !is_member {
@@ -437,6 +437,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Validate organization name
         validation::validate_organization_name(&req.name, &self.ctx.validation_config)
@@ -472,7 +473,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         self.validate_region_nodes(region)?;
 
         // Resolve admin_slug → UserId (optional — if absent, org has no admin member)
-        let admin_user_id = if let Some(admin_slug_proto) = req.admin {
+        let admin_user_id = if let Some(admin_slug_proto) = req.caller {
             let admin_user_slug = inferadb_ledger_types::UserSlug::new(admin_slug_proto.slug);
             let sys_svc_admin = SystemOrganizationService::new(self.ctx.state.clone());
             sys_svc_admin
@@ -584,6 +585,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
@@ -595,7 +597,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         ctx.set_organization(organization_slug_val);
 
         // Validate initiator is an organization administrator
-        self.validate_org_admin(&slug_resolver, organization_id, &req.initiator, &mut ctx)?;
+        self.validate_org_admin(&slug_resolver, organization_id, &req.caller, &mut ctx)?;
 
         // Best-effort revocation of pending invitations BEFORE deleting the org.
         // Must happen first because ResolveOrganizationInvite's apply handler
@@ -716,6 +718,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Extract organization from request
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -769,6 +772,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
 
@@ -830,6 +834,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Resolve organization slug → internal ID
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -841,7 +846,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         ctx.set_organization(organization_slug_val);
 
         // Validate initiator is an organization administrator
-        self.validate_org_admin(&slug_resolver, organization_id, &req.initiator, &mut ctx)?;
+        self.validate_org_admin(&slug_resolver, organization_id, &req.caller, &mut ctx)?;
 
         // Validate and convert proto region to domain region
         let target_region = inferadb_ledger_proto::convert::region_from_i32(req.target_region)?;
@@ -967,7 +972,6 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                 .unwrap_or(0),
             operations: vec![saga_op],
             timestamp: chrono::Utc::now(),
-            actor: "system:organization".to_string(),
         };
 
         let saga_write = LedgerRequest::Write {
@@ -1064,6 +1068,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
@@ -1074,7 +1079,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         ctx.set_organization(organization_slug_val);
 
         // Validate initiator is an organization administrator
-        self.validate_org_admin(&slug_resolver, organization_id, &req.initiator, &mut ctx)?;
+        self.validate_org_admin(&slug_resolver, organization_id, &req.caller, &mut ctx)?;
 
         let name = match req.name {
             Some(ref n) => {
@@ -1186,6 +1191,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
@@ -1243,6 +1249,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
@@ -1253,7 +1260,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         ctx.set_organization(organization_slug_val);
 
         let initiator_id =
-            slug_resolver.extract_and_resolve_user(&req.initiator).inspect_err(|status| {
+            slug_resolver.extract_and_resolve_user(&req.caller).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
@@ -1351,6 +1358,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.slug.as_ref().map_or(0, |n| n.slug);
@@ -1361,7 +1369,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         ctx.set_organization(organization_slug_val);
 
         // Validate initiator is admin
-        self.validate_org_admin(&slug_resolver, organization_id, &req.initiator, &mut ctx)?;
+        self.validate_org_admin(&slug_resolver, organization_id, &req.caller, &mut ctx)?;
 
         let target_id =
             slug_resolver.extract_and_resolve_user(&req.target).inspect_err(|status| {
@@ -1456,6 +1464,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_id =
@@ -1517,6 +1526,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let (organization_id, team_id) =
@@ -1569,6 +1579,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_id =
@@ -1579,7 +1590,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
 
         // Resolve initiator and check authorization (must be org admin)
         let initiator_id =
-            slug_resolver.extract_and_resolve_user(&inner.initiator).inspect_err(|status| {
+            slug_resolver.extract_and_resolve_user(&inner.caller).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
@@ -1680,6 +1691,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let (organization_id, team_id) =
@@ -1692,7 +1704,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &slug_resolver,
             organization_id,
             team_id,
-            &inner.initiator,
+            &inner.caller,
             &mut ctx,
         )?;
 
@@ -1774,6 +1786,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let (organization_id, team_id) =
@@ -1787,7 +1800,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &slug_resolver,
             organization_id,
             team_id,
-            &inner.initiator,
+            &inner.caller,
             &mut ctx,
         )?;
 
@@ -1876,6 +1889,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let (organization_id, team_id) = slug_resolver
@@ -1887,7 +1901,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &slug_resolver,
             organization_id,
             team_id,
-            &inner.initiator,
+            &inner.caller,
             &mut ctx,
         )?;
 
@@ -1968,6 +1982,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let (organization_id, team_id) = slug_resolver
@@ -1978,7 +1993,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &slug_resolver,
             organization_id,
             team_id,
-            &inner.initiator,
+            &inner.caller,
             &mut ctx,
         )?;
 
@@ -2042,6 +2057,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let (organization_id, team_id) = slug_resolver
@@ -2053,7 +2069,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             &slug_resolver,
             organization_id,
             team_id,
-            &inner.initiator,
+            &inner.caller,
             &mut ctx,
         )?;
 

@@ -72,6 +72,7 @@ fn make_write_request(
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     }
 }
 
@@ -102,6 +103,7 @@ async fn read_entity(
             vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
             key: key.to_string(),
             consistency: 0, // EVENTUAL (default)
+            caller: None,
         })
         .await
         .ok()?;

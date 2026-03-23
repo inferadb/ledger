@@ -1,7 +1,7 @@
 //! Cryptographically verified read operations.
 
 use inferadb_ledger_proto::proto;
-use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, UserSlug, VaultSlug};
 
 use crate::{
     LedgerClient,
@@ -23,6 +23,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Optional vault slug (omit for organization-level entities).
     /// * `key` - Entity key to read.
@@ -44,7 +45,7 @@ impl LedgerClient {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
-    /// let result = client.verified_read(organization, Some(vault), "user:123", VerifyOpts::new()).await?;
+    /// let result = client.verified_read(UserSlug::new(42), organization, Some(vault), "user:123", VerifyOpts::new()).await?;
     /// if let Some(verified) = result {
     ///     // Verify the proof before using the value
     ///     verified.verify()?;
@@ -55,6 +56,7 @@ impl LedgerClient {
     /// ```
     pub async fn verified_read(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         key: impl Into<String>,
@@ -83,6 +85,7 @@ impl LedgerClient {
                         at_height: opts.at_height,
                         include_chain_proof: opts.include_chain_proof,
                         trusted_height: opts.trusted_height,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =

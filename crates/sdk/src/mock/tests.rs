@@ -191,7 +191,8 @@ mod integration_tests {
         server.set_entity(ORG, VAULT, "user:123", b"test data");
         let client = create_client_for_mock(&server).await;
 
-        let result = client.read(ORG, Some(VAULT), "user:123", None, None).await.unwrap();
+        let result =
+            client.read(UserSlug::new(42), ORG, Some(VAULT), "user:123", None, None).await.unwrap();
 
         assert_eq!(result, Some(b"test data".to_vec()));
     }
@@ -201,7 +202,10 @@ mod integration_tests {
         let server = MockLedgerServer::start().await.unwrap();
         let client = create_client_for_mock(&server).await;
 
-        let result = client.read(ORG, Some(VAULT), "nonexistent", None, None).await.unwrap();
+        let result = client
+            .read(UserSlug::new(42), ORG, Some(VAULT), "nonexistent", None, None)
+            .await
+            .unwrap();
 
         assert_eq!(result, None);
     }
@@ -213,7 +217,14 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         let result = client
-            .read(ORG, Some(VAULT), "key", Some(crate::ReadConsistency::Linearizable), None)
+            .read(
+                UserSlug::new(42),
+                ORG,
+                Some(VAULT),
+                "key",
+                Some(crate::ReadConsistency::Linearizable),
+                None,
+            )
             .await
             .unwrap();
 
@@ -227,7 +238,14 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         let result = client
-            .read(ORG, Some(VAULT), "key", Some(crate::ReadConsistency::Eventual), None)
+            .read(
+                UserSlug::new(42),
+                ORG,
+                Some(VAULT),
+                "key",
+                Some(crate::ReadConsistency::Eventual),
+                None,
+            )
             .await
             .unwrap();
 
@@ -241,7 +259,14 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         let result = client
-            .read(ORG, Some(VAULT), "key", Some(crate::ReadConsistency::Linearizable), None)
+            .read(
+                UserSlug::new(42),
+                ORG,
+                Some(VAULT),
+                "key",
+                Some(crate::ReadConsistency::Linearizable),
+                None,
+            )
             .await
             .unwrap();
 
@@ -256,7 +281,8 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         let keys = vec!["exists1".to_string(), "missing".to_string(), "exists2".to_string()];
-        let result = client.batch_read(ORG, Some(VAULT), keys, None, None).await.unwrap();
+        let result =
+            client.batch_read(UserSlug::new(42), ORG, Some(VAULT), keys, None, None).await.unwrap();
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0], ("exists1".to_string(), Some(b"value1".to_vec())));
@@ -273,7 +299,14 @@ mod integration_tests {
 
         let keys = vec!["a".to_string(), "b".to_string()];
         let result = client
-            .batch_read(ORG, Some(VAULT), keys, Some(crate::ReadConsistency::Linearizable), None)
+            .batch_read(
+                UserSlug::new(42),
+                ORG,
+                Some(VAULT),
+                keys,
+                Some(crate::ReadConsistency::Linearizable),
+                None,
+            )
             .await
             .unwrap();
 
@@ -290,10 +323,10 @@ mod integration_tests {
 
         assert_eq!(server.read_count(), 0);
 
-        client.read(ORG, Some(VAULT), "key", None, None).await.unwrap();
+        client.read(UserSlug::new(42), ORG, Some(VAULT), "key", None, None).await.unwrap();
         assert_eq!(server.read_count(), 1);
 
-        client.read(ORG, Some(VAULT), "key", None, None).await.unwrap();
+        client.read(UserSlug::new(42), ORG, Some(VAULT), "key", None, None).await.unwrap();
         assert_eq!(server.read_count(), 2);
     }
 
@@ -305,7 +338,7 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         let ops = vec![Operation::set_entity("entity:1", b"data".to_vec(), None, None)];
-        let result = client.write(ORG, Some(VAULT), ops, None).await.unwrap();
+        let result = client.write(UserSlug::new(42), ORG, Some(VAULT), ops, None).await.unwrap();
 
         assert!(!result.tx_id.is_empty());
         assert!(result.block_height > 0);
@@ -318,9 +351,10 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         let ops = vec![Operation::set_entity("user:abc", b"user data".to_vec(), None, None)];
-        client.write(ORG, Some(VAULT), ops, None).await.unwrap();
+        client.write(UserSlug::new(42), ORG, Some(VAULT), ops, None).await.unwrap();
 
-        let value = client.read(ORG, Some(VAULT), "user:abc", None, None).await.unwrap();
+        let value =
+            client.read(UserSlug::new(42), ORG, Some(VAULT), "user:abc", None, None).await.unwrap();
         assert_eq!(value, Some(b"user data".to_vec()));
     }
 
@@ -334,21 +368,21 @@ mod integration_tests {
             Operation::set_entity("k2", b"v2".to_vec(), None, None),
             Operation::set_entity("k3", b"v3".to_vec(), None, None),
         ];
-        let result = client.write(ORG, Some(VAULT), ops, None).await.unwrap();
+        let result = client.write(UserSlug::new(42), ORG, Some(VAULT), ops, None).await.unwrap();
 
         assert!(!result.tx_id.is_empty());
 
         // All three should be readable
         assert_eq!(
-            client.read(ORG, Some(VAULT), "k1", None, None).await.unwrap(),
+            client.read(UserSlug::new(42), ORG, Some(VAULT), "k1", None, None).await.unwrap(),
             Some(b"v1".to_vec())
         );
         assert_eq!(
-            client.read(ORG, Some(VAULT), "k2", None, None).await.unwrap(),
+            client.read(UserSlug::new(42), ORG, Some(VAULT), "k2", None, None).await.unwrap(),
             Some(b"v2".to_vec())
         );
         assert_eq!(
-            client.read(ORG, Some(VAULT), "k3", None, None).await.unwrap(),
+            client.read(UserSlug::new(42), ORG, Some(VAULT), "k3", None, None).await.unwrap(),
             Some(b"v3".to_vec())
         );
     }
@@ -360,14 +394,26 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         // Verify it exists
-        assert!(client.read(ORG, Some(VAULT), "to_delete", None, None).await.unwrap().is_some());
+        assert!(
+            client
+                .read(UserSlug::new(42), ORG, Some(VAULT), "to_delete", None, None)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         // Delete it
         let ops = vec![Operation::delete_entity("to_delete")];
-        client.write(ORG, Some(VAULT), ops, None).await.unwrap();
+        client.write(UserSlug::new(42), ORG, Some(VAULT), ops, None).await.unwrap();
 
         // Verify deleted
-        assert_eq!(client.read(ORG, Some(VAULT), "to_delete", None, None).await.unwrap(), None);
+        assert_eq!(
+            client
+                .read(UserSlug::new(42), ORG, Some(VAULT), "to_delete", None, None)
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -376,7 +422,7 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         let ops = vec![Operation::create_relationship("document:123", "viewer", "user:456")];
-        client.write(ORG, Some(VAULT), ops, None).await.unwrap();
+        client.write(UserSlug::new(42), ORG, Some(VAULT), ops, None).await.unwrap();
 
         // Relationship was created (verified by write count, detailed check via list)
         assert_eq!(server.write_count(), 1);
@@ -394,22 +440,23 @@ mod integration_tests {
                 Operation::set_entity("batch2:c", b"c".to_vec(), None, None),
             ],
         ];
-        let result = client.batch_write(ORG, Some(VAULT), batches, None).await.unwrap();
+        let result =
+            client.batch_write(UserSlug::new(42), ORG, Some(VAULT), batches, None).await.unwrap();
 
         assert!(!result.tx_id.is_empty());
         assert_eq!(server.write_count(), 1); // Single batch write
 
         // All entities from all batches should be readable
         assert_eq!(
-            client.read(ORG, Some(VAULT), "batch1:a", None, None).await.unwrap(),
+            client.read(UserSlug::new(42), ORG, Some(VAULT), "batch1:a", None, None).await.unwrap(),
             Some(b"a".to_vec())
         );
         assert_eq!(
-            client.read(ORG, Some(VAULT), "batch2:b", None, None).await.unwrap(),
+            client.read(UserSlug::new(42), ORG, Some(VAULT), "batch2:b", None, None).await.unwrap(),
             Some(b"b".to_vec())
         );
         assert_eq!(
-            client.read(ORG, Some(VAULT), "batch2:c", None, None).await.unwrap(),
+            client.read(UserSlug::new(42), ORG, Some(VAULT), "batch2:c", None, None).await.unwrap(),
             Some(b"c".to_vec())
         );
     }
@@ -422,13 +469,22 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         let result = client
-            .set_entity(ORG, Some(VAULT), "entity:1", b"data".to_vec(), None, None, None)
+            .set_entity(
+                UserSlug::new(42),
+                ORG,
+                Some(VAULT),
+                "entity:1",
+                b"data".to_vec(),
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
 
         assert!(!result.tx_id.is_empty());
         assert_eq!(
-            client.read(ORG, Some(VAULT), "entity:1", None, None).await.unwrap(),
+            client.read(UserSlug::new(42), ORG, Some(VAULT), "entity:1", None, None).await.unwrap(),
             Some(b"data".to_vec())
         );
     }
@@ -439,11 +495,23 @@ mod integration_tests {
         server.set_entity(ORG, VAULT, "to_delete", b"exists");
         let client = create_client_for_mock(&server).await;
 
-        assert!(client.read(ORG, Some(VAULT), "to_delete", None, None).await.unwrap().is_some());
+        assert!(
+            client
+                .read(UserSlug::new(42), ORG, Some(VAULT), "to_delete", None, None)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
-        client.delete_entity(ORG, Some(VAULT), "to_delete", None).await.unwrap();
+        client.delete_entity(UserSlug::new(42), ORG, Some(VAULT), "to_delete", None).await.unwrap();
 
-        assert_eq!(client.read(ORG, Some(VAULT), "to_delete", None, None).await.unwrap(), None);
+        assert_eq!(
+            client
+                .read(UserSlug::new(42), ORG, Some(VAULT), "to_delete", None, None)
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -453,6 +521,7 @@ mod integration_tests {
 
         let result = client
             .set_entity(
+                UserSlug::new(42),
                 ORG,
                 Some(VAULT),
                 "cond:1",
@@ -466,7 +535,7 @@ mod integration_tests {
 
         assert!(!result.tx_id.is_empty());
         assert_eq!(
-            client.read(ORG, Some(VAULT), "cond:1", None, None).await.unwrap(),
+            client.read(UserSlug::new(42), ORG, Some(VAULT), "cond:1", None, None).await.unwrap(),
             Some(b"value".to_vec())
         );
     }
@@ -478,6 +547,7 @@ mod integration_tests {
 
         let result = client
             .set_entity(
+                UserSlug::new(42),
                 ORG,
                 Some(VAULT),
                 "ttl:1",
@@ -491,7 +561,7 @@ mod integration_tests {
 
         assert!(!result.tx_id.is_empty());
         assert_eq!(
-            client.read(ORG, Some(VAULT), "ttl:1", None, None).await.unwrap(),
+            client.read(UserSlug::new(42), ORG, Some(VAULT), "ttl:1", None, None).await.unwrap(),
             Some(b"temp".to_vec())
         );
     }
@@ -503,6 +573,7 @@ mod integration_tests {
 
         let result = client
             .set_entity(
+                UserSlug::new(42),
                 ORG,
                 Some(VAULT),
                 "cond_ttl:1",
@@ -516,7 +587,10 @@ mod integration_tests {
 
         assert!(!result.tx_id.is_empty());
         assert_eq!(
-            client.read(ORG, Some(VAULT), "cond_ttl:1", None, None).await.unwrap(),
+            client
+                .read(UserSlug::new(42), ORG, Some(VAULT), "cond_ttl:1", None, None)
+                .await
+                .unwrap(),
             Some(b"conditional-temp".to_vec())
         );
     }
@@ -529,13 +603,13 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         let ops = vec![Operation::set_entity("key1", b"data".to_vec(), None, None)];
-        let result = client.write(ORG, Some(VAULT), ops, None).await.unwrap();
+        let result = client.write(UserSlug::new(42), ORG, Some(VAULT), ops, None).await.unwrap();
 
         assert_eq!(result.assigned_sequence, 1);
 
         // Second write gets next sequence
         let ops2 = vec![Operation::set_entity("key2", b"data2".to_vec(), None, None)];
-        let result2 = client.write(ORG, Some(VAULT), ops2, None).await.unwrap();
+        let result2 = client.write(UserSlug::new(42), ORG, Some(VAULT), ops2, None).await.unwrap();
 
         assert_eq!(result2.assigned_sequence, 2);
     }
@@ -546,7 +620,8 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         let batches = vec![vec![Operation::set_entity("bw:1", b"first".to_vec(), None, None)]];
-        let result = client.batch_write(ORG, Some(VAULT), batches, None).await.unwrap();
+        let result =
+            client.batch_write(UserSlug::new(42), ORG, Some(VAULT), batches, None).await.unwrap();
 
         assert_eq!(result.assigned_sequence, 1);
     }
@@ -559,7 +634,8 @@ mod integration_tests {
         // Each write to the same vault gets incrementing sequences
         for i in 1..=5 {
             let ops = vec![Operation::set_entity(format!("seq:{i}"), b"data".to_vec(), None, None)];
-            let result = client.write(ORG, Some(VAULT), ops, None).await.unwrap();
+            let result =
+                client.write(UserSlug::new(42), ORG, Some(VAULT), ops, None).await.unwrap();
             assert_eq!(result.assigned_sequence, i);
         }
 
@@ -577,7 +653,10 @@ mod integration_tests {
         server.inject_unavailable(1);
         server.set_entity(ORG, VAULT, "retry-key", b"retry-value");
 
-        let result = client.read(ORG, Some(VAULT), "retry-key", None, None).await.unwrap();
+        let result = client
+            .read(UserSlug::new(42), ORG, Some(VAULT), "retry-key", None, None)
+            .await
+            .unwrap();
 
         assert_eq!(result, Some(b"retry-value".to_vec()));
         // 2 reads: 1 failed, 1 succeeded
@@ -592,7 +671,7 @@ mod integration_tests {
         // Inject more failures than max attempts
         server.inject_unavailable(5);
 
-        let result = client.read(ORG, Some(VAULT), "any-key", None, None).await;
+        let result = client.read(UserSlug::new(42), ORG, Some(VAULT), "any-key", None, None).await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -614,7 +693,7 @@ mod integration_tests {
         server.inject_unavailable(1);
 
         let ops = vec![Operation::set_entity("retry-write", b"value".to_vec(), None, None)];
-        let result = client.write(ORG, Some(VAULT), ops, None).await.unwrap();
+        let result = client.write(UserSlug::new(42), ORG, Some(VAULT), ops, None).await.unwrap();
 
         assert!(!result.tx_id.is_empty());
     }
@@ -634,7 +713,10 @@ mod integration_tests {
             for i in 0..10 {
                 let ops =
                     vec![Operation::set_entity(format!("v0:k{i}"), b"v0".to_vec(), None, None)];
-                client1.write(ORG, Some(VaultSlug::new(0)), ops, None).await.unwrap();
+                client1
+                    .write(UserSlug::new(42), ORG, Some(VaultSlug::new(0)), ops, None)
+                    .await
+                    .unwrap();
             }
         });
 
@@ -642,7 +724,10 @@ mod integration_tests {
             for i in 0..10 {
                 let ops =
                     vec![Operation::set_entity(format!("v1:k{i}"), b"v1".to_vec(), None, None)];
-                client2.write(ORG, Some(VaultSlug::new(1)), ops, None).await.unwrap();
+                client2
+                    .write(UserSlug::new(42), ORG, Some(VaultSlug::new(1)), ops, None)
+                    .await
+                    .unwrap();
             }
         });
 
@@ -668,7 +753,10 @@ mod integration_tests {
             handles.push(tokio::spawn(async move {
                 let key = format!("key:{}", i);
                 let expected = format!("value:{}", i).into_bytes();
-                let result = client_clone.read(ORG, Some(VAULT), &key, None, None).await.unwrap();
+                let result = client_clone
+                    .read(UserSlug::new(42), ORG, Some(VAULT), &key, None, None)
+                    .await
+                    .unwrap();
                 assert_eq!(result, Some(expected));
             }));
         }
@@ -725,10 +813,10 @@ mod integration_tests {
         server.add_organization(ORG, "ns", Region::US_EAST_VA);
         let client = create_client_for_mock(&server).await;
 
-        let vault_info = client.create_vault(ORG).await.unwrap();
+        let vault_info = client.create_vault(UserSlug::new(42), ORG).await.unwrap();
         assert!(vault_info.vault.value() > 0);
 
-        let fetched = client.get_vault(ORG, vault_info.vault).await.unwrap();
+        let fetched = client.get_vault(UserSlug::new(42), ORG, vault_info.vault).await.unwrap();
         assert_eq!(fetched.vault, vault_info.vault);
     }
 
@@ -739,7 +827,7 @@ mod integration_tests {
         server.add_vault(ORG, VaultSlug::new(1));
         let client = create_client_for_mock(&server).await;
 
-        let (vaults, _next) = client.list_vaults(0, None, None).await.unwrap();
+        let (vaults, _next) = client.list_vaults(UserSlug::new(42), 0, None, None).await.unwrap();
 
         assert_eq!(vaults.len(), 2);
     }
@@ -777,8 +865,10 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         use crate::ListEntitiesOpts;
-        let result =
-            client.list_entities(ORG, ListEntitiesOpts::with_prefix("user:")).await.unwrap();
+        let result = client
+            .list_entities(UserSlug::new(42), ORG, ListEntitiesOpts::with_prefix("user:"))
+            .await
+            .unwrap();
 
         assert_eq!(result.items.len(), 2);
         assert!(result.items.iter().all(|e| e.key.starts_with("user:")));
@@ -792,8 +882,10 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         use crate::ListRelationshipsOpts;
-        let result =
-            client.list_relationships(ORG, VAULT, ListRelationshipsOpts::new()).await.unwrap();
+        let result = client
+            .list_relationships(UserSlug::new(42), ORG, VAULT, ListRelationshipsOpts::new())
+            .await
+            .unwrap();
 
         assert_eq!(result.items.len(), 2);
     }
@@ -808,7 +900,12 @@ mod integration_tests {
 
         use crate::ListRelationshipsOpts;
         let result = client
-            .list_relationships(ORG, VAULT, ListRelationshipsOpts::new().relation("viewer"))
+            .list_relationships(
+                UserSlug::new(42),
+                ORG,
+                VAULT,
+                ListRelationshipsOpts::new().relation("viewer"),
+            )
             .await
             .unwrap();
 
@@ -876,7 +973,10 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         let empty_keys: Vec<String> = vec![];
-        let result = client.batch_read(ORG, Some(VAULT), empty_keys, None, None).await.unwrap();
+        let result = client
+            .batch_read(UserSlug::new(42), ORG, Some(VAULT), empty_keys, None, None)
+            .await
+            .unwrap();
 
         assert!(result.is_empty());
     }
@@ -888,7 +988,8 @@ mod integration_tests {
         server.set_entity(ORG, VAULT, "ns-entity", b"organization data");
         let client = create_client_for_mock(&server).await;
 
-        let result = client.read(ORG, None, "ns-entity", None, None).await.unwrap();
+        let result =
+            client.read(UserSlug::new(42), ORG, None, "ns-entity", None, None).await.unwrap();
 
         assert_eq!(result, Some(b"organization data".to_vec()));
     }
@@ -899,12 +1000,12 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         let ops = vec![Operation::set_entity("ns:key", b"value".to_vec(), None, None)];
-        let result = client.write(ORG, None, ops, None).await.unwrap();
+        let result = client.write(UserSlug::new(42), ORG, None, ops, None).await.unwrap();
 
         assert!(!result.tx_id.is_empty());
 
         // Read back with None vault
-        let value = client.read(ORG, None, "ns:key", None, None).await.unwrap();
+        let value = client.read(UserSlug::new(42), ORG, None, "ns:key", None, None).await.unwrap();
         assert_eq!(value, Some(b"value".to_vec()));
     }
 
@@ -916,9 +1017,12 @@ mod integration_tests {
         // 1MB value
         let large_value = vec![0u8; 1024 * 1024];
         let ops = vec![Operation::set_entity("large:key", large_value.clone(), None, None)];
-        client.write(ORG, Some(VAULT), ops, None).await.unwrap();
+        client.write(UserSlug::new(42), ORG, Some(VAULT), ops, None).await.unwrap();
 
-        let result = client.read(ORG, Some(VAULT), "large:key", None, None).await.unwrap();
+        let result = client
+            .read(UserSlug::new(42), ORG, Some(VAULT), "large:key", None, None)
+            .await
+            .unwrap();
         assert_eq!(result.unwrap().len(), 1024 * 1024);
     }
 
@@ -934,16 +1038,16 @@ mod integration_tests {
         let ops1 = vec![Operation::set_entity("c1:key", b"from-c1".to_vec(), None, None)];
         let ops2 = vec![Operation::set_entity("c2:key", b"from-c2".to_vec(), None, None)];
 
-        client1.write(ORG, Some(VAULT), ops1, None).await.unwrap();
-        client2.write(ORG, Some(VAULT), ops2, None).await.unwrap();
+        client1.write(UserSlug::new(42), ORG, Some(VAULT), ops1, None).await.unwrap();
+        client2.write(UserSlug::new(42), ORG, Some(VAULT), ops2, None).await.unwrap();
 
         // Both can read each other's data
         assert_eq!(
-            client1.read(ORG, Some(VAULT), "c2:key", None, None).await.unwrap(),
+            client1.read(UserSlug::new(42), ORG, Some(VAULT), "c2:key", None, None).await.unwrap(),
             Some(b"from-c2".to_vec())
         );
         assert_eq!(
-            client2.read(ORG, Some(VAULT), "c1:key", None, None).await.unwrap(),
+            client2.read(UserSlug::new(42), ORG, Some(VAULT), "c1:key", None, None).await.unwrap(),
             Some(b"from-c1".to_vec())
         );
     }
@@ -960,10 +1064,9 @@ mod integration_tests {
 
         // Start a slow read in background
         let client_clone = client.clone();
-        let handle =
-            tokio::spawn(
-                async move { client_clone.read(ORG, Some(VAULT), "key", None, None).await },
-            );
+        let handle = tokio::spawn(async move {
+            client_clone.read(UserSlug::new(42), ORG, Some(VAULT), "key", None, None).await
+        });
 
         // Give time for request to start
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -985,19 +1088,19 @@ mod integration_tests {
         let client = create_client_for_mock(&server).await;
 
         // Verify normal operation
-        let result = client.read(ORG, Some(VAULT), "key", None, None).await;
+        let result = client.read(UserSlug::new(42), ORG, Some(VAULT), "key", None, None).await;
         assert!(result.is_ok());
 
         // Shutdown
         client.shutdown().await;
 
         // New requests should fail with Shutdown error
-        let result = client.read(ORG, Some(VAULT), "key", None, None).await;
+        let result = client.read(UserSlug::new(42), ORG, Some(VAULT), "key", None, None).await;
         assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
 
         // Write should also fail
         let ops = vec![Operation::set_entity("new:key", b"value".to_vec(), None, None)];
-        let result = client.write(ORG, Some(VAULT), ops, None).await;
+        let result = client.write(UserSlug::new(42), ORG, Some(VAULT), ops, None).await;
         assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
     }
 
@@ -1014,7 +1117,7 @@ mod integration_tests {
                 None,
                 None,
             )];
-            client.write(ORG, Some(VAULT), ops, None).await.unwrap();
+            client.write(UserSlug::new(42), ORG, Some(VAULT), ops, None).await.unwrap();
         }
 
         // Verify writes completed
@@ -1025,7 +1128,7 @@ mod integration_tests {
 
         // Operations should fail
         let ops = vec![Operation::set_entity("key:5", b"value".to_vec(), None, None)];
-        let result = client.write(ORG, Some(VAULT), ops, None).await;
+        let result = client.write(UserSlug::new(42), ORG, Some(VAULT), ops, None).await;
         assert!(matches!(result, Err(crate::error::SdkError::Shutdown)));
 
         // Write count should not have increased (rejected before reaching server)
@@ -1046,24 +1149,24 @@ mod integration_tests {
         let client3 = client1.clone();
 
         // All clones should work initially
-        assert!(client1.read(ORG, Some(VAULT), "key", None, None).await.is_ok());
-        assert!(client2.read(ORG, Some(VAULT), "key", None, None).await.is_ok());
-        assert!(client3.read(ORG, Some(VAULT), "key", None, None).await.is_ok());
+        assert!(client1.read(UserSlug::new(42), ORG, Some(VAULT), "key", None, None).await.is_ok());
+        assert!(client2.read(UserSlug::new(42), ORG, Some(VAULT), "key", None, None).await.is_ok());
+        assert!(client3.read(UserSlug::new(42), ORG, Some(VAULT), "key", None, None).await.is_ok());
 
         // Shutdown through client2
         client2.shutdown().await;
 
         // All clones should now fail
         assert!(matches!(
-            client1.read(ORG, Some(VAULT), "key", None, None).await,
+            client1.read(UserSlug::new(42), ORG, Some(VAULT), "key", None, None).await,
             Err(crate::error::SdkError::Shutdown)
         ));
         assert!(matches!(
-            client2.read(ORG, Some(VAULT), "key", None, None).await,
+            client2.read(UserSlug::new(42), ORG, Some(VAULT), "key", None, None).await,
             Err(crate::error::SdkError::Shutdown)
         ));
         assert!(matches!(
-            client3.read(ORG, Some(VAULT), "key", None, None).await,
+            client3.read(UserSlug::new(42), ORG, Some(VAULT), "key", None, None).await,
             Err(crate::error::SdkError::Shutdown)
         ));
     }

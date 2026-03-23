@@ -51,7 +51,8 @@ async fn main() -> Result<()> {
         )
         .await?;
     let organization = org.slug;
-    let vault_info = client.create_vault(organization).await?;
+    let caller = UserSlug::new(42); // placeholder caller slug
+    let vault_info = client.create_vault(caller, organization).await?;
     let vault = vault_info.vault;
 
     println!("Using organization={organization}, vault={vault}\n");
@@ -63,6 +64,7 @@ async fn main() -> Result<()> {
 
     let result = client
         .write(
+            caller,
             organization,
             Some(vault),
             vec![
@@ -85,6 +87,7 @@ async fn main() -> Result<()> {
     // All groups are applied atomically in array order
     let result = client
         .batch_write(
+            caller,
             organization,
             Some(vault),
             vec![
@@ -137,6 +140,7 @@ async fn main() -> Result<()> {
     // Create an entity that must not exist (CREATE IF NOT EXISTS)
     let result = client
         .write(
+            caller,
             organization,
             Some(vault),
             vec![Operation::set_entity(
@@ -154,6 +158,7 @@ async fn main() -> Result<()> {
     // Update an entity that must exist (UPDATE IF EXISTS)
     let result = client
         .write(
+            caller,
             organization,
             Some(vault),
             vec![Operation::set_entity(
@@ -178,6 +183,7 @@ async fn main() -> Result<()> {
     let new_user_id = "user:charlie";
     let result = client
         .batch_write(
+            caller,
             organization,
             Some(vault),
             vec![
@@ -215,7 +221,7 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     println!("\n=== Verification ===");
 
-    let value = client.read(organization, Some(vault), new_user_id, None, None).await?;
+    let value = client.read(caller, organization, Some(vault), new_user_id, None, None).await?;
 
     if let Some(bytes) = value {
         let user: serde_json::Value = serde_json::from_slice(&bytes).expect("deserialize");

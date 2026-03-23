@@ -1,7 +1,7 @@
 //! Entity, relationship, and resource listing operations.
 
 use inferadb_ledger_proto::proto;
-use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, UserSlug, VaultSlug};
 
 use crate::{
     LedgerClient,
@@ -26,6 +26,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `organization` - Organization slug (external identifier).
     /// * `opts` - Query options including prefix filter, pagination, and consistency.
     ///
@@ -42,7 +43,7 @@ impl LedgerClient {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let organization = OrganizationSlug::new(1);
     /// // List all users
-    /// let result = client.list_entities(organization, ListEntitiesOpts::with_prefix("user:")).await?;
+    /// let result = client.list_entities(UserSlug::new(42), organization, ListEntitiesOpts::with_prefix("user:")).await?;
     /// for entity in result.items {
     ///     println!("Key: {}, Version: {}", entity.key, entity.version);
     /// }
@@ -50,6 +51,7 @@ impl LedgerClient {
     /// // Fetch next page if available
     /// if let Some(token) = result.next_page_token {
     ///     let next_page = client.list_entities(
+    ///         UserSlug::new(42),
     ///         organization,
     ///         ListEntitiesOpts::with_prefix("user:").page_token(token)
     ///     ).await?;
@@ -59,6 +61,7 @@ impl LedgerClient {
     /// ```
     pub async fn list_entities(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         opts: ListEntitiesOpts,
     ) -> Result<PagedResult<Entity>> {
@@ -86,6 +89,7 @@ impl LedgerClient {
                         page_token: opts.page_token.clone().unwrap_or_default(),
                         consistency: opts.consistency.to_proto() as i32,
                         vault: opts.vault.map(|v| proto::VaultSlug { slug: v.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -109,6 +113,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Vault slug (external identifier).
     /// * `opts` - Query options including filters, pagination, and consistency.
@@ -127,6 +132,7 @@ impl LedgerClient {
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
     /// // List all relationships for a document
     /// let result = client.list_relationships(
+    ///     UserSlug::new(42),
     ///     organization,
     ///     vault,
     ///     ListRelationshipsOpts::new().resource("document:123")
@@ -140,6 +146,7 @@ impl LedgerClient {
     /// ```
     pub async fn list_relationships(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
         opts: ListRelationshipsOpts,
@@ -169,6 +176,7 @@ impl LedgerClient {
                         limit: opts.limit,
                         page_token: opts.page_token.clone().unwrap_or_default(),
                         consistency: opts.consistency.to_proto() as i32,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -193,6 +201,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Vault slug (external identifier).
     /// * `opts` - Query options including type filter, pagination, and consistency.
@@ -211,6 +220,7 @@ impl LedgerClient {
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
     /// // List all document resources
     /// let result = client.list_resources(
+    ///     UserSlug::new(42),
     ///     organization,
     ///     vault,
     ///     ListResourcesOpts::with_type("document")
@@ -224,6 +234,7 @@ impl LedgerClient {
     /// ```
     pub async fn list_resources(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
         opts: ListResourcesOpts,
@@ -251,6 +262,7 @@ impl LedgerClient {
                         limit: opts.limit,
                         page_token: opts.page_token.clone().unwrap_or_default(),
                         consistency: opts.consistency.to_proto() as i32,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =

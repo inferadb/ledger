@@ -364,6 +364,7 @@ impl proto::app_service_server::AppService for AppService {
             self.ctx.make_request_context("AppService", "CreateApp", &grpc_metadata, &trace_ctx);
 
         let inner = request.into_inner();
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
         let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
@@ -483,6 +484,7 @@ impl proto::app_service_server::AppService for AppService {
             self.ctx.make_request_context("AppService", "UpdateApp", &grpc_metadata, &trace_ctx);
 
         let inner = request.into_inner();
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
         let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
@@ -564,6 +566,7 @@ impl proto::app_service_server::AppService for AppService {
             self.ctx.make_request_context("AppService", "DeleteApp", &grpc_metadata, &trace_ctx);
 
         let inner = request.into_inner();
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
         let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
@@ -629,6 +632,7 @@ impl proto::app_service_server::AppService for AppService {
         );
 
         let inner = request.into_inner();
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
         let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
@@ -686,6 +690,7 @@ impl proto::app_service_server::AppService for AppService {
         );
 
         let inner = request.into_inner();
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
         let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
@@ -764,6 +769,7 @@ impl proto::app_service_server::AppService for AppService {
         );
 
         let inner = request.into_inner();
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
         let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
@@ -878,6 +884,7 @@ impl proto::app_service_server::AppService for AppService {
         );
 
         let inner = request.into_inner();
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
         let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
@@ -1035,6 +1042,7 @@ impl proto::app_service_server::AppService for AppService {
         );
 
         let inner = request.into_inner();
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
         let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
@@ -1122,6 +1130,7 @@ impl proto::app_service_server::AppService for AppService {
         );
 
         let inner = request.into_inner();
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
         let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
@@ -1197,6 +1206,7 @@ impl proto::app_service_server::AppService for AppService {
             self.ctx.make_request_context("AppService", "AddAppVault", &grpc_metadata, &trace_ctx);
 
         let inner = request.into_inner();
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
         let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
@@ -1259,6 +1269,7 @@ impl proto::app_service_server::AppService for AppService {
         );
 
         let inner = request.into_inner();
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
         let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
@@ -1320,6 +1331,7 @@ impl proto::app_service_server::AppService for AppService {
         );
 
         let inner = request.into_inner();
+        super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
         let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;

@@ -227,7 +227,7 @@ impl AdminService {
             inferadb_ledger_raft::deadline::extract_deadline_from_metadata(grpc_metadata);
         let timeout =
             inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
-        let payload = RaftPayload::new(request);
+        let payload = RaftPayload::system(request);
 
         let result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
 
@@ -1243,7 +1243,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 recovery_started_at: None,
             };
 
-            if let Err(e) = self.raft.client_write(RaftPayload::new(health_request)).await {
+            if let Err(e) = self.raft.client_write(RaftPayload::system(health_request)).await {
                 tracing::error!("Failed to update vault health via Raft: {}", e);
                 // Continue with response - the local state will be inconsistent but
                 // the next recovery attempt can retry
@@ -1294,7 +1294,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 recovery_started_at: None,
             };
 
-            if let Err(e) = self.raft.client_write(RaftPayload::new(health_request)).await {
+            if let Err(e) = self.raft.client_write(RaftPayload::system(health_request)).await {
                 tracing::error!("Failed to update vault health via Raft: {}", e);
                 // The vault was successfully recovered locally - log error but return success
             }
@@ -1407,7 +1407,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         ctx.start_raft_timer();
 
         // GLOBAL write (for HealthService)
-        if let Err(e) = self.raft.client_write(RaftPayload::new(health_request.clone())).await {
+        if let Err(e) = self.raft.client_write(RaftPayload::system(health_request.clone())).await {
             ctx.end_raft_timer();
             ctx.set_error("RaftError", &e.to_string());
             tracing::error!(error = %e, "Failed to update vault health (GLOBAL)");
@@ -1421,7 +1421,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             if let Ok(Some(region)) = sys_svc.get_region_for_organization(organization_id)
                 && let Ok(rg) = manager.get_region_group(region)
             {
-                let _ = rg.raft().client_write(RaftPayload::new(health_request)).await;
+                let _ = rg.raft().client_write(RaftPayload::system(health_request)).await;
             }
         }
 
@@ -1560,7 +1560,6 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 sequence: now, // Use timestamp as sequence for GC
                 operations,
                 timestamp: chrono::Utc::now(),
-                actor: "system:gc".to_string(),
             };
 
             let gc_request = LedgerRequest::Write {
@@ -1573,7 +1572,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
             // Propose to REGIONAL Raft (where entity data lives), or fall back to GLOBAL
             let raft_target = regional_raft.as_ref().unwrap_or(&self.raft);
-            match raft_target.client_write(RaftPayload::new(gc_request)).await {
+            match raft_target.client_write(RaftPayload::system(gc_request)).await {
                 Ok(_) => {
                     total_expired += count as u64;
                 },

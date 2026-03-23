@@ -68,6 +68,7 @@ async fn write_entity(
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let response = client.write(request).await?.into_inner();
@@ -98,6 +99,7 @@ async fn read_entity(
         vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
+        caller: None,
     };
 
     let response = client.read(request).await?.into_inner();
@@ -221,6 +223,7 @@ async fn test_multi_region_batch_write() {
             ],
         }],
         include_tx_proofs: false,
+        caller: None,
     };
 
     let response = client.batch_write(request).await.expect("batch write").into_inner();
@@ -279,6 +282,7 @@ async fn test_multi_region_write_idempotency() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     // First write
@@ -337,6 +341,7 @@ async fn test_multi_region_write_nonexistent_organization() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let result = client.write(request).await;
@@ -525,6 +530,7 @@ async fn test_batch_write_forwarding_local_region() {
             ],
         }],
         include_tx_proofs: false,
+        caller: None,
     };
 
     let response =

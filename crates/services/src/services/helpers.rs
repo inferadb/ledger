@@ -19,6 +19,19 @@ use tempfile::TempDir;
 use tonic::Status;
 use tracing::{error, warn};
 
+/// Extracts the caller's user slug from a gRPC request and sets it on the
+/// request context for canonical log line emission.
+///
+/// No-op if the caller field is absent (proto3 optional messages default to `None`).
+pub(crate) fn extract_caller(
+    ctx: &mut inferadb_ledger_raft::logging::RequestContext,
+    caller: &Option<proto::UserSlug>,
+) {
+    if let Some(ref c) = *caller {
+        ctx.set_caller(c.slug);
+    }
+}
+
 /// Rejects the request if the node is draining (not accepting new proposals).
 ///
 /// Returns `Status::unavailable` so clients retry on a different node.

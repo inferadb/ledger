@@ -151,6 +151,7 @@ async fn test_single_node_write_read() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let response = client.write(request).await;
@@ -210,6 +211,7 @@ async fn test_write_idempotency() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     // First write
@@ -273,6 +275,7 @@ async fn test_write_creates_retrievable_block() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let response = write_client.write(request).await.expect("write should succeed").into_inner();
@@ -358,6 +361,7 @@ async fn test_three_node_write_replication() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let response = client.write(request).await.expect("write should succeed");

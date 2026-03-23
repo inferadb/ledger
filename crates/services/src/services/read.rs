@@ -611,6 +611,9 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             trace_ctx.trace_flags,
         );
 
+        // Extract caller identity for canonical log line
+        super::helpers::extract_caller(&mut ctx, &req.caller);
+
         // Set read operation fields
         ctx.set_key(&req.key);
 
@@ -760,6 +763,9 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             trace_ctx.parent_span_id.as_deref(),
             trace_ctx.trace_flags,
         );
+
+        // Extract caller identity for canonical log line
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Set read operation fields
         ctx.set_keys_count(req.keys.len());
@@ -936,6 +942,9 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             trace_ctx.parent_span_id.as_deref(),
             trace_ctx.trace_flags,
         );
+
+        // Extract caller identity for canonical log line
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Set read operation fields
         ctx.set_key(&req.key);

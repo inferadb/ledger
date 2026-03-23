@@ -10,7 +10,7 @@
 //! # async fn example(client: &LedgerClient) -> inferadb_ledger_sdk::Result<()> {
 //! # let organization = OrganizationSlug::new(1);
 //! let page = client
-//!     .relationship_query(organization, VaultSlug::new(1))
+//!     .relationship_query(UserSlug::new(42), organization, VaultSlug::new(1))
 //!     .resource("document:report-q4")
 //!     .relation("viewer")
 //!     .limit(50)
@@ -24,7 +24,7 @@
 //!
 //! if let Some(token) = &page.next_page_token {
 //!     let _next = client
-//!         .relationship_query(organization, VaultSlug::new(1))
+//!         .relationship_query(UserSlug::new(42), organization, VaultSlug::new(1))
 //!         .resource("document:report-q4")
 //!         .relation("viewer")
 //!         .page_token(token.clone())
@@ -35,7 +35,7 @@
 //! # }
 //! ```
 
-use inferadb_ledger_types::OrganizationSlug;
+use inferadb_ledger_types::{OrganizationSlug, UserSlug};
 
 use crate::{
     LedgerClient, VaultSlug,
@@ -52,6 +52,7 @@ use crate::{
 /// for that field. Chain filters, then call `.execute()`.
 pub struct RelationshipQueryBuilder<'a> {
     client: &'a LedgerClient,
+    caller: UserSlug,
     organization: OrganizationSlug,
     vault: VaultSlug,
     resource: Option<String>,
@@ -67,11 +68,13 @@ impl<'a> RelationshipQueryBuilder<'a> {
     /// Creates a new relationship query builder.
     pub(crate) fn new(
         client: &'a LedgerClient,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
     ) -> Self {
         Self {
             client,
+            caller,
             organization,
             vault,
             resource: None,
@@ -150,7 +153,7 @@ impl<'a> RelationshipQueryBuilder<'a> {
             page_token: self.page_token,
             consistency: self.consistency,
         };
-        self.client.list_relationships(self.organization, self.vault, opts).await
+        self.client.list_relationships(self.caller, self.organization, self.vault, opts).await
     }
 }
 
@@ -164,7 +167,7 @@ mod tests {
     #[tokio::test]
     async fn relationship_query_default_state() {
         let client = test_client().await;
-        let builder = client.relationship_query(ORG, VaultSlug::new(2));
+        let builder = client.relationship_query(UserSlug::new(42), ORG, VaultSlug::new(2));
         assert_eq!(builder.organization, ORG);
         assert_eq!(builder.vault, VaultSlug::new(2));
         assert!(builder.resource.is_none());
@@ -179,22 +182,26 @@ mod tests {
     #[tokio::test]
     async fn relationship_query_with_resource_filter() {
         let client = test_client().await;
-        let builder =
-            client.relationship_query(ORG, VaultSlug::new(2)).resource("document:report-q4");
+        let builder = client
+            .relationship_query(UserSlug::new(42), ORG, VaultSlug::new(2))
+            .resource("document:report-q4");
         assert_eq!(builder.resource.as_deref(), Some("document:report-q4"));
     }
 
     #[tokio::test]
     async fn relationship_query_with_relation_filter() {
         let client = test_client().await;
-        let builder = client.relationship_query(ORG, VaultSlug::new(2)).relation("viewer");
+        let builder =
+            client.relationship_query(UserSlug::new(42), ORG, VaultSlug::new(2)).relation("viewer");
         assert_eq!(builder.relation.as_deref(), Some("viewer"));
     }
 
     #[tokio::test]
     async fn relationship_query_with_subject_filter() {
         let client = test_client().await;
-        let builder = client.relationship_query(ORG, VaultSlug::new(2)).subject("user:alice");
+        let builder = client
+            .relationship_query(UserSlug::new(42), ORG, VaultSlug::new(2))
+            .subject("user:alice");
         assert_eq!(builder.subject.as_deref(), Some("user:alice"));
     }
 
@@ -202,7 +209,7 @@ mod tests {
     async fn relationship_query_chained_filters() {
         let client = test_client().await;
         let builder = client
-            .relationship_query(ORG, VaultSlug::new(2))
+            .relationship_query(UserSlug::new(42), ORG, VaultSlug::new(2))
             .resource("doc:1")
             .relation("editor")
             .subject("user:bob")
@@ -220,14 +227,19 @@ mod tests {
     #[tokio::test]
     async fn relationship_query_page_token() {
         let client = test_client().await;
-        let builder = client.relationship_query(ORG, VaultSlug::new(2)).page_token("next-page-abc");
+        let builder = client
+            .relationship_query(UserSlug::new(42), ORG, VaultSlug::new(2))
+            .page_token("next-page-abc");
         assert_eq!(builder.page_token.as_deref(), Some("next-page-abc"));
     }
 
     #[tokio::test]
     async fn relationship_query_consistency_override() {
         let client = test_client().await;
-        let builder = client.relationship_query(ORG, VaultSlug::new(2)).linearizable().eventual();
+        let builder = client
+            .relationship_query(UserSlug::new(42), ORG, VaultSlug::new(2))
+            .linearizable()
+            .eventual();
         assert!(matches!(builder.consistency, ReadConsistency::Eventual));
     }
 
@@ -235,8 +247,10 @@ mod tests {
     async fn relationship_query_accepts_string_and_str() {
         let client = test_client().await;
         let owned = String::from("doc:owned");
-        let builder =
-            client.relationship_query(ORG, VaultSlug::new(2)).resource(owned).relation("viewer");
+        let builder = client
+            .relationship_query(UserSlug::new(42), ORG, VaultSlug::new(2))
+            .resource(owned)
+            .relation("viewer");
         assert_eq!(builder.resource.as_deref(), Some("doc:owned"));
         assert_eq!(builder.relation.as_deref(), Some("viewer"));
     }

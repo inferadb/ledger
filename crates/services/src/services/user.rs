@@ -478,7 +478,6 @@ impl proto::user_service_server::UserService for UserService {
                 .unwrap_or(0),
             operations: vec![saga_op],
             timestamp: Utc::now(),
-            actor: "system:user".to_string(),
         };
         let saga_request = LedgerRequest::Write {
             organization: inferadb_ledger_types::OrganizationId::new(0),
@@ -524,6 +523,7 @@ impl proto::user_service_server::UserService for UserService {
 
         let mut ctx =
             self.ctx.make_request_context("UserService", "get_user", &grpc_metadata, &trace_ctx);
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_id = slug_resolver.extract_and_resolve_user(&req.slug).inspect_err(|status| {
@@ -569,6 +569,7 @@ impl proto::user_service_server::UserService for UserService {
 
         let mut ctx =
             self.ctx.make_request_context("UserService", "update_user", &grpc_metadata, &trace_ctx);
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_id = slug_resolver.extract_and_resolve_user(&req.slug).inspect_err(|status| {
@@ -725,6 +726,7 @@ impl proto::user_service_server::UserService for UserService {
 
         let mut ctx =
             self.ctx.make_request_context("UserService", "delete_user", &grpc_metadata, &trace_ctx);
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_id = slug_resolver.extract_and_resolve_user(&req.slug).inspect_err(|status| {
@@ -732,7 +734,7 @@ impl proto::user_service_server::UserService for UserService {
         })?;
         let user_slug = SlugResolver::extract_user_slug(&req.slug)?;
 
-        if req.deleted_by.is_empty() {
+        if req.caller.is_none() {
             ctx.set_error("InvalidArgument", "deleted_by must be non-empty");
             return Err(Status::invalid_argument("deleted_by must be non-empty"));
         }
@@ -747,7 +749,11 @@ impl proto::user_service_server::UserService for UserService {
                 if let Some(node_id) = self.ctx.node_id {
                     self.ctx.record_handler_event(
                         HandlerPhaseEmitter::for_system(EventAction::UserSoftDeleted, node_id)
-                            .principal(&req.deleted_by)
+                            .principal(
+                                &req.caller
+                                    .as_ref()
+                                    .map_or("system".to_owned(), |c| c.slug.to_string()),
+                            )
                             .detail("user_id", &deleted_id.to_string())
                             .detail("retention_days", &retention_days.to_string())
                             .trace_id(&trace_ctx.trace_id)
@@ -787,6 +793,7 @@ impl proto::user_service_server::UserService for UserService {
 
         let mut ctx =
             self.ctx.make_request_context("UserService", "list_users", &grpc_metadata, &trace_ctx);
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let page_size = if req.page_size == 0 { 100 } else { req.page_size.min(1000) as usize };
 
@@ -837,6 +844,7 @@ impl proto::user_service_server::UserService for UserService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let filter = req.filter.ok_or_else(|| {
             ctx.set_error("InvalidArgument", "filter is required");
@@ -886,6 +894,7 @@ impl proto::user_service_server::UserService for UserService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_id = slug_resolver.extract_and_resolve_user(&req.user).inspect_err(|status| {
@@ -1058,6 +1067,7 @@ impl proto::user_service_server::UserService for UserService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_id = slug_resolver.extract_and_resolve_user(&req.user).inspect_err(|status| {
@@ -1126,6 +1136,7 @@ impl proto::user_service_server::UserService for UserService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let filter = req.filter.ok_or_else(|| {
             ctx.set_error("InvalidArgument", "filter is required");
@@ -1285,6 +1296,7 @@ impl proto::user_service_server::UserService for UserService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_slug_val = req.slug.as_ref().map_or(0, |s| s.slug);
@@ -1399,7 +1411,6 @@ impl proto::user_service_server::UserService for UserService {
                 .unwrap_or(0),
             operations: vec![saga_op],
             timestamp: Utc::now(),
-            actor: "system:user".to_string(),
         };
         let saga_request = LedgerRequest::Write {
             organization: inferadb_ledger_types::OrganizationId::new(0),
@@ -1435,6 +1446,7 @@ impl proto::user_service_server::UserService for UserService {
 
         let mut ctx =
             self.ctx.make_request_context("UserService", "erase_user", &grpc_metadata, &trace_ctx);
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
 
@@ -1457,7 +1469,11 @@ impl proto::user_service_server::UserService for UserService {
                 if let Some(node_id) = self.ctx.node_id {
                     self.ctx.record_handler_event(
                         HandlerPhaseEmitter::for_system(EventAction::UserErased, node_id)
-                            .principal(&req.erased_by)
+                            .principal(
+                                &req.caller
+                                    .as_ref()
+                                    .map_or("system".to_owned(), |c| c.slug.to_string()),
+                            )
                             .detail("user_id", &erased_id.to_string())
                             .detail("region", region.as_str())
                             .trace_id(&trace_ctx.trace_id)
@@ -2076,6 +2092,7 @@ impl proto::user_service_server::UserService for UserService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Resolve user slug → internal ID + region
         let (user_id, user_slug, region) = self.resolve_user_region(&req.user, &mut ctx)?;
@@ -2210,6 +2227,7 @@ impl proto::user_service_server::UserService for UserService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Resolve user slug → internal ID + region
         let (user_id, user_slug, region) = self.resolve_user_region(&req.user, &mut ctx)?;
@@ -2265,6 +2283,7 @@ impl proto::user_service_server::UserService for UserService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let (user_id, user_slug, region) = self.resolve_user_region(&req.user, &mut ctx)?;
 
@@ -2347,6 +2366,7 @@ impl proto::user_service_server::UserService for UserService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let (user_id, _user_slug, region) = self.resolve_user_region(&req.user, &mut ctx)?;
 
@@ -2391,6 +2411,7 @@ impl proto::user_service_server::UserService for UserService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let (user_id, user_slug, region) = self.resolve_user_region(&req.user, &mut ctx)?;
 
@@ -2453,6 +2474,7 @@ impl proto::user_service_server::UserService for UserService {
 
         let mut ctx =
             self.ctx.make_request_context("UserService", "verify_totp", &grpc_metadata, &trace_ctx);
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let (user_id, _user_slug, region) = self.resolve_user_region(&req.user, &mut ctx)?;
 
@@ -2604,6 +2626,7 @@ impl proto::user_service_server::UserService for UserService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let (user_id, _user_slug, region) = self.resolve_user_region(&req.user, &mut ctx)?;
 

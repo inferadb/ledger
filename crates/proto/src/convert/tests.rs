@@ -412,7 +412,6 @@ fn test_vault_entry_to_proto_block_with_transaction() {
             subject: "user:1".to_string(),
         }],
         timestamp: Utc::now(),
-        actor: "user:1".to_string(),
     };
 
     let entry = inferadb_ledger_types::VaultEntry {

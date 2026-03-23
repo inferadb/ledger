@@ -1370,7 +1370,7 @@ pub async fn create_test_organization(
                 name: name.to_string(),
                 region: 10, // US_EAST_VA
                 tier: None,
-                admin: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
+                caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
             })
             .await;
 
@@ -1440,6 +1440,7 @@ pub async fn create_test_vault(
                 replication_factor: 0,
                 initial_nodes: vec![],
                 retention_policy: None,
+                caller: None,
             })
             .await;
 
@@ -1504,7 +1505,7 @@ pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &Test
         user_id: inferadb_ledger_types::UserId::new(0), /* placeholder — CreateUser allocates
                                                          * real ID */
     });
-    let _ = node.raft.client_write(RaftPayload::new(register_req)).await;
+    let _ = node.raft.client_write(RaftPayload::system(register_req)).await;
 
     // Step 1: Create user directory entry (allocates UserId, registers slug)
     let create_req = LedgerRequest::System(SystemRequest::CreateUser {
@@ -1513,7 +1514,7 @@ pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &Test
         slug: user_slug,
         region: inferadb_ledger_types::Region::US_EAST_VA,
     });
-    let result = node.raft.client_write(RaftPayload::new(create_req)).await;
+    let result = node.raft.client_write(RaftPayload::system(create_req)).await;
 
     match result {
         Ok(resp) => match resp.data {
@@ -1525,7 +1526,7 @@ pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &Test
                         status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
                         region: Some(inferadb_ledger_types::Region::US_EAST_VA),
                     });
-                let _ = node.raft.client_write(RaftPayload::new(activate_req)).await;
+                let _ = node.raft.client_write(RaftPayload::system(activate_req)).await;
 
                 // Step 3: Write slug index to entity store (so get_user_id_by_slug works).
                 // The CreateUser SystemRequest only writes to the in-memory index;
@@ -1543,7 +1544,6 @@ pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &Test
                     sequence: 0,
                     operations: vec![slug_op],
                     timestamp: std::time::SystemTime::now().into(),
-                    actor: "test:setup".to_string(),
                 };
                 let slug_write = LedgerRequest::Write {
                     organization: inferadb_ledger_types::OrganizationId::new(0),
@@ -1552,7 +1552,7 @@ pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &Test
                     idempotency_key: [0; 16],
                     request_hash: 0,
                 };
-                let _ = node.raft.client_write(RaftPayload::new(slug_write)).await;
+                let _ = node.raft.client_write(RaftPayload::system(slug_write)).await;
 
                 // Step 4: Write User entity to GLOBAL state layer.
                 // Token services (CreateUserSession) read the User entity from
@@ -1586,7 +1586,6 @@ pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &Test
                     sequence: 0,
                     operations: vec![user_op],
                     timestamp: std::time::SystemTime::now().into(),
-                    actor: "test:setup".to_string(),
                 };
                 let user_write = LedgerRequest::Write {
                     organization: inferadb_ledger_types::OrganizationId::new(0),
@@ -1595,7 +1594,7 @@ pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &Test
                     idempotency_key: [0; 16],
                     request_hash: 0,
                 };
-                let _ = node.raft.client_write(RaftPayload::new(user_write)).await;
+                let _ = node.raft.client_write(RaftPayload::system(user_write)).await;
 
                 slug.value()
             },
@@ -1630,7 +1629,7 @@ pub async fn setup_org_with_admin(
                 name: org_name.to_string(),
                 region: 10, // US_EAST_VA
                 tier: None,
-                admin: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
+                caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
             })
             .await;
 

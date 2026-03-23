@@ -550,7 +550,6 @@ mod tests {
             id: [0u8; 16],
             client_id: ClientId::new("client-1"),
             sequence: 1,
-            actor: "user:admin".to_string(),
             operations: vec![Operation::SetEntity {
                 key: "test_key".to_string(),
                 value: b"test_value".to_vec(),
@@ -607,7 +606,6 @@ mod tests {
             id: [0u8; 16],
             client_id: ClientId::new("client-1"),
             sequence: 1,
-            actor: "user:admin".to_string(),
             operations: vec![Operation::SetEntity {
                 key: "key".to_string(),
                 value: b"value".to_vec(),

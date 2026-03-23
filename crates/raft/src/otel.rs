@@ -206,7 +206,7 @@ pub struct SpanAttributes {
     pub vault: Option<u64>,
     pub service: Option<&'static str>,
     pub method: Option<&'static str>,
-    pub actor: Option<String>,
+    pub caller: Option<u64>,
 
     // System context
     pub node_id: Option<u64>,
@@ -287,7 +287,7 @@ impl SpanAttributes {
         if let Some(v) = self.method {
             attrs.push(KeyValue::new("method", v));
         }
-        push_attr!("actor", self.actor);
+        push_attr!("caller", self.caller, |v| v as i64);
 
         // System context
         push_attr!("node_id", self.node_id, |v| v as i64);

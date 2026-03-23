@@ -107,7 +107,7 @@ async fn setup_test_org_vault(client: &LedgerClient) -> (OrganizationSlug, Vault
         .create_organization(&ns_name, Region::US_EAST_VA, UserSlug::new(0), OrganizationTier::Free)
         .await
         .expect("create organization");
-    let vault_info = client.create_vault(org.slug).await.expect("create vault");
+    let vault_info = client.create_vault(UserSlug::new(0), org.slug).await.expect("create vault");
     (org.slug, vault_info.vault)
 }
 
@@ -171,15 +171,17 @@ async fn test_write_read_cycle() {
 
     // Write an entity
     let ops = vec![Operation::set_entity("user:alice", b"Alice Data".to_vec(), None, None)];
-    let write_result =
-        client.write(ns_id, Some(vault), ops, None).await.expect("write should succeed");
+    let write_result = client
+        .write(UserSlug::new(0), ns_id, Some(vault), ops, None)
+        .await
+        .expect("write should succeed");
 
     assert!(!write_result.tx_id.is_empty(), "should have tx_id");
     assert!(write_result.block_height > 0, "should have block height");
 
     // Read the entity back
     let read_result = client
-        .read(ns_id, Some(vault), "user:alice", None, None)
+        .read(UserSlug::new(0), ns_id, Some(vault), "user:alice", None, None)
         .await
         .expect("read should succeed");
 
@@ -199,15 +201,20 @@ async fn test_multiple_writes_reads() {
         let key = format!("item:{}", i);
         let value = format!("value-{}", i).into_bytes();
         let ops = vec![Operation::set_entity(&key, value, None, None)];
-        client.write(ns_id, Some(vault), ops, None).await.expect("write should succeed");
+        client
+            .write(UserSlug::new(0), ns_id, Some(vault), ops, None)
+            .await
+            .expect("write should succeed");
     }
 
     // Read all entities back
     for i in 0..5 {
         let key = format!("item:{}", i);
         let expected = format!("value-{}", i).into_bytes();
-        let result =
-            client.read(ns_id, Some(vault), &key, None, None).await.expect("read should succeed");
+        let result = client
+            .read(UserSlug::new(0), ns_id, Some(vault), &key, None, None)
+            .await
+            .expect("read should succeed");
         assert_eq!(result, Some(expected), "should read back value for {}", key);
     }
 }
@@ -225,7 +232,10 @@ async fn test_batch_read() {
         let key = format!("batch:{}", i);
         let value = format!("batch-value-{}", i).into_bytes();
         let ops = vec![Operation::set_entity(&key, value, None, None)];
-        client.write(ns_id, Some(vault), ops, None).await.expect("write should succeed");
+        client
+            .write(UserSlug::new(0), ns_id, Some(vault), ops, None)
+            .await
+            .expect("write should succeed");
     }
 
     // Batch read including a missing key
@@ -236,7 +246,7 @@ async fn test_batch_read() {
         "batch:missing".to_string(),
     ];
     let results = client
-        .batch_read(ns_id, Some(vault), keys, None, None)
+        .batch_read(UserSlug::new(0), ns_id, Some(vault), keys, None, None)
         .await
         .expect("batch read should succeed");
 
@@ -271,8 +281,10 @@ async fn test_write_replication_to_followers() {
 
     // Write through the leader
     let ops = vec![Operation::set_entity("repl:key", b"replicated-data".to_vec(), None, None)];
-    let result =
-        leader_client.write(ns_id, Some(vault), ops, None).await.expect("write should succeed");
+    let result = leader_client
+        .write(UserSlug::new(0), ns_id, Some(vault), ops, None)
+        .await
+        .expect("write should succeed");
     assert!(result.block_height > 0);
 
     // Wait for replication
@@ -287,7 +299,7 @@ async fn test_write_replication_to_followers() {
             create_single_endpoint_client(ep, &format!("repl-follower-{}", i)).await;
 
         let read_result = follower_client
-            .read(ns_id, Some(vault), "repl:key", None, None)
+            .read(UserSlug::new(0), ns_id, Some(vault), "repl:key", None, None)
             .await
             .expect("read from follower should succeed");
 
@@ -318,7 +330,10 @@ async fn test_three_node_write_replication() {
     // Write through the leader
     let ops =
         vec![Operation::set_entity("replicated:key", b"replicated-data".to_vec(), None, None)];
-    client.write(ns_id, Some(vault), ops, None).await.expect("write should succeed");
+    client
+        .write(UserSlug::new(0), ns_id, Some(vault), ops, None)
+        .await
+        .expect("write should succeed");
 
     // Wait for replication
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -328,7 +343,7 @@ async fn test_three_node_write_replication() {
         let reader = create_single_endpoint_client(ep, &format!("repl-reader-{}", i)).await;
 
         let result = reader
-            .read(ns_id, Some(vault), "replicated:key", None, None)
+            .read(UserSlug::new(0), ns_id, Some(vault), "replicated:key", None, None)
             .await
             .expect("read from node");
 
@@ -355,13 +370,17 @@ async fn test_multiple_client_sessions() {
 
     // First session writes
     let ops1 = vec![Operation::set_entity("session:key1", b"from-session-1".to_vec(), None, None)];
-    let first_result = client1.write(ns_id, Some(vault), ops1, None).await.expect("first write");
+    let first_result =
+        client1.write(UserSlug::new(0), ns_id, Some(vault), ops1, None).await.expect("first write");
 
     // Second independent session
     let client2 = create_sdk_client(&endpoints, "session-2").await;
 
     let ops2 = vec![Operation::set_entity("session:key2", b"from-session-2".to_vec(), None, None)];
-    let second_result = client2.write(ns_id, Some(vault), ops2, None).await.expect("second write");
+    let second_result = client2
+        .write(UserSlug::new(0), ns_id, Some(vault), ops2, None)
+        .await
+        .expect("second write");
 
     // Both writes should succeed with unique tx_ids
     assert!(!first_result.tx_id.is_empty());
@@ -369,10 +388,14 @@ async fn test_multiple_client_sessions() {
     assert_ne!(first_result.tx_id, second_result.tx_id, "should have different tx_ids");
 
     // Read back both keys
-    let value1 =
-        client2.read(ns_id, Some(vault), "session:key1", None, None).await.expect("read first");
-    let value2 =
-        client2.read(ns_id, Some(vault), "session:key2", None, None).await.expect("read second");
+    let value1 = client2
+        .read(UserSlug::new(0), ns_id, Some(vault), "session:key1", None, None)
+        .await
+        .expect("read first");
+    let value2 = client2
+        .read(UserSlug::new(0), ns_id, Some(vault), "session:key2", None, None)
+        .await
+        .expect("read second");
 
     assert_eq!(value1, Some(b"from-session-1".to_vec()));
     assert_eq!(value2, Some(b"from-session-2".to_vec()));
@@ -391,7 +414,7 @@ async fn test_watch_blocks_stream_setup() {
     let (ns_id, vault) = setup_test_org_vault(&client).await;
 
     // Start watching blocks from height 1 (genesis)
-    let stream_result = client.watch_blocks(ns_id, vault, 1).await;
+    let stream_result = client.watch_blocks(UserSlug::new(0), ns_id, vault, 1).await;
 
     assert!(stream_result.is_ok(), "watch_blocks should succeed: {:?}", stream_result.err());
 }
@@ -417,7 +440,10 @@ async fn test_data_persistence_across_sessions() {
             let key = format!("persist:{}", i);
             let value = format!("data-{}", i).into_bytes();
             let ops = vec![Operation::set_entity(&key, value, None, None)];
-            client.write(ns_id, Some(vault), ops, None).await.expect("write should succeed");
+            client
+                .write(UserSlug::new(0), ns_id, Some(vault), ops, None)
+                .await
+                .expect("write should succeed");
         }
     } // Client dropped
 
@@ -428,8 +454,10 @@ async fn test_data_persistence_across_sessions() {
         for i in 0..5 {
             let key = format!("persist:{}", i);
             let expected = format!("data-{}", i).into_bytes();
-            let read_result =
-                client.read(ns_id, Some(vault), &key, None, None).await.expect("read");
+            let read_result = client
+                .read(UserSlug::new(0), ns_id, Some(vault), &key, None, None)
+                .await
+                .expect("read");
             assert_eq!(read_result, Some(expected), "should read {}", key);
         }
 
@@ -437,12 +465,16 @@ async fn test_data_persistence_across_sessions() {
         let key = "persist:5";
         let value = b"data-5".to_vec();
         let ops = vec![Operation::set_entity(key, value.clone(), None, None)];
-        let result =
-            client.write(ns_id, Some(vault), ops, None).await.expect("write from new session");
+        let result = client
+            .write(UserSlug::new(0), ns_id, Some(vault), ops, None)
+            .await
+            .expect("write from new session");
         assert!(!result.tx_id.is_empty(), "should have tx_id");
 
-        let read_result =
-            client.read(ns_id, Some(vault), key, None, None).await.expect("read new write");
+        let read_result = client
+            .read(UserSlug::new(0), ns_id, Some(vault), key, None, None)
+            .await
+            .expect("read new write");
         assert_eq!(read_result, Some(value));
     }
 }
@@ -465,6 +497,7 @@ async fn test_admin_operations() {
         .await
         .expect("create organization");
     let organization = org.slug;
+    let caller = UserSlug::new(0);
     assert!(organization.value() > 0, "should get valid organization slug");
 
     // Get the organization
@@ -473,7 +506,7 @@ async fn test_admin_operations() {
     assert_eq!(org_info.name, ns_name);
 
     // Create a vault
-    let vault_info = client.create_vault(organization).await.expect("create vault");
+    let vault_info = client.create_vault(caller, organization).await.expect("create vault");
     assert!(vault_info.vault.value() > 0, "should get valid vault slug");
 
     // List organizations

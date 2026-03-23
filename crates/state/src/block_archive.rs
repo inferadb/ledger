@@ -677,7 +677,6 @@ mod tests {
                 id: [i as u8; 16],
                 client_id: ClientId::new(format!("client-{}", i)),
                 sequence: i as u64,
-                actor: "actor".to_string(),
                 operations: vec![Operation::SetEntity {
                     key: format!("key-{}", i),
                     value: format!("value-{}", i).into_bytes(),

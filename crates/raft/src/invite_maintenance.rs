@@ -231,7 +231,7 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
                 token_hash: invitation.token_hash,
             };
 
-            match self.raft.client_write(RaftPayload::new(global_request)).await {
+            match self.raft.client_write(RaftPayload::system(global_request)).await {
                 Ok(_) => {},
                 Err(e) => {
                     warn!(
@@ -253,7 +253,7 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
                     status: InvitationStatus::Expired,
                 });
 
-            if let Err(e) = group.raft().client_write(RaftPayload::new(regional_request)).await {
+            if let Err(e) = group.raft().client_write(RaftPayload::system(regional_request)).await {
                 warn!(
                     trace_id = %trace_id,
                     invite_id = scanned.invite_id.value(),
@@ -310,44 +310,45 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
 
             // Read REGIONAL record for created_at and slug
             let sys_svc = SystemOrganizationService::new(group.state().clone());
-            let invitation = match sys_svc
-                .read_invitation(scanned.entry.organization, scanned.invite_id)
-            {
-                Ok(Some(inv)) => inv,
-                Ok(None) => {
-                    // REGIONAL record already gone — still clean up GLOBAL indexes.
-                    // Use dummy slug and zeroed token hash; the delete operations
-                    // are idempotent (no-op if already gone).
-                    let global_request = LedgerRequest::PurgeOrganizationInviteIndexes {
-                        invite: scanned.invite_id,
-                        slug: inferadb_ledger_types::InviteSlug::new(0),
-                        invitee_email_hmac: scanned.email_hmac.clone(),
-                        token_hash: [0; 32],
-                    };
-                    if let Err(e) = self.raft.client_write(RaftPayload::new(global_request)).await {
+            let invitation =
+                match sys_svc.read_invitation(scanned.entry.organization, scanned.invite_id) {
+                    Ok(Some(inv)) => inv,
+                    Ok(None) => {
+                        // REGIONAL record already gone — still clean up GLOBAL indexes.
+                        // Use dummy slug and zeroed token hash; the delete operations
+                        // are idempotent (no-op if already gone).
+                        let global_request = LedgerRequest::PurgeOrganizationInviteIndexes {
+                            invite: scanned.invite_id,
+                            slug: inferadb_ledger_types::InviteSlug::new(0),
+                            invitee_email_hmac: scanned.email_hmac.clone(),
+                            token_hash: [0; 32],
+                        };
+                        if let Err(e) =
+                            self.raft.client_write(RaftPayload::system(global_request)).await
+                        {
+                            warn!(
+                                trace_id = %trace_id,
+                                invite_id = scanned.invite_id.value(),
+                                error = %e,
+                                "Failed to purge orphaned GLOBAL invite indexes"
+                            );
+                            had_errors = true;
+                        } else {
+                            reaped_count += 1;
+                        }
+                        continue;
+                    },
+                    Err(e) => {
                         warn!(
                             trace_id = %trace_id,
                             invite_id = scanned.invite_id.value(),
                             error = %e,
-                            "Failed to purge orphaned GLOBAL invite indexes"
+                            "Failed to read REGIONAL invitation for reaping"
                         );
                         had_errors = true;
-                    } else {
-                        reaped_count += 1;
-                    }
-                    continue;
-                },
-                Err(e) => {
-                    warn!(
-                        trace_id = %trace_id,
-                        invite_id = scanned.invite_id.value(),
-                        error = %e,
-                        "Failed to read REGIONAL invitation for reaping"
-                    );
-                    had_errors = true;
-                    continue;
-                },
-            };
+                        continue;
+                    },
+                };
 
             // Check retention window
             if now < invitation.created_at + retention {
@@ -361,7 +362,7 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
                 invite: scanned.invite_id,
             });
 
-            if let Err(e) = group.raft().client_write(RaftPayload::new(regional_request)).await {
+            if let Err(e) = group.raft().client_write(RaftPayload::system(regional_request)).await {
                 warn!(
                     trace_id = %trace_id,
                     invite_id = scanned.invite_id.value(),
@@ -383,7 +384,7 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
                 token_hash: invitation.token_hash,
             };
 
-            if let Err(e) = self.raft.client_write(RaftPayload::new(global_request)).await {
+            if let Err(e) = self.raft.client_write(RaftPayload::system(global_request)).await {
                 warn!(
                     trace_id = %trace_id,
                     invite_id = scanned.invite_id.value(),

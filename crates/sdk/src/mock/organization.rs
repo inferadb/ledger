@@ -32,7 +32,7 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
 
         let region = crate::proto_util::region_from_proto_i32(req.region)
             .unwrap_or(inferadb_ledger_types::Region::GLOBAL);
-        let admin_slug = req.admin.map_or(0, |u| u.slug);
+        let admin_slug = req.caller.map_or(0, |u| u.slug);
         let members = vec![MockMember {
             slug: admin_slug,
             role: proto::OrganizationMemberRole::Admin as i32,
@@ -81,7 +81,7 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
             .ok_or_else(|| Status::invalid_argument("Missing organization slug"))?;
 
         let initiator_slug = req
-            .initiator
+            .caller
             .as_ref()
             .map(|u| u.slug)
             .ok_or_else(|| Status::invalid_argument("Missing initiator"))?;
@@ -193,7 +193,7 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
         let slug = OrganizationSlug::new(slug_val);
 
         let initiator_slug = req
-            .initiator
+            .caller
             .as_ref()
             .map(|u| u.slug)
             .ok_or_else(|| Status::invalid_argument("Missing initiator"))?;
@@ -239,7 +239,7 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
         let slug = OrganizationSlug::new(slug_val);
 
         let initiator_slug = req
-            .initiator
+            .caller
             .as_ref()
             .map(|u| u.slug)
             .ok_or_else(|| Status::invalid_argument("Missing initiator"))?;
@@ -307,7 +307,7 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
         self.state.check_injection().await?;
         let req = request.into_inner();
         let slug = OrganizationSlug::new(req.slug.map_or(0, |n| n.slug));
-        let initiator_slug = req.initiator.map_or(0, |u| u.slug);
+        let initiator_slug = req.caller.map_or(0, |u| u.slug);
         let target_slug = req.target.map_or(0, |u| u.slug);
 
         let mut organizations = self.state.organizations.write();
@@ -335,7 +335,7 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
         self.state.check_injection().await?;
         let req = request.into_inner();
         let slug = OrganizationSlug::new(req.slug.map_or(0, |n| n.slug));
-        let initiator_slug = req.initiator.map_or(0, |u| u.slug);
+        let initiator_slug = req.caller.map_or(0, |u| u.slug);
         let target_slug = req.target.map_or(0, |u| u.slug);
 
         let mut organizations = self.state.organizations.write();

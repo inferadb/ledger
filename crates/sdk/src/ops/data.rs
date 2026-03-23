@@ -1,7 +1,7 @@
 //! Data read/write operations.
 
 use inferadb_ledger_proto::proto;
-use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, UserSlug, VaultSlug};
 
 use crate::{
     LedgerClient,
@@ -29,6 +29,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Optional vault slug (omit for organization-level entities).
     /// * `key` - The key to read.
@@ -52,16 +53,17 @@ impl LedgerClient {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
     /// // Eventual consistency read (default)
-    /// let value = client.read(organization, None, "user:123", None, None).await?;
+    /// let value = client.read(UserSlug::new(42), organization, None, "user:123", None, None).await?;
     ///
     /// // Linearizable consistency read
-    /// let value = client.read(organization, Some(vault), "key",
+    /// let value = client.read(UserSlug::new(42), organization, Some(vault), "key",
     ///     Some(ReadConsistency::Linearizable), None).await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn read(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         key: impl Into<String>,
@@ -69,6 +71,7 @@ impl LedgerClient {
         token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Option<Vec<u8>>> {
         self.read_internal(
+            caller,
             organization,
             vault,
             key.into(),
@@ -85,6 +88,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Optional vault slug (omit for organization-level entities).
     /// * `keys` - The keys to read (max 1000).
@@ -110,6 +114,7 @@ impl LedgerClient {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
     /// let results = client.batch_read(
+    ///     42,
     ///     organization,
     ///     Some(vault),
     ///     vec!["key1", "key2", "key3"],
@@ -128,6 +133,7 @@ impl LedgerClient {
     /// ```
     pub async fn batch_read(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -135,6 +141,7 @@ impl LedgerClient {
         token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Vec<(String, Option<Vec<u8>>)>> {
         self.batch_read_internal(
+            caller,
             organization,
             vault,
             keys.into_iter().map(Into::into).collect(),
@@ -152,6 +159,7 @@ impl LedgerClient {
     /// optional per-request cancellation.
     async fn read_internal(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         key: String,
@@ -174,6 +182,7 @@ impl LedgerClient {
                     vault: vault.map(|v| proto::VaultSlug { slug: v.value() }),
                     key: key.clone(),
                     consistency: consistency.to_proto() as i32,
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
                 };
 
                 let response = client.read(tonic::Request::new(request)).await?.into_inner();
@@ -188,6 +197,7 @@ impl LedgerClient {
     /// optional per-request cancellation.
     async fn batch_read_internal(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         keys: Vec<String>,
@@ -210,6 +220,7 @@ impl LedgerClient {
                     vault: vault.map(|v| proto::VaultSlug { slug: v.value() }),
                     keys: keys.clone(),
                     consistency: consistency.to_proto() as i32,
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
                 };
 
                 let response = client.batch_read(tonic::Request::new(request)).await?.into_inner();
@@ -237,6 +248,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Optional vault slug (required for relationships).
     /// * `operations` - The operations to apply atomically.
@@ -263,6 +275,7 @@ impl LedgerClient {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
     /// let result = client.write(
+    ///     42,
     ///     organization,
     ///     Some(vault),
     ///     vec![
@@ -278,6 +291,7 @@ impl LedgerClient {
     /// ```
     pub async fn write(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         operations: Vec<Operation>,
@@ -289,7 +303,15 @@ impl LedgerClient {
         // The same key is reused across all retry attempts
         let idempotency_key = uuid::Uuid::new_v4();
 
-        self.execute_write(organization, vault, &operations, idempotency_key, token.as_ref()).await
+        self.execute_write(
+            caller,
+            organization,
+            vault,
+            &operations,
+            idempotency_key,
+            token.as_ref(),
+        )
+        .await
     }
 
     /// Executes a single write attempt with retry for transient errors.
@@ -298,6 +320,7 @@ impl LedgerClient {
     /// at-most-once semantics even with network failures.
     async fn execute_write(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         operations: &[Operation],
@@ -352,6 +375,7 @@ impl LedgerClient {
                         idempotency_key: key_bytes,
                         operations: proto_ops,
                         include_tx_proof: false,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -441,6 +465,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Optional vault slug (required for relationships).
     /// * `batches` - Groups of operations to apply atomically. Each inner `Vec<Operation>` is a
@@ -476,6 +501,7 @@ impl LedgerClient {
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
     /// // Atomic transaction: create user AND grant permissions
     /// let result = client.batch_write(
+    ///     42,
     ///     organization,
     ///     Some(vault),
     ///     vec![
@@ -496,6 +522,7 @@ impl LedgerClient {
     /// ```
     pub async fn batch_write(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         batches: Vec<Vec<Operation>>,
@@ -507,8 +534,15 @@ impl LedgerClient {
         // The same key is reused across all retry attempts
         let idempotency_key = uuid::Uuid::new_v4();
 
-        self.execute_batch_write(organization, vault, &batches, idempotency_key, token.as_ref())
-            .await
+        self.execute_batch_write(
+            caller,
+            organization,
+            vault,
+            &batches,
+            idempotency_key,
+            token.as_ref(),
+        )
+        .await
     }
 
     /// Executes a single batch write attempt with retry for transient errors.
@@ -517,6 +551,7 @@ impl LedgerClient {
     /// at-most-once semantics even with network failures.
     async fn execute_batch_write(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         batches: &[Vec<Operation>],
@@ -575,6 +610,7 @@ impl LedgerClient {
                         idempotency_key: key_bytes,
                         operations: batch_ops,
                         include_tx_proofs: false,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -648,6 +684,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Optional vault slug (omit for organization-level entities).
     /// * `key` - The entity key.
@@ -670,18 +707,20 @@ impl LedgerClient {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
     /// // Simple set:
-    /// client.set_entity(organization, Some(vault), "user:123", b"data".to_vec(), None, None, None).await?;
+    /// client.set_entity(UserSlug::new(42), organization, Some(vault), "user:123", b"data".to_vec(), None, None, None).await?;
     ///
     /// // With expiration:
-    /// client.set_entity(organization, Some(vault), "session:abc", b"token".to_vec(), Some(1700000000), None, None).await?;
+    /// client.set_entity(UserSlug::new(42), organization, Some(vault), "session:abc", b"token".to_vec(), Some(1700000000), None, None).await?;
     ///
     /// // Conditional (create-if-not-exists):
-    /// client.set_entity(organization, Some(vault), "lock:xyz", b"owner".to_vec(), None, Some(SetCondition::NotExists), None).await?;
+    /// client.set_entity(UserSlug::new(42), organization, Some(vault), "lock:xyz", b"owner".to_vec(), None, Some(SetCondition::NotExists), None).await?;
     /// # Ok(())
     /// # }
     /// ```
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_entity(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         key: impl Into<String>,
@@ -691,6 +730,7 @@ impl LedgerClient {
         token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<WriteSuccess> {
         self.write(
+            caller,
             organization,
             vault,
             vec![Operation::set_entity(key, value, expires_at, condition)],
@@ -706,6 +746,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Optional vault slug (omit for organization-level entities).
     /// * `key` - The entity key to delete.
@@ -724,18 +765,19 @@ impl LedgerClient {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
-    /// client.delete_entity(organization, Some(vault), "user:123", None).await?;
+    /// client.delete_entity(UserSlug::new(42), organization, Some(vault), "user:123", None).await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn delete_entity(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: Option<VaultSlug>,
         key: impl Into<String>,
         token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<WriteSuccess> {
-        self.write(organization, vault, vec![Operation::delete_entity(key)], token).await
+        self.write(caller, organization, vault, vec![Operation::delete_entity(key)], token).await
     }
 
     // =============================================================================
@@ -750,6 +792,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Vault slug (external identifier).
     /// * `start_height` - First block height to receive (must be >= 1).
@@ -780,7 +823,7 @@ impl LedgerClient {
     /// # let organization = OrganizationSlug::new(1);
     ///
     /// // Start watching from height 1
-    /// let mut stream = client.watch_blocks(organization, VaultSlug::new(0), 1).await?;
+    /// let mut stream = client.watch_blocks(UserSlug::new(42), organization, VaultSlug::new(0), 1).await?;
     ///
     /// while let Some(announcement) = stream.next().await {
     ///     match announcement {
@@ -799,6 +842,7 @@ impl LedgerClient {
     /// ```
     pub async fn watch_blocks(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
         start_height: u64,
@@ -807,7 +851,7 @@ impl LedgerClient {
 
         // Get the initial stream
         let initial_stream =
-            self.create_watch_blocks_stream(organization, vault, start_height).await?;
+            self.create_watch_blocks_stream(caller, organization, vault, start_height).await?;
 
         // Create position tracker starting at the requested height
         let position = HeightTracker::new(start_height);
@@ -836,6 +880,7 @@ impl LedgerClient {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
                         vault: Some(proto::VaultSlug { slug: vault.value() }),
                         start_height: next_height,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -855,6 +900,7 @@ impl LedgerClient {
     /// Creates a WatchBlocks stream without reconnection logic.
     async fn create_watch_blocks_stream(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
         start_height: u64,
@@ -870,6 +916,7 @@ impl LedgerClient {
             organization: Some(proto::OrganizationSlug { slug: organization.value() }),
             vault: Some(proto::VaultSlug { slug: vault.value() }),
             start_height,
+            caller: Some(proto::UserSlug { slug: caller.value() }),
         };
 
         let response = client.watch_blocks(tonic::Request::new(request)).await?.into_inner();

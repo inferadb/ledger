@@ -113,7 +113,7 @@ impl<B: StorageBackend + 'static> UserRetentionReaper<B> {
                 region: user.region,
             });
 
-            match self.raft.client_write(RaftPayload::new(request)).await {
+            match self.raft.client_write(RaftPayload::system(request)).await {
                 Ok(_) => {
                     info!(
                         trace_id = %trace_ctx.trace_id,

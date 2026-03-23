@@ -59,7 +59,7 @@ impl LedgerClient {
         &self,
         name: impl Into<String>,
         region: Region,
-        admin: UserSlug,
+        caller: UserSlug,
         tier: OrganizationTier,
     ) -> Result<OrganizationInfo> {
         self.check_shutdown(None)?;
@@ -84,7 +84,7 @@ impl LedgerClient {
                         name: name.clone(),
                         region: region_i32,
                         tier: Some(tier.to_proto()),
-                        admin: Some(proto::UserSlug { slug: admin.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response = client
@@ -229,7 +229,7 @@ impl LedgerClient {
 
                     let request = proto::UpdateOrganizationRequest {
                         slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         name: name.clone(),
                     };
 
@@ -302,7 +302,7 @@ impl LedgerClient {
 
                     let request = proto::DeleteOrganizationRequest {
                         slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                     };
 
                     let response = client
@@ -504,7 +504,7 @@ impl LedgerClient {
 
                     let request = proto::RemoveOrganizationMemberRequest {
                         slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         target: Some(proto::UserSlug { slug: target.value() }),
                     };
 
@@ -562,7 +562,7 @@ impl LedgerClient {
 
                     let request = proto::UpdateOrganizationMemberRoleRequest {
                         slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         target: Some(proto::UserSlug { slug: target.value() }),
                         role: role.to_proto(),
                     };
@@ -655,7 +655,7 @@ impl LedgerClient {
         &self,
         organization: OrganizationSlug,
         name: &str,
-        initiator: UserSlug,
+        caller: UserSlug,
     ) -> Result<TeamInfo> {
         self.check_shutdown(None)?;
 
@@ -676,7 +676,7 @@ impl LedgerClient {
                     let request = proto::CreateOrganizationTeamRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
                         name: name.clone(),
-                        initiator: Some(proto::UserSlug { slug: initiator.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response = client
@@ -702,7 +702,7 @@ impl LedgerClient {
     pub async fn delete_organization_team(
         &self,
         team: TeamSlug,
-        initiator: UserSlug,
+        caller: UserSlug,
         move_members_to: Option<TeamSlug>,
     ) -> Result<()> {
         self.check_shutdown(None)?;
@@ -724,7 +724,7 @@ impl LedgerClient {
                         slug: Some(proto::TeamSlug { slug: team.value() }),
                         move_members_to: move_members_to
                             .map(|s| proto::TeamSlug { slug: s.value() }),
-                        initiator: Some(proto::UserSlug { slug: initiator.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     client.delete_organization_team(tonic::Request::new(request)).await?;
@@ -742,7 +742,7 @@ impl LedgerClient {
     pub async fn update_organization_team(
         &self,
         team: TeamSlug,
-        initiator: UserSlug,
+        caller: UserSlug,
         name: Option<&str>,
     ) -> Result<TeamInfo> {
         self.check_shutdown(None)?;
@@ -763,7 +763,7 @@ impl LedgerClient {
 
                     let request = proto::UpdateOrganizationTeamRequest {
                         slug: Some(proto::TeamSlug { slug: team.value() }),
-                        initiator: Some(proto::UserSlug { slug: initiator.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                         name: name.clone(),
                     };
 
@@ -834,7 +834,7 @@ impl LedgerClient {
         team: TeamSlug,
         user: UserSlug,
         role: TeamMemberRole,
-        initiator: UserSlug,
+        caller: UserSlug,
     ) -> Result<TeamInfo> {
         self.check_shutdown(None)?;
 
@@ -855,7 +855,7 @@ impl LedgerClient {
                         team: Some(proto::TeamSlug { slug: team.value() }),
                         user: Some(proto::UserSlug { slug: user.value() }),
                         role: role.to_proto().into(),
-                        initiator: Some(proto::UserSlug { slug: initiator.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -877,7 +877,7 @@ impl LedgerClient {
         &self,
         team: TeamSlug,
         user: UserSlug,
-        initiator: UserSlug,
+        caller: UserSlug,
     ) -> Result<()> {
         self.check_shutdown(None)?;
 
@@ -897,7 +897,7 @@ impl LedgerClient {
                     let request = proto::RemoveTeamMemberRequest {
                         team: Some(proto::TeamSlug { slug: team.value() }),
                         user: Some(proto::UserSlug { slug: user.value() }),
-                        initiator: Some(proto::UserSlug { slug: initiator.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     client.remove_team_member(tonic::Request::new(request)).await?;
@@ -915,13 +915,13 @@ impl LedgerClient {
     /// * `team` - Team slug (external identifier).
     /// * `user` - User slug of the member whose role to update.
     /// * `role` - New role to assign.
-    /// * `initiator` - User slug of the caller (must be org admin or team manager).
+    /// * `caller` - User slug of the caller (must be org admin or team manager).
     pub async fn update_team_member_role(
         &self,
         team: TeamSlug,
         user: UserSlug,
         role: TeamMemberRole,
-        initiator: UserSlug,
+        caller: UserSlug,
     ) -> Result<TeamInfo> {
         self.check_shutdown(None)?;
 
@@ -942,7 +942,7 @@ impl LedgerClient {
                         team: Some(proto::TeamSlug { slug: team.value() }),
                         user: Some(proto::UserSlug { slug: user.value() }),
                         role: role.to_proto().into(),
-                        initiator: Some(proto::UserSlug { slug: initiator.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response = client
@@ -1009,7 +1009,7 @@ impl LedgerClient {
                         slug: Some(proto::OrganizationSlug { slug: slug.value() }),
                         target_region: target_i32,
                         acknowledge_residency_downgrade,
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                     };
 
                     let response = client
@@ -1054,6 +1054,7 @@ impl LedgerClient {
     /// - Connection fails after retry attempts
     pub async fn migrate_user_region(
         &self,
+        caller: UserSlug,
         user: UserSlug,
         target_region: Region,
     ) -> Result<UserMigrationInfo> {
@@ -1077,6 +1078,7 @@ impl LedgerClient {
                     let request = proto::MigrateUserRegionRequest {
                         slug: Some(proto::UserSlug { slug: user.value() }),
                         target_region: target_i32,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response = client
@@ -1122,12 +1124,11 @@ impl LedgerClient {
     pub async fn erase_user(
         &self,
         user: UserSlug,
-        erased_by: impl Into<String>,
+        caller: UserSlug,
         region: Region,
     ) -> Result<UserSlug> {
         self.check_shutdown(None)?;
 
-        let erased_by = erased_by.into();
         let proto_region: proto::Region = region.into();
         let region_i32: i32 = proto_region.into();
         let pool = self.pool.clone();
@@ -1145,7 +1146,7 @@ impl LedgerClient {
 
                     let request = proto::EraseUserRequest {
                         user: Some(proto::UserSlug { slug: user.value() }),
-                        erased_by: erased_by.clone(),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                         region: region_i32,
                     };
 

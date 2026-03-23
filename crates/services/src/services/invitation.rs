@@ -536,6 +536,7 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // 4. Input validation
         let email = req.email.trim();
@@ -780,6 +781,7 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let org_id =
@@ -854,6 +856,7 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let index_entry = self.resolve_invite_slug_or_not_found(&req.slug, &mut ctx)?;
 
@@ -895,6 +898,7 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let index_entry = self.resolve_invite_slug_or_not_found(&req.slug, &mut ctx)?;
 
@@ -953,11 +957,13 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
-        let user_id = slug_resolver.extract_and_resolve_user(&req.user).inspect_err(|status| {
-            ctx.set_error("InvalidArgument", status.message());
-        })?;
+        let user_id =
+            slug_resolver.extract_and_resolve_user(&req.caller).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
 
         let blinding_key = self.blinding_key()?;
         let user_hmacs = self.get_user_email_hmacs(user_id, blinding_key)?;
@@ -1028,14 +1034,16 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let index_entry = self.resolve_invite_slug_or_not_found(&req.slug, &mut ctx)?;
 
         // Multi-email HMAC match
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
-        let user_id = slug_resolver.extract_and_resolve_user(&req.user).inspect_err(|status| {
-            ctx.set_error("InvalidArgument", status.message());
-        })?;
+        let user_id =
+            slug_resolver.extract_and_resolve_user(&req.caller).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
 
         let blinding_key = self.blinding_key()?;
         let user_hmacs = self.get_user_email_hmacs(user_id, blinding_key)?;
@@ -1072,6 +1080,7 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // 2. Resolve slug with timing equalization
         let index_entry = self.resolve_invite_slug_or_not_found(&req.slug, &mut ctx)?;
@@ -1079,10 +1088,10 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         // 3. Multi-email HMAC match
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_id =
-            slug_resolver.extract_and_resolve_user(&req.acceptor).inspect_err(|status| {
+            slug_resolver.extract_and_resolve_user(&req.caller).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
-        let user_slug = SlugResolver::extract_user_slug(&req.acceptor)?;
+        let user_slug = SlugResolver::extract_user_slug(&req.caller)?;
 
         let blinding_key = self.blinding_key()?;
         let user_hmacs = self.get_user_email_hmacs(user_id, blinding_key)?;
@@ -1215,14 +1224,16 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let index_entry = self.resolve_invite_slug_or_not_found(&req.slug, &mut ctx)?;
 
         // Multi-email HMAC match via GLOBAL index (matches accept_invitation pattern)
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
-        let user_id = slug_resolver.extract_and_resolve_user(&req.user).inspect_err(|status| {
-            ctx.set_error("InvalidArgument", status.message());
-        })?;
+        let user_id =
+            slug_resolver.extract_and_resolve_user(&req.caller).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
 
         let blinding_key = self.blinding_key()?;
         let user_hmacs = self.get_user_email_hmacs(user_id, blinding_key)?;

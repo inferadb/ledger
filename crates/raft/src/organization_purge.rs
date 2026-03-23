@@ -123,7 +123,7 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
                     organization: org_id,
                 });
 
-            match group.raft().client_write(RaftPayload::new(regional_request)).await {
+            match group.raft().client_write(RaftPayload::system(regional_request)).await {
                 Ok(_) => return true,
                 Err(e) => {
                     record_org_purge_regional_failure(&region.to_string());
@@ -165,7 +165,7 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
         for attempt in 0..MAX_RETRIES {
             let request = LedgerRequest::PurgeOrganization { organization: org_id };
 
-            match self.raft.client_write(RaftPayload::new(request)).await {
+            match self.raft.client_write(RaftPayload::system(request)).await {
                 Ok(_) => return true,
                 Err(e) => {
                     record_org_purge_global_failure();

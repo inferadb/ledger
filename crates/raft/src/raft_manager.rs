@@ -780,7 +780,7 @@ impl RaftManager {
                     let commitments =
                         std::mem::take(&mut *buffer.lock().unwrap_or_else(|e| e.into_inner()));
                     let result = raft
-                        .client_write(RaftPayload::with_commitments(batch_request, commitments))
+                        .client_write(RaftPayload::with_commitments(batch_request, commitments, 0))
                         .await;
                     match result {
                         Ok(response) => match response.data {

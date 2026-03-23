@@ -33,6 +33,7 @@ pub use saga::{
 };
 pub use service::{
     SYSTEM_ORGANIZATION_ID, SYSTEM_VAULT_ID, SystemError, SystemOrganizationService,
+    audit::{AuditKeys, AuditRecord, write_audit_record},
 };
 pub use token::{
     AllAppSessionsRevocationResult, AllUserSessionsRevocationResult, ExpiredTokenCleanupResult,

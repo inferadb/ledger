@@ -103,7 +103,7 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
         // Phase 1: Delete expired refresh tokens (the apply handler does the actual work)
         match self
             .raft
-            .client_write(RaftPayload::new(LedgerRequest::DeleteExpiredRefreshTokens))
+            .client_write(RaftPayload::system(LedgerRequest::DeleteExpiredRefreshTokens))
             .await
         {
             Ok(response) => {
@@ -140,6 +140,7 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
                         .raft
                         .client_write(RaftPayload::new(
                             LedgerRequest::TransitionSigningKeyRevoked { kid: kid.clone() },
+                            0,
                         ))
                         .await
                     {
@@ -183,7 +184,7 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
                     Ok(group) => {
                         let request =
                             LedgerRequest::System(SystemRequest::CleanupExpiredOnboarding);
-                        match group.raft().client_write(RaftPayload::new(request)).await {
+                        match group.raft().client_write(RaftPayload::system(request)).await {
                             Ok(response) => {
                                 if let crate::types::LedgerResponse::OnboardingCleanedUp {
                                     verification_codes_deleted,

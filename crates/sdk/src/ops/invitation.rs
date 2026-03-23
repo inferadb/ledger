@@ -240,6 +240,7 @@ impl LedgerClient {
                         status_filter: status_filter_i32,
                         page_token: page_token.clone(),
                         page_size,
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                     };
 
                     let response = client
@@ -285,6 +286,7 @@ impl LedgerClient {
                     let request = proto::GetInvitationDetailsRequest {
                         slug: Some(proto::InviteSlug { slug: slug.value() }),
                         user: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                     };
 
                     let response = client
@@ -309,7 +311,7 @@ impl LedgerClient {
     pub async fn accept_invitation(
         &self,
         slug: InviteSlug,
-        acceptor: UserSlug,
+        caller: UserSlug,
     ) -> Result<ReceivedInvitationInfo> {
         self.check_shutdown(None)?;
 
@@ -328,7 +330,7 @@ impl LedgerClient {
 
                     let request = proto::AcceptInvitationRequest {
                         slug: Some(proto::InviteSlug { slug: slug.value() }),
-                        acceptor: Some(proto::UserSlug { slug: acceptor.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -347,7 +349,7 @@ impl LedgerClient {
     pub async fn decline_invitation(
         &self,
         slug: InviteSlug,
-        user: UserSlug,
+        caller: UserSlug,
     ) -> Result<ReceivedInvitationInfo> {
         self.check_shutdown(None)?;
 
@@ -366,7 +368,7 @@ impl LedgerClient {
 
                     let request = proto::DeclineInvitationRequest {
                         slug: Some(proto::InviteSlug { slug: slug.value() }),
-                        user: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =

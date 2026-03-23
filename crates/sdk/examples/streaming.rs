@@ -54,9 +54,10 @@ async fn main() -> Result<()> {
         )
         .await?;
     let organization = org.slug;
+    let caller = UserSlug::new(42); // placeholder caller slug
     println!("Created organization with slug: {organization}");
 
-    let vault_info = client.create_vault(organization).await?;
+    let vault_info = client.create_vault(caller, organization).await?;
     let vault = vault_info.vault;
     println!("Created vault: {vault}");
 
@@ -80,6 +81,7 @@ async fn main() -> Result<()> {
 
             match writer_client
                 .write(
+                    caller,
                     writer_ns,
                     Some(writer_vault),
                     vec![Operation::set_entity(&key, value.into_bytes(), None, None)],
@@ -96,7 +98,7 @@ async fn main() -> Result<()> {
     // -------------------------------------------------------------------------
     // 4. Subscribe to block stream and process announcements
     // -------------------------------------------------------------------------
-    let mut stream = client.watch_blocks(organization, vault, 1).await?;
+    let mut stream = client.watch_blocks(caller, organization, vault, 1).await?;
 
     // Process blocks for 10 seconds
     let result = timeout(Duration::from_secs(10), async {

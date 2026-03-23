@@ -48,7 +48,7 @@ impl LedgerClient {
 
                     let request = proto::CreateAppRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         name: name.clone(),
                         description: description.clone(),
                     };
@@ -90,7 +90,7 @@ impl LedgerClient {
 
                     let request = proto::GetAppRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                     };
 
@@ -129,7 +129,7 @@ impl LedgerClient {
 
                     let request = proto::ListAppsRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                     };
 
                     let response =
@@ -168,7 +168,7 @@ impl LedgerClient {
 
                     let request = proto::UpdateAppRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                         name: name.clone(),
                         description: description.clone(),
@@ -211,7 +211,7 @@ impl LedgerClient {
 
                     let request = proto::DeleteAppRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                     };
 
@@ -267,7 +267,7 @@ impl LedgerClient {
 
                     let request = proto::SetAppEnabledRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                         enabled,
                     };
@@ -316,7 +316,7 @@ impl LedgerClient {
 
                     let request = proto::SetAppCredentialEnabledRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                         credential_type: credential_type_i32,
                         enabled,
@@ -360,7 +360,7 @@ impl LedgerClient {
 
                     let request = proto::GetAppClientSecretRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                     };
 
@@ -407,7 +407,7 @@ impl LedgerClient {
 
                     let request = proto::RotateAppClientSecretRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                         idempotency_key: idempotency_key.to_vec(),
                     };
@@ -452,7 +452,7 @@ impl LedgerClient {
 
                     let request = proto::ListAppClientAssertionsRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                     };
 
@@ -500,7 +500,7 @@ impl LedgerClient {
 
                     let request = proto::CreateAppClientAssertionRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                         name: name.clone(),
                         expires_at: Some(expires_at_proto),
@@ -554,7 +554,7 @@ impl LedgerClient {
 
                     let request = proto::DeleteAppClientAssertionRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                         assertion: Some(proto::ClientAssertionId { id: assertion.value() }),
                     };
@@ -593,7 +593,7 @@ impl LedgerClient {
 
                     let request = proto::SetAppClientAssertionEnabledRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                         assertion: Some(proto::ClientAssertionId { id: assertion.value() }),
                         enabled,
@@ -635,7 +635,7 @@ impl LedgerClient {
 
                     let request = proto::ListAppVaultsRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                     };
 
@@ -675,7 +675,7 @@ impl LedgerClient {
 
                     let request = proto::AddAppVaultRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                         vault: Some(proto::VaultSlug { slug: vault.value() }),
                         allowed_scopes: allowed_scopes.clone(),
@@ -720,7 +720,7 @@ impl LedgerClient {
 
                     let request = proto::UpdateAppVaultRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                         vault: Some(proto::VaultSlug { slug: vault.value() }),
                         allowed_scopes: allowed_scopes.clone(),
@@ -764,7 +764,7 @@ impl LedgerClient {
 
                     let request = proto::RemoveAppVaultRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        initiator: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                         app: Some(proto::AppSlug { slug: app.value() }),
                         vault: Some(proto::VaultSlug { slug: vault.value() }),
                     };

@@ -12,13 +12,13 @@ use chrono::{DateTime, Duration, Utc};
 use inferadb_ledger_state::{
     StateError,
     system::{
-        App, AppCredentialType, AppCredentials, AppProfile, AppVaultConnection,
-        ClientAssertionEntry, EmailHashEntry, KeyTier, OnboardingAccount, OrganizationMember,
-        OrganizationMemberRole, OrganizationProfile, OrganizationRegistry, OrganizationStatus,
-        OrganizationTier, PendingEmailVerification, ProvisioningReservation, RefreshToken,
-        SYSTEM_VAULT_ID, SigningKey, SigningKeyStatus, SystemError, SystemKeys,
+        App, AppCredentialType, AppCredentials, AppProfile, AppVaultConnection, AuditKeys,
+        AuditRecord, ClientAssertionEntry, EmailHashEntry, KeyTier, OnboardingAccount,
+        OrganizationMember, OrganizationMemberRole, OrganizationProfile, OrganizationRegistry,
+        OrganizationStatus, OrganizationTier, PendingEmailVerification, ProvisioningReservation,
+        RefreshToken, SYSTEM_VAULT_ID, SigningKey, SigningKeyStatus, SystemError, SystemKeys,
         SystemOrganizationService, Team, TeamMember, User, UserDirectoryEntry, UserDirectoryStatus,
-        UserEmail,
+        UserEmail, write_audit_record,
     },
 };
 use inferadb_ledger_store::StorageBackend;
@@ -85,7 +85,26 @@ impl<B: StorageBackend> RaftLogStore<B> {
             &mut pending,
             None,
             false,
+            0,
         )
+    }
+
+    /// Writes an audit record to the state layer if available.
+    ///
+    /// Encodes the `AuditRecord`, creates a `SetEntity` operation, and applies
+    /// it to the system vault. The `block_height` parameter is the height of
+    /// the block being applied (not hardcoded 0). Failures are logged as
+    /// warnings — audit must not abort the primary operation.
+    fn emit_audit(&self, key: String, record: &AuditRecord, block_height: u64) {
+        if let Some(state_layer) = &self.state_layer {
+            let mut ops = Vec::new();
+            write_audit_record(&mut ops, key, record);
+            if !ops.is_empty()
+                && let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, block_height)
+            {
+                tracing::warn!(error = %e, action = %record.action, "Failed to write audit record");
+            }
+        }
     }
 
     /// Applies a single request with event emission support.
@@ -116,6 +135,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         pending: &mut PendingExternalWrites,
         log_id_bytes: Option<&[u8]>,
         skip_state_writes: bool,
+        caller: u64,
     ) -> (LedgerResponse, Option<VaultEntry>) {
         // Block height for event emission (from region chain state)
         let block_height = self.region_chain.read().height + 1;
@@ -241,6 +261,56 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 None,
                             );
                         }
+                        // Atomic audit: include the audit record in the same
+                        // write transaction so it commits or rolls back with
+                        // the entity writes.
+                        let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                        let audit_key = AuditKeys::vault(
+                            state.vault_id_to_slug.get(vault).map_or(0, |s| s.value()),
+                            "write",
+                            ts_ns,
+                        );
+                        let mut audit_ops = Vec::new();
+                        write_audit_record(
+                            &mut audit_ops,
+                            audit_key,
+                            &AuditRecord {
+                                action: "write".into(),
+                                caller,
+                                target: format!("{}:{}", organization, vault),
+                                timestamp_ns: ts_ns,
+                                details: vec![
+                                    ("organization_id".into(), organization.value().to_string()),
+                                    (
+                                        "operations_count".into(),
+                                        transactions
+                                            .iter()
+                                            .map(|tx| tx.operations.len())
+                                            .sum::<usize>()
+                                            .to_string(),
+                                    ),
+                                ],
+                            },
+                        );
+                        if !audit_ops.is_empty() {
+                            match state_layer.apply_operations_in_txn(
+                                &mut write_txn,
+                                SYSTEM_VAULT_ID,
+                                &audit_ops,
+                                new_height,
+                            ) {
+                                Ok((_statuses, audit_dirty)) => {
+                                    state_layer.mark_dirty_keys(SYSTEM_VAULT_ID, &audit_dirty);
+                                },
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to write audit record in write txn"
+                                    );
+                                },
+                            }
+                        }
+
                         // Mark dirty before commit: dirty marks are conservative
                         // (trigger re-hash from storage). Safe on commit failure.
                         state_layer.mark_dirty_keys(*vault, &all_dirty_keys);
@@ -468,6 +538,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 );
                 *op_index += 1;
 
+                // Audit: vault creation
+                let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                self.emit_audit(
+                    AuditKeys::vault(slug.value(), "create", ts_ns),
+                    &AuditRecord {
+                        action: "create_vault".into(),
+                        caller,
+                        target: slug.value().to_string(),
+                        timestamp_ns: ts_ns,
+                        details: vec![("organization_id".into(), organization.value().to_string())],
+                    },
+                    block_height,
+                );
+
                 (LedgerResponse::VaultCreated { vault: vault_id, slug: *slug }, None)
             },
 
@@ -577,6 +661,23 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                     events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
                     *op_index += 1;
+
+                    // Audit: organization deletion
+                    let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                    self.emit_audit(
+                        AuditKeys::organization(organization.value(), "delete", ts_ns),
+                        &AuditRecord {
+                            action: "delete_organization".into(),
+                            caller,
+                            target: org_slug.map_or_else(
+                                || organization.value().to_string(),
+                                |s| s.value().to_string(),
+                            ),
+                            timestamp_ns: ts_ns,
+                            details: vec![],
+                        },
+                        block_height,
+                    );
                 }
 
                 (response, None)
@@ -584,6 +685,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             LedgerRequest::DeleteVault { organization, vault } => {
                 let key = (*organization, *vault);
+                // Capture vault slug before state mutation removes it
+                let vault_slug_for_audit = state.vault_id_to_slug.get(vault).copied();
                 // Mark vault as deleted (keep heights for historical queries)
                 let response = if let Some(vault_meta) = state.vaults.get_mut(&key) {
                     vault_meta.deleted = true;
@@ -625,6 +728,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         ),
                     );
                     *op_index += 1;
+
+                    // Audit: vault deletion
+                    let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                    let slug_val = vault_slug_for_audit.map_or(0, |s| s.value());
+                    self.emit_audit(
+                        AuditKeys::vault(slug_val, "delete", ts_ns),
+                        &AuditRecord {
+                            action: "delete_vault".into(),
+                            caller,
+                            target: vault.value().to_string(),
+                            timestamp_ns: ts_ns,
+                            details: vec![(
+                                "organization_id".into(),
+                                organization.value().to_string(),
+                            )],
+                        },
+                        block_height,
+                    );
                 }
 
                 (response, None)
@@ -804,6 +925,23 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             .build(block_height, *op_index, block_timestamp, ttl_days),
                     );
                     *op_index += 1;
+
+                    // Audit: user role change within organization
+                    let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                    self.emit_audit(
+                        AuditKeys::user_role(target.value(), "update_role", ts_ns),
+                        &AuditRecord {
+                            action: "update_organization_member_role".into(),
+                            caller,
+                            target: target.value().to_string(),
+                            timestamp_ns: ts_ns,
+                            details: vec![
+                                ("organization_id".into(), organization.value().to_string()),
+                                ("new_role".into(), format!("{role:?}")),
+                            ],
+                        },
+                        block_height,
+                    );
                 }
 
                 (response, None)
@@ -1431,6 +1569,28 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             state.app_id_to_slug.insert(app_id, *slug);
                             pending.app_slug_index.push((*slug, (*organization, app_id)));
 
+                            // Audit: app creation
+                            let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                            self.emit_audit(
+                                AuditKeys::app(
+                                    organization.value(),
+                                    app_id.value(),
+                                    "create",
+                                    ts_ns,
+                                ),
+                                &AuditRecord {
+                                    action: "create_app".into(),
+                                    caller,
+                                    target: slug.value().to_string(),
+                                    timestamp_ns: ts_ns,
+                                    details: vec![(
+                                        "organization_id".into(),
+                                        organization.value().to_string(),
+                                    )],
+                                },
+                                block_height,
+                            );
+
                             LedgerResponse::AppCreated { app_id, app_slug: *slug }
                         }
                     },
@@ -1512,6 +1672,23 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         state.app_slug_index.remove(&slug);
                         state.app_id_to_slug.remove(app);
                         pending.app_slug_index_deleted.push(slug);
+
+                        // Audit: app deletion
+                        let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                        self.emit_audit(
+                            AuditKeys::app(organization.value(), app.value(), "delete", ts_ns),
+                            &AuditRecord {
+                                action: "delete_app".into(),
+                                caller,
+                                target: slug.value().to_string(),
+                                timestamp_ns: ts_ns,
+                                details: vec![(
+                                    "organization_id".into(),
+                                    organization.value().to_string(),
+                                )],
+                            },
+                            block_height,
+                        );
 
                         LedgerResponse::AppDeleted { organization_id: *organization }
                     },
@@ -2266,6 +2443,23 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                     events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
                     *op_index += 1;
+
+                    // Audit: organization purge
+                    let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                    self.emit_audit(
+                        AuditKeys::organization(organization.value(), "purge", ts_ns),
+                        &AuditRecord {
+                            action: "purge_organization".into(),
+                            caller,
+                            target: org_slug.map_or_else(
+                                || organization.value().to_string(),
+                                |s| s.value().to_string(),
+                            ),
+                            timestamp_ns: ts_ns,
+                            details: vec![],
+                        },
+                        block_height,
+                    );
                 }
 
                 (response, None)
@@ -2315,6 +2509,27 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                     events.push(emitter.build(block_height, *op_index, block_timestamp, ttl_days));
                     *op_index += 1;
+
+                    // Audit: organization suspension
+                    let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                    let mut details = Vec::new();
+                    if let Some(r) = reason {
+                        details.push(("reason".into(), r.clone()));
+                    }
+                    self.emit_audit(
+                        AuditKeys::organization(organization.value(), "suspend", ts_ns),
+                        &AuditRecord {
+                            action: "suspend_organization".into(),
+                            caller,
+                            target: org_slug.map_or_else(
+                                || organization.value().to_string(),
+                                |s| s.value().to_string(),
+                            ),
+                            timestamp_ns: ts_ns,
+                            details,
+                        },
+                        block_height,
+                    );
                 }
 
                 (response, None)
@@ -2598,7 +2813,32 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     SystemRequest::UpdateUser { user_id, role, primary_email } => {
                         if let Some(sys) = &sys_service {
                             match sys.update_user(*user_id, *role, *primary_email) {
-                                Ok(_user) => LedgerResponse::UserUpdated { user_id: *user_id },
+                                Ok(_user) => {
+                                    // Audit: user role change (only when role is being modified)
+                                    if let Some(new_role) = role {
+                                        let ts_ns =
+                                            block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                                        self.emit_audit(
+                                            AuditKeys::user_role(
+                                                user_id.value(),
+                                                "update_role",
+                                                ts_ns,
+                                            ),
+                                            &AuditRecord {
+                                                action: "update_user_role".into(),
+                                                caller,
+                                                target: user_id.value().to_string(),
+                                                timestamp_ns: ts_ns,
+                                                details: vec![(
+                                                    "new_role".into(),
+                                                    format!("{new_role:?}"),
+                                                )],
+                                            },
+                                            block_height,
+                                        );
+                                    }
+                                    LedgerResponse::UserUpdated { user_id: *user_id }
+                                },
                                 Err(e) => LedgerResponse::Error {
                                     code: ErrorCode::Internal,
                                     message: format!("Failed to update user: {e}"),
@@ -2956,6 +3196,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         // Update user→org index for initial admin member
                         state.user_org_index.entry(*admin).or_default().insert(organization_id);
 
+                        // Audit: organization creation
+                        let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                        self.emit_audit(
+                            AuditKeys::organization(organization_id.value(), "create", ts_ns),
+                            &AuditRecord {
+                                action: "create_organization".into(),
+                                caller,
+                                target: slug.value().to_string(),
+                                timestamp_ns: ts_ns,
+                                details: vec![
+                                    ("region".into(), format!("{region:?}")),
+                                    ("tier".into(), format!("{tier:?}")),
+                                    ("admin".into(), admin.value().to_string()),
+                                ],
+                            },
+                            block_height,
+                        );
+
                         LedgerResponse::OrganizationCreated {
                             organization_id,
                             organization_slug: *slug,
@@ -3056,6 +3314,23 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             if let Err(e) = save_org_profile(state_layer, *organization, &profile) {
                                 return (e, None);
                             }
+
+                            // Audit: organization update
+                            let org_slug = state.id_to_slug.get(organization).copied();
+                            let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                            let slug_val = org_slug.map_or(0, |s| s.value());
+                            self.emit_audit(
+                                AuditKeys::organization(organization.value(), "update", ts_ns),
+                                &AuditRecord {
+                                    action: "update_organization".into(),
+                                    caller,
+                                    target: slug_val.to_string(),
+                                    timestamp_ns: ts_ns,
+                                    details: vec![],
+                                },
+                                block_height,
+                            );
+
                             LedgerResponse::OrganizationUpdated { organization_id: *organization }
                         } else {
                             ledger_error(
@@ -5089,6 +5364,22 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 .build(block_height, *op_index, block_timestamp, ttl_days),
                         );
                         *op_index += 1;
+
+                        // Audit: user deletion
+                        let user_slug = state.user_id_to_slug.get(user_id).copied();
+                        let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                        let slug_val = user_slug.map_or(0, |s| s.value());
+                        self.emit_audit(
+                            AuditKeys::user(slug_val, "delete", ts_ns),
+                            &AuditRecord {
+                                action: "delete_user".into(),
+                                caller,
+                                target: user_id.value().to_string(),
+                                timestamp_ns: ts_ns,
+                                details: vec![],
+                            },
+                            block_height,
+                        );
                     },
                     (
                         LedgerResponse::UserEmailCreated { email_id },
@@ -5144,6 +5435,22 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 .build(block_height, *op_index, block_timestamp, ttl_days),
                         );
                         *op_index += 1;
+
+                        // Audit: user erasure (GDPR Article 17 — most audit-critical)
+                        let user_slug = state.user_id_to_slug.get(user_id).copied();
+                        let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                        let slug_val = user_slug.map_or(0, |s| s.value());
+                        self.emit_audit(
+                            AuditKeys::user(slug_val, "erase", ts_ns),
+                            &AuditRecord {
+                                action: "erase_user".into(),
+                                caller,
+                                target: user_id.value().to_string(),
+                                timestamp_ns: ts_ns,
+                                details: vec![("region".into(), region.as_str().to_owned())],
+                            },
+                            block_height,
+                        );
                     },
                     (
                         LedgerResponse::UsersMigrated { migrated, skipped, errors, .. },
@@ -5254,6 +5561,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     );
                 }
 
+                // Audit: signing key creation
+                let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                self.emit_audit(
+                    AuditKeys::signing_key(kid, "create", ts_ns),
+                    &AuditRecord {
+                        action: "create_signing_key".into(),
+                        caller,
+                        target: kid.clone(),
+                        timestamp_ns: ts_ns,
+                        details: vec![("scope".into(), format!("{scope:?}"))],
+                    },
+                    block_height,
+                );
+
                 (LedgerResponse::SigningKeyCreated { id, kid: kid.clone() }, None)
             },
 
@@ -5345,6 +5666,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     );
                 }
 
+                // Audit: signing key rotation
+                let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                self.emit_audit(
+                    AuditKeys::signing_key(old_kid, "rotate", ts_ns),
+                    &AuditRecord {
+                        action: "rotate_signing_key".into(),
+                        caller,
+                        target: old_kid.clone(),
+                        timestamp_ns: ts_ns,
+                        details: vec![
+                            ("old_kid".into(), old_kid.clone()),
+                            ("new_kid".into(), new_kid.clone()),
+                            ("grace_period_secs".into(), grace_period_secs.to_string()),
+                        ],
+                    },
+                    block_height,
+                );
+
                 (
                     LedgerResponse::SigningKeyRotated {
                         old_kid: old_kid.clone(),
@@ -5381,6 +5720,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         format!("Failed to revoke signing key: {e}"),
                     );
                 }
+
+                // Audit: signing key revocation
+                let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                self.emit_audit(
+                    AuditKeys::signing_key(kid, "revoke", ts_ns),
+                    &AuditRecord {
+                        action: "revoke_signing_key".into(),
+                        caller,
+                        target: kid.clone(),
+                        timestamp_ns: ts_ns,
+                        details: vec![("previous_status".into(), format!("{:?}", key.status))],
+                    },
+                    block_height,
+                );
 
                 (LedgerResponse::SigningKeyRevoked { kid: kid.clone() }, None)
             },
@@ -5740,13 +6093,31 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 };
 
                 match sys.revoke_all_user_sessions(*user, user_slug, block_timestamp) {
-                    Ok(result) => (
-                        LedgerResponse::AllUserSessionsRevoked {
-                            count: result.revoked_count,
-                            version: result.new_version,
-                        },
-                        None,
-                    ),
+                    Ok(result) => {
+                        // Audit: revoke all user sessions
+                        let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                        self.emit_audit(
+                            AuditKeys::user(user_slug.value(), "revoke_sessions", ts_ns),
+                            &AuditRecord {
+                                action: "revoke_all_user_sessions".into(),
+                                caller,
+                                target: user.value().to_string(),
+                                timestamp_ns: ts_ns,
+                                details: vec![(
+                                    "revoked_count".into(),
+                                    result.revoked_count.to_string(),
+                                )],
+                            },
+                            block_height,
+                        );
+                        (
+                            LedgerResponse::AllUserSessionsRevoked {
+                                count: result.revoked_count,
+                                version: result.new_version,
+                            },
+                            None,
+                        )
+                    },
                     Err(e) => error_result(
                         ErrorCode::Internal,
                         format!("Failed to revoke all user sessions: {e}"),
@@ -5771,13 +6142,36 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 };
 
                 match sys.revoke_all_app_sessions(*organization, *app, app_slug, block_timestamp) {
-                    Ok(result) => (
-                        LedgerResponse::AllAppSessionsRevoked {
-                            count: result.revoked_count,
-                            version: result.new_version,
-                        },
-                        None,
-                    ),
+                    Ok(result) => {
+                        // Audit: revoke all app sessions
+                        let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
+                        self.emit_audit(
+                            AuditKeys::app(
+                                organization.value(),
+                                app.value(),
+                                "revoke_sessions",
+                                ts_ns,
+                            ),
+                            &AuditRecord {
+                                action: "revoke_all_app_sessions".into(),
+                                caller,
+                                target: app_slug.value().to_string(),
+                                timestamp_ns: ts_ns,
+                                details: vec![(
+                                    "revoked_count".into(),
+                                    result.revoked_count.to_string(),
+                                )],
+                            },
+                            block_height,
+                        );
+                        (
+                            LedgerResponse::AllAppSessionsRevoked {
+                                count: result.revoked_count,
+                                version: result.new_version,
+                            },
+                            None,
+                        )
+                    },
                     Err(e) => error_result(
                         ErrorCode::Internal,
                         format!("Failed to revoke all app sessions: {e}"),
@@ -5902,6 +6296,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     pending,
                     log_id_bytes,
                     skip_state_writes,
+                    caller,
                 )
             },
 
@@ -6002,6 +6397,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     pending,
                     log_id_bytes,
                     skip_state_writes,
+                    caller,
                 )
             },
 
@@ -6023,6 +6419,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         pending,
                         log_id_bytes,
                         skip_state_writes,
+                        caller,
                     );
                     responses.push(response);
                     if vault_entry.is_some() {

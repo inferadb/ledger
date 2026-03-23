@@ -60,6 +60,7 @@ async fn ensure_signing_key(addr: std::net::SocketAddr) -> Result<(), Box<dyn st
         .create_signing_key(proto::CreateSigningKeyRequest {
             scope: proto::SigningKeyScope::Global as i32,
             organization: None,
+            caller: None,
         })
         .await;
     match result {
@@ -87,6 +88,7 @@ async fn wait_for_signing_key_ready(
             .create_user_session(proto::CreateUserSessionRequest {
                 user: Some(proto::UserSlug { slug: user.value() }),
                 credential_used: None,
+                caller: Some(proto::UserSlug { slug: user.value() }),
             })
             .await;
 
@@ -112,7 +114,7 @@ async fn get_active_global_kid(
     client: &mut proto::token_service_client::TokenServiceClient<tonic::transport::Channel>,
 ) -> String {
     let keys = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None })
+        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
         .await
         .expect("get public keys")
         .into_inner()
@@ -149,7 +151,9 @@ async fn poll_for_public_keys(
 
     while start.elapsed() < timeout {
         let mut client = create_token_client(addr).await.expect("connect");
-        let result = client.get_public_keys(proto::GetPublicKeysRequest { organization }).await;
+        let result = client
+            .get_public_keys(proto::GetPublicKeysRequest { organization, caller: None })
+            .await;
 
         if let Ok(resp) = result {
             let keys = resp.into_inner().keys;
@@ -309,6 +313,7 @@ async fn test_revoke_all_user_sessions() {
         .create_user_session(proto::CreateUserSessionRequest {
             user: Some(proto::UserSlug { slug: user.value() }),
             credential_used: None,
+            caller: Some(proto::UserSlug { slug: user.value() }),
         })
         .await
         .expect("session 2")
@@ -319,6 +324,7 @@ async fn test_revoke_all_user_sessions() {
         .create_user_session(proto::CreateUserSessionRequest {
             user: Some(proto::UserSlug { slug: user.value() }),
             credential_used: None,
+            caller: Some(proto::UserSlug { slug: user.value() }),
         })
         .await
         .expect("session 3")
@@ -341,6 +347,7 @@ async fn test_revoke_all_user_sessions() {
     let revoke_resp = client
         .revoke_all_user_sessions(proto::RevokeAllUserSessionsRequest {
             user: Some(proto::UserSlug { slug: user.value() }),
+            caller: Some(proto::UserSlug { slug: user.value() }),
         })
         .await
         .expect("revoke_all should succeed");
@@ -368,6 +375,7 @@ async fn test_revoke_all_user_sessions() {
         .create_user_session(proto::CreateUserSessionRequest {
             user: Some(proto::UserSlug { slug: user.value() }),
             credential_used: None,
+            caller: Some(proto::UserSlug { slug: user.value() }),
         })
         .await
         .expect("new session after revoke-all should work");
@@ -409,7 +417,7 @@ async fn test_org_deletion_cascades_token_revocation() {
     org_client
         .delete_organization(proto::DeleteOrganizationRequest {
             slug: Some(proto::OrganizationSlug { slug: org.value() }),
-            initiator: Some(proto::UserSlug { slug: admin_slug }),
+            caller: Some(proto::UserSlug { slug: admin_slug }),
         })
         .await
         .expect("delete organization");
@@ -533,6 +541,7 @@ async fn test_concurrent_refresh_and_revoke_all() {
         client
             .revoke_all_user_sessions(proto::RevokeAllUserSessionsRequest {
                 user: Some(proto::UserSlug { slug: user.value() }),
+                caller: Some(proto::UserSlug { slug: user.value() }),
             })
             .await
     });
@@ -673,13 +682,13 @@ async fn create_app(
     addr: std::net::SocketAddr,
     org: OrganizationSlug,
     name: &str,
-    initiator: u64,
+    caller: u64,
 ) -> Result<AppSlug, Box<dyn std::error::Error>> {
     let mut client = create_app_client(addr).await?;
     let response = client
         .create_app(proto::CreateAppRequest {
             organization: Some(proto::OrganizationSlug { slug: org.value() }),
-            initiator: Some(proto::UserSlug { slug: initiator }),
+            caller: Some(proto::UserSlug { slug: caller }),
             name: name.to_string(),
             description: None,
         })
@@ -702,13 +711,13 @@ async fn add_app_vault(
     app: AppSlug,
     vault: VaultSlug,
     scopes: &[&str],
-    initiator: u64,
+    caller: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = create_app_client(addr).await?;
     client
         .add_app_vault(proto::AddAppVaultRequest {
             organization: Some(proto::OrganizationSlug { slug: org.value() }),
-            initiator: Some(proto::UserSlug { slug: initiator }),
+            caller: Some(proto::UserSlug { slug: caller }),
             app: Some(proto::AppSlug { slug: app.value() }),
             vault: Some(proto::VaultSlug { slug: vault.value() }),
             allowed_scopes: scopes.iter().map(|s| s.to_string()).collect(),
@@ -724,13 +733,13 @@ async fn update_app_vault_scopes(
     app: AppSlug,
     vault: VaultSlug,
     scopes: &[&str],
-    initiator: u64,
+    caller: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = create_app_client(addr).await?;
     client
         .update_app_vault(proto::UpdateAppVaultRequest {
             organization: Some(proto::OrganizationSlug { slug: org.value() }),
-            initiator: Some(proto::UserSlug { slug: initiator }),
+            caller: Some(proto::UserSlug { slug: caller }),
             app: Some(proto::AppSlug { slug: app.value() }),
             vault: Some(proto::VaultSlug { slug: vault.value() }),
             allowed_scopes: scopes.iter().map(|s| s.to_string()).collect(),
@@ -745,13 +754,13 @@ async fn remove_app_vault(
     org: OrganizationSlug,
     app: AppSlug,
     vault: VaultSlug,
-    initiator: u64,
+    caller: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = create_app_client(addr).await?;
     client
         .remove_app_vault(proto::RemoveAppVaultRequest {
             organization: Some(proto::OrganizationSlug { slug: org.value() }),
-            initiator: Some(proto::UserSlug { slug: initiator }),
+            caller: Some(proto::UserSlug { slug: caller }),
             app: Some(proto::AppSlug { slug: app.value() }),
             vault: Some(proto::VaultSlug { slug: vault.value() }),
         })
@@ -765,13 +774,13 @@ async fn set_app_enabled(
     org: OrganizationSlug,
     app: AppSlug,
     enabled: bool,
-    initiator: u64,
+    caller: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = create_app_client(addr).await?;
     client
         .set_app_enabled(proto::SetAppEnabledRequest {
             organization: Some(proto::OrganizationSlug { slug: org.value() }),
-            initiator: Some(proto::UserSlug { slug: initiator }),
+            caller: Some(proto::UserSlug { slug: caller }),
             app: Some(proto::AppSlug { slug: app.value() }),
             enabled,
         })
@@ -789,6 +798,7 @@ async fn ensure_org_signing_key(
         .create_signing_key(proto::CreateSigningKeyRequest {
             scope: proto::SigningKeyScope::Organization as i32,
             organization: Some(proto::OrganizationSlug { slug: org.value() }),
+            caller: None,
         })
         .await?;
     Ok(())
@@ -1235,6 +1245,7 @@ async fn test_signing_key_rotation_during_active_sessions() {
             kid: old_kid.clone(),
             grace_period_secs: 3600,
             force_revoke: false,
+            caller: None,
         })
         .await
         .expect("rotate signing key");
@@ -1260,6 +1271,7 @@ async fn test_signing_key_rotation_during_active_sessions() {
         .create_user_session(proto::CreateUserSessionRequest {
             user: Some(proto::UserSlug { slug: user.value() }),
             credential_used: None,
+            caller: Some(proto::UserSlug { slug: user.value() }),
         })
         .await
         .expect("new session after rotation")
@@ -1274,7 +1286,7 @@ async fn test_signing_key_rotation_during_active_sessions() {
 
     // Public keys should show both: new key as active, old key as rotated
     let keys_after = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None })
+        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
         .await
         .expect("get public keys after rotation")
         .into_inner()
@@ -1318,7 +1330,7 @@ async fn test_signing_key_revocation_immediately_invalidates() {
 
     // Revoke the signing key
     client
-        .revoke_signing_key(proto::RevokeSigningKeyRequest { kid: kid.clone() })
+        .revoke_signing_key(proto::RevokeSigningKeyRequest { kid: kid.clone(), caller: None })
         .await
         .expect("revoke signing key");
 
@@ -1339,7 +1351,7 @@ async fn test_signing_key_revocation_immediately_invalidates() {
 
     // GetPublicKeys should no longer show the key (revoked keys are filtered out)
     let keys_after = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None })
+        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
         .await
         .expect("get public keys after revocation")
         .into_inner()
@@ -1378,6 +1390,7 @@ async fn test_signing_key_rotation_grace_zero() {
             kid: old_kid.clone(),
             grace_period_secs: 0,
             force_revoke: true,
+            caller: None,
         })
         .await
         .expect("rotate with force_revoke");
@@ -1405,7 +1418,7 @@ async fn test_signing_key_rotation_grace_zero() {
 
     // GetPublicKeys should only show the new key (old key is revoked, not rotated)
     let keys_after = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None })
+        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
         .await
         .expect("get public keys after zero-grace rotation")
         .into_inner()
@@ -1484,6 +1497,7 @@ async fn test_create_signing_key_idempotency() {
         .create_signing_key(proto::CreateSigningKeyRequest {
             scope: proto::SigningKeyScope::Global as i32,
             organization: None,
+            caller: None,
         })
         .await
         .expect("first CreateSigningKey should succeed");
@@ -1494,13 +1508,14 @@ async fn test_create_signing_key_idempotency() {
         .create_signing_key(proto::CreateSigningKeyRequest {
             scope: proto::SigningKeyScope::Global as i32,
             organization: None,
+            caller: None,
         })
         .await;
 
     // The second call may succeed (idempotent) or fail (scope already has active key).
     // Either way, GetPublicKeys should show exactly one active global key.
     let keys = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None })
+        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
         .await
         .expect("get public keys")
         .into_inner()
@@ -1547,6 +1562,7 @@ async fn test_global_key_not_found_returns_error() {
         .create_user_session(proto::CreateUserSessionRequest {
             user: Some(proto::UserSlug { slug: user.value() }),
             credential_used: None,
+            caller: Some(proto::UserSlug { slug: user.value() }),
         })
         .await;
 
@@ -1566,7 +1582,7 @@ async fn test_global_key_not_found_returns_error() {
             // This is still a valid test outcome: the saga fired, key was created,
             // and CreateUserSession succeeded with it.
             let keys = client
-                .get_public_keys(proto::GetPublicKeysRequest { organization: None })
+                .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
                 .await
                 .expect("get public keys")
                 .into_inner()
@@ -1608,13 +1624,14 @@ async fn test_state_machine_timestamps_use_proposed_at() {
         .create_signing_key(proto::CreateSigningKeyRequest {
             scope: proto::SigningKeyScope::Global as i32,
             organization: None,
+            caller: None,
         })
         .await
         .expect("create signing key");
 
     // Read the created key's timestamps
     let keys = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None })
+        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
         .await
         .expect("get public keys")
         .into_inner()
@@ -1636,13 +1653,14 @@ async fn test_state_machine_timestamps_use_proposed_at() {
             kid: old_kid.clone(),
             grace_period_secs,
             force_revoke: false,
+            caller: None,
         })
         .await
         .expect("rotate signing key");
 
     // Read both keys (old=rotated, new=active)
     let keys = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None })
+        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
         .await
         .expect("get public keys after rotation")
         .into_inner()
@@ -1780,12 +1798,13 @@ async fn test_token_maintenance_transitions_rotated_keys() {
         .create_signing_key(proto::CreateSigningKeyRequest {
             scope: proto::SigningKeyScope::Global as i32,
             organization: None,
+            caller: None,
         })
         .await
         .expect("create signing key");
 
     let keys = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None })
+        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
         .await
         .expect("get keys")
         .into_inner()
@@ -1799,13 +1818,14 @@ async fn test_token_maintenance_transitions_rotated_keys() {
             kid: old_kid.clone(),
             grace_period_secs: 1,
             force_revoke: false,
+            caller: None,
         })
         .await
         .expect("rotate signing key");
 
     // Immediately after rotation: should have 2 keys (active + rotated)
     let keys_after_rotate = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None })
+        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
         .await
         .expect("get keys after rotate")
         .into_inner()
@@ -1822,7 +1842,7 @@ async fn test_token_maintenance_transitions_rotated_keys() {
     // After maintenance: the rotated key should be transitioned to revoked and
     // no longer visible in GetPublicKeys (revoked keys are filtered out)
     let keys_after_maintenance = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None })
+        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
         .await
         .expect("get keys after maintenance")
         .into_inner()
@@ -1856,12 +1876,13 @@ async fn test_token_maintenance_idempotency() {
         .create_signing_key(proto::CreateSigningKeyRequest {
             scope: proto::SigningKeyScope::Global as i32,
             organization: None,
+            caller: None,
         })
         .await
         .expect("create signing key");
 
     let keys = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None })
+        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
         .await
         .expect("get keys")
         .into_inner()
@@ -1874,6 +1895,7 @@ async fn test_token_maintenance_idempotency() {
             kid: old_kid,
             grace_period_secs: 1,
             force_revoke: false,
+            caller: None,
         })
         .await
         .expect("rotate signing key");
@@ -1886,7 +1908,7 @@ async fn test_token_maintenance_idempotency() {
     // If the job double-counted or created duplicate transitions, we'd see errors in logs
     // or inconsistent state.
     let keys_final = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None })
+        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
         .await
         .expect("get keys after multiple maintenance cycles")
         .into_inner()
@@ -1905,6 +1927,7 @@ async fn test_token_maintenance_idempotency() {
             kid: current_kid.clone(),
             grace_period_secs: 1,
             force_revoke: false,
+            caller: None,
         })
         .await
         .expect("second rotation should succeed");
@@ -1913,7 +1936,7 @@ async fn test_token_maintenance_idempotency() {
     tokio::time::sleep(Duration::from_secs(8)).await;
 
     let keys_after_second = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None })
+        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
         .await
         .expect("get keys after second rotation maintenance")
         .into_inner()

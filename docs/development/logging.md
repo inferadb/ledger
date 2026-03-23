@@ -262,7 +262,6 @@ async fn test_read_emits_log_event() {
 | `set_sequence(seq)`      | Per-client sequence number    |
 | `set_organization(slug)` | Target organization slug      |
 | `set_vault(slug)`        | Target vault slug             |
-| `set_actor(actor)`       | Identity performing operation |
 
 ### System Context
 

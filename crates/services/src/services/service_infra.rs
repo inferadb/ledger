@@ -93,6 +93,8 @@ impl ServiceContext {
     /// Creates a `RequestContext` for a service method and fills in common fields.
     ///
     /// Replaces the per-service `org_ctx!`/`vault_ctx!`/`user_ctx!`/`app_ctx!` macros.
+    /// The `caller` parameter extracts the user slug from the proto request's
+    /// `UserSlug caller` field for canonical log line emission.
     pub(crate) fn make_request_context(
         &self,
         service: &'static str,
@@ -140,7 +142,7 @@ impl ServiceContext {
         ctx: &mut RequestContext,
     ) -> Result<LedgerResponse, Status> {
         let timeout = self.effective_timeout(grpc_metadata);
-        let payload = RaftPayload::new(request);
+        let payload = RaftPayload::new(request, ctx.caller_or_zero());
 
         ctx.start_raft_timer();
         let result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
@@ -214,7 +216,7 @@ impl ServiceContext {
 
         let timeout = self.effective_timeout(grpc_metadata);
         let request = LedgerRequest::System(system_request);
-        let payload = RaftPayload::new(request);
+        let payload = RaftPayload::new(request, ctx.caller_or_zero());
 
         ctx.start_raft_timer();
         let result = tokio::time::timeout(timeout, region_group.raft().client_write(payload)).await;
@@ -285,7 +287,7 @@ impl ServiceContext {
         })?;
 
         let timeout = self.effective_timeout(grpc_metadata);
-        let payload = RaftPayload::new(request);
+        let payload = RaftPayload::new(request, ctx.caller_or_zero());
 
         ctx.start_raft_timer();
         let result = tokio::time::timeout(timeout, region_group.raft().client_write(payload)).await;

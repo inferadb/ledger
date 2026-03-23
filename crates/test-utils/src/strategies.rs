@@ -184,21 +184,19 @@ pub fn arb_region() -> impl Strategy<Value = Region> {
     (0usize..ALL_REGIONS.len()).prop_map(|i| ALL_REGIONS[i])
 }
 
-/// Generates an arbitrary [`Transaction`] with 1-20 operations, random client ID, and actor.
+/// Generates an arbitrary [`Transaction`] with 1-20 operations and random client ID.
 pub fn arb_transaction() -> impl Strategy<Value = Transaction> {
     (
         arb_tx_id(),
         "[a-z]{3,10}", // client_id
         1u64..100_000, // sequence
-        "[a-z]{3,10}", // actor
         arb_operation_sequence(),
         arb_timestamp(),
     )
-        .prop_map(|(id, client_id, sequence, actor, operations, timestamp)| Transaction {
+        .prop_map(|(id, client_id, sequence, operations, timestamp)| Transaction {
             id,
             client_id: ClientId::new(client_id),
             sequence,
-            actor,
             operations,
             timestamp,
         })
@@ -467,7 +465,6 @@ mod tests {
         fn strategy_produces_valid_transactions(tx in arb_transaction()) {
             prop_assert!(!tx.client_id.value().is_empty());
             prop_assert!(tx.sequence > 0);
-            prop_assert!(!tx.actor.is_empty());
             prop_assert!(!tx.operations.is_empty());
         }
 

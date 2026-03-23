@@ -183,7 +183,6 @@ pub fn vault_entry_to_proto_block(
                 seconds: tx.timestamp.timestamp(),
                 nanos: tx.timestamp.timestamp_subsec_nanos() as i32,
             }),
-            actor: tx.actor.clone(),
         })
         .collect();
 

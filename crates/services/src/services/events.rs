@@ -899,6 +899,7 @@ mod tests {
             filter: None,
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
 
         let resp = service.list_events(req).await.unwrap();
@@ -920,6 +921,7 @@ mod tests {
             filter: None,
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
 
         let resp = service.list_events(req).await.unwrap();
@@ -947,6 +949,7 @@ mod tests {
             filter: None,
             limit: 2,
             page_token: String::new(),
+            caller: None,
         });
         let resp = service.list_events(req).await.unwrap();
         assert_eq!(resp.get_ref().entries.len(), 2);
@@ -958,6 +961,7 @@ mod tests {
             filter: None,
             limit: 2,
             page_token: resp.get_ref().next_page_token.clone(),
+            caller: None,
         });
         let resp = service.list_events(req).await.unwrap();
         assert_eq!(resp.get_ref().entries.len(), 2);
@@ -969,6 +973,7 @@ mod tests {
             filter: None,
             limit: 2,
             page_token: resp.get_ref().next_page_token.clone(),
+            caller: None,
         });
         let resp = service.list_events(req).await.unwrap();
         assert_eq!(resp.get_ref().entries.len(), 1);
@@ -993,6 +998,7 @@ mod tests {
             }),
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
 
         let resp = service.list_events(req).await.unwrap();
@@ -1019,6 +1025,7 @@ mod tests {
             }),
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
 
         let resp = service.list_events(req).await.unwrap();
@@ -1047,6 +1054,7 @@ mod tests {
             }),
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
 
         let resp = service.list_events(req).await.unwrap();
@@ -1092,6 +1100,7 @@ mod tests {
             filter: None,
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
         let resp = service.list_events(req).await.unwrap();
         assert_eq!(resp.get_ref().entries.len(), 1);
@@ -1110,6 +1119,7 @@ mod tests {
             filter: None,
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
         let resp = service.list_events(req).await.unwrap();
         assert_eq!(resp.get_ref().entries.len(), 1);
@@ -1124,6 +1134,7 @@ mod tests {
             filter: None,
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
         let err = service.list_events(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1140,6 +1151,7 @@ mod tests {
         let req = Request::new(proto::GetEventRequest {
             organization: Some(proto::OrganizationSlug { slug: 100 }),
             event_id: vec![42u8; 16],
+            caller: None,
         });
         let resp = service.get_event(req).await.unwrap();
         let got = resp.get_ref().entry.as_ref().unwrap();
@@ -1153,6 +1165,7 @@ mod tests {
         let req = Request::new(proto::GetEventRequest {
             organization: Some(proto::OrganizationSlug { slug: 100 }),
             event_id: vec![99u8; 16],
+            caller: None,
         });
         let err = service.get_event(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
@@ -1190,6 +1203,7 @@ mod tests {
         let req = Request::new(proto::GetEventRequest {
             organization: Some(proto::OrganizationSlug { slug: 200 }),
             event_id: vec![42u8; 16],
+            caller: None,
         });
         let err = service.get_event(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
@@ -1202,6 +1216,7 @@ mod tests {
         let req = Request::new(proto::GetEventRequest {
             organization: Some(proto::OrganizationSlug { slug: 100 }),
             event_id: vec![1, 2, 3], // wrong length
+            caller: None,
         });
         let err = service.get_event(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1226,6 +1241,7 @@ mod tests {
         let req = Request::new(proto::CountEventsRequest {
             organization: Some(proto::OrganizationSlug { slug: 100 }),
             filter: None,
+            caller: None,
         });
         let resp = service.count_events(req).await.unwrap();
         assert_eq!(resp.get_ref().count, 7);
@@ -1247,6 +1263,7 @@ mod tests {
                 actions: vec!["write_committed".to_string()],
                 ..Default::default()
             }),
+            caller: None,
         });
         let resp = service.count_events(req).await.unwrap();
         assert_eq!(resp.get_ref().count, 2);
@@ -1264,6 +1281,7 @@ mod tests {
         let req = Request::new(proto::CountEventsRequest {
             organization: Some(proto::OrganizationSlug { slug: 0 }),
             filter: None,
+            caller: None,
         });
         let resp = service.count_events(req).await.unwrap();
         assert_eq!(resp.get_ref().count, 2);
@@ -1279,6 +1297,7 @@ mod tests {
             source_service: "engine".to_string(),
             organization: Some(proto::OrganizationSlug { slug: 0 }),
             entries: vec![],
+            caller: None,
         });
         let err = service.ingest_events(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unavailable);
@@ -1292,6 +1311,7 @@ mod tests {
             source_service: "engine".to_string(),
             organization: Some(proto::OrganizationSlug { slug: 100 }),
             entries: vec![make_ingest_entry("engine.task_completed", "user-1")],
+            caller: None,
         });
         let err = service.ingest_events(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unavailable);
@@ -1305,6 +1325,7 @@ mod tests {
             source_service: "rogue".to_string(),
             organization: Some(proto::OrganizationSlug { slug: 100 }),
             entries: vec![make_ingest_entry("rogue.evil", "user-1")],
+            caller: None,
         });
         let err = service.ingest_events(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
@@ -1323,6 +1344,7 @@ mod tests {
                 make_ingest_entry("engine.b", "u2"),
                 make_ingest_entry("engine.c", "u3"),
             ],
+            caller: None,
         });
         let err = service.ingest_events(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1336,6 +1358,7 @@ mod tests {
             source_service: "engine".to_string(),
             organization: Some(proto::OrganizationSlug { slug: 100 }),
             entries: vec![],
+            caller: None,
         });
         let resp = service.ingest_events(req).await.unwrap();
         let body = resp.get_ref();
@@ -1356,6 +1379,7 @@ mod tests {
                 make_ingest_entry("engine.task_completed", "alice"),
                 make_ingest_entry("engine.task_started", "bob"),
             ],
+            caller: None,
         });
         let resp = service.ingest_events(req).await.unwrap();
         assert_eq!(resp.get_ref().accepted_count, 2);
@@ -1367,6 +1391,7 @@ mod tests {
             filter: None,
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
         let list_resp = service.list_events(list_req).await.unwrap();
         assert_eq!(list_resp.get_ref().entries.len(), 2);
@@ -1406,6 +1431,7 @@ mod tests {
                 // Valid
                 make_ingest_entry("engine.done", "charlie"),
             ],
+            caller: None,
         });
         let resp = service.ingest_events(req).await.unwrap();
         assert_eq!(resp.get_ref().accepted_count, 2);
@@ -1424,6 +1450,7 @@ mod tests {
             filter: None,
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
         let list_resp = service.list_events(list_req).await.unwrap();
         assert_eq!(list_resp.get_ref().entries.len(), 2);
@@ -1439,6 +1466,7 @@ mod tests {
                 make_ingest_entry("control.wrong", "alice"),
                 make_ingest_entry("bad.prefix", "bob"),
             ],
+            caller: None,
         });
         let resp = service.ingest_events(req).await.unwrap();
         assert_eq!(resp.get_ref().accepted_count, 0);
@@ -1450,6 +1478,7 @@ mod tests {
             filter: None,
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
         let list_resp = service.list_events(list_req).await.unwrap();
         assert!(list_resp.get_ref().entries.is_empty());
@@ -1468,6 +1497,7 @@ mod tests {
             source_service: "engine".to_string(),
             organization: Some(proto::OrganizationSlug { slug: 100 }),
             entries: vec![make_ingest_entry("engine.task_done", "alice")],
+            caller: None,
         });
         service.ingest_events(req).await.unwrap();
 
@@ -1480,6 +1510,7 @@ mod tests {
             }),
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
         let list_resp = service.list_events(list_req).await.unwrap();
         assert_eq!(list_resp.get_ref().entries.len(), 1);
@@ -1494,6 +1525,7 @@ mod tests {
             }),
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
         let list_resp2 = service.list_events(list_req2).await.unwrap();
         assert_eq!(list_resp2.get_ref().entries.len(), 1);
@@ -1505,6 +1537,7 @@ mod tests {
             filter: None,
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
         let list_resp3 = service.list_events(list_req3).await.unwrap();
         assert_eq!(list_resp3.get_ref().entries.len(), 2);
@@ -1522,6 +1555,7 @@ mod tests {
             source_service: "engine".to_string(),
             organization: Some(proto::OrganizationSlug { slug: 100 }),
             entries: vec![make_ingest_entry("engine.a", "u1")],
+            caller: None,
         });
         let resp1 = service.ingest_events(req1).await.unwrap();
         assert_eq!(resp1.get_ref().accepted_count, 1);
@@ -1531,6 +1565,7 @@ mod tests {
             source_service: "engine".to_string(),
             organization: Some(proto::OrganizationSlug { slug: 100 }),
             entries: vec![make_ingest_entry("engine.b", "u2")],
+            caller: None,
         });
         let err = service.ingest_events(req2).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::ResourceExhausted);
@@ -1549,6 +1584,7 @@ mod tests {
             source_service: "engine".to_string(),
             organization: Some(proto::OrganizationSlug { slug: 100 }),
             entries: vec![make_ingest_entry("engine.a", "u1")],
+            caller: None,
         });
         service.ingest_events(req1).await.unwrap();
 
@@ -1557,6 +1593,7 @@ mod tests {
             source_service: "control".to_string(),
             organization: Some(proto::OrganizationSlug { slug: 100 }),
             entries: vec![make_ingest_entry("control.b", "u1")],
+            caller: None,
         });
         let resp2 = service.ingest_events(req2).await.unwrap();
         assert_eq!(resp2.get_ref().accepted_count, 1);
@@ -1584,6 +1621,7 @@ mod tests {
                 error_detail: None,
                 denial_reason: None,
             }],
+            caller: None,
         });
         let resp = service.ingest_events(req).await.unwrap();
         assert_eq!(resp.get_ref().accepted_count, 0);
@@ -1610,6 +1648,7 @@ mod tests {
                 error_detail: None,
                 denial_reason: None,
             }],
+            caller: None,
         });
         let resp = service.ingest_events(req).await.unwrap();
         assert_eq!(resp.get_ref().accepted_count, 0);
@@ -1655,6 +1694,7 @@ mod tests {
                     denial_reason: Some("quota exceeded".to_string()),
                 },
             ],
+            caller: None,
         });
         let resp = service.ingest_events(req).await.unwrap();
         assert_eq!(resp.get_ref().accepted_count, 3);
@@ -1665,6 +1705,7 @@ mod tests {
             filter: None,
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
         let list_resp = service.list_events(list_req).await.unwrap();
         assert_eq!(list_resp.get_ref().entries.len(), 3);
@@ -1693,6 +1734,7 @@ mod tests {
                 error_detail: None,
                 denial_reason: None,
             }],
+            caller: None,
         });
         let resp = service.ingest_events(req).await.unwrap();
         assert_eq!(resp.get_ref().accepted_count, 1);
@@ -1703,6 +1745,7 @@ mod tests {
             filter: None,
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
         let list_resp = service.list_events(list_req).await.unwrap();
         let entry = &list_resp.get_ref().entries[0];
@@ -1721,6 +1764,7 @@ mod tests {
             source_service: "control".to_string(),
             organization: Some(proto::OrganizationSlug { slug: 100 }),
             entries: vec![make_ingest_entry("control.deploy_started", "ci-bot")],
+            caller: None,
         });
         let resp = service.ingest_events(req).await.unwrap();
         assert_eq!(resp.get_ref().accepted_count, 1);
@@ -1746,6 +1790,7 @@ mod tests {
             }),
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
 
         let resp = service.list_events(req).await.unwrap();
@@ -1772,6 +1817,7 @@ mod tests {
             }),
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
 
         let resp = service.list_events(req).await.unwrap();
@@ -1797,6 +1843,7 @@ mod tests {
             }),
             limit: 10,
             page_token: String::new(),
+            caller: None,
         });
 
         let resp = service.list_events(req).await.unwrap();

@@ -65,8 +65,8 @@ use crate::{
 /// Key prefix for saga records in _system organization.
 const SAGA_KEY_PREFIX: &str = "_meta:saga:";
 
-/// Actor identifier for saga operations.
-const SAGA_ACTOR: &str = "system:saga";
+/// Client ID for saga operations.
+const SAGA_CLIENT_ID: &str = "system:saga";
 
 /// System organization ID.
 const SYSTEM_ORGANIZATION_ID: OrganizationId = OrganizationId::new(0);
@@ -314,7 +314,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         region: Region,
         request: LedgerRequest,
     ) -> std::result::Result<crate::types::LedgerResponse, SagaError> {
-        let payload = RaftPayload::new(request);
+        let payload = RaftPayload::system(request);
         let result = match &self.manager {
             Some(manager) => {
                 let region_group =
@@ -380,14 +380,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     fn build_transaction(operations: Vec<Operation>) -> Transaction {
         Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
-            client_id: ClientId::new(SAGA_ACTOR),
+            client_id: ClientId::new(SAGA_CLIENT_ID),
             sequence: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0),
             operations,
             timestamp: chrono::Utc::now(),
-            actor: SAGA_ACTOR.to_string(),
         }
     }
 
@@ -420,11 +419,10 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             match self.system_service().get_organization(organization) {
                 Ok(Some(registry)) => registry.region,
                 Ok(None) => {
-                    warn!(
-                        organization = organization.value(),
-                        "Organization not found in state layer, falling back to GLOBAL"
-                    );
-                    Region::GLOBAL
+                    return Err(SagaError::EntityNotFound {
+                        entity_type: "Organization".into(),
+                        identifier: organization.value().to_string(),
+                    });
                 },
                 Err(e) => {
                     warn!(
@@ -461,7 +459,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 // Step 1: Soft-delete user via SystemRequest (proper postcard encoding).
                 let request =
                     LedgerRequest::System(SystemRequest::DeleteUser { user_id: saga.input.user });
-                let result = self.raft.client_write(RaftPayload::new(request)).await;
+                let result = self.raft.client_write(RaftPayload::system(request)).await;
 
                 match result {
                     Ok(_) => {
@@ -612,7 +610,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             request_hash: 0,
         };
 
-        self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+        self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
             SagaError::SequenceAllocation {
                 message: format!("{e:?}"),
                 backtrace: snafu::Backtrace::generate(),
@@ -650,7 +648,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             // Migrating — instead, propose a ResumeOrganization to revert status
             let request =
                 LedgerRequest::ResumeOrganization { organization: saga.input.organization_id };
-            let _ = self.raft.client_write(RaftPayload::new(request)).await;
+            let _ = self.raft.client_write(RaftPayload::system(request)).await;
 
             saga.transition(MigrateOrgSagaState::TimedOut);
             return Ok(());
@@ -665,7 +663,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 };
 
                 let result =
-                    self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                    self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
                         SagaError::SagaRaftWrite {
                             message: format!("{e:?}"),
                             backtrace: snafu::Backtrace::generate(),
@@ -747,7 +745,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     LedgerRequest::CompleteMigration { organization: saga.input.organization_id };
 
                 let result =
-                    self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                    self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
                         SagaError::SagaRaftWrite {
                             message: format!("{e:?}"),
                             backtrace: snafu::Backtrace::generate(),
@@ -825,7 +823,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
                 region: Some(saga.input.source_region),
             });
-            let _ = self.raft.client_write(RaftPayload::new(request)).await;
+            let _ = self.raft.client_write(RaftPayload::system(request)).await;
 
             saga.transition(MigrateUserSagaState::TimedOut);
             return Ok(());
@@ -839,7 +837,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     status: inferadb_ledger_state::system::UserDirectoryStatus::Migrating,
                     region: None, // keep current region
                 });
-                self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
                     SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
                         backtrace: snafu::Backtrace::generate(),
@@ -869,7 +867,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
                     region: Some(saga.input.target_region),
                 });
-                self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
                     SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
                         backtrace: snafu::Backtrace::generate(),
@@ -921,7 +919,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 let hmac = hmac_hex.clone();
                 let request =
                     LedgerRequest::System(SystemRequest::RemoveEmailHash { hmac_hex: hmac });
-                let _ = self.raft.client_write(RaftPayload::new(request)).await;
+                let _ = self.raft.client_write(RaftPayload::system(request)).await;
             }
             saga.transition(CreateUserSagaState::TimedOut);
             return Ok(());
@@ -944,7 +942,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     hmac_hex: saga.input.hmac.clone(),
                     user_id,
                 });
-                self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
                     SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
                         backtrace: snafu::Backtrace::generate(),
@@ -972,7 +970,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     slug: user_slug,
                     region: saga.input.region,
                 });
-                self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
                     SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
                         backtrace: snafu::Backtrace::generate(),
@@ -1000,7 +998,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
                     region: Some(saga.input.region),
                 });
-                self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
                     SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
                         backtrace: snafu::Backtrace::generate(),
@@ -1089,7 +1087,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     organization: *organization_id,
                     status: OrganizationStatus::Deleted,
                 });
-                let _ = self.raft.client_write(RaftPayload::new(request)).await;
+                let _ = self.raft.client_write(RaftPayload::system(request)).await;
             }
             saga.transition(CreateOrganizationSagaState::TimedOut);
             return Ok(());
@@ -1105,7 +1103,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     admin: saga.input.admin,
                 });
                 let result =
-                    self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                    self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
                         SagaError::SagaRaftWrite {
                             message: format!("{e:?}"),
                             backtrace: snafu::Backtrace::generate(),
@@ -1201,7 +1199,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     organization: organization_id,
                     status: OrganizationStatus::Active,
                 });
-                self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
                     SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
                         backtrace: snafu::Backtrace::generate(),
@@ -1276,7 +1274,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                         let request = LedgerRequest::System(SystemRequest::RemoveEmailHash {
                             hmac_hex: s.input.hmac.clone(),
                         });
-                        let _ = self.raft.client_write(RaftPayload::new(request)).await;
+                        let _ = self.raft.client_write(RaftPayload::system(request)).await;
                         cleanup.push("email_hmac_removed");
                     }
 
@@ -1302,7 +1300,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                 organization: organization_id,
                                 status: OrganizationStatus::Deleted,
                             });
-                        let _ = self.raft.client_write(RaftPayload::new(request)).await;
+                        let _ = self.raft.client_write(RaftPayload::system(request)).await;
                         cleanup.push("directory_marked_deleted");
                     }
 
@@ -1329,7 +1327,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     let request = LedgerRequest::System(SystemRequest::RemoveEmailHash {
                         hmac_hex: s.input.email_hmac.clone(),
                     });
-                    let _ = self.raft.client_write(RaftPayload::new(request)).await;
+                    let _ = self.raft.client_write(RaftPayload::system(request)).await;
                     cleanup.push("email_hmac_removed");
 
                     // If IDs were allocated (step 0 completed), mark directories as Deleted
@@ -1340,7 +1338,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                 status: inferadb_ledger_state::system::UserDirectoryStatus::Deleted,
                                 region: None,
                             });
-                        let _ = self.raft.client_write(RaftPayload::new(user_dir_request)).await;
+                        let _ = self.raft.client_write(RaftPayload::system(user_dir_request)).await;
                         cleanup.push("user_directory_marked_deleted");
 
                         let org_dir_request =
@@ -1348,7 +1346,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                 organization: organization_id,
                                 status: OrganizationStatus::Deleted,
                             });
-                        let _ = self.raft.client_write(RaftPayload::new(org_dir_request)).await;
+                        let _ = self.raft.client_write(RaftPayload::system(org_dir_request)).await;
                         cleanup.push("org_directory_marked_deleted");
                     }
 
@@ -1576,7 +1574,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 };
 
                 let result =
-                    self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                    self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
                         SagaError::SagaRaftWrite {
                             message: format!("{e:?}"),
                             backtrace: snafu::Backtrace::generate(),
@@ -1646,7 +1644,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     region: saga.input.region,
                 });
                 let result =
-                    self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                    self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
                         SagaError::SagaRaftWrite {
                             message: format!("{e:?}"),
                             backtrace: snafu::Backtrace::generate(),
@@ -1809,7 +1807,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     organization_slug: saga.input.organization_slug,
                     email_hmac: saga.input.email_hmac.clone(),
                 });
-                self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+                self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
                     SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
                         backtrace: snafu::Backtrace::generate(),

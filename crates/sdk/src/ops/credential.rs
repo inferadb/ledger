@@ -26,6 +26,7 @@ impl LedgerClient {
     /// Subsequent reads will have the secret stripped.
     pub async fn create_user_credential(
         &self,
+        caller: UserSlug,
         user: UserSlug,
         name: impl Into<String>,
         data: CredentialData,
@@ -62,6 +63,7 @@ impl LedgerClient {
                         user: Some(proto::UserSlug { slug: user.value() }),
                         credential_type: credential_type_i32,
                         name: name.clone(),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                         data: Some(proto_data.clone()),
                     };
 
@@ -84,6 +86,7 @@ impl LedgerClient {
     /// TOTP secrets are stripped from the response.
     pub async fn list_user_credentials(
         &self,
+        caller: UserSlug,
         user: UserSlug,
         credential_type: Option<CredentialType>,
     ) -> Result<Vec<UserCredentialInfo>> {
@@ -106,6 +109,7 @@ impl LedgerClient {
                     let request = proto::ListUserCredentialsRequest {
                         user: Some(proto::UserSlug { slug: user.value() }),
                         credential_type: type_filter,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response = client
@@ -126,6 +130,7 @@ impl LedgerClient {
     /// only `name` and `enabled` can be changed for those types.
     pub async fn update_user_credential(
         &self,
+        caller: UserSlug,
         user: UserSlug,
         credential_id: UserCredentialId,
         name: Option<String>,
@@ -153,6 +158,7 @@ impl LedgerClient {
                         credential_id: credential_id.value(),
                         name: name.clone(),
                         enabled,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                         passkey: passkey_proto.clone(),
                     };
 
@@ -175,6 +181,7 @@ impl LedgerClient {
     /// Rejects if this is the user's last credential (safety guard).
     pub async fn delete_user_credential(
         &self,
+        caller: UserSlug,
         user: UserSlug,
         credential_id: UserCredentialId,
     ) -> Result<()> {
@@ -196,6 +203,7 @@ impl LedgerClient {
                     let request = proto::DeleteUserCredentialRequest {
                         user: Some(proto::UserSlug { slug: user.value() }),
                         credential_id: credential_id.value(),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     client.delete_user_credential(tonic::Request::new(request)).await?;
@@ -217,6 +225,7 @@ impl LedgerClient {
     /// Returns a 32-byte challenge nonce for the subsequent `verify_totp` call.
     pub async fn create_totp_challenge(
         &self,
+        caller: UserSlug,
         user: UserSlug,
         primary_method: impl Into<String>,
     ) -> Result<Vec<u8>> {
@@ -239,6 +248,7 @@ impl LedgerClient {
                     let request = proto::CreateTotpChallengeRequest {
                         user: Some(proto::UserSlug { slug: user.value() }),
                         primary_method: primary_method.clone(),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response = client
@@ -259,6 +269,7 @@ impl LedgerClient {
     /// Returns the token pair (access + refresh) directly.
     pub async fn verify_totp(
         &self,
+        caller: UserSlug,
         user: UserSlug,
         totp_code: impl Into<String>,
         challenge_nonce: Vec<u8>,
@@ -284,6 +295,7 @@ impl LedgerClient {
                         totp_code: totp_code.clone(),
                         challenge_nonce: challenge_nonce.clone(),
                         credential_used: None,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -310,6 +322,7 @@ impl LedgerClient {
     /// Returns the token pair and the number of remaining unused codes.
     pub async fn consume_recovery_code(
         &self,
+        caller: UserSlug,
         user: UserSlug,
         code: impl Into<String>,
         challenge_nonce: Vec<u8>,
@@ -335,6 +348,7 @@ impl LedgerClient {
                         code: code.clone(),
                         challenge_nonce: challenge_nonce.clone(),
                         credential_used: None,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response = client

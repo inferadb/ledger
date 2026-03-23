@@ -102,7 +102,7 @@ async fn test_vault_health_tracking() {
             name: ns_name,
             region: 10, // REGION_US_EAST_VA
             tier: None,
-            admin: None,
+            caller: None,
         })
         .await
         .expect("create organization");
@@ -117,6 +117,7 @@ async fn test_vault_health_tracking() {
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
+            caller: None,
         })
         .await
         .expect("create vault");
@@ -214,7 +215,7 @@ async fn test_learner_cache_initialization() {
             name: ns_name.clone(),
             region: 10, // REGION_US_EAST_VA
             tier: None,
-            admin: None,
+            caller: None,
         })
         .await
         .expect("create organization");
@@ -268,7 +269,7 @@ async fn test_concurrent_background_jobs() {
             name: ns_name,
             region: 10, // REGION_US_EAST_VA
             tier: None,
-            admin: None,
+            caller: None,
         })
         .await
         .expect("create organization");
@@ -282,6 +283,7 @@ async fn test_concurrent_background_jobs() {
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
+            caller: None,
         })
         .await
         .expect("create vault");

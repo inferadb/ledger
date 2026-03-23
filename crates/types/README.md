@@ -51,11 +51,10 @@ let header = BlockHeader::builder()
 
 let tx = Transaction::builder()
     .id("tx-1")
-    .actor("user:alice")
     .operations(vec![Operation::set_entity("key", b"value".to_vec())])
     .seq(1)
     .timestamp(Utc::now())
-    .build()?;  // Fallible: validates actor and operations
+    .build()?;  // Fallible: validates operations
 ```
 
 ## License

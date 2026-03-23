@@ -86,6 +86,7 @@ async fn test_idempotency_key_reuse_detection() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let response1 = write_client.write(request1).await.expect("write should succeed");
@@ -116,6 +117,7 @@ async fn test_idempotency_key_reuse_detection() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let response2 = write_client.write(request2).await.expect("write RPC should succeed");
@@ -167,6 +169,7 @@ async fn test_same_vault_two_writes() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let resp1 = write_client.write(request1).await.expect("write 1");
@@ -198,6 +201,7 @@ async fn test_same_vault_two_writes() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let resp2 = write_client.write(request2).await.expect("write 2");
@@ -244,6 +248,7 @@ async fn test_only_vault_2() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let resp1 = write_client.write(request1).await.expect("write v2 first");
@@ -275,6 +280,7 @@ async fn test_only_vault_2() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let resp2 = write_client.write(request2).await.expect("write v2 second");
@@ -325,6 +331,7 @@ async fn test_vault_2_first_then_1_then_2() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let resp1 = write_client.write(request1).await.expect("write v2 first");
@@ -358,6 +365,7 @@ async fn test_vault_2_first_then_1_then_2() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let resp2 = write_client.write(request2).await.expect("write v1");
@@ -391,6 +399,7 @@ async fn test_vault_2_first_then_1_then_2() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let resp3 = write_client.write(request3).await.expect("write v2 again");
@@ -442,6 +451,7 @@ async fn test_two_vault_server_assigned_sequences() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let resp1 = write_client.write(request1).await.expect("write to vault 1");
@@ -475,6 +485,7 @@ async fn test_two_vault_server_assigned_sequences() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let resp2 = write_client.write(request2).await.expect("write to vault 2");
@@ -508,6 +519,7 @@ async fn test_two_vault_server_assigned_sequences() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let resp3 = write_client.write(request3).await.expect("write to vault 2 second");
@@ -579,6 +591,7 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let response1 = write_client.write(request1).await.expect("write to vault 1");
@@ -611,6 +624,7 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let response2 = write_client.write(request2).await.expect("write to vault 2");
@@ -710,6 +724,7 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let response3 = write_client.write(request3).await.expect("write to vault 2 after divergence");
@@ -763,6 +778,7 @@ async fn test_diverged_vault_returns_unavailable() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     write_client.write(request).await.expect("write should succeed");
@@ -828,6 +844,7 @@ async fn test_diverged_vault_returns_unavailable() {
         vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         key: "divergence-key".to_string(),
         consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual.into(),
+        caller: None,
     };
 
     let read_result = read_client.read(read_request).await;
@@ -896,6 +913,7 @@ async fn test_follower_state_root_verification() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     client.write(request).await.expect("write should succeed");
@@ -966,6 +984,7 @@ async fn test_idempotency_survives_leader_failover() {
             replication_factor: 0,
             initial_nodes: vec![],
             retention_policy: None,
+            caller: None,
         })
         .await
         .expect("create vault");
@@ -999,6 +1018,7 @@ async fn test_idempotency_survives_leader_failover() {
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let response1 = write_client.write(request.clone()).await.expect("first write");

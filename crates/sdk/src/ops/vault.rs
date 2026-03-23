@@ -1,7 +1,7 @@
 //! Vault CRUD operations.
 
 use inferadb_ledger_proto::proto;
-use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, UserSlug, VaultSlug};
 
 use crate::{
     LedgerClient,
@@ -18,6 +18,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `organization` - Organization slug (external identifier).
     ///
     /// # Returns
@@ -37,12 +38,16 @@ impl LedgerClient {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let organization = OrganizationSlug::new(1);
-    /// let vault = client.create_vault(organization).await?;
+    /// let vault = client.create_vault(UserSlug::new(42), organization).await?;
     /// println!("Created vault with slug: {}", vault.vault);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn create_vault(&self, organization: OrganizationSlug) -> Result<VaultInfo> {
+    pub async fn create_vault(
+        &self,
+        caller: UserSlug,
+        organization: OrganizationSlug,
+    ) -> Result<VaultInfo> {
         self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
@@ -63,6 +68,7 @@ impl LedgerClient {
                         replication_factor: 0,  // Use default
                         initial_nodes: vec![],  // Auto-assigned
                         retention_policy: None, // Default: FULL
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -88,6 +94,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Vault slug (external identifier).
     ///
@@ -108,13 +115,14 @@ impl LedgerClient {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
-    /// let info = client.get_vault(organization, vault).await?;
+    /// let info = client.get_vault(UserSlug::new(42), organization, vault).await?;
     /// println!("Vault height: {}, status: {:?}", info.height, info.status);
     /// # Ok(())
     /// # }
     /// ```
     pub async fn get_vault(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
     ) -> Result<VaultInfo> {
@@ -136,6 +144,7 @@ impl LedgerClient {
                     let request = proto::GetVaultRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
                         vault: Some(proto::VaultSlug { slug: vault.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -156,8 +165,10 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `page_size` - Maximum items per page (0 = server default).
     /// * `page_token` - Opaque cursor from a previous response, or `None` for the first page.
+    /// * `organization` - Optional organization filter.
     ///
     /// # Returns
     ///
@@ -174,7 +185,7 @@ impl LedgerClient {
     /// # use inferadb_ledger_sdk::LedgerClient;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// let (vaults, _next) = client.list_vaults(100, None, None).await?;
+    /// let (vaults, _next) = client.list_vaults(UserSlug::new(42), 100, None, None).await?;
     /// for v in vaults {
     ///     println!("Vault {} in {}", v.vault, v.organization);
     /// }
@@ -183,6 +194,7 @@ impl LedgerClient {
     /// ```
     pub async fn list_vaults(
         &self,
+        caller: UserSlug,
         page_size: u32,
         page_token: Option<Vec<u8>>,
         organization: Option<OrganizationSlug>,
@@ -207,6 +219,7 @@ impl LedgerClient {
                         page_size,
                         organization: organization
                             .map(|o| proto::OrganizationSlug { slug: o.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -225,6 +238,7 @@ impl LedgerClient {
     ///
     /// # Arguments
     ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     /// * `organization` - Organization slug (external identifier).
     /// * `vault` - Vault slug (external identifier).
     ///
@@ -242,12 +256,13 @@ impl LedgerClient {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
-    /// client.delete_vault(organization, vault).await?;
+    /// client.delete_vault(UserSlug::new(42), organization, vault).await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn delete_vault(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
     ) -> Result<()> {
@@ -269,6 +284,7 @@ impl LedgerClient {
                     let request = proto::DeleteVaultRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
                         vault: Some(proto::VaultSlug { slug: vault.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     client.delete_vault(tonic::Request::new(request)).await?;
@@ -281,8 +297,13 @@ impl LedgerClient {
     }
 
     /// Updates vault metadata (retention policy).
+    ///
+    /// # Arguments
+    ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     pub async fn update_vault(
         &self,
+        caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
         retention_policy: Option<proto::BlockRetentionPolicy>,
@@ -306,6 +327,7 @@ impl LedgerClient {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),
                         vault: Some(proto::VaultSlug { slug: vault.value() }),
                         retention_policy,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     client.update_vault(tonic::Request::new(request)).await?;

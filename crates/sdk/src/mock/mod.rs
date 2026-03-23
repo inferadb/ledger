@@ -36,7 +36,7 @@
 //!     let client = LedgerClient::new(config).await.unwrap();
 //!
 //!     // Test read operation
-//!     let value = client.read(organization, Some(vault), "user:123", None, None).await.unwrap();
+//!     let value = client.read(UserSlug::new(42), organization, Some(vault), "user:123", None, None).await.unwrap();
 //!     assert_eq!(value, Some(b"test-value".to_vec()));
 //! }
 //! ```

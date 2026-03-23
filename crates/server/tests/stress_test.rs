@@ -190,7 +190,7 @@ async fn setup_organization_and_vault(
         name: format!("stress-ns-{}", config.organization.value()),
         region: 10, // REGION_US_EAST_VA
         tier: None,
-        admin: None,
+        caller: None,
     };
     let ns_response = org_client
         .create_organization(ns_request)
@@ -211,6 +211,7 @@ async fn setup_organization_and_vault(
         replication_factor: 1,
         initial_nodes: vec![],
         retention_policy: None,
+        caller: None,
     };
     let vault_response = vault_client
         .create_vault(vault_request)
@@ -269,7 +270,7 @@ async fn setup_multi_region_organizations(
             name: format!("stress-region-{}-ns", region),
             region: 10, // REGION_US_EAST_VA
             tier: None,
-            admin: None,
+            caller: None,
         };
 
         let ns_response = org_client
@@ -291,6 +292,7 @@ async fn setup_multi_region_organizations(
             replication_factor: 1,
             initial_nodes: vec![],
             retention_policy: None,
+            caller: None,
         };
 
         let vault_response = vault_client.create_vault(vault_request).await.map_err(|e| {
@@ -542,6 +544,7 @@ async fn write_worker(
                 idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
                 operations,
                 include_tx_proofs: false,
+                caller: None,
             };
 
             match client.batch_write(request).await {
@@ -648,6 +651,7 @@ async fn write_worker(
                     )),
                 }],
                 include_tx_proof: false,
+                caller: None,
             };
 
             match client.write(request).await {
@@ -782,6 +786,7 @@ async fn read_worker(
                 vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault.value() }),
                 keys,
                 consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
+                caller: None,
             };
 
             match client.batch_read(request).await {
@@ -826,6 +831,7 @@ async fn read_worker(
                 vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault.value() }),
                 key,
                 consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
+                caller: None,
             };
 
             match client.read(request).await {
@@ -876,6 +882,7 @@ async fn verify_consistency(
             // additional Raft configuration that isn't always enabled in test clusters.
             // Eventual consistency is sufficient here since we wait for cluster sync.
             consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
+            caller: None,
         };
 
         // Add timeout to prevent hanging if server is unresponsive
@@ -986,6 +993,7 @@ async fn verify_multi_region_consistency(
             }),
             key: key.clone(),
             consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
+            caller: None,
         };
 
         let read_result = tokio::time::timeout(Duration::from_secs(5), client.read(request)).await;

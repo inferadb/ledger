@@ -133,7 +133,6 @@ pub fn block_hash(header: &BlockHeader) -> Hash {
 /// - id: 16 bytes
 /// - client_id length + bytes
 /// - sequence: u64 BE
-/// - actor length + bytes
 /// - operations (each with type byte + encoded fields)
 /// - timestamp
 pub fn tx_hash(tx: &Transaction) -> Hash {
@@ -148,10 +147,6 @@ pub fn tx_hash(tx: &Transaction) -> Hash {
 
     // sequence: u64 BE
     hasher.update(tx.sequence.to_be_bytes());
-
-    // actor: length-prefixed
-    hasher.update((tx.actor.len() as u32).to_le_bytes());
-    hasher.update(tx.actor.as_bytes());
 
     // operations count: u32 LE
     hasher.update((tx.operations.len() as u32).to_le_bytes());
@@ -553,7 +548,6 @@ mod tests {
             id: [0u8; 16],
             client_id: "client1".into(),
             sequence: 1,
-            actor: "user1".to_string(),
             operations: vec![],
             timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
         };
@@ -569,7 +563,6 @@ mod tests {
             id: [1u8; 16],
             client_id: "client1".into(),
             sequence: 1,
-            actor: "user1".to_string(),
             operations: vec![],
             timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
         };
@@ -577,7 +570,6 @@ mod tests {
             id: [2u8; 16],
             client_id: "client1".into(),
             sequence: 2,
-            actor: "user1".to_string(),
             operations: vec![],
             timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
         };
@@ -595,7 +587,6 @@ mod tests {
             id: [1u8; 16],
             client_id: "c".into(),
             sequence: 1,
-            actor: "a".to_string(),
             operations: vec![],
             timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
         };
@@ -603,7 +594,6 @@ mod tests {
             id: [2u8; 16],
             client_id: "c".into(),
             sequence: 2,
-            actor: "a".to_string(),
             operations: vec![],
             timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
         };
@@ -611,7 +601,6 @@ mod tests {
             id: [3u8; 16],
             client_id: "c".into(),
             sequence: 3,
-            actor: "a".to_string(),
             operations: vec![],
             timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
         };
@@ -633,7 +622,6 @@ mod tests {
             id: [42u8; 16],
             client_id: "test".into(),
             sequence: 100,
-            actor: "actor".to_string(),
             operations: vec![],
             timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
         };

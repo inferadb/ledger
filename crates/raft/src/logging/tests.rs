@@ -58,10 +58,9 @@ fn test_context_with_specific_request_id() {
 #[test]
 fn test_set_client_info() {
     let mut ctx = RequestContext::new("WriteService", "write");
-    ctx.set_client_info("client_123", 42, Some("user:7kQ3xP9m".into()));
+    ctx.set_client_info("client_123", 42);
     assert_eq!(ctx.client_id.as_deref(), Some("client_123"));
     assert_eq!(ctx.sequence, Some(42));
-    assert_eq!(ctx.actor.as_deref(), Some("user:7kQ3xP9m"));
     ctx.suppress_emission();
 }
 
@@ -1274,7 +1273,7 @@ fn test_canonical_log_line_completeness() {
         let mut ctx = RequestContext::new("WriteService", "write");
 
         // Identity fields
-        ctx.set_client_info("client_123", 42, Some("user@example.com".into()));
+        ctx.set_client_info("client_123", 42);
 
         // Target fields
         ctx.set_target(1, 2);

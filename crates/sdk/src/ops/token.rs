@@ -32,6 +32,7 @@ impl LedgerClient {
                     let request = proto::CreateUserSessionRequest {
                         user: Some(proto::UserSlug { slug: user.value() }),
                         credential_used: None,
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                     };
 
                     let response = client
@@ -110,6 +111,7 @@ impl LedgerClient {
 
                     let request = proto::RevokeAllUserSessionsRequest {
                         user: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                     };
 
                     let response = client
@@ -323,8 +325,13 @@ impl LedgerClient {
     }
 
     /// Creates a new signing key for the given scope.
+    ///
+    /// # Arguments
+    ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     pub async fn create_signing_key(
         &self,
+        caller: UserSlug,
         scope: &str,
         organization: Option<OrganizationSlug>,
     ) -> Result<crate::token::PublicKeyInfo> {
@@ -354,6 +361,7 @@ impl LedgerClient {
                         scope: scope_i32,
                         organization: organization
                             .map(|o| proto::OrganizationSlug { slug: o.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -371,8 +379,13 @@ impl LedgerClient {
     }
 
     /// Rotates a signing key, creating a new key and marking the old one as rotated.
+    ///
+    /// # Arguments
+    ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     pub async fn rotate_signing_key(
         &self,
+        caller: UserSlug,
         kid: &str,
         grace_period_secs: Option<u64>,
         force_revoke: bool,
@@ -397,6 +410,7 @@ impl LedgerClient {
                         kid: kid.clone(),
                         grace_period_secs: grace_period_secs.unwrap_or(0),
                         force_revoke,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -414,7 +428,11 @@ impl LedgerClient {
     }
 
     /// Revokes a signing key by its kid.
-    pub async fn revoke_signing_key(&self, kid: &str) -> Result<()> {
+    ///
+    /// # Arguments
+    ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
+    pub async fn revoke_signing_key(&self, caller: UserSlug, kid: &str) -> Result<()> {
         self.check_shutdown(None)?;
 
         let kid = kid.to_owned();
@@ -431,7 +449,10 @@ impl LedgerClient {
                 || async {
                     let mut client = crate::connected_client!(pool, create_token_client);
 
-                    let request = proto::RevokeSigningKeyRequest { kid: kid.clone() };
+                    let request = proto::RevokeSigningKeyRequest {
+                        kid: kid.clone(),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
+                    };
 
                     client.revoke_signing_key(tonic::Request::new(request)).await?;
 
@@ -443,8 +464,13 @@ impl LedgerClient {
     }
 
     /// Gets active public keys for token verification.
+    ///
+    /// # Arguments
+    ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     pub async fn get_public_keys(
         &self,
+        caller: UserSlug,
         organization: Option<OrganizationSlug>,
     ) -> Result<Vec<crate::token::PublicKeyInfo>> {
         self.check_shutdown(None)?;
@@ -465,6 +491,7 @@ impl LedgerClient {
                     let request = proto::GetPublicKeysRequest {
                         organization: organization
                             .map(|o| proto::OrganizationSlug { slug: o.value() }),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =

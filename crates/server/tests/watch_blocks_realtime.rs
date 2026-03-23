@@ -68,6 +68,7 @@ async fn write_entity(
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let response = client.write(request).await?.into_inner();
@@ -112,6 +113,7 @@ async fn test_watch_blocks_subscribe_before_writes() {
         }),
         vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         start_height: 1,
+        caller: None,
     };
 
     let mut stream =
@@ -183,6 +185,7 @@ async fn test_watch_blocks_historical_then_realtime() {
         }),
         vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         start_height: 1,
+        caller: None,
     };
 
     let mut stream =
@@ -258,6 +261,7 @@ async fn test_watch_blocks_multiple_subscribers() {
             }),
             vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
             start_height: 1,
+            caller: None,
         };
         let stream = read_client
             .watch_blocks(request)
@@ -312,6 +316,7 @@ async fn test_watch_blocks_vault_isolation() {
         }),
         vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_a.value() }),
         start_height: 1,
+        caller: None,
     };
 
     let mut stream_a =
@@ -403,6 +408,7 @@ async fn test_watch_blocks_reconnection_after_restart() {
         }),
         vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         start_height: 1,
+        caller: None,
     };
 
     let mut stream =
@@ -435,6 +441,7 @@ async fn test_watch_blocks_reconnection_after_restart() {
         }),
         vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         start_height: last_height + 1, // Resume from where we left off
+        caller: None,
     };
 
     let mut stream2 = read_client2

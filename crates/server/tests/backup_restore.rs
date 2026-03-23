@@ -65,6 +65,7 @@ async fn write_entity(
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let response = client.write(request).await?.into_inner();

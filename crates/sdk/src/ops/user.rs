@@ -95,6 +95,7 @@ impl LedgerClient {
 
                     let request = proto::GetUserRequest {
                         slug: Some(proto::UserSlug { slug: user.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                     };
 
                     let response =
@@ -145,6 +146,7 @@ impl LedgerClient {
                         name: name.clone(),
                         role: proto_role,
                         primary_email: email.map(|id| proto::UserEmailId { id: id.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                     };
 
                     let response =
@@ -161,14 +163,9 @@ impl LedgerClient {
     }
 
     /// Soft-deletes a user, starting the retention countdown.
-    pub async fn delete_user(
-        &self,
-        user: UserSlug,
-        deleted_by: impl Into<String>,
-    ) -> Result<UserInfo> {
+    pub async fn delete_user(&self, user: UserSlug, caller: UserSlug) -> Result<UserInfo> {
         self.check_shutdown(None)?;
 
-        let deleted_by = deleted_by.into();
         let pool = self.pool.clone();
         let retry_policy = self.pool.config().retry_policy().clone();
 
@@ -184,7 +181,7 @@ impl LedgerClient {
 
                     let request = proto::DeleteUserRequest {
                         slug: Some(proto::UserSlug { slug: user.value() }),
-                        deleted_by: deleted_by.clone(),
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -212,8 +209,13 @@ impl LedgerClient {
     }
 
     /// Lists users with pagination.
+    ///
+    /// # Arguments
+    ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     pub async fn list_users(
         &self,
+        caller: UserSlug,
         page_size: u32,
         page_token: Option<Vec<u8>>,
     ) -> Result<(Vec<UserInfo>, Option<Vec<u8>>)> {
@@ -236,6 +238,7 @@ impl LedgerClient {
                         page_size,
                         page_token: page_token.clone(),
                         region: None,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -251,7 +254,15 @@ impl LedgerClient {
     }
 
     /// Searches users by email.
-    pub async fn search_users(&self, email: impl Into<String>) -> Result<Vec<UserInfo>> {
+    ///
+    /// # Arguments
+    ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
+    pub async fn search_users(
+        &self,
+        caller: UserSlug,
+        email: impl Into<String>,
+    ) -> Result<Vec<UserInfo>> {
         self.check_shutdown(None)?;
 
         let email = email.into();
@@ -277,6 +288,7 @@ impl LedgerClient {
                         }),
                         page_token: None,
                         page_size: 100,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -321,6 +333,7 @@ impl LedgerClient {
                         user: Some(proto::UserSlug { slug: user.value() }),
                         email: email.clone(),
                         email_hmac: email_hmac.clone(),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                     };
 
                     let response =
@@ -356,6 +369,7 @@ impl LedgerClient {
                     let request = proto::DeleteUserEmailRequest {
                         user: Some(proto::UserSlug { slug: user.value() }),
                         email_id: Some(proto::UserEmailId { id: email_id.value() }),
+                        caller: Some(proto::UserSlug { slug: user.value() }),
                     };
 
                     client.delete_user_email(tonic::Request::new(request)).await?;
@@ -367,8 +381,13 @@ impl LedgerClient {
     }
 
     /// Searches user emails by user or email address.
+    ///
+    /// # Arguments
+    ///
+    /// * `caller` - Identity of the user performing this operation (external slug).
     pub async fn search_user_email(
         &self,
+        caller: UserSlug,
         user: Option<UserSlug>,
         email: Option<String>,
     ) -> Result<Vec<UserEmailInfo>> {
@@ -395,6 +414,7 @@ impl LedgerClient {
                         }),
                         page_token: None,
                         page_size: 100,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
                     };
 
                     let response =
@@ -454,6 +474,7 @@ impl LedgerClient {
     /// Returns [`BlindingKeyRotationStatus`] with initial progress.
     pub async fn rotate_blinding_key(
         &self,
+        caller: UserSlug,
         new_key_version: u32,
     ) -> Result<BlindingKeyRotationStatus> {
         self.check_shutdown(None)?;
@@ -471,7 +492,10 @@ impl LedgerClient {
                 || async {
                     let mut client = crate::connected_client!(pool, create_admin_client);
 
-                    let request = proto::RotateBlindingKeyRequest { new_key_version };
+                    let request = proto::RotateBlindingKeyRequest {
+                        new_key_version,
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
+                    };
 
                     let response = client
                         .rotate_blinding_key(tonic::Request::new(request))
@@ -497,7 +521,10 @@ impl LedgerClient {
     /// # Returns
     ///
     /// Returns [`BlindingKeyRehashStatus`] with progress details.
-    pub async fn get_blinding_key_rehash_status(&self) -> Result<BlindingKeyRehashStatus> {
+    pub async fn get_blinding_key_rehash_status(
+        &self,
+        caller: UserSlug,
+    ) -> Result<BlindingKeyRehashStatus> {
         self.check_shutdown(None)?;
 
         let pool = self.pool.clone();
@@ -513,7 +540,9 @@ impl LedgerClient {
                 || async {
                     let mut client = crate::connected_client!(pool, create_admin_client);
 
-                    let request = proto::GetBlindingKeyRehashStatusRequest {};
+                    let request = proto::GetBlindingKeyRehashStatusRequest {
+                        caller: Some(proto::UserSlug { slug: caller.value() }),
+                    };
 
                     let response = client
                         .get_blinding_key_rehash_status(tonic::Request::new(request))

@@ -154,6 +154,12 @@ impl SystemKeys {
         key_entry!(TOTP_CHALLENGE_PREFIX, Regional, Temporary),
         // -- _audit: Compliance (GLOBAL) --
         key_entry!(ERASURE_AUDIT_PREFIX, Global, Audit),
+        key_entry!(SIGNING_KEY_AUDIT_PREFIX, Global, Audit),
+        key_entry!(ORG_AUDIT_PREFIX, Global, Audit),
+        key_entry!(USER_ROLE_AUDIT_PREFIX, Global, Audit),
+        key_entry!(APP_AUDIT_PREFIX, Global, Audit),
+        key_entry!(VAULT_AUDIT_PREFIX, Global, Audit),
+        key_entry!(USER_AUDIT_PREFIX, Global, Audit),
         // -- Bare entity prefixes (GLOBAL) --
         key_entry!(APP_PREFIX, Global, Entity),
         key_entry!(ORG_PREFIX, Global, Entity),
@@ -805,6 +811,24 @@ impl SystemKeys {
 
     /// Prefix for erasure audit records.
     pub const ERASURE_AUDIT_PREFIX: &'static str = "_audit:erasure:";
+
+    /// Prefix for signing key lifecycle audit records.
+    pub const SIGNING_KEY_AUDIT_PREFIX: &'static str = "_audit:signing_key:";
+
+    /// Prefix for organization lifecycle audit records.
+    pub const ORG_AUDIT_PREFIX: &'static str = "_audit:org:";
+
+    /// Prefix for user role change audit records.
+    pub const USER_ROLE_AUDIT_PREFIX: &'static str = "_audit:user_role:";
+
+    /// Prefix for app lifecycle audit records.
+    pub const APP_AUDIT_PREFIX: &'static str = "_audit:app:";
+
+    /// Prefix for vault lifecycle audit records.
+    pub const VAULT_AUDIT_PREFIX: &'static str = "_audit:vault:";
+
+    /// Prefix for user lifecycle audit records (delete, erase, revoke sessions).
+    pub const USER_AUDIT_PREFIX: &'static str = "_audit:user:";
 
     /// Prefix for onboarding email verification keys (ephemeral, regional).
     pub const ONBOARD_VERIFY_PREFIX: &'static str = "_tmp:onboard_verify:";
@@ -1937,7 +1961,7 @@ mod tests {
     /// a new constant, preventing silent omissions.
     #[test]
     fn test_key_registry_completeness() {
-        const EXPECTED_COUNT: usize = 59;
+        const EXPECTED_COUNT: usize = 65;
         assert_eq!(
             SystemKeys::KEY_REGISTRY.len(),
             EXPECTED_COUNT,

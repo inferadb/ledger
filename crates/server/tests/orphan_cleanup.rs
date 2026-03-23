@@ -65,6 +65,7 @@ async fn write_entity(
             )),
         }],
         include_tx_proof: false,
+        caller: None,
     };
 
     let response = client.write(request).await?.into_inner();
@@ -94,6 +95,7 @@ async fn read_entity(
         vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
         key: key.to_string(),
         consistency: 0, // EVENTUAL
+        caller: None,
     };
 
     let response = client.read(request).await?.into_inner();

@@ -63,6 +63,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
@@ -210,6 +211,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
@@ -294,6 +296,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
 
         let mut ctx =
             self.ctx.make_request_context("VaultService", "get_vault", &grpc_metadata, &trace_ctx);
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
@@ -355,6 +358,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let page_size = crate::proto_compat::normalize_page_size(req.page_size);
         let start_after = crate::proto_compat::decode_page_token(&req.page_token);
@@ -426,6 +430,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             &grpc_metadata,
             &trace_ctx,
         );
+        super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);

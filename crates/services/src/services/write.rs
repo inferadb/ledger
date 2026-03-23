@@ -465,7 +465,6 @@ impl WriteService {
             sequence: 0, // Server-assigned at apply time
             operations: internal_ops,
             timestamp: chrono::Utc::now(),
-            actor: "system".to_string(), // Actor is set by upstream Engine/Control
         };
 
         Ok(LedgerRequest::Write {
@@ -611,6 +610,9 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             trace_ctx.trace_flags,
         );
 
+        // Extract caller identity for canonical log line
+        super::helpers::extract_caller(&mut ctx, &req.caller);
+
         // Parse idempotency key (must be exactly 16 bytes for UUID)
         let idempotency_key: [u8; 16] =
             req.idempotency_key.as_slice().try_into().map_err(|_| {
@@ -640,7 +642,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         let request_hash = seahash::hash(&super::helpers::hash_operations(&req.operations));
 
         // Populate logging context with request metadata
-        ctx.set_client_info(&client_id, 0, None);
+        ctx.set_client_info(&client_id, 0);
         let organization = req.organization.as_ref().map_or(0, |n| n.slug);
         let vault = req.vault.as_ref().map_or(0, |v| v.slug);
         ctx.set_target(organization, vault);
@@ -874,6 +876,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 region.raft.client_write(RaftPayload {
                     request: ledger_request,
                     proposed_at: chrono::Utc::now(),
+                    caller: ctx.caller_or_zero(),
                     state_root_commitments: commitments,
                 }),
             )
@@ -1166,6 +1169,9 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             trace_ctx.trace_flags,
         );
 
+        // Extract caller identity for canonical log line
+        super::helpers::extract_caller(&mut ctx, &req.caller);
+
         // Parse idempotency key (must be exactly 16 bytes for UUID)
         let idempotency_key: [u8; 16] =
             req.idempotency_key.as_slice().try_into().map_err(|_| {
@@ -1173,7 +1179,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             })?;
 
         // Populate logging context with request metadata
-        ctx.set_client_info(&client_id, 0, None);
+        ctx.set_client_info(&client_id, 0);
         let organization = req.organization.as_ref().map_or(0, |n| n.slug);
         let vault = req.vault.as_ref().map_or(0, |v| v.slug);
         ctx.set_target(organization, vault);
@@ -1398,6 +1404,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             region.raft.client_write(RaftPayload {
                 request: ledger_request,
                 proposed_at: chrono::Utc::now(),
+                caller: ctx.caller_or_zero(),
                 state_root_commitments: commitments,
             }),
         )

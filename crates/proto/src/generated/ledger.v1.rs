@@ -236,15 +236,6 @@ pub struct Transaction {
     pub operations: ::prost::alloc::vec::Vec<Operation>,
     #[prost(message, optional, tag = "5")]
     pub timestamp: ::core::option::Option<::prost_types::Timestamp>,
-    /// Actor identity, ALWAYS server-assigned from authenticated context.
-    /// Clients cannot specify this - derived from auth:
-    ///
-    /// * Session token → "user:{user_id}"
-    /// * API key → "client:{client_id}"
-    /// * Internal operation → "system:{component}" (e.g., "system:gc")
-    ///   Format: {type}:{id}, max 128 characters.
-    #[prost(string, tag = "6")]
-    pub actor: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Operation {
@@ -459,6 +450,9 @@ pub struct ReadRequest {
     /// Default: EVENTUAL (any replica)
     #[prost(enumeration = "ReadConsistency", tag = "4")]
     pub consistency: i32,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "5")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ReadResponse {
@@ -481,6 +475,9 @@ pub struct BatchReadRequest {
     /// Applied to all reads
     #[prost(enumeration = "ReadConsistency", tag = "4")]
     pub consistency: i32,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "5")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 /// Batch read response: results for all requested keys.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -527,6 +524,9 @@ pub struct VerifiedReadRequest {
     /// Chain proof starts from this checkpoint
     #[prost(uint64, optional, tag = "6")]
     pub trusted_height: ::core::option::Option<u64>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "7")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct VerifiedReadResponse {
@@ -615,6 +615,9 @@ pub struct WatchBlocksRequest {
     /// last_known_height = block.height
     #[prost(uint64, tag = "3")]
     pub start_height: u64,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "4")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetBlockRequest {
@@ -713,6 +716,9 @@ pub struct ListRelationshipsRequest {
     /// Default: EVENTUAL (any replica)
     #[prost(enumeration = "ReadConsistency", tag = "9")]
     pub consistency: i32,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "10")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListRelationshipsResponse {
@@ -745,6 +751,9 @@ pub struct ListResourcesRequest {
     /// Default: EVENTUAL (any replica)
     #[prost(enumeration = "ReadConsistency", tag = "7")]
     pub consistency: i32,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "8")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListResourcesResponse {
@@ -782,6 +791,9 @@ pub struct ListEntitiesRequest {
     /// Omit for organization-level entities
     #[prost(message, optional, tag = "8")]
     pub vault: ::core::option::Option<VaultSlug>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "9")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListEntitiesResponse {
@@ -793,8 +805,6 @@ pub struct ListEntitiesResponse {
     #[prost(string, tag = "3")]
     pub next_page_token: ::prost::alloc::string::String,
 }
-/// Note: actor is NOT specified by client. Server assigns Transaction.actor
-/// from authenticated context (session token, API key, or system identity).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WriteRequest {
     #[prost(message, optional, tag = "1")]
@@ -812,6 +822,9 @@ pub struct WriteRequest {
     /// Request block_header + tx_proof in response for verification
     #[prost(bool, tag = "6")]
     pub include_tx_proof: bool,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "7")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WriteResponse {
@@ -944,6 +957,9 @@ pub struct BatchWriteRequest {
     /// Request block_header + tx_proofs in response for verification
     #[prost(bool, tag = "6")]
     pub include_tx_proofs: bool,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "7")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 /// Logical grouping of operations within a BatchWriteRequest.
 /// Purpose: Allows expressing ordered operation groups within an atomic batch.
@@ -994,6 +1010,163 @@ pub struct BatchWriteSuccess {
     #[prost(uint64, tag = "5")]
     pub assigned_sequence: u64,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeploySchemaRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    /// JSON schema definition
+    #[prost(bytes = "vec", tag = "3")]
+    pub definition: ::prost::alloc::vec::Vec<u8>,
+    /// Explicit version, or auto-increment
+    #[prost(uint32, optional, tag = "4")]
+    pub version: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "5")]
+    pub description: ::core::option::Option<::prost::alloc::string::String>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "6")]
+    pub caller: ::core::option::Option<UserSlug>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeploySchemaResponse {
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    #[prost(string, tag = "2")]
+    pub status: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListSchemaVersionsRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SchemaVersionEntry {
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    #[prost(bool, tag = "2")]
+    pub has_definition: bool,
+    #[prost(bool, tag = "3")]
+    pub is_active: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListSchemaVersionsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub versions: ::prost::alloc::vec::Vec<SchemaVersionEntry>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetSchemaRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    #[prost(uint32, tag = "3")]
+    pub version: u32,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "4")]
+    pub caller: ::core::option::Option<UserSlug>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetSchemaResponse {
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    /// JSON schema definition
+    #[prost(bytes = "vec", tag = "2")]
+    pub definition: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, optional, tag = "3")]
+    pub description: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ActivateSchemaRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    #[prost(uint32, tag = "3")]
+    pub version: u32,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "4")]
+    pub caller: ::core::option::Option<UserSlug>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ActivateSchemaResponse {
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    #[prost(string, tag = "2")]
+    pub status: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RollbackSchemaRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RollbackSchemaResponse {
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    #[prost(string, tag = "2")]
+    pub status: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetActiveSchemaRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetActiveSchemaResponse {
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub definition: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, optional, tag = "3")]
+    pub description: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DiffSchemasRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    #[prost(uint32, tag = "3")]
+    pub from_version: u32,
+    #[prost(uint32, tag = "4")]
+    pub to_version: u32,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "5")]
+    pub caller: ::core::option::Option<UserSlug>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DiffFieldChange {
+    #[prost(string, tag = "1")]
+    pub field: ::prost::alloc::string::String,
+    /// "added", "removed", "changed"
+    #[prost(string, tag = "2")]
+    pub change_type: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DiffSchemasResponse {
+    #[prost(uint32, tag = "1")]
+    pub from_version: u32,
+    #[prost(uint32, tag = "2")]
+    pub to_version: u32,
+    #[prost(message, repeated, tag = "3")]
+    pub changes: ::prost::alloc::vec::Vec<DiffFieldChange>,
+}
 /// Create a new organization. An OrganizationSlug (Snowflake ID) is generated
 /// by the leader and returned. Every organization must declare a region
 /// governing where its data is stored.
@@ -1008,9 +1181,9 @@ pub struct CreateOrganizationRequest {
     /// Billing tier (Free if not specified)
     #[prost(enumeration = "OrganizationTier", optional, tag = "3")]
     pub tier: ::core::option::Option<i32>,
-    /// First organization administrator (required)
+    /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "4")]
-    pub admin: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateOrganizationResponse {
@@ -1045,9 +1218,9 @@ pub struct CreateOrganizationResponse {
 pub struct DeleteOrganizationRequest {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<OrganizationSlug>,
-    /// Must be an organization administrator
+    /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteOrganizationResponse {
@@ -1135,9 +1308,9 @@ pub struct MigrateOrganizationRequest {
     pub target_region: i32,
     #[prost(bool, tag = "3")]
     pub acknowledge_residency_downgrade: bool,
-    /// Must be an organization administrator
+    /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "4")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
 }
 /// Migration response with source/target region and current status.
 /// Status will be MIGRATING while the saga is in progress.
@@ -1158,9 +1331,9 @@ pub struct MigrateOrganizationResponse {
 pub struct UpdateOrganizationRequest {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<OrganizationSlug>,
-    /// Must be an organization administrator
+    /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     /// New name (1-200 chars, validated)
     #[prost(string, optional, tag = "3")]
     pub name: ::core::option::Option<::prost::alloc::string::String>,
@@ -1220,7 +1393,7 @@ pub struct RemoveOrganizationMemberRequest {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub target: ::core::option::Option<UserSlug>,
 }
@@ -1233,7 +1406,7 @@ pub struct UpdateOrganizationMemberRoleRequest {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub target: ::core::option::Option<UserSlug>,
     #[prost(enumeration = "OrganizationMemberRole", tag = "4")]
@@ -1302,9 +1475,9 @@ pub struct CreateOrganizationTeamRequest {
     /// Unique within organization (1-200 chars)
     #[prost(string, tag = "2")]
     pub name: ::prost::alloc::string::String,
-    /// For audit logging
+    /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "3")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateOrganizationTeamResponse {
@@ -1320,9 +1493,9 @@ pub struct DeleteOrganizationTeamRequest {
     /// If not set, members are simply removed from the team.
     #[prost(message, optional, tag = "2")]
     pub move_members_to: ::core::option::Option<TeamSlug>,
-    /// Must be org admin or team manager
+    /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "3")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteOrganizationTeamResponse {}
@@ -1331,9 +1504,9 @@ pub struct DeleteOrganizationTeamResponse {}
 pub struct UpdateOrganizationTeamRequest {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<TeamSlug>,
-    /// Must be org admin or team manager
+    /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     /// New name (1-200 chars, unique within org)
     #[prost(string, optional, tag = "3")]
     pub name: ::core::option::Option<::prost::alloc::string::String>,
@@ -1366,9 +1539,9 @@ pub struct AddTeamMemberRequest {
     pub user: ::core::option::Option<UserSlug>,
     #[prost(enumeration = "OrganizationTeamMemberRole", tag = "3")]
     pub role: i32,
-    /// Must be org admin or team manager
+    /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "4")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AddTeamMemberResponse {
@@ -1381,12 +1554,29 @@ pub struct RemoveTeamMemberRequest {
     pub team: ::core::option::Option<TeamSlug>,
     #[prost(message, optional, tag = "2")]
     pub user: ::core::option::Option<UserSlug>,
-    /// Must be org admin or team manager
+    /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "3")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RemoveTeamMemberResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateTeamMemberRoleRequest {
+    #[prost(message, optional, tag = "1")]
+    pub team: ::core::option::Option<TeamSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub user: ::core::option::Option<UserSlug>,
+    #[prost(enumeration = "OrganizationTeamMemberRole", tag = "3")]
+    pub role: i32,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "4")]
+    pub caller: ::core::option::Option<UserSlug>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UpdateTeamMemberRoleResponse {
+    #[prost(message, optional, tag = "1")]
+    pub team: ::core::option::Option<OrganizationTeam>,
+}
 /// Request to migrate a user's PII to a different region.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MigrateUserRegionRequest {
@@ -1394,6 +1584,9 @@ pub struct MigrateUserRegionRequest {
     pub slug: ::core::option::Option<UserSlug>,
     #[prost(enumeration = "Region", tag = "2")]
     pub target_region: i32,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 /// Migration response with source/target region and current directory status.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1421,6 +1614,9 @@ pub struct CreateVaultRequest {
     /// Default: FULL
     #[prost(message, optional, tag = "4")]
     pub retention_policy: ::core::option::Option<BlockRetentionPolicy>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "5")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BlockRetentionPolicy {
@@ -1444,6 +1640,9 @@ pub struct DeleteVaultRequest {
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault: ::core::option::Option<VaultSlug>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteVaultResponse {
@@ -1456,6 +1655,9 @@ pub struct GetVaultRequest {
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
     pub vault: ::core::option::Option<VaultSlug>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetVaultResponse {
@@ -1484,6 +1686,12 @@ pub struct ListVaultsRequest {
     /// Max items per page
     #[prost(uint32, tag = "2")]
     pub page_size: u32,
+    /// Filter by organization
+    #[prost(message, optional, tag = "3")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "4")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListVaultsResponse {
@@ -1502,6 +1710,9 @@ pub struct UpdateVaultRequest {
     pub vault: ::core::option::Option<VaultSlug>,
     #[prost(message, optional, tag = "3")]
     pub retention_policy: ::core::option::Option<BlockRetentionPolicy>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "4")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct UpdateVaultResponse {}
@@ -1666,6 +1877,9 @@ pub struct CreateUserResponse {
 pub struct GetUserRequest {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<UserSlug>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "2")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetUserResponse {
@@ -1688,19 +1902,22 @@ pub struct UpdateUserRequest {
     /// Change primary email (must be owned by user)
     #[prost(message, optional, tag = "4")]
     pub primary_email: ::core::option::Option<UserEmailId>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "5")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct UpdateUserResponse {
     #[prost(message, optional, tag = "1")]
     pub user: ::core::option::Option<User>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteUserRequest {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<UserSlug>,
-    /// Audit trail: who requested deletion
-    #[prost(string, tag = "2")]
-    pub deleted_by: ::prost::alloc::string::String,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "2")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteUserResponse {
@@ -1722,6 +1939,9 @@ pub struct ListUsersRequest {
     /// Filter by region
     #[prost(enumeration = "Region", optional, tag = "3")]
     pub region: ::core::option::Option<i32>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "4")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListUsersResponse {
@@ -1756,6 +1976,9 @@ pub struct SearchUsersRequest {
     /// Default: 100, Max: 1000
     #[prost(uint32, tag = "3")]
     pub page_size: u32,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "4")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SearchUsersResponse {
@@ -1775,6 +1998,9 @@ pub struct CreateUserEmailRequest {
     /// HMAC-SHA256 of normalized email (hex). Goes to GLOBAL; plaintext stays regional.
     #[prost(string, tag = "3")]
     pub email_hmac: ::prost::alloc::string::String,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "4")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateUserEmailResponse {
@@ -1788,6 +2014,9 @@ pub struct DeleteUserEmailRequest {
     /// Email to remove (cannot be primary)
     #[prost(message, optional, tag = "2")]
     pub email_id: ::core::option::Option<UserEmailId>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteUserEmailResponse {
@@ -1814,6 +2043,9 @@ pub struct SearchUserEmailRequest {
     pub page_token: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
     #[prost(uint32, tag = "3")]
     pub page_size: u32,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "4")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SearchUserEmailResponse {
@@ -2039,6 +2271,9 @@ pub struct CreateUserCredentialRequest {
     pub credential_type: i32,
     #[prost(string, tag = "3")]
     pub name: ::prost::alloc::string::String,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "4")]
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(oneof = "create_user_credential_request::Data", tags = "10, 11, 12")]
     pub data: ::core::option::Option<create_user_credential_request::Data>,
 }
@@ -2065,6 +2300,9 @@ pub struct ListUserCredentialsRequest {
     pub user: ::core::option::Option<UserSlug>,
     #[prost(enumeration = "CredentialType", optional, tag = "2")]
     pub credential_type: ::core::option::Option<i32>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListUserCredentialsResponse {
@@ -2082,6 +2320,9 @@ pub struct UpdateUserCredentialRequest {
     pub name: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(bool, optional, tag = "4")]
     pub enabled: ::core::option::Option<bool>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "5")]
+    pub caller: ::core::option::Option<UserSlug>,
     /// Only passkey updates are allowed (sign_count, backup_state).
     /// TOTP and recovery code credentials are immutable after creation.
     #[prost(message, optional, tag = "10")]
@@ -2098,6 +2339,9 @@ pub struct DeleteUserCredentialRequest {
     pub user: ::core::option::Option<UserSlug>,
     #[prost(int64, tag = "2")]
     pub credential_id: i64,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteUserCredentialResponse {}
@@ -2108,6 +2352,9 @@ pub struct CreateTotpChallengeRequest {
     /// "passkey" — audit trail
     #[prost(string, tag = "2")]
     pub primary_method: ::prost::alloc::string::String,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateTotpChallengeResponse {
@@ -2128,6 +2375,9 @@ pub struct VerifyTotpRequest {
     /// Audit trail for created session
     #[prost(message, optional, tag = "4")]
     pub credential_used: ::core::option::Option<CredentialInfo>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "5")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct VerifyTotpResponse {
@@ -2148,6 +2398,9 @@ pub struct ConsumeRecoveryCodeRequest {
     /// Audit trail for created session
     #[prost(message, optional, tag = "4")]
     pub credential_used: ::core::option::Option<CredentialInfo>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "5")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ConsumeRecoveryCodeResponse {
@@ -2513,6 +2766,9 @@ pub struct ListReceivedInvitationsRequest {
     pub page_token: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
     #[prost(uint32, tag = "4")]
     pub page_size: u32,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "5")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListReceivedInvitationsResponse {
@@ -2528,6 +2784,9 @@ pub struct GetInvitationDetailsRequest {
     /// Must match invitee email
     #[prost(message, optional, tag = "2")]
     pub user: ::core::option::Option<UserSlug>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetInvitationDetailsResponse {
@@ -2538,9 +2797,9 @@ pub struct GetInvitationDetailsResponse {
 pub struct AcceptInvitationRequest {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<InviteSlug>,
-    /// Authenticated user
+    /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "2")]
-    pub acceptor: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AcceptInvitationResponse {
@@ -2551,9 +2810,9 @@ pub struct AcceptInvitationResponse {
 pub struct DeclineInvitationRequest {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<InviteSlug>,
-    /// Authenticated user
+    /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "2")]
-    pub user: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeclineInvitationResponse {
@@ -2622,7 +2881,7 @@ pub struct CreateAppRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(string, tag = "3")]
     pub name: ::prost::alloc::string::String,
     #[prost(string, optional, tag = "4")]
@@ -2638,7 +2897,7 @@ pub struct GetAppRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
 }
@@ -2652,7 +2911,7 @@ pub struct ListAppsRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListAppsResponse {
@@ -2664,7 +2923,7 @@ pub struct UpdateAppRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
     #[prost(string, optional, tag = "4")]
@@ -2682,7 +2941,7 @@ pub struct DeleteAppRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
 }
@@ -2693,7 +2952,7 @@ pub struct SetAppEnabledRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
     #[prost(bool, tag = "4")]
@@ -2709,7 +2968,7 @@ pub struct SetAppCredentialEnabledRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
     #[prost(enumeration = "AppCredentialType", tag = "4")]
@@ -2727,7 +2986,7 @@ pub struct GetAppClientSecretRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
 }
@@ -2743,7 +3002,7 @@ pub struct RotateAppClientSecretRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
     /// Client-generated UUID (16 bytes) for idempotent retry.
@@ -2763,7 +3022,7 @@ pub struct ListAppClientAssertionsRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
 }
@@ -2777,7 +3036,7 @@ pub struct CreateAppClientAssertionRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
     #[prost(string, tag = "4")]
@@ -2804,7 +3063,7 @@ pub struct DeleteAppClientAssertionRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
     #[prost(message, optional, tag = "4")]
@@ -2817,7 +3076,7 @@ pub struct SetAppClientAssertionEnabledRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
     #[prost(message, optional, tag = "4")]
@@ -2832,7 +3091,7 @@ pub struct ListAppVaultsRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
 }
@@ -2846,7 +3105,7 @@ pub struct AddAppVaultRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
     #[prost(message, optional, tag = "4")]
@@ -2864,7 +3123,7 @@ pub struct UpdateAppVaultRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
     #[prost(message, optional, tag = "4")]
@@ -2882,7 +3141,7 @@ pub struct RemoveAppVaultRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
     #[prost(message, optional, tag = "2")]
-    pub initiator: ::core::option::Option<UserSlug>,
+    pub caller: ::core::option::Option<UserSlug>,
     #[prost(message, optional, tag = "3")]
     pub app: ::core::option::Option<AppSlug>,
     #[prost(message, optional, tag = "4")]
@@ -2909,6 +3168,9 @@ pub struct CreateUserSessionRequest {
     /// Required for passkey logins; omitted for email-code (implicit).
     #[prost(message, optional, tag = "2")]
     pub credential_used: ::core::option::Option<CredentialInfo>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateUserSessionResponse {
@@ -3021,6 +3283,9 @@ pub struct RevokeTokenResponse {}
 pub struct RevokeAllUserSessionsRequest {
     #[prost(message, optional, tag = "1")]
     pub user: ::core::option::Option<UserSlug>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "2")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RevokeAllUserSessionsResponse {
@@ -3046,6 +3311,9 @@ pub struct CreateSigningKeyRequest {
     /// Required when scope=SIGNING_KEY_SCOPE_ORGANIZATION
     #[prost(message, optional, tag = "2")]
     pub organization: ::core::option::Option<OrganizationSlug>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateSigningKeyResponse {
@@ -3062,6 +3330,9 @@ pub struct RotateSigningKeyRequest {
     /// true = immediately revoke old key (skip grace period)
     #[prost(bool, tag = "3")]
     pub force_revoke: bool,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "4")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RotateSigningKeyResponse {
@@ -3072,6 +3343,9 @@ pub struct RotateSigningKeyResponse {
 pub struct RevokeSigningKeyRequest {
     #[prost(string, tag = "1")]
     pub kid: ::prost::alloc::string::String,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "2")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RevokeSigningKeyResponse {}
@@ -3080,6 +3354,9 @@ pub struct GetPublicKeysRequest {
     /// Absent = global keys
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "2")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetPublicKeysResponse {
@@ -3221,6 +3498,9 @@ pub struct ListEventsRequest {
     /// Opaque pagination cursor from previous response.
     #[prost(string, tag = "4")]
     pub page_token: ::prost::alloc::string::String,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "5")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListEventsResponse {
@@ -3243,6 +3523,9 @@ pub struct GetEventRequest {
     /// Event identifier (UUID bytes).
     #[prost(bytes = "vec", tag = "2")]
     pub event_id: ::prost::alloc::vec::Vec<u8>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetEventResponse {
@@ -3259,6 +3542,9 @@ pub struct CountEventsRequest {
     /// Optional filter criteria.
     #[prost(message, optional, tag = "2")]
     pub filter: ::core::option::Option<EventFilter>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "3")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CountEventsResponse {
@@ -3318,6 +3604,9 @@ pub struct IngestEventsRequest {
     /// Events to ingest (max batch size enforced by server config).
     #[prost(message, repeated, tag = "3")]
     pub entries: ::prost::alloc::vec::Vec<IngestEventEntry>,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "4")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 /// Reason an individual event was rejected during ingestion.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -3618,6 +3907,9 @@ pub struct RotateBlindingKeyRequest {
     /// Version number of the new blinding key (monotonically increasing).
     #[prost(uint32, tag = "1")]
     pub new_key_version: u32,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "2")]
+    pub caller: ::core::option::Option<UserSlug>,
 }
 /// Response from initiating a blinding key rotation.
 /// Returns immediately — the re-hash runs asynchronously.
@@ -3636,7 +3928,11 @@ pub struct RotateBlindingKeyResponse {
 }
 /// Request to check blinding key rehash progress.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetBlindingKeyRehashStatusRequest {}
+pub struct GetBlindingKeyRehashStatusRequest {
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "1")]
+    pub caller: ::core::option::Option<UserSlug>,
+}
 /// Status of an in-flight or completed blinding key rotation.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetBlindingKeyRehashStatusResponse {
@@ -3715,15 +4011,15 @@ pub struct GetRewrapStatusResponse {
 }
 /// Erase a user's PII via crypto-shredding.
 /// Forward-only finalization — irreversible by design.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct EraseUserRequest {
     /// User slug (Snowflake ID) to erase. The server resolves this to an
     /// internal user ID.
     #[prost(message, optional, tag = "1")]
     pub user: ::core::option::Option<UserSlug>,
-    /// Identity of the actor requesting erasure (audit trail).
-    #[prost(string, tag = "2")]
-    pub erased_by: ::prost::alloc::string::String,
+    /// Identity of the user performing this operation.
+    #[prost(message, optional, tag = "2")]
+    pub caller: ::core::option::Option<UserSlug>,
     /// Region where the user's PII resides.
     #[prost(enumeration = "Region", tag = "3")]
     pub region: i32,
@@ -6828,6 +7124,36 @@ pub mod organization_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Update a team member's role. Caller must be org admin or team manager.
+        pub async fn update_team_member_role(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateTeamMemberRoleRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateTeamMemberRoleResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.OrganizationService/UpdateTeamMemberRole",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "ledger.v1.OrganizationService",
+                        "UpdateTeamMemberRole",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -6980,6 +7306,14 @@ pub mod organization_service_server {
             request: tonic::Request<super::RemoveTeamMemberRequest>,
         ) -> std::result::Result<
             tonic::Response<super::RemoveTeamMemberResponse>,
+            tonic::Status,
+        >;
+        /// Update a team member's role. Caller must be org admin or team manager.
+        async fn update_team_member_role(
+            &self,
+            request: tonic::Request<super::UpdateTeamMemberRoleRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateTeamMemberRoleResponse>,
             tonic::Status,
         >;
     }
@@ -7853,6 +8187,55 @@ pub mod organization_service_server {
                     };
                     Box::pin(fut)
                 }
+                "/ledger.v1.OrganizationService/UpdateTeamMemberRole" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpdateTeamMemberRoleSvc<T: OrganizationService>(pub Arc<T>);
+                    impl<
+                        T: OrganizationService,
+                    > tonic::server::UnaryService<super::UpdateTeamMemberRoleRequest>
+                    for UpdateTeamMemberRoleSvc<T> {
+                        type Response = super::UpdateTeamMemberRoleResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UpdateTeamMemberRoleRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OrganizationService>::update_team_member_role(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpdateTeamMemberRoleSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 _ => {
                     Box::pin(async move {
                         let mut response = http::Response::new(
@@ -8503,6 +8886,783 @@ pub mod vault_service_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "ledger.v1.VaultService";
     impl<T> tonic::server::NamedService for VaultServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+/// Generated client implementations.
+pub mod schema_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// Manages versioned schema definitions within a vault's entity store.
+    /// Schemas are JSON blobs with version tracking and activation semantics.
+    #[derive(Debug, Clone)]
+    pub struct SchemaServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl SchemaServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> SchemaServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> SchemaServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            SchemaServiceClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// Deploy a new schema version (atomic version + pointer write).
+        pub async fn deploy_schema(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DeploySchemaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeploySchemaResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.SchemaService/DeploySchema",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.SchemaService", "DeploySchema"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// List all schema versions without loading definitions (avoids N+1).
+        pub async fn list_schema_versions(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListSchemaVersionsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListSchemaVersionsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.SchemaService/ListSchemaVersions",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.SchemaService", "ListSchemaVersions"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Get a single schema version with its definition.
+        pub async fn get_schema(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetSchemaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetSchemaResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.SchemaService/GetSchema",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.SchemaService", "GetSchema"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Activate a specific schema version (atomic pointer update).
+        pub async fn activate_schema(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ActivateSchemaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ActivateSchemaResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.SchemaService/ActivateSchema",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.SchemaService", "ActivateSchema"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Rollback to the previous activated version (not just current-1).
+        pub async fn rollback_schema(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RollbackSchemaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RollbackSchemaResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.SchemaService/RollbackSchema",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.SchemaService", "RollbackSchema"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Get the currently active schema version and definition.
+        pub async fn get_active_schema(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetActiveSchemaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetActiveSchemaResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.SchemaService/GetActiveSchema",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.SchemaService", "GetActiveSchema"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Compare two schema versions.
+        pub async fn diff_schemas(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DiffSchemasRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DiffSchemasResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.SchemaService/DiffSchemas",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.SchemaService", "DiffSchemas"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod schema_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with SchemaServiceServer.
+    #[async_trait]
+    pub trait SchemaService: std::marker::Send + std::marker::Sync + 'static {
+        /// Deploy a new schema version (atomic version + pointer write).
+        async fn deploy_schema(
+            &self,
+            request: tonic::Request<super::DeploySchemaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeploySchemaResponse>,
+            tonic::Status,
+        >;
+        /// List all schema versions without loading definitions (avoids N+1).
+        async fn list_schema_versions(
+            &self,
+            request: tonic::Request<super::ListSchemaVersionsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListSchemaVersionsResponse>,
+            tonic::Status,
+        >;
+        /// Get a single schema version with its definition.
+        async fn get_schema(
+            &self,
+            request: tonic::Request<super::GetSchemaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetSchemaResponse>,
+            tonic::Status,
+        >;
+        /// Activate a specific schema version (atomic pointer update).
+        async fn activate_schema(
+            &self,
+            request: tonic::Request<super::ActivateSchemaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ActivateSchemaResponse>,
+            tonic::Status,
+        >;
+        /// Rollback to the previous activated version (not just current-1).
+        async fn rollback_schema(
+            &self,
+            request: tonic::Request<super::RollbackSchemaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RollbackSchemaResponse>,
+            tonic::Status,
+        >;
+        /// Get the currently active schema version and definition.
+        async fn get_active_schema(
+            &self,
+            request: tonic::Request<super::GetActiveSchemaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetActiveSchemaResponse>,
+            tonic::Status,
+        >;
+        /// Compare two schema versions.
+        async fn diff_schemas(
+            &self,
+            request: tonic::Request<super::DiffSchemasRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DiffSchemasResponse>,
+            tonic::Status,
+        >;
+    }
+    /// Manages versioned schema definitions within a vault's entity store.
+    /// Schemas are JSON blobs with version tracking and activation semantics.
+    #[derive(Debug)]
+    pub struct SchemaServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> SchemaServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for SchemaServiceServer<T>
+    where
+        T: SchemaService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/ledger.v1.SchemaService/DeploySchema" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeploySchemaSvc<T: SchemaService>(pub Arc<T>);
+                    impl<
+                        T: SchemaService,
+                    > tonic::server::UnaryService<super::DeploySchemaRequest>
+                    for DeploySchemaSvc<T> {
+                        type Response = super::DeploySchemaResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DeploySchemaRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SchemaService>::deploy_schema(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeploySchemaSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.SchemaService/ListSchemaVersions" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListSchemaVersionsSvc<T: SchemaService>(pub Arc<T>);
+                    impl<
+                        T: SchemaService,
+                    > tonic::server::UnaryService<super::ListSchemaVersionsRequest>
+                    for ListSchemaVersionsSvc<T> {
+                        type Response = super::ListSchemaVersionsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListSchemaVersionsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SchemaService>::list_schema_versions(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListSchemaVersionsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.SchemaService/GetSchema" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetSchemaSvc<T: SchemaService>(pub Arc<T>);
+                    impl<
+                        T: SchemaService,
+                    > tonic::server::UnaryService<super::GetSchemaRequest>
+                    for GetSchemaSvc<T> {
+                        type Response = super::GetSchemaResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetSchemaRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SchemaService>::get_schema(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetSchemaSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.SchemaService/ActivateSchema" => {
+                    #[allow(non_camel_case_types)]
+                    struct ActivateSchemaSvc<T: SchemaService>(pub Arc<T>);
+                    impl<
+                        T: SchemaService,
+                    > tonic::server::UnaryService<super::ActivateSchemaRequest>
+                    for ActivateSchemaSvc<T> {
+                        type Response = super::ActivateSchemaResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ActivateSchemaRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SchemaService>::activate_schema(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ActivateSchemaSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.SchemaService/RollbackSchema" => {
+                    #[allow(non_camel_case_types)]
+                    struct RollbackSchemaSvc<T: SchemaService>(pub Arc<T>);
+                    impl<
+                        T: SchemaService,
+                    > tonic::server::UnaryService<super::RollbackSchemaRequest>
+                    for RollbackSchemaSvc<T> {
+                        type Response = super::RollbackSchemaResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RollbackSchemaRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SchemaService>::rollback_schema(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RollbackSchemaSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.SchemaService/GetActiveSchema" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetActiveSchemaSvc<T: SchemaService>(pub Arc<T>);
+                    impl<
+                        T: SchemaService,
+                    > tonic::server::UnaryService<super::GetActiveSchemaRequest>
+                    for GetActiveSchemaSvc<T> {
+                        type Response = super::GetActiveSchemaResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetActiveSchemaRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SchemaService>::get_active_schema(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetActiveSchemaSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.SchemaService/DiffSchemas" => {
+                    #[allow(non_camel_case_types)]
+                    struct DiffSchemasSvc<T: SchemaService>(pub Arc<T>);
+                    impl<
+                        T: SchemaService,
+                    > tonic::server::UnaryService<super::DiffSchemasRequest>
+                    for DiffSchemasSvc<T> {
+                        type Response = super::DiffSchemasResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DiffSchemasRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SchemaService>::diff_schemas(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DiffSchemasSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for SchemaServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "ledger.v1.SchemaService";
+    impl<T> tonic::server::NamedService for SchemaServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }

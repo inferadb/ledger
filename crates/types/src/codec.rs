@@ -335,19 +335,11 @@ mod tests {
                 proptest::array::uniform16(any::<u8>()),
                 "[a-z]{3,10}",
                 1u64..100_000,
-                "[a-z]{3,10}",
                 proptest::collection::vec(arb_operation(), 1..5),
                 arb_timestamp(),
             )
-                .prop_map(|(id, client_id, sequence, actor, operations, timestamp)| {
-                    Transaction {
-                        id,
-                        client_id: client_id.into(),
-                        sequence,
-                        actor,
-                        operations,
-                        timestamp,
-                    }
+                .prop_map(|(id, client_id, sequence, operations, timestamp)| {
+                    Transaction { id, client_id: client_id.into(), sequence, operations, timestamp }
                 })
         }
 

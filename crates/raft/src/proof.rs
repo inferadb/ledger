@@ -364,7 +364,6 @@ mod tests {
             id: [id; 16],
             client_id: ClientId::new(format!("client_{}", id)),
             sequence: id as u64,
-            actor: "test".to_string(),
             operations: vec![],
             timestamp: Utc::now(),
         }

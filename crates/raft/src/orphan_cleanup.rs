@@ -48,8 +48,8 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Maximum memberships to process per batch.
 const MAX_BATCH_SIZE: usize = 1000;
 
-/// Actor identifier for cleanup operations.
-const CLEANUP_ACTOR: &str = "system:orphan_cleanup";
+/// Client ID for cleanup operations.
+const CLEANUP_CLIENT_ID: &str = "system:orphan_cleanup";
 
 /// System organization ID.
 const SYSTEM_ORGANIZATION_ID: OrganizationId = OrganizationId::new(0);
@@ -241,14 +241,13 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
 
         let transaction = Transaction {
             id: *uuid::Uuid::new_v4().as_bytes(),
-            client_id: ClientId::new(CLEANUP_ACTOR),
+            client_id: ClientId::new(CLEANUP_CLIENT_ID),
             sequence: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0),
             operations,
             timestamp: chrono::Utc::now(),
-            actor: CLEANUP_ACTOR.to_string(),
         };
 
         let request = LedgerRequest::Write {
@@ -259,7 +258,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             request_hash: 0,
         };
 
-        self.raft.client_write(RaftPayload::new(request)).await.map_err(|e| {
+        self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
             OrphanCleanupError::OrphanRaftWrite {
                 message: format!("{:?}", e),
                 backtrace: snafu::Backtrace::generate(),
