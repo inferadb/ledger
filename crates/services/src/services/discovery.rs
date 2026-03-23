@@ -1,4 +1,4 @@
-//! System discovery service implementation.
+//! Peer discovery and system state for cluster coordination.
 //!
 //! Provides peer discovery and system state information for cluster coordination.
 //!
@@ -74,6 +74,7 @@ fn is_private_ipv4(ip: Ipv4Addr) -> bool {
 ///
 /// Private ranges:
 /// - fd00::/8 (Unique Local Addresses - typical for WireGuard)
+/// - fc00::/7 (Unique Local Addresses)
 /// - fe80::/10 (Link-Local)
 /// - ::1 (loopback)
 fn is_private_ipv6(ip: Ipv6Addr) -> bool {

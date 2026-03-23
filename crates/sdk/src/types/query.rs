@@ -48,7 +48,7 @@ pub struct Entity {
 }
 
 impl Entity {
-    /// Converts from protobuf Entity.
+    /// Converts from protobuf message.
     pub(crate) fn from_proto(proto: proto::Entity) -> Self {
         Self {
             key: proto.key,
@@ -89,7 +89,7 @@ impl Relationship {
         Self { resource: resource.into(), relation: relation.into(), subject: subject.into() }
     }
 
-    /// Converts from protobuf Relationship.
+    /// Converts from protobuf message.
     pub(crate) fn from_proto(proto: proto::Relationship) -> Self {
         Self { resource: proto.resource, relation: proto.relation, subject: proto.subject }
     }

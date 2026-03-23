@@ -236,8 +236,8 @@ async fn test_write_idempotency() {
 
 /// Tests that writes create blocks that can be retrieved via GetBlock.
 ///
-/// DESIGN.md §3.2.1: State root is computed after applying transactions.
-/// DESIGN.md §7.1: GetBlock returns stored block with header and transactions.
+/// State root is computed after applying transactions.
+/// GetBlock returns stored block with header and transactions.
 #[tokio::test]
 async fn test_write_creates_retrievable_block() {
     let cluster = TestCluster::new(1).await;

@@ -103,8 +103,7 @@ macro_rules! connected_client {
 /// 1. All pending requests are cancelled with `SdkError::Shutdown`
 /// 2. New requests immediately fail with `SdkError::Shutdown`
 /// 3. Server resolver refresh task is stopped
-/// 4. Sequence tracker state is flushed to disk (if using persistence)
-/// 5. Connections are closed
+/// 4. Pending operations are cancelled
 ///
 /// # Example
 ///
@@ -363,7 +362,7 @@ impl LedgerClient {
     /// - Create child tokens for per-request cancellation
     ///
     /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, UserSlug, VaultSlug};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "svc").await?;
     /// # let organization = OrganizationSlug::new(1);
@@ -377,7 +376,7 @@ impl LedgerClient {
     /// });
     ///
     /// // This read will be cancelled if it takes longer than 100ms
-    /// let result = client.read(organization, None, "key", None, Some(token)).await;
+    /// let result = client.read(UserSlug::new(42), organization, None, "key", None, Some(token)).await;
     /// # Ok(())
     /// # }
     /// ```

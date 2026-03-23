@@ -466,7 +466,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// Handles both inserts and deletes (slug index deletions on org/vault
     /// removal, client sequence eviction).
     ///
-    /// This method does NOT commit the transaction — the caller commits after
+    /// Does NOT commit the transaction — the caller commits after
     /// writing both the core blob and external tables, ensuring atomicity.
     pub(super) fn flush_external_writes(
         pending: &PendingExternalWrites,

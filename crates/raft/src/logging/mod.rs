@@ -1,6 +1,6 @@
 //! Canonical log lines for structured request-level observability.
 //!
-//! This module implements the canonical log line pattern where each request emits
+//! Canonical log line pattern where each request emits
 //! exactly one structured JSON event containing all request context. This enables:
 //!
 //! - Single-line debugging: all request context in one log entry

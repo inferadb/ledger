@@ -64,7 +64,7 @@ pub enum CoordinatorError {
 
 /// Coordinate bootstrap decision with discovered peers.
 ///
-/// This function implements the coordination algorithm:
+/// Implements the coordination algorithm:
 ///
 /// 1. Poll discovery every `bootstrap_poll_secs` until `bootstrap_expect` nodes found
 /// 2. Query each discovered peer via `discover_node_info`

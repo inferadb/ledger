@@ -10,10 +10,10 @@ use crate::types::{AppSlug, OrganizationSlug, TokenVersion, UserSlug, VaultSlug}
 
 // ─── Audience Constants ──────────────────────────────────────────────
 
-/// User session tokens are consumed by Control.
+/// User session tokens are consumed by the control plane.
 pub const SESSION_AUDIENCE: &str = "inferadb-control";
 
-/// Vault access tokens are consumed by Engine.
+/// Vault access tokens are consumed by the engine service.
 pub const VAULT_AUDIENCE: &str = "inferadb-engine";
 
 // ─── Envelope Constants ──────────────────────────────────────────────

@@ -90,11 +90,11 @@ pub(crate) struct ServiceContext {
 }
 
 impl ServiceContext {
-    /// Creates a `RequestContext` for a service method and fills in common fields.
+    /// Creates a `RequestContext` for a service method.
     ///
-    /// Replaces the per-service `org_ctx!`/`vault_ctx!`/`user_ctx!`/`app_ctx!` macros.
-    /// The `caller` parameter extracts the user slug from the proto request's
-    /// `UserSlug caller` field for canonical log line emission.
+    /// Populates operation type, transport metadata, trace context, and node ID.
+    /// The caller should use `extract_caller` separately to set the user slug
+    /// from the proto request's `UserSlug caller` field.
     pub(crate) fn make_request_context(
         &self,
         service: &'static str,

@@ -34,7 +34,7 @@ const BACKUP_EXT: &str = ".backup";
 /// Metadata file extension (JSON sidecar).
 const META_EXT: &str = ".meta.json";
 
-/// Error types for backup operations.
+/// Backup operation failure.
 #[derive(Debug, Snafu)]
 pub enum BackupError {
     /// IO error during backup operations.

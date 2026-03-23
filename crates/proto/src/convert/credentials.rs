@@ -237,9 +237,8 @@ impl TryFrom<&proto::RecoveryCodeCredentialData> for RecoveryCodeCredential {
 
 /// Converts a domain [`UserCredential`] to a proto [`UserCredential`](proto::UserCredential).
 ///
-/// The `user` field is set to `None` because `UserId` → `UserSlug` resolution
-/// happens in the service layer via `SlugResolver`. Callers must set the
-/// `user` field on the returned proto message.
+/// The caller provides the resolved `user_slug` for the `user` field, since
+/// `UserId` → `UserSlug` resolution happens in the service layer via `SlugResolver`.
 pub fn user_credential_to_proto(
     cred: &UserCredential,
     user_slug: UserSlug,

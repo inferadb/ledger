@@ -14,7 +14,7 @@
 //!
 //! ```no_run
 //! use inferadb_ledger_sdk::mock::MockLedgerServer;
-//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig, OrganizationSlug, VaultSlug, ServerSource};
+//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig, OrganizationSlug, UserSlug, VaultSlug, ServerSource};
 //!
 //! #[tokio::test]
 //! async fn test_read() {
@@ -95,7 +95,7 @@ type IdempotencyKey = (OrganizationSlug, VaultSlug, String, Vec<u8>);
 /// Value for idempotency cache: (tx_id, block_height, assigned_sequence)
 type IdempotencyCacheEntry = (Vec<u8>, u64, u64);
 
-/// Entity data stored in mock server.
+/// Entity data: (value, version, expires_at).
 type EntityData = (Vec<u8>, u64, Option<u64>);
 
 /// Entity storage map type.

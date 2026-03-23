@@ -225,7 +225,7 @@ fn hash_length_prefixed_str(hasher: &mut Sha256, s: &str) {
     hasher.update(s.as_bytes());
 }
 
-/// Hashes length-prefixed bytes.
+/// Hashes a length-prefixed byte slice.
 #[inline]
 fn hash_length_prefixed_bytes(hasher: &mut Sha256, data: &[u8]) {
     hasher.update((data.len() as u32).to_le_bytes());

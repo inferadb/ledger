@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 use super::{DEFAULT_PAGE_SIZE, DatabaseHeader, HEADER_SIZE, StorageBackend};
 use crate::error::{Error, PageId, Result};
 
-/// In-memory storage backend for testing.
+/// Volatile page store backed by a [`HashMap`].
 ///
 /// Stores all pages in a [`HashMap`] with no durability -- data is lost
 /// when the backend is dropped. [`sync`](StorageBackend::sync) is a

@@ -48,7 +48,7 @@ impl LedgerClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, ReadConsistency, VaultSlug};
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, ReadConsistency, UserSlug, VaultSlug};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
     /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));

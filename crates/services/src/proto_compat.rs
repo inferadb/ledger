@@ -1,7 +1,7 @@
 //! Proto conversions that depend on crate-local types.
 //!
 //! Most proto <-> domain conversions live in `inferadb_ledger_proto::convert`.
-//! This module holds conversions that require types from `inferadb_ledger_state`,
+//! Conversions that require types from `inferadb_ledger_state`,
 //! which the proto crate intentionally does not depend on.
 //!
 //! These are free functions rather than `From` impls because the orphan rule

@@ -1,4 +1,4 @@
-//! Sampling and observation infrastructure for canonical log lines.
+//! Tail sampling for canonical log lines.
 //!
 //! Provides configurable tail sampling that reduces log volume while ensuring
 //! errors, slow requests, and admin operations are never dropped.

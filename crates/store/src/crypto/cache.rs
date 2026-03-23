@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 
 use super::types::{DataEncryptionKey, RegionMasterKey, WrappedDek};
 
-/// Bounded LRU cache for unwrapped Data Encryption Keys.
+/// Bounded cache for unwrapped Data Encryption Keys.
 ///
 /// Keyed by [`WrappedDek`] so that RMK rotation (which re-wraps DEKs)
 /// naturally invalidates stale entries without explicit purge.

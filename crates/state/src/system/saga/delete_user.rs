@@ -1,3 +1,5 @@
+//! Delete User saga state machine and step definitions.
+
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::UserId;
 use serde::{Deserialize, Serialize};

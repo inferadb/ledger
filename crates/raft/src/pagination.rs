@@ -108,7 +108,7 @@ impl PageTokenCodec {
         URL_SAFE_NO_PAD.encode(&bytes)
     }
 
-    /// Decodes and validate a page token.
+    /// Decodes and validates a page token.
     ///
     /// # Errors
     ///

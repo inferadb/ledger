@@ -58,6 +58,7 @@ pub enum EventScope {
 }
 
 impl EventScope {
+    /// Converts from protobuf enum value.
     pub(crate) fn from_proto(value: i32) -> Self {
         match proto::EventScope::try_from(value) {
             Ok(proto::EventScope::System) => Self::System,

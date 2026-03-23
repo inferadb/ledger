@@ -108,8 +108,8 @@ message NodeId {
   string id = 1;
 }
 
-// Unique user identifier (global, stored in _system organization)
-// Sequential int64 assigned by Ledger leader (see ID Generation Strategy in DESIGN.md)
+// Unique user identifier (global, stored in _system organization).
+// Sequential int64 assigned by the Raft leader via Snowflake ID generation.
 message UserId {
   int64 id = 1;
 }
@@ -326,7 +326,7 @@ enum ReadConsistency {
 
 // Merkle inclusion proof for transaction in block.
 // Verification: recompute root from leaf_hash up through siblings.
-// The leaf_hash is SHA-256(canonical_tx_encoding) - see DESIGN.md "Transaction Hash".
+// The leaf_hash is SHA-256(canonical_tx_encoding).
 message MerkleProof {
   Hash leaf_hash = 1; // SHA-256 of transaction (not included separately)
   repeated MerkleSibling siblings = 2; // Siblings from leaf to root (bottom-up order)
@@ -1458,7 +1458,6 @@ message CreateVaultRequest {
 }
 
 // Block retention modes for storage/compliance trade-off.
-// See DESIGN.md "Snapshot & Retention Policy" for details.
 enum BlockRetentionMode {
   BLOCK_RETENTION_MODE_UNSPECIFIED = 0;
   // Keep all blocks with full transactions indefinitely.

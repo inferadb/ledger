@@ -163,6 +163,7 @@ impl TokenBucket {
 ///
 /// ```no_run
 /// use inferadb_ledger_raft::RateLimiter;
+/// use inferadb_ledger_types::OrganizationId;
 ///
 /// let limiter = RateLimiter::new(
 ///     1000, 500.0,  // per-client: burst 1000, 500/s sustained
@@ -172,7 +173,7 @@ impl TokenBucket {
 /// );
 ///
 /// // Check all three tiers
-/// limiter.check("client-1", 42.into()).unwrap();
+/// limiter.check("client-1", OrganizationId::new(42)).unwrap();
 /// ```
 #[derive(Debug)]
 pub struct RateLimiter {
@@ -213,6 +214,7 @@ impl RateLimiter {
     /// * `organization_capacity` — max burst size per organization
     /// * `organization_refill_rate` — sustained requests/sec per organization
     /// * `backpressure_threshold` — pending Raft proposals above which all requests are throttled
+    /// * `region` — Region identifier for Prometheus metric labels.
     pub fn new(
         client_capacity: u64,
         client_refill_rate: f64,
@@ -250,8 +252,6 @@ impl RateLimiter {
     /// - **Backpressure**: Raft pending proposals exceed the configured threshold.
     /// - **Client**: Per-client token bucket is exhausted.
     /// - **Organization**: Per-organization token bucket is exhausted.
-    ///
-    /// * `organization` - Internal organization identifier (`OrganizationId`).
     pub fn check(
         &self,
         client_id: &str,
@@ -419,14 +419,6 @@ impl RateLimiter {
         self.backpressure_threshold.store(backpressure_threshold, Ordering::Relaxed);
     }
 }
-
-// Backwards compatibility: re-export as OrganizationRateLimiter for existing call sites
-// that only need organization-level rate limiting.
-/// Alias for backwards compatibility with code using the organization-only rate limiter.
-pub type OrganizationRateLimiter = RateLimiter;
-
-/// Alias for backwards compatibility.
-pub type RateLimitExceeded = RateLimitRejection;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]

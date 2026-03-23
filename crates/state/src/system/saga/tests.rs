@@ -1,3 +1,5 @@
+//! Tests for cross-organization saga state machines.
+
 use std::time::Duration;
 
 use chrono::Utc;

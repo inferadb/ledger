@@ -66,8 +66,6 @@ pub struct IndexManager;
 impl IndexManager {
     /// Adds a subject to the object index.
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// Key: `{vault_id}{bucket_id}obj_idx:{resource}#{relation}`
     /// Value: serialized list of subjects
     ///
@@ -100,8 +98,6 @@ impl IndexManager {
     }
 
     /// Removes a subject from the object index.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// # Errors
     ///
@@ -141,8 +137,6 @@ impl IndexManager {
 
     /// Adds a resource-relation pair to the subject index.
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// Key: `{vault_id}{bucket_id}subj_idx:{subject}`
     /// Value: serialized list of (resource, relation) pairs
     ///
@@ -175,8 +169,6 @@ impl IndexManager {
     }
 
     /// Removes a resource-relation pair from the subject index.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// # Errors
     ///
@@ -218,8 +210,6 @@ impl IndexManager {
 
     /// Returns subjects for a resource and relation (object index lookup).
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// # Errors
     ///
     /// Returns `IndexError::Storage` if the read transaction fails.
@@ -244,8 +234,6 @@ impl IndexManager {
     }
 
     /// Returns resource-relation pairs for a subject (subject index lookup).
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// # Errors
     ///

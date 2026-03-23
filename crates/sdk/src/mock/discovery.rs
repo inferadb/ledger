@@ -1,3 +1,5 @@
+//! Mock implementation of the discovery gRPC service.
+
 use std::sync::Arc;
 
 use inferadb_ledger_proto::proto;

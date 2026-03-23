@@ -1,6 +1,6 @@
 //! gRPC server for InferaDB Ledger.
 //!
-//! This module provides the main server that exposes all gRPC services:
+//! Main server exposing all gRPC services:
 //! - ReadService: Query operations
 //! - WriteService: Transaction submission
 //! - OrganizationService: Organization lifecycle management
@@ -8,9 +8,12 @@
 //! - AdminService: Cluster operations, maintenance, backup/restore
 //! - UserService: User lifecycle and email management
 //! - AppService: Organization-scoped client application management
+//! - InvitationService: Organization invitation lifecycle
 //! - TokenService: JWT lifecycle (sessions, vault tokens, signing keys)
+//! - EventsService: Organization-scoped event queries
 //! - HealthService: Health checks
 //! - SystemDiscoveryService: Peer discovery
+//! - RaftService: Inter-node Raft consensus
 
 use std::{
     net::SocketAddr,
@@ -190,7 +193,7 @@ impl LedgerServer {
 
     /// Starts the gRPC server.
     ///
-    /// This method blocks until the server is shut down. If a `shutdown_rx`
+    /// Blocks until the server is shut down. If a `shutdown_rx`
     /// was provided via the builder, the server will stop when the signal
     /// is received. Otherwise, it blocks indefinitely.
     ///

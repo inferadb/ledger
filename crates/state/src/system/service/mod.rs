@@ -142,9 +142,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     // Sequence Counters
     // =========================================================================
 
-    /// Returns the next value from a sequence counter and increments it.
+    /// Returns the current value of a sequence counter, then increments it.
     ///
-    /// If the counter doesn't exist, initializes it to `start_value`.
+    /// On first call (counter absent), returns `start_value` and stores `start_value + 1`.
     ///
     /// # Errors
     ///

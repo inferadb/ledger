@@ -11,14 +11,23 @@
 // procedural code.
 #![allow(clippy::disallowed_methods)]
 
+/// Encryption-at-rest configuration.
 mod encryption;
+/// JWT signing, validation, and token lifetime configuration.
 mod jwt;
+/// Key management and rotation configuration.
 mod key_management;
+/// Node identity and peer configuration.
 mod node;
+/// Hot key detection, metrics cardinality, and OpenTelemetry configuration.
 mod observability;
+/// Raft consensus and log storage configuration.
 mod raft;
+/// Rate limiting, shutdown, health check, validation, saga, and cleanup configuration.
 mod resilience;
+/// Runtime reconfiguration types for hot-reloadable settings.
 mod runtime;
+/// Storage backend and cache configuration.
 mod storage;
 
 pub use encryption::*;

@@ -165,7 +165,7 @@ impl ForwardClient {
 
     /// Forwards a WatchBlocks request to the remote region.
     ///
-    /// Note: This returns a streaming response that must be handled appropriately.
+    /// Returns a streaming response. The caller is responsible for consuming the stream.
     pub async fn forward_watch_blocks(
         &mut self,
         request: WatchBlocksRequest,

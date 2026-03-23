@@ -69,7 +69,7 @@ pub const CHECKSUM_SIZE: usize = 32;
 // Errors
 // ============================================================================
 
-/// Errors that can occur during snapshot operations.
+/// Snapshot operation failure.
 #[derive(Debug, Snafu)]
 pub enum SnapshotError {
     /// I/O error during snapshot read/write.

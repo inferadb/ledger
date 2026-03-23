@@ -540,7 +540,7 @@ mod tests {
 
     /// Stress test: 100 concurrent record_access calls during window rotation.
     ///
-    /// Uses a very short window (1 second) and a high threshold so that window
+    /// Uses a 1-second window and a high threshold so that window
     /// rotation is triggered by the elapsed time while many threads are actively
     /// incrementing counters. Verifies no panics or data corruption under
     /// contention on the `Mutex<DetectorState>`.

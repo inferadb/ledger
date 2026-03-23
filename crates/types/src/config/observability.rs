@@ -1,4 +1,4 @@
-//! Hot key detection, audit logging, metrics cardinality, and OpenTelemetry configuration.
+//! Hot key detection, metrics cardinality, and OpenTelemetry configuration.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

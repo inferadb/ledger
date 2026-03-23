@@ -137,8 +137,6 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Execute a function with mutable access to a vault's commitment.
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// Creates the commitment if it doesn't exist.
     fn with_commitment<F, R>(&self, vault: VaultId, f: F) -> R
     where
@@ -235,8 +233,6 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Returns [`StateError::Codec`] if entity serialization or deserialization fails.
     /// Returns [`StateError::Index`] if a relationship index update fails.
     /// Returns [`StateError::PreconditionFailed`] if a conditional write check fails.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn apply_operations_in_txn(
         &self,
         txn: &mut WriteTransaction<'_, B>,
@@ -393,8 +389,6 @@ impl<B: StorageBackend> StateLayer<B> {
     ///
     /// Call this after committing a [`WriteTransaction`] that was used with
     /// [`apply_operations_in_txn`](Self::apply_operations_in_txn).
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn mark_dirty_keys(&self, vault: VaultId, dirty_keys: &[Vec<u8>]) {
         self.with_commitment(vault, |commitment| {
             for key in dirty_keys {
@@ -449,8 +443,6 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Returns [`StateError::Codec`] if entity serialization or deserialization fails.
     /// Returns [`StateError::Index`] if a relationship index update fails.
     /// Returns [`StateError::PreconditionFailed`] if a conditional write check fails.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn apply_operations(
         &self,
         vault: VaultId,
@@ -470,8 +462,6 @@ impl<B: StorageBackend> StateLayer<B> {
     }
 
     /// Clears all entities and relationships for a vault.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// Used during vault recovery to reset state before replay.
     ///
@@ -497,8 +487,6 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Returns an entity by key.
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the read transaction fails.
@@ -517,8 +505,6 @@ impl<B: StorageBackend> StateLayer<B> {
     }
 
     /// Checks if a relationship exists.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// # Errors
     ///
@@ -540,8 +526,6 @@ impl<B: StorageBackend> StateLayer<B> {
     }
 
     /// Computes state root for a vault, updating dirty bucket roots.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// This scans only the dirty buckets and recomputes their roots,
     /// then returns SHA-256(bucket_roots[0..256]).
@@ -609,8 +593,6 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Loads bucket roots from stored vault metadata.
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// Called during startup/recovery to restore commitment state.
     pub fn load_vault_commitment(&self, vault: VaultId, bucket_roots: [Hash; NUM_BUCKETS]) {
         self.vault_commitments
@@ -619,8 +601,6 @@ impl<B: StorageBackend> StateLayer<B> {
     }
 
     /// Returns the current bucket roots for a vault (for persistence).
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn get_bucket_roots(&self, vault: VaultId) -> Option<[Hash; NUM_BUCKETS]> {
         self.vault_commitments.read().get(&vault).map(|c| *c.bucket_roots())
     }
@@ -668,8 +648,6 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Lists subjects for a given resource and relation.
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the read transaction fails.
@@ -686,8 +664,6 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Lists resource-relation pairs for a given subject.
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the read transaction fails.
@@ -702,8 +678,6 @@ impl<B: StorageBackend> StateLayer<B> {
     }
 
     /// Lists all entities in a vault with optional prefix filter.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// Returns up to `limit` entities. Use `start_after` for pagination.
     ///
@@ -778,8 +752,6 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Lists all relationships in a vault.
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// Returns up to `limit` relationships. Use `start_after` for pagination.
     ///
     /// # Errors
@@ -801,7 +773,7 @@ impl<B: StorageBackend> StateLayer<B> {
         // Build the range start key.
         // Note: Keys are ordered by (vault, bucket_id, local_key). For full
         // vault scans without start_after, we use the 8-byte vault prefix to
-        // iterate from the very first key in the vault (bucket 0).
+        // iterate from the first key in the vault (bucket 0).
         let start_key = if let Some(after) = start_after {
             let mut k = encode_storage_key(vault, after.as_bytes());
             k.push(0);

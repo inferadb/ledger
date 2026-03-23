@@ -43,7 +43,7 @@ impl fmt::Display for OrganizationStatus {
 }
 
 impl OrganizationStatus {
-    /// Creates from protobuf enum value.
+    /// Converts from protobuf enum value.
     pub(crate) fn from_proto(value: i32) -> Self {
         match proto::OrganizationStatus::try_from(value) {
             Ok(proto::OrganizationStatus::Active) => OrganizationStatus::Active,
@@ -81,6 +81,7 @@ impl fmt::Display for OrganizationTier {
 }
 
 impl OrganizationTier {
+    /// Converts from protobuf enum value.
     pub(crate) fn from_proto(value: i32) -> Self {
         match proto::OrganizationTier::try_from(value) {
             Ok(proto::OrganizationTier::Pro) => OrganizationTier::Pro,
@@ -89,6 +90,7 @@ impl OrganizationTier {
         }
     }
 
+    /// Converts to protobuf enum value.
     pub(crate) fn to_proto(self) -> i32 {
         match self {
             OrganizationTier::Free => proto::OrganizationTier::Free.into(),
@@ -126,7 +128,7 @@ impl fmt::Display for VaultStatus {
 }
 
 impl VaultStatus {
-    /// Creates from protobuf enum value.
+    /// Converts from protobuf enum value.
     pub(crate) fn from_proto(value: i32) -> Self {
         match proto::VaultStatus::try_from(value) {
             Ok(proto::VaultStatus::Active) => VaultStatus::Active,
@@ -370,7 +372,7 @@ pub struct OrganizationMemberInfo {
 }
 
 impl OrganizationMemberInfo {
-    /// Creates from protobuf message.
+    /// Converts from protobuf message.
     pub(crate) fn from_proto(member: &proto::OrganizationMember) -> Self {
         Self {
             user: UserSlug::new(member.user.map_or(0, |u| u.slug)),
@@ -431,6 +433,7 @@ pub struct TeamMemberInfo {
 }
 
 impl TeamMemberInfo {
+    /// Converts from protobuf message.
     pub(crate) fn from_proto(member: &proto::OrganizationTeamMember) -> Self {
         Self {
             user: UserSlug::new(member.user.map_or(0, |u| u.slug)),
@@ -459,6 +462,7 @@ pub struct TeamInfo {
 }
 
 impl TeamInfo {
+    /// Converts from protobuf message.
     pub(crate) fn from_proto(team: &proto::OrganizationTeam) -> Self {
         Self {
             slug: TeamSlug::new(team.slug.map_or(0, |s| s.slug)),
@@ -614,7 +618,7 @@ pub enum HealthStatus {
 }
 
 impl HealthStatus {
-    /// Creates from protobuf enum value.
+    /// Converts from protobuf enum value.
     pub(crate) fn from_proto(value: i32) -> Self {
         match proto::HealthStatus::try_from(value) {
             Ok(proto::HealthStatus::Healthy) => HealthStatus::Healthy,

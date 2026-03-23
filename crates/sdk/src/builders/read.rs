@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```no_run
-//! # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+//! # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, UserSlug, VaultSlug};
 //! # async fn example(client: &LedgerClient) -> inferadb_ledger_sdk::Result<()> {
 //! # let organization = OrganizationSlug::new(1);
 //! let results = client
@@ -64,7 +64,7 @@ pub struct BatchReadBuilder<'a, S = NoKeys> {
 }
 
 impl<'a> BatchReadBuilder<'a, NoKeys> {
-    /// Creates a new batch read builder targeting a organization and optional vault.
+    /// Creates a new batch read builder targeting an organization and optional vault.
     pub(crate) fn new(
         client: &'a LedgerClient,
         caller: UserSlug,

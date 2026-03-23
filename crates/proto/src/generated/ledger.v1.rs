@@ -55,8 +55,8 @@ pub struct NodeId {
     #[prost(string, tag = "1")]
     pub id: ::prost::alloc::string::String,
 }
-/// Unique user identifier (global, stored in \_system organization)
-/// Sequential int64 assigned by Ledger leader (see ID Generation Strategy in DESIGN.md)
+/// Unique user identifier (global, stored in \_system organization).
+/// Sequential int64 assigned by the Raft leader via Snowflake ID generation.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct UserId {
     #[prost(int64, tag = "1")]
@@ -369,7 +369,7 @@ pub struct Entity {
 }
 /// Merkle inclusion proof for transaction in block.
 /// Verification: recompute root from leaf_hash up through siblings.
-/// The leaf_hash is SHA-256(canonical_tx_encoding) - see DESIGN.md "Transaction Hash".
+/// The leaf_hash is SHA-256(canonical_tx_encoding).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MerkleProof {
     /// SHA-256 of transaction (not included separately)
@@ -4549,7 +4549,6 @@ impl OrganizationTeamMemberRole {
     }
 }
 /// Block retention modes for storage/compliance trade-off.
-/// See DESIGN.md "Snapshot & Retention Policy" for details.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum BlockRetentionMode {

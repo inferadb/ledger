@@ -666,7 +666,7 @@ fn test_consistency_after_partition_heals() {
 
 /// Tests that requests complete through slow nodes.
 ///
-/// Per DESIGN.md fault table: "Network delay | toxiproxy | Timeout handling"
+/// Fault scenario: network delay with timeout handling.
 ///
 /// This test verifies that the system handles slow responses correctly,
 /// eventually completing without blocking indefinitely.

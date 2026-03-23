@@ -83,7 +83,7 @@ impl fmt::Display for OrganizationMemberRole {
 // App Types
 // ============================================================================
 
-/// Credential type discriminator for the unified enable/disable RPC.
+/// Credential type discriminator for application authentication methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppCredentialType {

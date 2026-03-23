@@ -1,4 +1,10 @@
 //! Key patterns for the `_system` organization.
+//!
+//! Defines storage key builders for all system entity families: users,
+//! organizations, apps, teams, signing keys, refresh tokens, invitations,
+//! and credentials. Keys are classified by [`KeyTier`] (Global vs Regional)
+//! and [`KeyFamily`] (directory, index, meta, shred, temporary, audit, entity).
+//! [`SystemKeys::validate_key_tier`] enforces tier correctness at write time.
 
 use std::fmt::Write;
 

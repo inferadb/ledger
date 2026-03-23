@@ -109,7 +109,7 @@ impl Page {
         Self { id, data, dirty: true }
     }
 
-    /// Creates a page from raw bytes read from storage.
+    /// Creates a clean (non-dirty) page from raw bytes read from storage.
     pub fn from_bytes(id: PageId, data: Vec<u8>) -> Self {
         Self { id, data, dirty: false }
     }

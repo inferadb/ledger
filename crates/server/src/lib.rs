@@ -1,7 +1,6 @@
 //! InferaDB Ledger server library.
 //!
-//! Provides the core server functionality including configuration,
-//! cluster bootstrap, and shutdown handling.
+//! Core server functionality: configuration, cluster bootstrap, and shutdown handling.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]

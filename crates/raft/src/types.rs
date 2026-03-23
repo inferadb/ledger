@@ -20,18 +20,6 @@ pub use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy, Ledger
 use openraft::{BasicNode, impls::OneshotResponder};
 use serde::{Deserialize, Serialize};
 
-// Use the declare_raft_types macro for type configuration.
-// This macro generates a `LedgerTypeConfig` struct that implements `RaftTypeConfig`.
-//
-// Type parameters:
-// - `D`: Application data (LedgerRequest)
-// - `R`: Application response (LedgerResponse)
-// - `NodeId`: Node identifier type (u64)
-// - `Node`: Node metadata (BasicNode with address info)
-// - `Entry`: Log entry format (default Entry)
-// - `SnapshotData`: Snapshot format (file-based streaming with zstd compression)
-// - `AsyncRuntime`: Tokio runtime
-// - `Responder`: One-shot channel responder
 // ============================================================================
 // State Root Commitment
 // ============================================================================
@@ -3598,7 +3586,7 @@ mod tests {
     /// `ServiceContext::propose_regional`. GLOBAL variants contain
     /// no PII and are proposed via `ServiceContext::propose_system_request`.
     ///
-    /// This function exists solely to be used in the exhaustive match test
+    /// Exists solely for the exhaustive match test
     /// below. When a new `SystemRequest` variant is added, the compiler
     /// will force the developer to classify it here — catching any
     /// accidental PII in GLOBAL requests at compile time.

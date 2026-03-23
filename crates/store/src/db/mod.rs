@@ -1,6 +1,6 @@
 //! Database and transaction management for inferadb-ledger-store.
 //!
-//! Provides ACID transactions over the 19 fixed tables. Uses a single-writer
+//! Provides ACID transactions over the fixed table set. Uses a single-writer
 //! model optimized for Raft's serialized writes.
 //!
 //! # Example

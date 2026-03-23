@@ -1,6 +1,6 @@
 //! Raft consensus infrastructure for InferaDB Ledger.
 //!
-//! This crate provides:
+//! Provides:
 //! - OpenRaft integration with inferadb-ledger-store log storage
 //! - Combined RaftStorage implementation (log + state machine)
 //! - Inter-node Raft network transport

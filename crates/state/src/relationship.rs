@@ -14,11 +14,19 @@ use crate::keys::{encode_storage_key, vault_prefix};
 pub enum RelationshipError {
     /// Underlying storage operation failed.
     #[snafu(display("Storage error: {source}"))]
-    Storage { source: inferadb_ledger_store::Error },
+    Storage {
+        source: inferadb_ledger_store::Error,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     /// Serialization or deserialization failed.
     #[snafu(display("Codec error: {source}"))]
-    Codec { source: CodecError },
+    Codec {
+        source: CodecError,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }
 
 /// Result type for relationship operations.
@@ -26,15 +34,11 @@ pub type Result<T> = std::result::Result<T, RelationshipError>;
 
 /// Low-level relationship storage operations on raw transactions.
 ///
-/// Provides direct relationship CRUD without the batch semantics, dual-index
-/// updates, or dirty-bucket tracking of [`StateLayer`](crate::StateLayer).
-/// Use this when operating within an existing transaction.
+/// Methods accepting `vault: VaultId` use the internal sequential vault identifier.
 pub struct RelationshipStore;
 
 impl RelationshipStore {
     /// Returns a relationship by its components, or `None` if not found.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// # Errors
     ///
@@ -62,8 +66,6 @@ impl RelationshipStore {
 
     /// Checks if a relationship exists in the vault.
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// # Errors
     ///
     /// Returns `RelationshipError::Storage` if the read transaction fails.
@@ -85,8 +87,6 @@ impl RelationshipStore {
     ///
     /// Returns `true` if the relationship was created, `false` if it already existed.
     /// The caller must commit the transaction after this call.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// Note: This does not update the dual indexes ([`IndexManager`](crate::IndexManager)).
     /// [`StateLayer::apply_operations`](crate::StateLayer::apply_operations) handles
@@ -124,8 +124,6 @@ impl RelationshipStore {
     /// Returns `true` if the relationship existed and was deleted, `false` if not found.
     /// The caller must commit the transaction after this call.
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// Note: This does not update the dual indexes. See [`create`](Self::create) for details.
     ///
     /// # Errors
@@ -149,8 +147,6 @@ impl RelationshipStore {
     /// Lists relationships in a vault with pagination.
     ///
     /// Returns up to `limit` relationships starting from `offset`.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// # Errors
     ///
@@ -193,8 +189,6 @@ impl RelationshipStore {
 
     /// Counts all relationships in a vault.
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// # Errors
     ///
     /// Returns `RelationshipError::Storage` if the iterator or read transaction fails.
@@ -226,8 +220,6 @@ impl RelationshipStore {
     /// Scans the vault for relationships whose key starts with `rel:{resource}#`,
     /// returning up to `limit` matches. Because keys are distributed across buckets
     /// by hash, a full vault scan is performed internally.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// # Errors
     ///

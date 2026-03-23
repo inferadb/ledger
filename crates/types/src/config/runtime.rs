@@ -1,4 +1,4 @@
-//! Runtime-reconfigurable configuration.
+//! Runtime-reconfigurable configuration and field-level change tracking.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

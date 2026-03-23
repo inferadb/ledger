@@ -1,6 +1,6 @@
 //! Raft network transport using gRPC.
 //!
-//! This module implements the `RaftNetwork` trait for OpenRaft, enabling
+//! [`RaftNetwork`] trait implementation for OpenRaft, enabling
 //! inter-node communication for vote requests, log replication, and snapshots.
 
 use std::{collections::HashMap, future::Future, sync::Arc};
@@ -24,7 +24,7 @@ use crate::{
     types::{LedgerNodeId, LedgerTypeConfig},
 };
 
-/// Error type for network operations.
+/// Network operation failure.
 #[derive(Debug, Clone)]
 pub struct NetworkError(String);
 

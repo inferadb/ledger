@@ -153,16 +153,12 @@ impl From<InternalMerkleProof> for proto::MerkleProof {
 // VaultEntry to Block conversion (special case - requires RegionBlock context)
 // =============================================================================
 
-/// Converts a VaultEntry from storage to a proto Block.
+/// Converts a [`VaultEntry`](inferadb_ledger_types::VaultEntry) to a proto [`Block`](proto::Block).
 ///
-/// This is a free function rather than a `From` impl because it requires additional
-/// context (the [`RegionBlock`](inferadb_ledger_types::RegionBlock) and vault) to
-/// populate the block header.
-///
-/// The `vault` parameter must be provided by the caller (service layer) since
-/// the conversion layer does not have access to the `AppliedState` slug index.
-/// The vault is the external Snowflake identifier — never the internal
-/// sequential `VaultId`.
+/// Free function rather than a `From` impl because it requires additional
+/// context (the [`RegionBlock`](inferadb_ledger_types::RegionBlock) and vault slug)
+/// beyond the `VaultEntry` itself. The caller provides the resolved vault slug
+/// since this layer has no access to the slug index.
 pub fn vault_entry_to_proto_block(
     entry: &inferadb_ledger_types::VaultEntry,
     region_block: &inferadb_ledger_types::RegionBlock,

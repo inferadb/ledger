@@ -50,7 +50,7 @@ pub struct FileBackend {
     write_lock: Mutex<()>,
     /// Page size in bytes.
     page_size: usize,
-    /// Path for error messages (reserved for future use).
+    /// Path retained for debug/display and error reporting.
     #[allow(dead_code)] // retained for debug/display and error reporting
     path: String,
 }

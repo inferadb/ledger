@@ -1,4 +1,4 @@
-//! Block, transaction, and entity types for the ledger chain.
+//! Block, transaction, entity, relationship, and write result types for the ledger chain.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -170,8 +170,8 @@ impl RegionBlock {
     /// Extracts a standalone VaultBlock for client verification.
     ///
     /// Clients verify per-vault chains and never see [`RegionBlock`] directly.
-    /// Requires both organization and vault since multiple organizations
-    /// can share a region.
+    /// Requires organization, vault, and vault height to uniquely identify
+    /// the entry since multiple organizations can share a region.
     pub fn extract_vault_block(
         &self,
         organization: OrganizationId,
@@ -303,7 +303,7 @@ pub enum Operation {
         value: Vec<u8>,
         /// Optional write condition.
         condition: Option<SetCondition>,
-        /// Unix timestamp for expiration. A value of 0 means the entry never expires.
+        /// Optional Unix timestamp for expiration. `None` means the entry never expires.
         expires_at: Option<u64>,
     },
     /// Deletes an entity.

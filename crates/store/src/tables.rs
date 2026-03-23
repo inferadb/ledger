@@ -1,6 +1,6 @@
 //! Fixed table definitions for the store engine.
 //!
-//! The store has exactly 21 tables, all known at compile time.
+//! The store uses a fixed set of predefined tables, all known at compile time.
 //! This enables type-safe access and eliminates dynamic table lookup overhead.
 
 use crate::types::KeyType;
@@ -428,7 +428,7 @@ impl Table for VaultHealth {
 /// On-disk representation of a table's metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct TableEntry {
-    /// Table identifier (0-18).
+    /// Table identifier (0–20).
     pub table_id: TableId,
     /// Root page of the B-tree (0 = empty table).
     pub root_page: u64,

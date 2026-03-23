@@ -1,3 +1,5 @@
+//! Organization region migration saga state machine and step definitions.
+
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};

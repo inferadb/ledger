@@ -1,6 +1,6 @@
 //! OpenTelemetry/OTLP trace export for canonical log lines.
 //!
-//! This module provides integration between request logging and OpenTelemetry,
+//! Integration between request logging and OpenTelemetry,
 //! enabling export of request spans to observability backends like Jaeger,
 //! Tempo, or Honeycomb.
 //!
@@ -10,23 +10,7 @@
 //! efficient, non-blocking span export. The provider is initialized once at
 //! server startup and accessed via a global singleton for span creation.
 //!
-//! # Example
-//!
-//! ```no_run
-//! use inferadb_ledger_types::config::OtelConfig;
-//! use inferadb_ledger_raft::otel::{init_otel, shutdown_otel};
-//!
-//! // At server startup
-//! let config = OtelConfig {
-//!     enabled: true,
-//!     endpoint: Some("http://localhost:4317".to_string()),
-//!     ..Default::default()
-//! };
-//! init_otel(&config).expect("Failed to initialize OTEL");
-//!
-//! // At server shutdown
-//! shutdown_otel();
-//! ```
+//! See [`init_otel`] and [`shutdown_otel`] for usage.
 
 use std::{sync::OnceLock, time::Duration};
 
@@ -42,7 +26,7 @@ use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
 /// Global tracer provider, initialized once at server startup.
 static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
-/// Error type for OTEL initialization.
+/// OTEL initialization failure.
 #[derive(Debug)]
 pub enum OtelInitError {
     /// Failed to build the span exporter.
@@ -64,7 +48,7 @@ impl std::error::Error for OtelInitError {}
 
 /// Initializes the OpenTelemetry tracer provider.
 ///
-/// This function should be called once at server startup. It creates a
+/// Call once at server startup. Creates a
 /// `SdkTracerProvider` with `BatchSpanProcessor` for efficient span export.
 ///
 /// # Arguments
@@ -102,8 +86,7 @@ pub fn init_otel(config: &OtelConfig) -> Result<(), OtelInitError> {
 
     let timeout = Duration::from_millis(config.timeout_ms);
 
-    // Build the span exporter (gRPC only for now - HTTP requires additional features)
-    // Note: HTTP transport requires the http-proto feature which we don't enable
+    // HTTP transport requires the http-proto feature which is not enabled.
     if !config.use_grpc() {
         tracing::warn!("HTTP transport requested but only gRPC is supported; using gRPC");
     }
@@ -149,7 +132,7 @@ pub fn init_otel(config: &OtelConfig) -> Result<(), OtelInitError> {
 
 /// Shuts down the OpenTelemetry tracer provider gracefully.
 ///
-/// This function flushes any pending spans and shuts down the provider.
+/// Flushes pending spans and shuts down the provider.
 /// It should be called during server shutdown.
 ///
 /// # Behavior
@@ -194,7 +177,7 @@ pub fn get_tracer() -> Option<opentelemetry_sdk::trace::Tracer> {
 /// contextual information as canonical log line JSON fields.
 ///
 /// Each field corresponds to a canonical log line field with the same name.
-/// See the logging documentation for detailed field descriptions.
+/// See [`RequestContext`](crate::logging::RequestContext) for field definitions.
 #[derive(Debug, Default)]
 #[allow(missing_docs)] // Fields are self-documenting and match canonical log line field names
 pub struct SpanAttributes {

@@ -1,6 +1,6 @@
 //! Shard management for multi-vault state coordination.
 //!
-//! - Multiple organizations share a single Raft group (shard)
+//! - Multiple vaults (potentially from different organizations) share a single Raft group (shard)
 //! - Each vault maintains independent cryptographic chain
 //! - State root divergence in one vault doesn't cascade to others
 
@@ -33,23 +33,43 @@ use crate::{
 pub enum ShardError {
     /// State layer operation failed.
     #[snafu(display("State layer error: {source}"))]
-    State { source: crate::state::StateError },
+    State {
+        source: crate::state::StateError,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     /// Block archive operation failed.
     #[snafu(display("Block archive error: {source}"))]
-    BlockArchive { source: crate::block_archive::BlockArchiveError },
+    BlockArchive {
+        source: crate::block_archive::BlockArchiveError,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     /// Snapshot operation failed.
     #[snafu(display("Snapshot error: {source}"))]
-    Snapshot { source: crate::snapshot::SnapshotError },
+    Snapshot {
+        source: crate::snapshot::SnapshotError,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     /// Underlying storage operation failed.
     #[snafu(display("Storage error: {source}"))]
-    Store { source: inferadb_ledger_store::Error },
+    Store {
+        source: inferadb_ledger_store::Error,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     /// Entity store operation failed.
     #[snafu(display("Entity store error: {source}"))]
-    Entity { source: crate::entity::EntityError },
+    Entity {
+        source: crate::entity::EntityError,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     /// Requested vault does not exist in this region.
     #[snafu(display("Vault {vault} not found"))]
@@ -66,8 +86,6 @@ pub enum ShardError {
 pub type Result<T> = std::result::Result<T, ShardError>;
 
 /// Computes the hash of a snapshot header for chain linking.
-///
-/// Used to link snapshots together in a verifiable chain.
 fn compute_snapshot_header_hash(header: &crate::snapshot::SnapshotHeader) -> Hash {
     let bytes = encode(header).unwrap_or_default();
     inferadb_ledger_types::sha256(&bytes)
@@ -96,7 +114,7 @@ pub struct VaultMeta {
 /// - Snapshot creation and restoration
 /// - Vault health tracking
 pub struct ShardManager<B: StorageBackend> {
-    /// Region this region manager belongs to.
+    /// Region this shard manager belongs to.
     region: Region,
     /// Shared database.
     db: Arc<Database<B>>,
@@ -139,7 +157,7 @@ impl<B: StorageBackend> ShardManager<B> {
         }
     }
 
-    /// Returns the region this region manager belongs to.
+    /// Returns the region this shard manager belongs to.
     pub fn region(&self) -> Region {
         self.region
     }
@@ -172,8 +190,6 @@ impl<B: StorageBackend> ShardManager<B> {
     }
 
     /// Returns vault metadata.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn get_vault_meta(&self, vault: VaultId) -> Option<VaultMeta> {
         self.vault_meta.read().get(&vault).cloned()
     }
@@ -184,8 +200,6 @@ impl<B: StorageBackend> ShardManager<B> {
     }
 
     /// Returns vault health status.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn vault_health(&self, vault: VaultId) -> Option<VaultHealth> {
         self.vault_meta.read().get(&vault).map(|m| m.health.clone())
     }
@@ -201,9 +215,6 @@ impl<B: StorageBackend> ShardManager<B> {
     }
 
     /// Registers a new vault in this region.
-    ///
-    /// * `organization` - Internal organization identifier (`OrganizationId`).
-    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn register_vault(&self, organization: OrganizationId, vault: VaultId) {
         let mut meta = self.vault_meta.write();
         meta.insert(

@@ -16,7 +16,7 @@
 //! # Example
 //!
 //! ```no_run
-//! # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+//! # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, UserSlug, VaultSlug};
 //! # async fn example(client: &LedgerClient) -> inferadb_ledger_sdk::Result<()> {
 //! # let organization = OrganizationSlug::new(1);
 //! let result = client
@@ -75,7 +75,7 @@ pub struct WriteBuilder<'a, S = NoOps> {
 }
 
 impl<'a> WriteBuilder<'a, NoOps> {
-    /// Creates a new write builder targeting a organization and optional vault.
+    /// Creates a new write builder targeting an organization and optional vault.
     pub(crate) fn new(
         client: &'a LedgerClient,
         caller: UserSlug,

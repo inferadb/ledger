@@ -45,8 +45,7 @@ use tonic::{Request, Response, Status};
 
 use super::slug_resolver::SlugResolver;
 
-/// Handles cluster membership, snapshots, vault recovery, runtime configuration,
-/// backup/restore, and cryptographic key operations via Raft consensus.
+/// gRPC handler for cluster administration operations.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct AdminService {
@@ -109,7 +108,7 @@ pub struct AdminService {
 }
 
 impl AdminService {
-    /// Sets input validation configuration for request field limits.
+    /// Attaches input validation configuration for request field limits.
     #[must_use]
     pub fn with_validation_config(mut self, config: Arc<ValidationConfig>) -> Self {
         self.validation_config = config;
@@ -123,7 +122,7 @@ impl AdminService {
         self
     }
 
-    /// Sets the runtime configuration handle for hot-reloadable settings.
+    /// Attaches the runtime configuration handle for hot-reloadable settings.
     #[must_use]
     pub fn with_runtime_config(
         mut self,
@@ -137,7 +136,7 @@ impl AdminService {
         self
     }
 
-    /// Sets the backup manager and snapshot manager for backup/restore operations.
+    /// Attaches the backup manager and snapshot manager for backup/restore operations.
     #[must_use]
     pub fn with_backup(
         mut self,
@@ -149,7 +148,7 @@ impl AdminService {
         self
     }
 
-    /// Sets the handler-phase event handle for recording denial events.
+    /// Attaches the handler-phase event handle for recording denial events.
     #[must_use]
     pub fn with_event_handle(
         mut self,

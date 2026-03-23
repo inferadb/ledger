@@ -100,11 +100,13 @@ pub struct PasskeyCredential {
 /// TOTP credential data (RFC 6238).
 ///
 /// The `secret` field is the shared HMAC key used to generate time-based
-/// codes. It derives `Zeroize` and `ZeroizeOnDrop` to clear memory after use.
-/// Secrets are write-once — never returned after initial creation.
+/// codes. It is wrapped in [`Zeroizing<Vec<u8>>`](zeroize::Zeroizing) to
+/// clear memory on drop. Secrets are write-once — never returned after
+/// initial creation.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TotpCredential {
-    /// 20-byte HMAC secret (RFC 6238). Zeroed from memory on drop.
+    /// HMAC secret (RFC 6238). Zeroed from memory on drop.
+    /// Typically 20 bytes for SHA1, 32 for SHA256, or 64 for SHA512.
     #[serde(with = "zeroize_vec_serde")]
     pub secret: zeroize::Zeroizing<Vec<u8>>,
     /// Hash algorithm for TOTP computation.

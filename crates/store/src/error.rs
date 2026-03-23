@@ -139,7 +139,7 @@ pub enum Error {
     },
 }
 
-// Provide automatic conversion from io::Error to Error::Io for ergonomic ? usage
+/// Automatic conversion from [`io::Error`] for ergonomic `?` usage.
 impl From<io::Error> for Error {
     fn from(source: io::Error) -> Self {
         Error::Io { source }

@@ -40,6 +40,9 @@ pub enum TieredStorageError {
     Snapshot {
         /// The underlying snapshot error.
         source: SnapshotError,
+        /// Location where the error occurred.
+        #[snafu(implicit)]
+        location: snafu::Location,
     },
 
     /// The requested tier is not configured.
@@ -61,6 +64,9 @@ pub enum TieredStorageError {
     Io {
         /// The underlying IO error.
         source: std::io::Error,
+        /// Location where the error occurred.
+        #[snafu(implicit)]
+        location: snafu::Location,
     },
 
     /// Error from object storage operations.
@@ -74,7 +80,9 @@ pub enum TieredStorageError {
 /// Result type for tiered storage operations.
 pub type Result<T> = std::result::Result<T, TieredStorageError>;
 
-/// Trait for storage backends that can store and retrieve snapshots.
+/// Trait for snapshot storage backends (distinct from `inferadb_ledger_store::StorageBackend`).
+///
+/// Implementations store and retrieve snapshots from different storage tiers.
 pub trait StorageBackend: Send + Sync {
     /// The tier this backend represents.
     fn tier(&self) -> StorageTier;
@@ -189,7 +197,13 @@ pub struct ObjectStorageBackend {
 }
 
 impl ObjectStorageBackend {
-    /// Creates a new object storage backend from a URL.
+    /// Default multipart threshold (50 MB).
+    const DEFAULT_MULTIPART_THRESHOLD: usize = 50 * 1024 * 1024;
+
+    /// Multipart upload chunk size (8 MB).
+    const MULTIPART_CHUNK_SIZE: usize = 8 * 1024 * 1024;
+
+    /// Creates a new object storage backend from a URL with default multipart threshold (50 MB).
     ///
     /// # Supported URLs
     ///
@@ -217,13 +231,6 @@ impl ObjectStorageBackend {
     ///
     /// Returns `TieredStorageError::ObjectStorage` if the URL is invalid, the scheme is
     /// unsupported, required credentials are missing, or no tokio runtime is available.
-    /// Default multipart threshold (50 MB).
-    const DEFAULT_MULTIPART_THRESHOLD: usize = 50 * 1024 * 1024;
-
-    /// Multipart upload chunk size (8 MB).
-    const MULTIPART_CHUNK_SIZE: usize = 8 * 1024 * 1024;
-
-    /// Creates a new object storage backend from a URL with default multipart threshold (50 MB).
     pub fn new(url: &str) -> Result<Self> {
         Self::with_multipart_threshold(url, Self::DEFAULT_MULTIPART_THRESHOLD)
     }
@@ -456,7 +463,7 @@ impl StorageBackend for ObjectStorageBackend {
         if self.is_test_backend {
             // For testing, serialize to bytes
             let temp_dir =
-                tempfile::TempDir::new().map_err(|e| TieredStorageError::Io { source: e })?;
+                tempfile::TempDir::new().context(IoSnafu)?;
             let temp_path = temp_dir.path().join("temp.snap");
             snapshot.write_to_file(&temp_path).context(SnapshotSnafu)?;
             let buf = std::fs::read(&temp_path).context(IoSnafu)?;
@@ -466,7 +473,7 @@ impl StorageBackend for ObjectStorageBackend {
 
         // Serialize snapshot to bytes
         let temp_dir =
-            tempfile::TempDir::new().map_err(|e| TieredStorageError::Io { source: e })?;
+            tempfile::TempDir::new().context(IoSnafu)?;
         let temp_path = temp_dir.path().join("temp.snap");
         snapshot.write_to_file(&temp_path).context(SnapshotSnafu)?;
         let data = std::fs::read(&temp_path).context(IoSnafu)?;
@@ -511,7 +518,7 @@ impl StorageBackend for ObjectStorageBackend {
             let data = guard.get(&height).ok_or(TieredStorageError::SnapshotNotFound { height })?;
 
             let temp_dir =
-                tempfile::TempDir::new().map_err(|e| TieredStorageError::Io { source: e })?;
+                tempfile::TempDir::new().context(IoSnafu)?;
             let temp_path = temp_dir.path().join("temp.snap");
             std::fs::write(&temp_path, data).context(IoSnafu)?;
             return Snapshot::read_from_file(&temp_path).context(SnapshotSnafu);
@@ -537,7 +544,7 @@ impl StorageBackend for ObjectStorageBackend {
 
         // Write to temp file and parse
         let temp_dir =
-            tempfile::TempDir::new().map_err(|e| TieredStorageError::Io { source: e })?;
+            tempfile::TempDir::new().context(IoSnafu)?;
         let temp_path = temp_dir.path().join("temp.snap");
         std::fs::write(&temp_path, &data).context(IoSnafu)?;
 
@@ -622,7 +629,7 @@ pub struct SnapshotLocation {
     pub height: u64,
     /// Tier where the snapshot is stored.
     pub tier: StorageTier,
-    /// When the snapshot was created.
+    /// Unix timestamp (seconds) when the snapshot was created.
     pub created_at: u64,
 }
 

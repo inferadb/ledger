@@ -43,7 +43,7 @@ use tonic::{Request, Response, Status};
 
 use super::{service_infra::ServiceContext, slug_resolver::SlugResolver};
 
-/// User lifecycle, email management, region migration, and GDPR erasure.
+/// gRPC handler for user lifecycle operations.
 pub struct UserService {
     ctx: ServiceContext,
 }

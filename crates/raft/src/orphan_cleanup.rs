@@ -1,7 +1,7 @@
 //! Cross-organization orphan cleanup job.
 //!
 //! When users are deleted from `_system`, membership records
-//! in org organizations become orphaned. This background job periodically scans
+//! in organizations become orphaned. This background job periodically scans
 //! for and removes these orphaned records.
 //!
 //! ## Behavior

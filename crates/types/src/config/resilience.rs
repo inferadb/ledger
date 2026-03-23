@@ -1,4 +1,4 @@
-//! Rate limiting, shutdown, health check, and validation configuration.
+//! Rate limiting, shutdown, health check, validation, saga, cleanup, and migration configuration.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -224,6 +224,7 @@ const fn default_watchdog_multiplier() -> u64 {
     2
 }
 
+/// Default leader transfer timeout in seconds (10s).
 const fn default_leader_transfer_timeout_secs() -> u64 {
     10
 }

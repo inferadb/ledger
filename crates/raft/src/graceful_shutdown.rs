@@ -18,10 +18,11 @@
 //!
 //! 1. Mark readiness as failing (stops new traffic from load balancer)
 //! 2. Wait `pre_stop_delay_secs` for Kubernetes to remove pod from endpoints
-//! 3. Wait `grace_period_secs` for load balancer to drain existing connections
-//! 4. Wait up to `drain_timeout_secs` for in-flight requests to finish
-//! 5. Run pre-shutdown tasks (snapshots, Raft shutdown) with `pre_shutdown_timeout_secs` limit
-//! 6. Signal the gRPC server to stop
+//! 3. Enter `Draining` phase — stop accepting new writes, let in-flight requests finish
+//! 4. Wait `grace_period_secs` for load balancer to drain existing connections
+//! 5. Wait up to `drain_timeout_secs` for in-flight requests to reach zero
+//! 6. Run pre-shutdown tasks (snapshots, Raft shutdown) with `pre_shutdown_timeout_secs` limit
+//! 7. Signal the gRPC server to stop
 //!
 //! # Connection Tracking
 //!
@@ -407,7 +408,7 @@ impl GracefulShutdown {
 
     /// Executes the graceful shutdown sequence.
     ///
-    /// This method should be called when the node receives a termination signal
+    /// Call when the node receives a termination signal
     /// (e.g., SIGTERM). It orchestrates the full shutdown sequence and then
     /// signals the gRPC server to stop.
     ///

@@ -75,10 +75,7 @@ impl From<&inferadb_ledger_types::SetCondition> for proto::SetCondition {
 
         let condition = match c {
             inferadb_ledger_types::SetCondition::MustNotExist => Condition::NotExists(true),
-            inferadb_ledger_types::SetCondition::MustExist => {
-                // Proto uses must_exists field for this
-                Condition::MustExists(true)
-            },
+            inferadb_ledger_types::SetCondition::MustExist => Condition::MustExists(true),
             inferadb_ledger_types::SetCondition::VersionEquals(v) => Condition::Version(*v),
             inferadb_ledger_types::SetCondition::ValueEquals(bytes) => {
                 Condition::ValueEquals(bytes.clone())

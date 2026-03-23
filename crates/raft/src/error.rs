@@ -1,9 +1,9 @@
 //! Error types for the inferadb-ledger-raft crate using snafu.
 //!
-//! This module provides structured error types that preserve error chains,
+//! Structured error types that preserve error chains,
 //! source locations, and enable proper error handling patterns.
 //!
-//! ## Design Decisions
+//! ## OpenRaft Compatibility
 //!
 //! OpenRaft's error types have complex generic bounds incompatible with
 //! Snafu's derive macro. Instead of wrapping them directly, we capture the error
@@ -17,7 +17,7 @@ use snafu::{Backtrace, GenerateImplicitData, Snafu};
 // Recovery Errors
 // ============================================================================
 
-/// Errors that can occur during vault recovery operations.
+/// Vault recovery failure.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum RecoveryError {
@@ -65,7 +65,7 @@ pub enum RecoveryError {
 // Saga Errors
 // ============================================================================
 
-/// Errors that can occur during saga orchestration.
+/// Saga orchestration failure.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum SagaError {
@@ -118,7 +118,7 @@ pub enum SagaError {
 // Orphan Cleanup Errors
 // ============================================================================
 
-/// Errors that can occur during orphan cleanup operations.
+/// Orphan cleanup failure.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum OrphanCleanupError {

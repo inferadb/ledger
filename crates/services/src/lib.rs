@@ -1,6 +1,6 @@
 //! gRPC services and server assembly for InferaDB Ledger.
 //!
-//! This crate contains all gRPC service implementations and the
+//! gRPC service implementations and the
 //! [`LedgerServer`] that wires them together with Raft consensus.
 
 #![deny(unsafe_code)]
@@ -13,6 +13,7 @@ pub mod api_version;
 pub mod jwt;
 #[doc(hidden)]
 pub mod peer_maintenance;
+/// Proto conversions that depend on crate-local types (orphan rule workaround).
 pub(crate) mod proto_compat;
 #[doc(hidden)]
 pub mod server;

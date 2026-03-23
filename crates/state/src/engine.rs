@@ -7,7 +7,7 @@
 use std::{path::Path, sync::Arc};
 
 use inferadb_ledger_store::{Database, FileBackend, InMemoryBackend};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 
 /// Errors returned when opening or operating on a [`StorageEngine`].
 #[derive(Debug, Snafu)]
@@ -15,11 +15,20 @@ use snafu::Snafu;
 pub enum EngineError {
     /// Engine failed to open the storage backend.
     #[snafu(display("Failed to open database at {path}: {source}"))]
-    Open { path: String, source: inferadb_ledger_store::Error },
+    Open {
+        path: String,
+        source: inferadb_ledger_store::Error,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     /// Underlying storage operation failed.
     #[snafu(display("Storage operation failed: {source}"))]
-    Storage { source: inferadb_ledger_store::Error },
+    Storage {
+        source: inferadb_ledger_store::Error,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }
 
 /// File-backed storage engine wrapping [`Database<FileBackend>`].
@@ -41,7 +50,7 @@ impl StorageEngine {
     pub fn open(path: impl AsRef<Path>) -> std::result::Result<Self, EngineError> {
         let path = path.as_ref();
         let db = if path.exists() { Database::open(path) } else { Database::create(path) }
-            .map_err(|e| EngineError::Open { path: path.display().to_string(), source: e })?;
+            .context(OpenSnafu { path: path.display().to_string() })?;
 
         Ok(Self { db: Arc::new(db) })
     }
@@ -76,7 +85,7 @@ impl InMemoryStorageEngine {
     /// Returns `EngineError::Open` if the in-memory database cannot be created.
     pub fn open() -> std::result::Result<Self, EngineError> {
         let db = Database::open_in_memory()
-            .map_err(|e| EngineError::Open { path: ":memory:".to_string(), source: e })?;
+            .context(OpenSnafu { path: ":memory:".to_string() })?;
 
         Ok(Self { db: Arc::new(db) })
     }

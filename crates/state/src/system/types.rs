@@ -1,4 +1,7 @@
 //! Data model types for the `_system` organization.
+//!
+//! Includes users, organizations, apps, teams, signing keys, refresh tokens,
+//! and invitation records.
 
 use std::net::SocketAddr;
 
@@ -219,8 +222,8 @@ pub struct MigrationSummary {
 /// Distinct from [`UserStatus`] which tracks richer regional-level lifecycle.
 /// The directory only needs to route and gate:
 /// - `Active` → PII in declared region
-/// - `Migrating` → PII being moved between regions (Task 15)
-/// - `Deleted` → user erased via crypto-shredding (Task 20)
+/// - `Migrating` → PII being moved between regions
+/// - `Deleted` → user erased via crypto-shredding
 /// - `Provisioning` → user being set up by onboarding saga
 ///
 /// IMPORTANT: Variants must only be appended at the end. Postcard encodes enums

@@ -1,4 +1,4 @@
-//! Block retention policy types.
+//! Block retention policy types controlling how long transaction bodies are preserved.
 
 use serde::{Deserialize, Serialize};
 

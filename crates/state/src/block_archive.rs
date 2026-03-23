@@ -43,6 +43,9 @@ pub enum BlockArchiveError {
     Io {
         /// The underlying IO error.
         source: std::io::Error,
+        /// Location where the error occurred.
+        #[snafu(implicit)]
+        location: snafu::Location,
     },
 
     /// Block not found at the requested height.
@@ -57,6 +60,9 @@ pub enum BlockArchiveError {
     Codec {
         /// The underlying codec error.
         source: inferadb_ledger_types::CodecError,
+        /// Location where the error occurred.
+        #[snafu(implicit)]
+        location: snafu::Location,
     },
 
     /// Storage engine error from inferadb-ledger-store.
@@ -64,13 +70,16 @@ pub enum BlockArchiveError {
     Store {
         /// The underlying storage error.
         source: inferadb_ledger_store::Error,
+        /// Location where the error occurred.
+        #[snafu(implicit)]
+        location: snafu::Location,
     },
 }
 
 /// Result type for block archive operations.
 pub type Result<T> = std::result::Result<T, BlockArchiveError>;
 
-/// Statistics about block compaction.
+/// Statistics about block archive compaction (transaction body removal).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionStats {
     /// Current compaction watermark (blocks below this are compacted).
@@ -112,7 +121,7 @@ struct SegmentWriter {
 /// Block archive for a region.
 ///
 /// Uses inferadb-ledger-store for the primary block storage (tables::Blocks) and maintains
-/// a vault_block_index for looking up shard heights by vault/organization/height.
+/// a vault_block_index for looking up region heights by vault/organization/height.
 #[allow(clippy::result_large_err)]
 pub struct BlockArchive<B: StorageBackend> {
     /// Database handle.
@@ -231,9 +240,6 @@ impl<B: StorageBackend> BlockArchive<B> {
     }
 
     /// Finds the region height containing a specific vault block.
-    ///
-    /// * `organization` - Internal organization identifier (`OrganizationId`).
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// # Errors
     ///
@@ -504,9 +510,6 @@ impl<B: StorageBackend> BlockArchive<B> {
 }
 
 /// Encodes vault block index key.
-///
-/// * `organization` - Internal organization identifier (`OrganizationId`).
-/// * `vault` - Internal vault identifier (`VaultId`).
 ///
 /// Format: {organization:8BE}{vault:8BE}{vault_height:8BE}
 fn encode_vault_block_index_key(

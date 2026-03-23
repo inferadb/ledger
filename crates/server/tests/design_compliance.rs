@@ -1,7 +1,7 @@
-//! DESIGN.md compliance integration tests.
+//! Design compliance integration tests.
 //!
 //! These tests verify that the implementation adheres to the invariants and
-//! behaviors specified in DESIGN.md. The server assigns sequence numbers at
+//! behaviors specified in the design specification. The server assigns sequence numbers at
 //! commit time; clients provide a 16-byte idempotency key per request.
 
 #![allow(
@@ -545,10 +545,10 @@ async fn test_two_vault_server_assigned_sequences() {
 
 // =============================================================================
 // Multi-Vault Failure Isolation Tests
-// DESIGN.md Invariants 34-37: Vault failures are isolated
+// Invariants 34-37: Vault failures are isolated
 // =============================================================================
 
-/// DESIGN.md Invariant 34: "A diverged vault does not affect other vaults."
+/// Invariant 34: A diverged vault does not affect other vaults.
 ///
 /// This test verifies that when one vault's state root diverges (perhaps due to
 /// a bug or corruption), other vaults continue to operate normally.
@@ -737,7 +737,7 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
     }
 }
 
-/// DESIGN.md Invariant 35: "Diverged vault returns UNAVAILABLE for reads."
+/// Invariant 35: Diverged vault returns UNAVAILABLE for reads.
 ///
 /// When a vault's computed state root doesn't match the expected root,
 /// the vault should be marked as diverged and return UNAVAILABLE.
@@ -867,10 +867,10 @@ async fn test_diverged_vault_returns_unavailable() {
 
 // =============================================================================
 // State Root Verification Tests
-// DESIGN.md section 3.2.1: State Commitment and Bucket-Based Verification
+// State commitment and bucket-based verification
 // =============================================================================
 
-/// DESIGN.md Invariant 28: "Followers verify state roots match leader."
+/// Invariant 28: Followers verify state roots match leader.
 ///
 /// When a follower applies log entries, it must verify that its computed
 /// state root matches the state root included in the log entry from the leader.
@@ -948,7 +948,7 @@ async fn test_follower_state_root_verification() {
 
 // =============================================================================
 // Consensus Edge Case Tests
-// DESIGN.md section 2.2: Raft Consensus with OpenRaft
+// Raft consensus with OpenRaft
 // =============================================================================
 
 /// Verifies that idempotency detection works correctly across leader failover.

@@ -11,7 +11,7 @@
 //! - Error rates
 //! - Consistency verification
 //!
-//! ## DESIGN.md Targets (§1.10)
+//! ## Performance Targets
 //! - Write p99: <50ms
 //! - Read p99: <2ms (no proof)
 //! - Write throughput: 5,000 tx/sec

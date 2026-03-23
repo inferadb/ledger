@@ -80,7 +80,7 @@ impl PageAllocator {
         self.state.lock().free_pages.len()
     }
 
-    /// Returns the total number of page slots (the next page ID that would be allocated).
+    /// Returns the high-water mark page ID (number of page slots ever allocated).
     pub fn total_pages(&self) -> PageId {
         self.next_page_id()
     }
@@ -100,7 +100,7 @@ impl PageAllocator {
         self.state.lock().free_pages.clone()
     }
 
-    /// Returns page size.
+    /// Returns the page size in bytes.
     pub fn page_size(&self) -> usize {
         self.page_size
     }

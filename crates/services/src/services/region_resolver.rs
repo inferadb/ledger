@@ -1,6 +1,6 @@
 //! Region resolution for routing requests to the correct Raft instance.
 //!
-//! This module provides abstractions for routing organization requests to the
+//! Abstractions for routing organization requests to the
 //! appropriate Raft region in multi-region deployments.
 //!
 //! ## Architecture
@@ -88,9 +88,9 @@ pub struct RemoteRegionInfo {
 /// (needs to be forwarded via gRPC).
 #[derive(Debug)]
 pub enum ResolveResult {
-    /// Region is available locally - process the request directly.
+    /// Region is available locally. Process the request directly.
     Local(RegionContext),
-    /// Region is on a remote node - forward the request via gRPC.
+    /// Region is on a remote node. Forward the request via gRPC.
     Remote(RemoteRegionInfo),
 }
 

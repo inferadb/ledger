@@ -36,16 +36,11 @@ pub type Result<T> = std::result::Result<T, EntityError>;
 
 /// Low-level entity storage operations on raw transactions.
 ///
-/// Provides direct entity CRUD without the batch semantics, dirty-bucket
-/// tracking, or conditional writes of [`StateLayer`](crate::StateLayer).
-/// Use this when operating within an existing transaction (e.g., snapshot
-/// restoration).
+/// Methods accepting `vault: VaultId` use the internal sequential vault identifier.
 pub struct EntityStore;
 
 impl EntityStore {
     /// Returns an entity by key, or `None` if not found.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// # Errors
     ///
@@ -72,8 +67,6 @@ impl EntityStore {
     /// If an entity with the same key already exists in the vault, it is replaced.
     /// The caller must commit the transaction after this call.
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// # Errors
     ///
     /// Returns `EntityError::Codec` if serialization of the entity fails.
@@ -95,8 +88,6 @@ impl EntityStore {
     /// Returns `true` if the entity existed and was deleted, `false` if it
     /// was not found. The caller must commit the transaction after this call.
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// # Errors
     ///
     /// Returns `EntityError::Storage` if the delete operation fails.
@@ -111,8 +102,6 @@ impl EntityStore {
     }
 
     /// Checks if an entity exists in the vault.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// # Errors
     ///
@@ -130,8 +119,6 @@ impl EntityStore {
     ///
     /// Returns up to `limit` entities starting from `offset`, ordered by
     /// storage key (vault prefix + bucket + local key).
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// # Errors
     ///
@@ -177,8 +164,6 @@ impl EntityStore {
     ///
     /// Used during state root recomputation to rehash a single dirty bucket.
     ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
-    ///
     /// # Errors
     ///
     /// Returns `EntityError::Storage` if the iterator or read transaction fails.
@@ -207,8 +192,6 @@ impl EntityStore {
     }
 
     /// Counts all entities in a vault.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// # Errors
     ///
@@ -240,8 +223,6 @@ impl EntityStore {
     /// Returns up to `limit` entities whose local key starts with `key_prefix`.
     /// Because keys are distributed across buckets by hash, a full vault scan
     /// is performed internally (prefix filtering cannot short-circuit by bucket).
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     ///
     /// # Errors
     ///

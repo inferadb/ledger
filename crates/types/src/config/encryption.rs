@@ -249,6 +249,10 @@ impl RewrapConfig {
 
 impl RewrapConfig {
     /// Validates the re-wrapping configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if batch size or interval is invalid.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.batch_size == 0 || self.batch_size > MAX_REWRAP_BATCH_SIZE {
             return Err(ConfigError::Validation {

@@ -47,7 +47,7 @@ pub struct BlockAnnouncement {
 }
 
 impl BlockAnnouncement {
-    /// Creates a BlockAnnouncement from the protobuf type.
+    /// Converts from protobuf message.
     pub(crate) fn from_proto(proto: proto::BlockAnnouncement) -> Self {
         let timestamp = proto.timestamp.and_then(|ts| proto_timestamp_to_system_time(&ts));
 

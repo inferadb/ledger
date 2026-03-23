@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// - Standard derives: Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord
 /// - Serde with `#[serde(transparent)]` for wire format compatibility
 /// - `From<inner>` and `Into<inner>` conversions
-/// - `Display` with a semantic prefix (e.g., `ns:123`)
+/// - `Display` with a semantic prefix (e.g., `org:123`)
 /// - `new()` constructor and `value()` accessor
 macro_rules! define_id {
     (
@@ -265,10 +265,9 @@ define_slug!(
 // ============================================================================
 
 define_id!(
-    /// Unique identifier for a vault within an organization.
+    /// Internal sequential identifier for a vault within an organization (storage-layer only).
     ///
-    /// Wraps an `i64` with compile-time type safety to prevent mixing
-    /// with [`OrganizationId`], [`UserId`], or [`UserEmailId`].
+    /// Never exposed in APIs — use [`VaultSlug`] for external identification.
     ///
     /// # Display
     ///
@@ -293,10 +292,9 @@ define_slug!(
 // ============================================================================
 
 define_id!(
-    /// Unique identifier for a user in the `_system` organization.
+    /// Internal sequential identifier for a user (storage-layer only).
     ///
-    /// Wraps an `i64` with compile-time type safety to prevent mixing
-    /// with [`OrganizationId`], [`VaultId`], or [`UserEmailId`].
+    /// Never exposed in APIs — use [`UserSlug`] for external identification.
     ///
     /// # Display
     ///
@@ -318,6 +316,7 @@ define_slug!(
 
 define_id!(
     /// Unique identifier for a user email record.
+    /// Never exposed in APIs.
     ///
     /// Wraps an `i64` with compile-time type safety to prevent mixing
     /// with [`UserId`], [`OrganizationId`], or [`VaultId`].
@@ -330,6 +329,7 @@ define_id!(
 
 define_id!(
     /// Unique identifier for an email verification token.
+    /// Never exposed in APIs.
     ///
     /// Sequential `i64` assigned by the Raft leader from the
     /// `_meta:seq:email_verify` sequence counter.
@@ -493,7 +493,7 @@ define_id!(
     /// Internal sequential identifier for an organization invitation.
     ///
     /// Wraps an `i64` assigned by the Raft leader from the
-    /// `_meta:seq:invite` GLOBAL sequence counter.
+    /// `_meta:seq:invite` REGIONAL sequence counter.
     ///
     /// # Display
     ///
@@ -512,6 +512,10 @@ define_slug!(
     ///
     /// Used in gRPC APIs and SDK methods. Resolved to [`InviteId`] at
     /// the service boundary via slug index lookup.
+    ///
+    /// # Display
+    ///
+    /// Displays as the raw `u64` value: `1234567890`.
     InviteSlug
 );
 
@@ -596,9 +600,9 @@ define_string_id!(
     ClientId
 );
 
-/// Node identifier in the Raft cluster.
+/// Numeric node identifier for openraft.
 ///
-/// We use u64 for efficient storage and comparison. The mapping from
-/// human-readable node names (e.g., "node-1") to numeric IDs is maintained
-/// in the `_system` organization.
+/// Uses `u64` for efficient storage and comparison. Mapped from
+/// human-readable [`NodeId`] strings (e.g., `"node-1"`) via the
+/// `_system` organization's node registry.
 pub type LedgerNodeId = u64;

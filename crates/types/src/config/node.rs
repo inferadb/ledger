@@ -1,4 +1,4 @@
-//! Node and peer configuration for cluster bootstrap.
+//! Node and peer configuration for ledger cluster nodes.
 
 use std::{net::SocketAddr, path::PathBuf};
 

@@ -36,8 +36,10 @@ use crate::{
     page::{PAGE_HEADER_SIZE, Page},
 };
 
-/// Node header size (after page header): cell_count(2) + free_start(2) +
-/// free_end(2) + reserved(2) + next_leaf(8) = 16 bytes.
+/// Node header size (after page header): 16 bytes.
+///
+/// Leaf layout: cell_count(2) + free_start(2) + free_end(2) + reserved(2) + next_leaf(8).
+/// Branch layout: cell_count(2) + free_start(2) + free_end(2) + rightmost_child(8) + padding(2).
 pub const NODE_HEADER_SIZE: usize = 16;
 
 /// Offset of cell count in node (after page header).
@@ -63,7 +65,7 @@ pub const LEAF_BLOOM_OFFSET: usize = PAGE_HEADER_SIZE + NODE_HEADER_SIZE;
 pub const LEAF_CELL_PTRS_OFFSET: usize = LEAF_BLOOM_OFFSET + BLOOM_FILTER_SIZE;
 
 /// Offset where cell pointers begin (branch nodes, after rightmost child).
-const BRANCH_CELL_PTRS_OFFSET: usize = PAGE_HEADER_SIZE + 6 + 8; // +8 for rightmost child
+const BRANCH_CELL_PTRS_OFFSET: usize = PAGE_HEADER_SIZE + 6 + 8; // cell_count(2) + free_start(2) + free_end(2) + rightmost_child(8)
 
 /// Size of a cell pointer.
 const CELL_PTR_SIZE: usize = 2;
@@ -773,7 +775,7 @@ impl<'a> LeafNodeRef<'a> {
         &self.data[cell_offset + 4 + key_len..cell_offset + 4 + key_len + val_len]
     }
 
-    /// Binary search for a key.
+    /// Binary searches for a key. Returns `Found(index)` or `NotFound(insert_position)`.
     pub fn search(&self, key: &[u8]) -> SearchResult {
         let count = self.cell_count() as usize;
         if count == 0 {

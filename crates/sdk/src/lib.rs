@@ -16,7 +16,7 @@
 //! # Quick Start
 //!
 //! ```no_run
-//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig, Operation, OrganizationSlug, ServerSource};
+//! use inferadb_ledger_sdk::{LedgerClient, ClientConfig, Operation, OrganizationSlug, UserSlug, ServerSource};
 //!
 //! #[tokio::main]
 //! async fn main() -> inferadb_ledger_sdk::Result<()> {
@@ -27,13 +27,14 @@
 //!
 //!     let client = LedgerClient::new(config).await?;
 //!     # let organization = OrganizationSlug::new(1);
+//!     # let caller = UserSlug::new(1);
 //!
 //!     // Read operations
-//!     let value = client.read(organization, None, "user:123", None, None).await?;
+//!     let value = client.read(caller, organization, None, "user:123", None, None).await?;
 //!
 //!     // Write operations with automatic idempotency
 //!     let operations = vec![Operation::set_entity("user:123", b"data".to_vec(), None, None)];
-//!     let result = client.write(organization, None, operations, None).await?;
+//!     let result = client.write(caller, organization, None, operations, None).await?;
 //!     println!("Committed at block {} with sequence {}", result.block_height, result.assigned_sequence);
 //!
 //!     Ok(())
@@ -81,8 +82,7 @@ pub mod token;
 mod tracing;
 mod types;
 
-// Public API exports — LedgerClient
-// Public API exports — builders, config, etc.
+// Public API exports
 pub use builders::{BatchReadBuilder, RelationshipQueryBuilder, WriteBuilder};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use client::LedgerClient;

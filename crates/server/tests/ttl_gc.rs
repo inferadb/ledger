@@ -2,7 +2,6 @@
 //!
 //! Tests that expired entities are properly cleaned up by the GC.
 //!
-//! Per DESIGN.md:
 //! - Expired entities remain in state until garbage collection
 //! - GC runs only on leader
 //! - Uses ExpireEntity operation (distinct from DeleteEntity)
@@ -136,7 +135,7 @@ async fn force_gc(
 
 /// Tests that ForceGc removes expired entities.
 ///
-/// DESIGN.md §6.4: Expired entities remain in state until garbage collection.
+/// Expired entities remain in state until garbage collection.
 #[tokio::test]
 async fn test_force_gc_removes_expired_entities() {
     let cluster = TestCluster::new(1).await;
@@ -392,7 +391,7 @@ async fn test_force_gc_idempotent() {
 
 /// Tests that expired entities are filtered from read responses.
 ///
-/// DESIGN.md: Expired entities remain in state until GC runs, but reads
+/// Expired entities remain in state until GC runs, but reads
 /// should filter them out based on current time vs expires_at.
 #[tokio::test]
 async fn test_expired_entity_not_returned_by_read() {

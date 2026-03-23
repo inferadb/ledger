@@ -55,7 +55,7 @@ const SCAN_CEILING: usize = 500;
 /// Maximum invitations returned by a REGIONAL prefix scan.
 const MAX_LIST_INVITATIONS: usize = 1_000;
 
-/// Organization invitation lifecycle: create, list, revoke, accept, decline.
+/// gRPC handler for organization invitation lifecycle.
 pub struct InvitationService {
     ctx: ServiceContext,
 }

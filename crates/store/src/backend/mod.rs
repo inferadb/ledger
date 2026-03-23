@@ -244,9 +244,9 @@ pub struct DatabaseHeader {
     pub reserved: [u8; 4],
     /// God byte: bit 0 = primary slot, bit 1 = recovery required.
     pub god_byte: u8,
-    /// Commits slot 0.
+    /// Commit slot 0.
     pub slot0: CommitSlot,
-    /// Commits slot 1.
+    /// Commit slot 1.
     pub slot1: CommitSlot,
 }
 

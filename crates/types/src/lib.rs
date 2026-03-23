@@ -1,8 +1,9 @@
 //! Core types, errors, and cryptographic primitives for InferaDB Ledger.
 //!
 //! Provides the foundational types used throughout the ledger:
-//! - Newtype identifiers (`OrganizationId`, `OrganizationSlug`, `VaultId`, `UserId`, `UserEmailId`)
-//!   and geographic region enum (`Region`)
+//! - Newtype identifiers for organizations, vaults, users, teams, apps, invitations,
+//!   and signing keys (both internal `i64` IDs and external Snowflake `u64` slugs),
+//!   plus geographic region enum (`Region`)
 //! - Data structures for blocks, transactions, and operations
 //! - Configuration types with validated builders
 //! - Cryptographic hashing functions (SHA-256, seahash)

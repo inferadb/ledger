@@ -173,11 +173,10 @@ pub enum SeekResult {
     EndOfTree,
 }
 
-/// Functions for manipulating cursor positions.
+/// Stateless helper functions for cursor positioning.
 ///
-/// These are stateless helper functions that operate on cursor positions
-/// and page data provided externally. The actual B-tree struct will use
-/// these to implement cursor operations.
+/// Operate on [`CursorPosition`] and page data provided externally.
+/// The [`BTree`](super::BTree) struct uses these to implement cursor operations.
 pub mod cursor_ops {
     use super::{super::node::LeafNodeRef, *};
 

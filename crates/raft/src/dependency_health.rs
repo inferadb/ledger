@@ -4,7 +4,7 @@
 //! - **Disk writability**: touch + delete a temp file in the data directory
 //! - **Peer reachability**: gRPC connectivity check to cluster peers
 //! - **Raft log lag**: ensures the node isn't too far behind the leader
-//! - **RMK provisioning**: reports loaded RMK versions per region
+//! - **RMK (Region Master Key) provisioning**: reports loaded RMK versions per region
 //!
 //! Results are cached with a configurable TTL (default 5s) to prevent I/O
 //! storms from aggressive Kubernetes probe intervals.

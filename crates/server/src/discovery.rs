@@ -53,7 +53,6 @@ pub struct DiscoveredPeer {
 ///
 /// Used during bootstrap coordination to determine which node should
 /// bootstrap the cluster (lowest Snowflake ID wins).
-// Used by coordinator module in Task 5 (PRD.md)
 #[derive(Debug, Clone)]
 pub struct DiscoveredNode {
     /// Node's Snowflake ID (auto-generated, persisted).
@@ -71,7 +70,7 @@ pub struct DiscoveredNode {
 struct CachedPeers {
     /// Unix timestamp (seconds since epoch) when this cache was written.
     cached_at: u64,
-    /// Lists of discovered peers from the last successful resolution.
+    /// List of discovered peers from the last successful resolution.
     peers: Vec<DiscoveredPeer>,
 }
 
@@ -129,7 +128,7 @@ pub async fn resolve_bootstrap_peers(config: &Config) -> Vec<SocketAddr> {
 
 /// Queries a peer for its node identity information via GetNodeInfo RPC.
 ///
-/// This function connects to a peer and retrieves its Snowflake ID, cluster
+/// Connects to a peer and retrieves its Snowflake ID, cluster
 /// membership status, and current Raft term. Used during bootstrap coordination
 /// to determine which node should bootstrap the cluster.
 ///
@@ -143,7 +142,7 @@ pub async fn resolve_bootstrap_peers(config: &Config) -> Vec<SocketAddr> {
 ///
 /// # Security
 ///
-/// This function validates the peer address before attempting connection:
+/// Validates the peer address before attempting connection:
 /// - Rejects port 0 (unassigned/ephemeral)
 /// - Rejects unspecified addresses (0.0.0.0, ::)
 ///

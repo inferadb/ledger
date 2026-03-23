@@ -2,7 +2,7 @@
 //!
 //! ## Metric Naming Conventions
 //!
-//! All metrics follow the pattern: `ledger_{subsystem}_{name}_{unit}`
+//! Metrics use the `ledger_` or `inferadb_ledger_raft_` prefix.
 //!
 //! - Counters: `_total` suffix
 //! - Histograms: `_seconds` or `_bytes` suffix

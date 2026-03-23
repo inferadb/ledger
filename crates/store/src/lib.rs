@@ -1,9 +1,8 @@
 //! inferadb-ledger-store: A purpose-built embedded storage engine for InferaDB.
 //!
-//! inferadb-ledger-store is a simplified B+ tree storage engine designed for InferaDB's
-//! specific requirements:
+//! B+ tree storage engine designed for InferaDB's specific requirements:
 //!
-//! - **Fixed schema**: 19 tables known at compile time
+//! - **Fixed schema**: All tables known at compile time (see [`TableId`])
 //! - **Single writer**: Leverages Raft's serialization (no write-write MVCC needed)
 //! - **Raft-friendly**: Optimized for append-heavy Raft log access patterns
 //! - **Checksummed pages**: Crash safety with XXH3-64 verification
@@ -61,7 +60,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
-// All unwraps in this crate are infallible:
+// `.unwrap()` is in the project's disallowed_methods list. All uses in this crate are infallible:
 // - try_into().unwrap() on slices with pre-validated sizes (e.g., u16::from_le_bytes)
 // - write_all().unwrap() on growable Vec<u8> buffers
 #![allow(clippy::disallowed_methods)]
@@ -115,5 +114,5 @@ pub use page::{PAGE_HEADER_SIZE, Page, PageAllocator, PageCache};
 pub use tables::{Table, TableEntry, TableId};
 pub use types::{Key, KeyType, Value};
 
-/// Format version for the store on-disk layout.
+/// Crate API version. For on-disk format version, see [`backend::FORMAT_VERSION`].
 pub const VERSION: u16 = 1;

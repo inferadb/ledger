@@ -20,7 +20,7 @@ pub enum Direction {
 }
 
 impl Direction {
-    /// Creates from protobuf enum value.
+    /// Converts from protobuf enum value.
     pub(crate) fn from_proto(value: i32) -> Self {
         match proto::Direction::try_from(value) {
             Ok(proto::Direction::Left) => Direction::Left,
@@ -43,7 +43,7 @@ pub struct MerkleSibling {
 }
 
 impl MerkleSibling {
-    /// Creates from protobuf type.
+    /// Converts from protobuf message.
     pub(crate) fn from_proto(proto: proto::MerkleSibling) -> Self {
         Self {
             hash: proto.hash.map(|h| h.value).unwrap_or_default(),
@@ -66,7 +66,7 @@ pub struct MerkleProof {
 }
 
 impl MerkleProof {
-    /// Creates from protobuf type.
+    /// Converts from protobuf message.
     pub(crate) fn from_proto(proto: proto::MerkleProof) -> Self {
         Self {
             leaf_hash: proto.leaf_hash.map(|h| h.value).unwrap_or_default(),
@@ -152,7 +152,7 @@ pub struct BlockHeader {
 }
 
 impl BlockHeader {
-    /// Creates from protobuf type.
+    /// Converts from protobuf message.
     pub(crate) fn from_proto(proto: proto::BlockHeader) -> Self {
         let timestamp = proto.timestamp.and_then(|ts| proto_timestamp_to_system_time(&ts));
 
@@ -184,7 +184,7 @@ pub struct ChainProof {
 }
 
 impl ChainProof {
-    /// Creates from protobuf type.
+    /// Converts from protobuf message.
     pub(crate) fn from_proto(proto: proto::ChainProof) -> Self {
         Self { headers: proto.headers.into_iter().map(BlockHeader::from_proto).collect() }
     }

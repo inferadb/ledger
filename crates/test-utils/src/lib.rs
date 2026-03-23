@@ -9,6 +9,7 @@
 //! - [`strategies`] - Proptest strategies for domain types
 
 #![deny(unsafe_code)]
+#![warn(missing_docs)]
 // Test utilities are allowed to use unwrap for simplicity
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 

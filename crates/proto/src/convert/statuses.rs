@@ -370,6 +370,8 @@ pub fn region_from_i32(value: i32) -> Result<inferadb_ledger_types::Region, Stat
 // UserStatus conversions
 // =============================================================================
 
+/// Converts a domain [`UserStatus`](inferadb_ledger_types::UserStatus) to its protobuf
+/// representation.
 impl From<inferadb_ledger_types::UserStatus> for proto::UserStatus {
     fn from(status: inferadb_ledger_types::UserStatus) -> Self {
         use inferadb_ledger_types::UserStatus as D;
@@ -383,6 +385,9 @@ impl From<inferadb_ledger_types::UserStatus> for proto::UserStatus {
     }
 }
 
+/// Converts a protobuf [`UserStatus`](proto::UserStatus) to the domain type.
+///
+/// Returns [`Status::invalid_argument`] for `Unspecified`.
 impl TryFrom<proto::UserStatus> for inferadb_ledger_types::UserStatus {
     type Error = Status;
 
@@ -401,7 +406,8 @@ impl TryFrom<proto::UserStatus> for inferadb_ledger_types::UserStatus {
     }
 }
 
-/// Convert a raw i32 user status value to a domain `UserStatus`.
+/// Converts a raw `i32` proto enum value to a domain
+/// [`UserStatus`](inferadb_ledger_types::UserStatus).
 pub fn user_status_from_i32(value: i32) -> Result<inferadb_ledger_types::UserStatus, Status> {
     let proto_status = proto::UserStatus::try_from(value)
         .map_err(|_| Status::invalid_argument(format!("unknown user status value: {value}")))?;
@@ -412,6 +418,7 @@ pub fn user_status_from_i32(value: i32) -> Result<inferadb_ledger_types::UserSta
 // UserRole conversions
 // =============================================================================
 
+/// Converts a domain [`UserRole`](inferadb_ledger_types::UserRole) to its protobuf representation.
 impl From<inferadb_ledger_types::UserRole> for proto::UserRole {
     fn from(role: inferadb_ledger_types::UserRole) -> Self {
         use inferadb_ledger_types::UserRole as D;
@@ -422,6 +429,9 @@ impl From<inferadb_ledger_types::UserRole> for proto::UserRole {
     }
 }
 
+/// Converts a protobuf [`UserRole`](proto::UserRole) to the domain type.
+///
+/// `Unspecified` defaults to `User`.
 impl TryFrom<proto::UserRole> for inferadb_ledger_types::UserRole {
     type Error = Status;
 
@@ -434,7 +444,7 @@ impl TryFrom<proto::UserRole> for inferadb_ledger_types::UserRole {
     }
 }
 
-/// Convert a raw i32 user role value to a domain `UserRole`.
+/// Converts a raw `i32` proto enum value to a domain [`UserRole`](inferadb_ledger_types::UserRole).
 pub fn user_role_from_i32(value: i32) -> Result<inferadb_ledger_types::UserRole, Status> {
     let proto_role = proto::UserRole::try_from(value)
         .map_err(|_| Status::invalid_argument(format!("unknown user role value: {value}")))?;

@@ -128,7 +128,7 @@ impl AppService {
     ///
     /// The structural `App` record (credentials, enabled, slug) lives in GLOBAL.
     /// PII fields (name, description) live in a separate `AppProfile` in REGIONAL.
-    /// This method loads both and overlays the PII fields onto the returned `App`.
+    /// Loads both and overlays the PII fields onto the returned `App`.
     fn load_app(&self, org_id: DomainOrganizationId, app_id: DomainAppId) -> Result<App, Status> {
         let mut app = super::helpers::load_app(&self.ctx.state, org_id, app_id)?;
         self.overlay_app_profile(&mut app, org_id);

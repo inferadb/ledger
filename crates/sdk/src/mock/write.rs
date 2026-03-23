@@ -1,3 +1,5 @@
+//! Mock implementation of the write gRPC service.
+
 use std::sync::{Arc, atomic::Ordering};
 
 use inferadb_ledger_proto::proto;

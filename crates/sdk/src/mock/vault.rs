@@ -1,3 +1,5 @@
+//! Mock implementation of the vault gRPC service.
+
 use std::sync::{Arc, atomic::Ordering};
 
 use inferadb_ledger_proto::proto;

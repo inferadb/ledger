@@ -67,7 +67,7 @@ impl HealthService {
         }
     }
 
-    /// Sets the RaftManager for resolving vault health from regional state.
+    /// Attaches the RaftManager for resolving vault health from regional state.
     pub fn with_manager(mut self, manager: Arc<inferadb_ledger_raft::RaftManager>) -> Self {
         self.manager = Some(manager);
         self

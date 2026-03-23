@@ -1,18 +1,17 @@
 //! Idempotency cache for preventing duplicate transaction processing.
 //!
-//! This module implements a bounded, TTL-based cache that stores the results
+//! Bounded, TTL-based cache that stores the results
 //! of recently committed transactions. When a client retries a request with
 //! the same `(organization, vault, client_id, idempotency_key)` tuple, we return the
 //! cached result instead of reprocessing.
 //!
-//! Per ADR server-assigned-sequences:
+//! The protocol works as follows:
 //! - Clients send a 16-byte UUID idempotency key per write
 //! - Server assigns sequences at Raft commit time
 //! - Cache hit with same payload returns cached result (idempotent retry)
 //! - Cache hit with different payload returns `IDEMPOTENCY_KEY_REUSED` error
 //!
-//! Uses moka's TinyLFU admission policy for superior hit rates (~85% vs ~60% for LRU)
-//! and built-in TTL eviction.
+//! Uses moka for bounded, TinyLFU-based caching with TTL eviction.
 
 use std::time::Duration;
 
@@ -23,13 +22,13 @@ use moka::sync::Cache;
 /// Maximum number of entries in the cache.
 const MAX_CACHE_SIZE: u64 = 100_000;
 
-/// Time-to-live for cache entries (24 hours per ADR).
+/// Time-to-live for cache entries (24 hours).
 const ENTRY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Composite key for idempotency cache.
 ///
-/// Per ADR: Cache key is `(organization, vault, client_id, idempotency_key)`.
-/// The idempotency_key is a 16-byte UUID provided by the client.
+/// Cache key is `(organization, vault, client_id, idempotency_key)` where
+/// `idempotency_key` is a 16-byte UUID provided by the client.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IdempotencyKey {
     /// Organization internal ID.
@@ -149,7 +148,7 @@ impl IdempotencyCache {
         self.cache.insert(key, CachedResult { request_hash, result });
     }
 
-    /// Checks and insert in one operation.
+    /// Checks and inserts in one operation.
     ///
     /// Returns:
     /// - `NewRequest` if the key was not in cache (and the result has been inserted)

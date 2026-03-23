@@ -1,6 +1,6 @@
 //! Raft storage implementation using inferadb-ledger-store.
 //!
-//! This module provides the persistent storage for Raft log entries,
+//! Persistent storage for Raft log entries,
 //! vote state, committed log tracking, and state machine state.
 //!
 //! We use the deprecated but non-sealed `RaftStorage` trait which combines
@@ -39,7 +39,7 @@ pub use types::*;
 
 // Metadata keys for RaftState table
 const KEY_VOTE: &str = "vote";
-#[allow(dead_code)] // reserved for save_committed/read_committed
+#[allow(dead_code)] // Used by OpenRaft's save_committed/read_committed trait methods
 const KEY_COMMITTED: &str = "committed";
 const KEY_LAST_PURGED: &str = "last_purged";
 const KEY_APPLIED_STATE: &str = "applied_state";

@@ -34,7 +34,7 @@ pub type Result<T, E = LedgerError> = std::result::Result<T, E>;
 /// | 2000–2099   | Consensus   | Leadership, proposals, log storage          |
 /// | 2100–2199   | Consensus   | State machine, network                      |
 /// | 3000–3099   | Application | Hash mismatch, vault divergence, not-found  |
-/// | 3100–3199   | Application | Precondition, idempotency, sequence         |
+/// | 3100–3199   | Application | Precondition, idempotency, sequence, migration |
 /// | 3200–3299   | Application | Serialization, config, I/O, internal        |
 ///
 /// # Wire Format
@@ -125,7 +125,7 @@ impl DiagnosticCode {
         self as u16
     }
 
-    /// Converts a numeric code to an `DiagnosticCode`, returning `None` for unknown values.
+    /// Converts a numeric code to a `DiagnosticCode`, returning `None` for unknown values.
     #[must_use]
     pub fn from_u16(code: u16) -> Option<Self> {
         match code {

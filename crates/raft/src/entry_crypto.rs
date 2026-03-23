@@ -23,8 +23,8 @@ use crate::types::SystemRequest;
 
 /// Encrypted form of a [`SystemRequest`] for at-rest PII protection.
 ///
-/// The plaintext `SystemRequest` is postcard-serialized, then encrypted with
-/// AES-256-GCM using the user's `UserShredKey` as the encryption key. The
+/// The plaintext `SystemRequest` is postcard-serialized, then
+/// encrypted with AES-256-GCM using the user's shred key material (32-byte AES key). The
 /// `user_id` is stored in plaintext so the decryption path can look up
 /// the correct key.
 ///

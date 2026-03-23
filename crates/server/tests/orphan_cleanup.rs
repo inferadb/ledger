@@ -146,7 +146,7 @@ async fn test_orphan_cleanup_leader_only() {
 
 /// Tests detection of deleted users.
 ///
-/// Per DESIGN.md: Users with deleted_at or status=DELETED/DELETING are considered deleted.
+/// Users with `deleted_at` or status DELETED/DELETING are considered deleted.
 #[tokio::test]
 async fn test_deleted_user_detection() {
     let cluster = TestCluster::new(1).await;

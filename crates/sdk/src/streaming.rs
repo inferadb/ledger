@@ -20,10 +20,7 @@ use crate::{
     error::{Result, SdkError},
 };
 
-/// Position tracker for stream resumption.
-///
-/// This trait allows the stream to track the position of the last
-/// successfully received item for seamless reconnection.
+/// Position tracking for stream resumption.
 pub trait PositionTracker: Clone + Send + 'static {
     /// The item type being streamed.
     type Item;
@@ -110,7 +107,7 @@ impl PositionTracker for HeightTracker {
 /// # ) -> inferadb_ledger_sdk::Result<
 /// #     tonic::Streaming<inferadb_ledger_proto::proto::BlockAnnouncement>,
 /// # > {
-/// #     unimplemented!("placeholder for doc example")
+/// #     Err(inferadb_ledger_sdk::SdkError::Connection { message: String::new() })
 /// # }
 /// ```
 pub struct ReconnectingStream<T, P, F, Fut>

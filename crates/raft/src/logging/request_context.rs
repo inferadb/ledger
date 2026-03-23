@@ -55,7 +55,7 @@ pub(super) fn truncate_hash(hash: &str) -> String {
 
 /// Accesses the current task-local request context, if one exists.
 ///
-/// This function provides safe access to the request context from anywhere
+/// Provides safe access to the request context from anywhere
 /// in the call stack within the same tokio task. The context is set when
 /// a [`RequestContextGuard`] is used with [`RequestContextGuard::run_with`]
 /// and accessed via the [`with_current_context`] or [`try_with_current_context`]
@@ -87,7 +87,7 @@ where
 /// Attempts to access the current task-local request context.
 ///
 /// Similar to [`with_current_context`], but returns `false` if no context exists
-/// instead of `None`. Useful when you just want to perform an action if context
+/// instead of `None`. Useful when you want to perform an action if context
 /// exists but don't need a return value.
 ///
 /// # Returns

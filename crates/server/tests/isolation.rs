@@ -8,10 +8,9 @@
 //! - Organizations provide organizational isolation through their vaults
 //! - Multiple vaults within the same organization are isolated from each other
 //!
-//! Per DESIGN.md:
-//! - Line 158: "Organization | Entities, vaults, keys" - isolation boundary
-//! - Line 162: "Organizations share physical nodes and Raft groups but maintain independent data"
-//! - Line 226: VaultSlug is "Sequential from `_meta:seq:vault`" - globally unique
+//! Organizations provide the isolation boundary for entities, vaults, and keys.
+//! Organizations share physical nodes and Raft groups but maintain independent data.
+//! Vault slugs are sequential from `_meta:seq:vault` and globally unique.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 

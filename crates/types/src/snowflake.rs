@@ -1,14 +1,12 @@
 //! Snowflake-style globally unique ID generation.
 //!
 //! Generates 64-bit IDs that are globally unique, roughly time-ordered, and
-//! monotonically increasing within a single process. Used for both node IDs
+//! monotonically increasing within a single process. Used for node IDs,
 //! organization slugs, and vault slugs.
 //!
 //! # ID Structure
 //!
-//! ```text
-//! | 42 bits: timestamp (ms since epoch) | 12 bits: worker | 10 bits: sequence |
-//! ```
+//! `| 42 bits: timestamp (ms since epoch) | 12 bits: worker | 10 bits: sequence |`
 //!
 //! - **Timestamp**: milliseconds since 2024-01-01 00:00:00 UTC (~139 years range)
 //! - **Worker**: per-process identifier from entropy mixed with PID (4096 values)

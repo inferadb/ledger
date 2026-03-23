@@ -69,12 +69,7 @@ fn validate_read_key(key: &str) -> Result<(), Status> {
     Ok(())
 }
 
-/// Handles read operations including verified reads, entity/relationship listing, and block
-/// streaming.
-///
-/// Routes read requests to the correct region via the `RegionResolver`.
-/// Node-level fields (snapshot manager, pagination, sampler) are shared across
-/// all regions on this node.
+/// gRPC handler for read operations.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct ReadService {

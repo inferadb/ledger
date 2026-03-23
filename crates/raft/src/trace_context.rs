@@ -1,6 +1,6 @@
 //! W3C Trace Context propagation for distributed tracing.
 //!
-//! This module implements W3C Trace Context extraction from incoming gRPC requests
+//! W3C Trace Context extraction from incoming gRPC requests
 //! and injection into outgoing Raft RPCs. It follows the W3C Trace Context
 //! specification: <https://www.w3.org/TR/trace-context/>
 //!

@@ -47,7 +47,7 @@ use tonic::{Request, Response, Status};
 
 use super::{service_infra::ServiceContext, slug_resolver::SlugResolver};
 
-/// Organization lifecycle: creation, deletion, retrieval, listing, and region migration.
+/// gRPC handler for organization lifecycle operations.
 pub struct OrganizationService {
     ctx: ServiceContext,
 }

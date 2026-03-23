@@ -54,11 +54,7 @@ fn classify_batch_error(err: &BatchError) -> Status {
     }
 }
 
-/// Handles transaction submission through Raft consensus with batching, idempotency, and rate
-/// limiting.
-///
-/// Supports multi-region deployments via `RegionResolver` for routing requests
-/// to the correct region's Raft instance.
+/// gRPC handler for transaction submission.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct WriteService {
@@ -105,14 +101,14 @@ pub struct WriteService {
 
 #[allow(clippy::result_large_err)]
 impl WriteService {
-    /// Adds per-organization rate limiting to an existing service.
+    /// Attaches per-organization rate limiting to an existing service.
     #[must_use]
     pub fn with_rate_limiter(mut self, rate_limiter: Arc<RateLimiter>) -> Self {
         self.rate_limiter = Some(rate_limiter);
         self
     }
 
-    /// Adds hot key detector for identifying frequently accessed keys.
+    /// Attaches hot key detector for identifying frequently accessed keys.
     #[must_use]
     pub fn with_hot_key_detector(
         mut self,
@@ -122,7 +118,7 @@ impl WriteService {
         self
     }
 
-    /// Sets input validation configuration for request field limits.
+    /// Attaches input validation configuration for request field limits.
     #[must_use]
     pub fn with_validation_config(mut self, config: Arc<ValidationConfig>) -> Self {
         self.validation_config = config;
@@ -136,7 +132,7 @@ impl WriteService {
         self
     }
 
-    /// Sets the handler-phase event handle for recording denial events.
+    /// Attaches the handler-phase event handle for recording denial events.
     #[must_use]
     pub fn with_event_handle(
         mut self,

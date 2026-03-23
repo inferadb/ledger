@@ -345,7 +345,7 @@ pub(crate) fn read_vault_connection(
     })
 }
 
-/// Maps a [`ErrorCode`] to the corresponding gRPC [`Status`].
+/// Maps an [`ErrorCode`] to the corresponding gRPC [`Status`].
 ///
 /// Used by service-layer error handlers to convert structured state-machine
 /// error codes into the correct gRPC status without string matching.

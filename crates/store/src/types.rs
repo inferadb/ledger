@@ -2,10 +2,10 @@
 //!
 //! The store supports three key types:
 //! - `u64` / `i64`: 8-byte fixed-width integers (big-endian for lexicographic ordering)
-//! - `&str`: UTF-8 strings (stored inline without length prefix)
-//! - `&[u8]`: Arbitrary byte slices (stored inline without length prefix)
+//! - `String` / `&str`: UTF-8 strings (stored inline without length prefix)
+//! - `Vec<u8>` / `&[u8]`: Arbitrary byte slices (stored inline without length prefix)
 //!
-//! Values are always `&[u8]` (arbitrary bytes).
+//! Values are `&[u8]` (arbitrary bytes) or `u64` (8-byte big-endian).
 
 use std::cmp::Ordering;
 

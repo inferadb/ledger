@@ -126,8 +126,6 @@ pub struct VaultSnapshotMeta {
 
 impl VaultSnapshotMeta {
     /// Creates a new vault snapshot metadata.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn new(
         vault: VaultId,
         vault_height: u64,
@@ -153,9 +151,9 @@ impl VaultSnapshotMeta {
     }
 }
 
-/// Snapshot header.
+/// Header metadata for a serialized snapshot.
 ///
-/// Snapshots include chain verification linkage to enable verification after
+/// Includes chain verification linkage to enable integrity verification after
 /// block compaction.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnapshotHeader {
@@ -210,7 +208,7 @@ pub struct SnapshotStateData {
     pub vault_entities: HashMap<VaultId, Vec<Entity>>,
 }
 
-/// In-memory snapshot representation.
+/// In-memory snapshot containing header metadata and decompressed state data.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     /// Snapshot header.
@@ -249,8 +247,7 @@ impl Default for SnapshotChainParams {
 impl Snapshot {
     /// Creates a new snapshot with chain verification linkage.
     ///
-    /// Snapshots include chain verification data to enable verification after
-    /// block compaction.
+    /// Chain parameters enable snapshot integrity verification even after block compaction removes transaction bodies.
     ///
     /// # Errors
     ///
@@ -398,15 +395,11 @@ impl Snapshot {
     }
 
     /// Returns vault metadata by vault.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn get_vault_meta(&self, vault: VaultId) -> Option<&VaultSnapshotMeta> {
         self.header.vault_states.iter().find(|v| v.vault == vault)
     }
 
     /// Returns entities for a vault.
-    ///
-    /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn get_vault_entities(&self, vault: VaultId) -> Option<&Vec<Entity>> {
         self.state.vault_entities.get(&vault)
     }
@@ -508,12 +501,14 @@ impl Snapshot {
     }
 }
 
-/// Snapshot file naming utilities.
+/// Returns the filename for a snapshot at the given region height.
 pub fn snapshot_filename(region_height: u64) -> String {
     format!("{:09}.snap", region_height)
 }
 
 /// Parses region height from snapshot filename.
+///
+/// Returns `None` if the filename does not match the expected format.
 pub fn parse_snapshot_filename(filename: &str) -> Option<u64> {
     filename.strip_suffix(".snap").and_then(|s| s.parse().ok())
 }

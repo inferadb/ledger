@@ -1,4 +1,9 @@
 //! Client configuration with builder pattern.
+//!
+//! [`ClientConfig`] is the entry point for configuring a [`LedgerClient`](crate::LedgerClient).
+//! Use [`ClientConfig::builder()`] to construct a validated configuration with
+//! server endpoints, retry policies, TLS settings, and optional features like
+//! circuit breakers and metrics.
 
 use std::time::Duration;
 

@@ -1,6 +1,6 @@
 //! JWT signing, validation, and key management.
 //!
-//! This module contains:
+//! Provides:
 //! - `JwtEngine` — signing key cache with lock-free reads (ArcSwap) and methods for
 //!   signing/validating JWTs.
 //! - Refresh token utilities (`generate_refresh_token`, `generate_family_id`).

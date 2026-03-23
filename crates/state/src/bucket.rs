@@ -48,7 +48,7 @@ pub const NUM_BUCKETS: usize = 256;
 pub struct VaultCommitment {
     /// Root hash for each bucket (0-255).
     bucket_roots: [Hash; NUM_BUCKETS],
-    /// Sets of buckets that need rehashing.
+    /// Set of buckets that need rehashing.
     dirty_buckets: BTreeSet<u8>,
 }
 

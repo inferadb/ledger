@@ -1,4 +1,4 @@
-//! JWT token configuration.
+//! JWT signing, validation, and token lifetime configuration.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

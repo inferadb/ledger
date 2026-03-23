@@ -25,7 +25,7 @@ use tonic::{Request, Response, Status};
 
 use super::{service_infra::ServiceContext, slug_resolver::SlugResolver};
 
-/// Vault lifecycle: creation, deletion, retrieval, and listing.
+/// gRPC handler for vault lifecycle operations.
 pub struct VaultService {
     ctx: ServiceContext,
 }
@@ -93,7 +93,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         let ledger_request = LedgerRequest::CreateVault {
             organization: organization_id,
             slug: vault,
-            name: None, // CreateVaultRequest doesn't have name field
+            name: None,
             retention_policy,
         };
 

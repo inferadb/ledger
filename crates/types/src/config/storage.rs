@@ -1,4 +1,5 @@
-//! Storage engine configuration for B+ tree, compaction, and integrity.
+//! Storage engine, compaction, integrity, backup, tiered storage, and lifecycle purge
+//! configuration.
 
 use std::{collections::HashMap, time::Duration};
 

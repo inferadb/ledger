@@ -48,7 +48,7 @@ const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// TCP keepalive interval.
 const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Connection pool managing tonic gRPC channels.
+/// Manages tonic gRPC channels with lazy connection establishment.
 ///
 /// Provides lazy connection establishment and thread-safe channel sharing.
 /// The underlying tonic [`Channel`] is cheap to clone (it shares the HTTP/2

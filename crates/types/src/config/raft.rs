@@ -1,4 +1,4 @@
-//! Raft consensus and batch writer configuration.
+//! Raft consensus, batch writer, sequence eviction, and post-erasure compaction configuration.
 
 use std::time::Duration;
 

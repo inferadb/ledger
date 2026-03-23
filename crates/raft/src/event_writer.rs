@@ -1,6 +1,6 @@
 //! Event writers for deterministic and handler-phase audit trail generation.
 //!
-//! This module provides:
+//! Provides:
 //!
 //! - [`EventWriter`] for persisting batched events to `events.db`
 //! - [`ApplyPhaseEmitter`] for constructing deterministic [`EventEntry`] records during Raft state

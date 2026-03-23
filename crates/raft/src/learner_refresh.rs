@@ -62,7 +62,7 @@ impl Default for LearnerRefreshConfig {
 
 /// Cached system state from voters.
 ///
-/// This represents the data that learners cache from the cluster state.
+/// Data that learners cache from the cluster state.
 #[derive(Debug, Clone)]
 pub struct CachedSystemState {
     /// Version number for cache comparison.

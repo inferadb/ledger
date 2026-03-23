@@ -7,7 +7,7 @@
 //! - Entity and relationship CRUD with conditional writes
 //! - Snapshot creation and restoration
 //! - Dual indexes for relationship queries (object-centric and subject-centric)
-//! - System organization types for organization routing and cluster membership
+//! - System types for routing and cluster membership
 //! - Time-travel index for historical queries
 //! - Block archive for committed block storage
 
