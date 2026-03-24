@@ -13,10 +13,10 @@ use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 /// # Example
 ///
 /// ```no_run
-/// # use inferadb_ledger_sdk::{LedgerClient, EventSource, OrganizationSlug};
+/// # use inferadb_ledger_sdk::{LedgerClient, EventSource, OrganizationSlug, UserSlug};
 /// # async fn example(client: &LedgerClient) -> inferadb_ledger_sdk::Result<()> {
 /// # let organization = OrganizationSlug::new(1);
-/// let result = client.ingest_events(organization, EventSource::Engine, vec![]).await?;
+/// let result = client.ingest_events(UserSlug::new(42), organization, EventSource::Engine, vec![]).await?;
 /// # Ok(())
 /// # }
 /// ```

@@ -319,14 +319,14 @@ impl ListResourcesOpts {
 /// # Example
 ///
 /// ```no_run
-/// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig, OrganizationSlug, VaultSlug, VerifyOpts, ServerSource};
+/// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig, OrganizationSlug, UserSlug, VaultSlug, VerifyOpts, ServerSource};
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let client = LedgerClient::new(ClientConfig::builder()
 /// #     .servers(ServerSource::from_static(["http://localhost:50051"]))
 /// #     .client_id("example")
 /// #     .build()?).await?;
 /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
-/// let result = client.verified_read(organization, Some(vault), "key", VerifyOpts::new()).await?;
+/// let result = client.verified_read(UserSlug::new(42), organization, Some(vault), "key", VerifyOpts::new()).await?;
 /// if let Some(verified) = result {
 ///     // Verify the proof is valid
 ///     verified.verify()?;

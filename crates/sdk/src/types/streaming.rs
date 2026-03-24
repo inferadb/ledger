@@ -13,7 +13,7 @@ use crate::proto_util::proto_timestamp_to_system_time;
 /// # Example
 ///
 /// ```no_run
-/// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig, OrganizationSlug, VaultSlug, ServerSource};
+/// # use inferadb_ledger_sdk::{LedgerClient, ClientConfig, OrganizationSlug, UserSlug, VaultSlug, ServerSource};
 /// # use futures::StreamExt;
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let client = LedgerClient::new(ClientConfig::builder()
@@ -21,7 +21,7 @@ use crate::proto_util::proto_timestamp_to_system_time;
 /// #     .client_id("example")
 /// #     .build()?).await?;
 /// # let (organization, vault, start_height) = (OrganizationSlug::new(1), VaultSlug::new(1), 1u64);
-/// let mut stream = client.watch_blocks(organization, vault, start_height).await?;
+/// let mut stream = client.watch_blocks(UserSlug::new(42), organization, vault, start_height).await?;
 /// while let Some(announcement) = stream.next().await {
 ///     let block = announcement?;
 ///     println!("New block at height {}: {:?}", block.height, block.block_hash);
