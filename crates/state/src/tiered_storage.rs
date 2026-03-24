@@ -462,8 +462,7 @@ impl StorageBackend for ObjectStorageBackend {
         #[cfg(test)]
         if self.is_test_backend {
             // For testing, serialize to bytes
-            let temp_dir =
-                tempfile::TempDir::new().context(IoSnafu)?;
+            let temp_dir = tempfile::TempDir::new().context(IoSnafu)?;
             let temp_path = temp_dir.path().join("temp.snap");
             snapshot.write_to_file(&temp_path).context(SnapshotSnafu)?;
             let buf = std::fs::read(&temp_path).context(IoSnafu)?;
@@ -472,8 +471,7 @@ impl StorageBackend for ObjectStorageBackend {
         }
 
         // Serialize snapshot to bytes
-        let temp_dir =
-            tempfile::TempDir::new().context(IoSnafu)?;
+        let temp_dir = tempfile::TempDir::new().context(IoSnafu)?;
         let temp_path = temp_dir.path().join("temp.snap");
         snapshot.write_to_file(&temp_path).context(SnapshotSnafu)?;
         let data = std::fs::read(&temp_path).context(IoSnafu)?;
@@ -517,8 +515,7 @@ impl StorageBackend for ObjectStorageBackend {
             let guard = self.test_storage.read();
             let data = guard.get(&height).ok_or(TieredStorageError::SnapshotNotFound { height })?;
 
-            let temp_dir =
-                tempfile::TempDir::new().context(IoSnafu)?;
+            let temp_dir = tempfile::TempDir::new().context(IoSnafu)?;
             let temp_path = temp_dir.path().join("temp.snap");
             std::fs::write(&temp_path, data).context(IoSnafu)?;
             return Snapshot::read_from_file(&temp_path).context(SnapshotSnafu);
@@ -543,8 +540,7 @@ impl StorageBackend for ObjectStorageBackend {
         })?;
 
         // Write to temp file and parse
-        let temp_dir =
-            tempfile::TempDir::new().context(IoSnafu)?;
+        let temp_dir = tempfile::TempDir::new().context(IoSnafu)?;
         let temp_path = temp_dir.path().join("temp.snap");
         std::fs::write(&temp_path, &data).context(IoSnafu)?;
 

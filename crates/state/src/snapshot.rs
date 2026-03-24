@@ -247,7 +247,8 @@ impl Default for SnapshotChainParams {
 impl Snapshot {
     /// Creates a new snapshot with chain verification linkage.
     ///
-    /// Chain parameters enable snapshot integrity verification even after block compaction removes transaction bodies.
+    /// Chain parameters enable snapshot integrity verification even after block compaction removes
+    /// transaction bodies.
     ///
     /// # Errors
     ///

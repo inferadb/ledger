@@ -84,8 +84,7 @@ impl InMemoryStorageEngine {
     ///
     /// Returns `EngineError::Open` if the in-memory database cannot be created.
     pub fn open() -> std::result::Result<Self, EngineError> {
-        let db = Database::open_in_memory()
-            .context(OpenSnafu { path: ":memory:".to_string() })?;
+        let db = Database::open_in_memory().context(OpenSnafu { path: ":memory:".to_string() })?;
 
         Ok(Self { db: Arc::new(db) })
     }
