@@ -222,7 +222,7 @@ impl UserService {
     ) -> bool {
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
 
         // Reject if code length doesn't match configured digits (prevents ct_eq length leak)
         if code.len() != digits as usize {
@@ -2834,7 +2834,7 @@ mod tests {
     ) -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let counter = now / u64::from(period);
