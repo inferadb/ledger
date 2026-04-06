@@ -167,6 +167,24 @@ run-release:
 clean:
     cargo clean
 
+# Prune stale build artifacts without destroying the current cache.
+# Removes incremental compilation caches and dep artifacts older than
+# `age` days (default: 7), plus the llvm-cov target directory.
+# Safe to run regularly — current builds are unaffected.
+clean-stale age="7":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Pruning build artifacts older than {{age}} days..."
+    before=$(du -sh target/ 2>/dev/null | cut -f1)
+    # Stale incremental compilation caches (cargo never GCs these)
+    find target/debug/incremental -maxdepth 1 -type d -mtime +{{age}} -exec rm -rf {} + 2>/dev/null || true
+    # Stale dependency artifacts (old hashes from previous compilations)
+    find target/debug/deps -maxdepth 1 -type f -mtime +{{age}} -delete 2>/dev/null || true
+    # llvm-cov instrumented builds (fully regenerated each run)
+    rm -rf target/llvm-cov-target 2>/dev/null || true
+    after=$(du -sh target/ 2>/dev/null | cut -f1)
+    echo "target/: ${before} → ${after}"
+
 # Update dependencies
 update:
     cargo update
