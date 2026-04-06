@@ -127,9 +127,15 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                 }
 
                 // Get Raft metrics for leader_id and term
-                let raft_metrics = self.ctx.raft.metrics().borrow().clone();
-                let leader_id = raft_metrics.current_leader.unwrap_or(raft_metrics.id);
-                ctx.set_raft_term(raft_metrics.current_term);
+                let (leader_id, current_term) = if let Some(raft_metrics) = self.ctx.raft_metrics()
+                {
+                    let leader = raft_metrics.current_leader.unwrap_or(raft_metrics.id);
+                    ctx.set_raft_term(raft_metrics.current_term);
+                    (leader, raft_metrics.current_term)
+                } else {
+                    // Fallback when metrics are unavailable (e.g., test mocks).
+                    (0, 0)
+                };
 
                 // Compute empty state root for genesis block
                 let state_root = self.ctx.state.compute_state_root(vault_id).map_err(|e| {
@@ -167,7 +173,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                         nanos: 0,
                     }),
                     leader_id: Some(NodeId { id: leader_id.to_string() }),
-                    term: raft_metrics.current_term,
+                    term: current_term,
                     committed_index: 0, // Not available via propose_request helper
                     block_hash: Some(Hash { value: genesis_hash.to_vec() }),
                 };

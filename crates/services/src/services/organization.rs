@@ -2127,3 +2127,205 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
+mod tests {
+    use std::sync::Arc;
+
+    use inferadb_ledger_proto::proto::{
+        self, DeleteOrganizationRequest, ListOrganizationsRequest,
+        organization_service_server::OrganizationService as OrgServiceTrait,
+    };
+    use inferadb_ledger_raft::log_storage::AppliedState;
+    use inferadb_ledger_test_utils::TestDir;
+    use tonic::Request;
+
+    use crate::proposal::mock::MockProposalService;
+
+    /// Creates an `OrganizationService` backed by a [`MockProposalService`].
+    ///
+    /// Returns the service, mock (for enqueuing responses), and the applied
+    /// state (for populating slug indexes).
+    fn make_org_service() -> (
+        super::OrganizationService,
+        Arc<MockProposalService>,
+        Arc<parking_lot::RwLock<AppliedState>>,
+        TestDir,
+    ) {
+        let temp = TestDir::new();
+        let mock = Arc::new(MockProposalService::new());
+        let (ctx, applied_state) =
+            super::super::service_infra::tests::test_service_context_with_mock(mock.clone(), &temp);
+        let service = super::OrganizationService::new(ctx);
+        (service, mock, applied_state, temp)
+    }
+
+    // =========================================================================
+    // list_organizations
+    // =========================================================================
+
+    #[tokio::test]
+    async fn list_organizations_empty_state_returns_empty() {
+        let (service, _mock, applied_state, _temp) = make_org_service();
+
+        // Register a user so the caller resolves.
+        let user_slug = inferadb_ledger_types::UserSlug::new(1000);
+        let user_id = inferadb_ledger_types::UserId::new(1);
+        {
+            let mut state = applied_state.write();
+            state.user_slug_index.insert(user_slug, user_id);
+            state.user_id_to_slug.insert(user_id, user_slug);
+        }
+
+        let request = Request::new(ListOrganizationsRequest {
+            caller: Some(proto::UserSlug { slug: user_slug.value() }),
+            page_size: 10,
+            page_token: None,
+        });
+
+        let response = OrgServiceTrait::list_organizations(&service, request).await.unwrap();
+        let inner = response.into_inner();
+        assert!(inner.organizations.is_empty());
+        assert!(inner.next_page_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_organizations_no_caller_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_org_service();
+
+        let request = Request::new(ListOrganizationsRequest {
+            caller: None,
+            page_size: 10,
+            page_token: None,
+        });
+
+        let err = OrgServiceTrait::list_organizations(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn list_organizations_unknown_caller_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_org_service();
+
+        let request = Request::new(ListOrganizationsRequest {
+            caller: Some(proto::UserSlug { slug: 9999 }),
+            page_size: 10,
+            page_token: None,
+        });
+
+        let err = OrgServiceTrait::list_organizations(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    // =========================================================================
+    // delete_organization
+    // =========================================================================
+
+    #[tokio::test]
+    async fn delete_organization_missing_slug_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_org_service();
+
+        let request = Request::new(DeleteOrganizationRequest { slug: None, caller: None });
+
+        let err = OrgServiceTrait::delete_organization(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn delete_organization_unknown_slug_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_org_service();
+
+        let request = Request::new(DeleteOrganizationRequest {
+            slug: Some(proto::OrganizationSlug { slug: 42 }),
+            caller: Some(proto::UserSlug { slug: 1 }),
+        });
+
+        let err = OrgServiceTrait::delete_organization(&service, request).await.unwrap_err();
+        // Unknown slug → NotFound from slug resolver
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    // =========================================================================
+    // get_organization
+    // =========================================================================
+
+    #[tokio::test]
+    async fn get_organization_missing_slug_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_org_service();
+
+        let request = Request::new(proto::GetOrganizationRequest { slug: None, caller: None });
+
+        let err = OrgServiceTrait::get_organization(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_organization_unknown_slug_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_org_service();
+
+        let request = Request::new(proto::GetOrganizationRequest {
+            slug: Some(proto::OrganizationSlug { slug: 9999 }),
+            caller: Some(proto::UserSlug { slug: 1 }),
+        });
+
+        let err = OrgServiceTrait::get_organization(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    // =========================================================================
+    // update_organization
+    // =========================================================================
+
+    #[tokio::test]
+    async fn update_organization_missing_slug_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_org_service();
+
+        let request = Request::new(proto::UpdateOrganizationRequest {
+            slug: None,
+            caller: None,
+            name: Some("New Name".to_string()),
+        });
+
+        let err = OrgServiceTrait::update_organization(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn update_organization_unknown_slug_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_org_service();
+
+        let request = Request::new(proto::UpdateOrganizationRequest {
+            slug: Some(proto::OrganizationSlug { slug: 9999 }),
+            caller: Some(proto::UserSlug { slug: 1 }),
+            name: Some("New Name".to_string()),
+        });
+
+        let err = OrgServiceTrait::update_organization(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn update_organization_no_caller_returns_not_found() {
+        let (service, _mock, applied_state, _temp) = make_org_service();
+
+        let org_slug = inferadb_ledger_types::OrganizationSlug::new(1000);
+        let org_id = inferadb_ledger_types::OrganizationId::new(1);
+        {
+            let mut state = applied_state.write();
+            state.slug_index.insert(org_slug, org_id);
+            state.id_to_slug.insert(org_id, org_slug);
+        }
+
+        // Caller slug 1 is unknown → admin validation fails with NotFound
+        let request = Request::new(proto::UpdateOrganizationRequest {
+            slug: Some(proto::OrganizationSlug { slug: org_slug.value() }),
+            caller: Some(proto::UserSlug { slug: 1 }),
+            name: Some("New Name".to_string()),
+        });
+
+        let err = OrgServiceTrait::update_organization(&service, request).await.unwrap_err();
+        // Caller slug not in index → NotFound
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+}

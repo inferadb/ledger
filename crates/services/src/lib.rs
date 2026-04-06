@@ -13,6 +13,7 @@ pub mod api_version;
 pub mod jwt;
 #[doc(hidden)]
 pub mod peer_maintenance;
+pub(crate) mod proposal;
 /// Proto conversions that depend on crate-local types (orphan rule workaround).
 pub(crate) mod proto_compat;
 #[doc(hidden)]

@@ -1374,9 +1374,284 @@ impl proto::app_service_server::AppService for AppService {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
+    use std::sync::Arc;
+
+    use inferadb_ledger_proto::proto::{self, app_service_server::AppService as AppServiceTrait};
+    use inferadb_ledger_raft::log_storage::AppliedState;
+    use inferadb_ledger_test_utils::TestDir;
+    use parking_lot::RwLock;
+    use tonic::Request;
+
     use super::*;
+    use crate::proposal::mock::MockProposalService;
+
+    /// Creates an `AppService` backed by a [`MockProposalService`].
+    fn make_app_service()
+    -> (super::AppService, Arc<MockProposalService>, Arc<RwLock<AppliedState>>, TestDir) {
+        let temp = TestDir::new();
+        let mock = Arc::new(MockProposalService::new());
+        let (ctx, applied_state) =
+            super::super::service_infra::tests::test_service_context_with_mock(mock.clone(), &temp);
+        let service = super::AppService::new(ctx);
+        (service, mock, applied_state, temp)
+    }
+
+    // =========================================================================
+    // get_app — read-only handler
+    // =========================================================================
+
+    #[tokio::test]
+    async fn get_app_missing_org_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_app_service();
+
+        let request =
+            Request::new(proto::GetAppRequest { organization: None, caller: None, app: None });
+
+        let err = AppServiceTrait::get_app(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_app_unknown_org_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_app_service();
+
+        let request = Request::new(proto::GetAppRequest {
+            organization: Some(proto::OrganizationSlug { slug: 9999 }),
+            caller: None,
+            app: Some(proto::AppSlug { slug: 8888 }),
+        });
+
+        let err = AppServiceTrait::get_app(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    // =========================================================================
+    // list_apps — read-only handler
+    // =========================================================================
+
+    #[tokio::test]
+    async fn list_apps_missing_org_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_app_service();
+
+        let request = Request::new(proto::ListAppsRequest { organization: None, caller: None });
+
+        let err = AppServiceTrait::list_apps(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn list_apps_unknown_org_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_app_service();
+
+        let request = Request::new(proto::ListAppsRequest {
+            organization: Some(proto::OrganizationSlug { slug: 9999 }),
+            caller: None,
+        });
+
+        let err = AppServiceTrait::list_apps(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    // =========================================================================
+    // create_app — validation paths
+    // =========================================================================
+
+    #[tokio::test]
+    async fn create_app_missing_org_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_app_service();
+
+        let request = Request::new(proto::CreateAppRequest {
+            organization: None,
+            caller: None,
+            name: "Test App".to_string(),
+            description: None,
+        });
+
+        let err = AppServiceTrait::create_app(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn create_app_empty_name_returns_invalid_argument() {
+        let (service, _mock, applied_state, _temp) = make_app_service();
+
+        let org_slug = inferadb_ledger_types::OrganizationSlug::new(1000);
+        let org_id = inferadb_ledger_types::OrganizationId::new(1);
+        {
+            let mut state = applied_state.write();
+            state.slug_index.insert(org_slug, org_id);
+            state.id_to_slug.insert(org_id, org_slug);
+        }
+
+        let request = Request::new(proto::CreateAppRequest {
+            organization: Some(proto::OrganizationSlug { slug: org_slug.value() }),
+            caller: None,
+            name: "   ".to_string(),
+            description: None,
+        });
+
+        let err = AppServiceTrait::create_app(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("name"));
+    }
+
+    // =========================================================================
+    // set_app_enabled — validation + mock paths
+    // =========================================================================
+
+    #[tokio::test]
+    async fn set_app_enabled_missing_org_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_app_service();
+
+        let request = Request::new(proto::SetAppEnabledRequest {
+            organization: None,
+            app: None,
+            caller: None,
+            enabled: true,
+        });
+
+        let err = AppServiceTrait::set_app_enabled(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn set_app_enabled_unknown_org_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_app_service();
+
+        let request = Request::new(proto::SetAppEnabledRequest {
+            organization: Some(proto::OrganizationSlug { slug: 9999 }),
+            app: Some(proto::AppSlug { slug: 8888 }),
+            caller: None,
+            enabled: true,
+        });
+
+        let err = AppServiceTrait::set_app_enabled(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    // =========================================================================
+    // delete_app — validation paths
+    // =========================================================================
+
+    #[tokio::test]
+    async fn delete_app_missing_org_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_app_service();
+
+        let request =
+            Request::new(proto::DeleteAppRequest { organization: None, app: None, caller: None });
+
+        let err = AppServiceTrait::delete_app(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn delete_app_unknown_org_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_app_service();
+
+        let request = Request::new(proto::DeleteAppRequest {
+            organization: Some(proto::OrganizationSlug { slug: 9999 }),
+            app: Some(proto::AppSlug { slug: 8888 }),
+            caller: None,
+        });
+
+        let err = AppServiceTrait::delete_app(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    // =========================================================================
+    // update_app — validation paths
+    // =========================================================================
+
+    #[tokio::test]
+    async fn update_app_no_fields_returns_invalid_argument() {
+        let (service, _mock, applied_state, _temp) = make_app_service();
+
+        let org_slug = inferadb_ledger_types::OrganizationSlug::new(1000);
+        let org_id = inferadb_ledger_types::OrganizationId::new(1);
+        let app_slug = inferadb_ledger_types::AppSlug::new(2000);
+        let app_id = inferadb_ledger_types::AppId::new(1);
+        {
+            let mut state = applied_state.write();
+            state.slug_index.insert(org_slug, org_id);
+            state.id_to_slug.insert(org_id, org_slug);
+            state.app_slug_index.insert(app_slug, (org_id, app_id));
+            state.app_id_to_slug.insert(app_id, app_slug);
+        }
+
+        let request = Request::new(proto::UpdateAppRequest {
+            organization: Some(proto::OrganizationSlug { slug: org_slug.value() }),
+            app: Some(proto::AppSlug { slug: app_slug.value() }),
+            caller: None,
+            name: None,
+            description: None,
+        });
+
+        let err = AppServiceTrait::update_app(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("At least one field"));
+    }
+
+    #[tokio::test]
+    async fn update_app_empty_name_returns_invalid_argument() {
+        let (service, _mock, applied_state, _temp) = make_app_service();
+
+        let org_slug = inferadb_ledger_types::OrganizationSlug::new(1000);
+        let org_id = inferadb_ledger_types::OrganizationId::new(1);
+        let app_slug = inferadb_ledger_types::AppSlug::new(2000);
+        let app_id = inferadb_ledger_types::AppId::new(1);
+        {
+            let mut state = applied_state.write();
+            state.slug_index.insert(org_slug, org_id);
+            state.id_to_slug.insert(org_id, org_slug);
+            state.app_slug_index.insert(app_slug, (org_id, app_id));
+            state.app_id_to_slug.insert(app_id, app_slug);
+        }
+
+        let request = Request::new(proto::UpdateAppRequest {
+            organization: Some(proto::OrganizationSlug { slug: org_slug.value() }),
+            app: Some(proto::AppSlug { slug: app_slug.value() }),
+            caller: None,
+            name: Some("   ".to_string()),
+            description: None,
+        });
+
+        let err = AppServiceTrait::update_app(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    // =========================================================================
+    // set_app_credential_enabled — validation paths
+    // =========================================================================
+
+    #[tokio::test]
+    async fn set_app_credential_enabled_invalid_type_returns_invalid_argument() {
+        let (service, _mock, applied_state, _temp) = make_app_service();
+
+        let org_slug = inferadb_ledger_types::OrganizationSlug::new(1000);
+        let org_id = inferadb_ledger_types::OrganizationId::new(1);
+        let app_slug = inferadb_ledger_types::AppSlug::new(2000);
+        let app_id = inferadb_ledger_types::AppId::new(1);
+        {
+            let mut state = applied_state.write();
+            state.slug_index.insert(org_slug, org_id);
+            state.id_to_slug.insert(org_id, org_slug);
+            state.app_slug_index.insert(app_slug, (org_id, app_id));
+            state.app_id_to_slug.insert(app_id, app_slug);
+        }
+
+        let request = Request::new(proto::SetAppCredentialEnabledRequest {
+            organization: Some(proto::OrganizationSlug { slug: org_slug.value() }),
+            app: Some(proto::AppSlug { slug: app_slug.value() }),
+            caller: None,
+            credential_type: 999,
+            enabled: true,
+        });
+
+        let err = AppServiceTrait::set_app_credential_enabled(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
 
     // =========================================================================
     // parse_idempotency_key

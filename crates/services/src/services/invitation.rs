@@ -1292,9 +1292,233 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
+    use std::sync::Arc;
+
+    use inferadb_ledger_proto::proto::{
+        self, invitation_service_server::InvitationService as InvitationServiceTrait,
+    };
+    use inferadb_ledger_raft::log_storage::AppliedState;
+    use inferadb_ledger_test_utils::TestDir;
+    use parking_lot::RwLock;
+    use tonic::Request;
+
     use super::*;
+    use crate::proposal::mock::MockProposalService;
+
+    /// Creates an `InvitationService` backed by a [`MockProposalService`].
+    fn make_invitation_service()
+    -> (super::InvitationService, Arc<MockProposalService>, Arc<RwLock<AppliedState>>, TestDir)
+    {
+        let temp = TestDir::new();
+        let mock = Arc::new(MockProposalService::new());
+        let (ctx, applied_state) =
+            super::super::service_infra::tests::test_service_context_with_mock(mock.clone(), &temp);
+        let service = super::InvitationService::new(ctx);
+        (service, mock, applied_state, temp)
+    }
+
+    // =========================================================================
+    // create_organization_invite — validation paths
+    // =========================================================================
+
+    #[tokio::test]
+    async fn create_invite_empty_email_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_invitation_service();
+
+        let request = Request::new(proto::CreateOrganizationInviteRequest {
+            organization: Some(proto::OrganizationSlug { slug: 1000 }),
+            caller: Some(proto::UserSlug { slug: 1 }),
+            email: String::new(),
+            role: 0,
+            ttl_hours: 24,
+            team: None,
+        });
+
+        let err = InvitationServiceTrait::create_organization_invite(&service, request)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn create_invite_invalid_email_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_invitation_service();
+
+        let request = Request::new(proto::CreateOrganizationInviteRequest {
+            organization: Some(proto::OrganizationSlug { slug: 1000 }),
+            caller: Some(proto::UserSlug { slug: 1 }),
+            email: "not-an-email".to_string(),
+            role: 0,
+            ttl_hours: 24,
+            team: None,
+        });
+
+        let err = InvitationServiceTrait::create_organization_invite(&service, request)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn create_invite_ttl_too_low_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_invitation_service();
+
+        let request = Request::new(proto::CreateOrganizationInviteRequest {
+            organization: Some(proto::OrganizationSlug { slug: 1000 }),
+            caller: Some(proto::UserSlug { slug: 1 }),
+            email: "test@example.com".to_string(),
+            role: 0,
+            ttl_hours: 0,
+            team: None,
+        });
+
+        let err = InvitationServiceTrait::create_organization_invite(&service, request)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("ttl_hours"));
+    }
+
+    #[tokio::test]
+    async fn create_invite_ttl_too_high_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_invitation_service();
+
+        let request = Request::new(proto::CreateOrganizationInviteRequest {
+            organization: Some(proto::OrganizationSlug { slug: 1000 }),
+            caller: Some(proto::UserSlug { slug: 1 }),
+            email: "test@example.com".to_string(),
+            role: 0,
+            ttl_hours: 721,
+            team: None,
+        });
+
+        let err = InvitationServiceTrait::create_organization_invite(&service, request)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("ttl_hours"));
+    }
+
+    #[tokio::test]
+    async fn create_invite_unknown_org_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_invitation_service();
+
+        let request = Request::new(proto::CreateOrganizationInviteRequest {
+            organization: Some(proto::OrganizationSlug { slug: 9999 }),
+            caller: Some(proto::UserSlug { slug: 1 }),
+            email: "test@example.com".to_string(),
+            role: 1,
+            ttl_hours: 24,
+            team: None,
+        });
+
+        let err = InvitationServiceTrait::create_organization_invite(&service, request)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    // =========================================================================
+    // list_organization_invites — validation paths
+    // =========================================================================
+
+    #[tokio::test]
+    async fn list_invites_missing_org_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_invitation_service();
+
+        let request = Request::new(proto::ListOrganizationInvitesRequest {
+            organization: None,
+            caller: None,
+            page_size: 10,
+            page_token: None,
+            status_filter: None,
+        });
+
+        let err =
+            InvitationServiceTrait::list_organization_invites(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn list_invites_unknown_org_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_invitation_service();
+
+        let request = Request::new(proto::ListOrganizationInvitesRequest {
+            organization: Some(proto::OrganizationSlug { slug: 9999 }),
+            caller: Some(proto::UserSlug { slug: 1 }),
+            page_size: 10,
+            page_token: None,
+            status_filter: None,
+        });
+
+        let err =
+            InvitationServiceTrait::list_organization_invites(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    // =========================================================================
+    // revoke_organization_invite — validation paths
+    // =========================================================================
+
+    #[tokio::test]
+    async fn revoke_invite_missing_slug_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_invitation_service();
+
+        let request =
+            Request::new(proto::RevokeOrganizationInviteRequest { slug: None, caller: None });
+
+        let err = InvitationServiceTrait::revoke_organization_invite(&service, request)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn revoke_invite_unknown_slug_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_invitation_service();
+
+        let request = Request::new(proto::RevokeOrganizationInviteRequest {
+            slug: Some(proto::InviteSlug { slug: 9999 }),
+            caller: Some(proto::UserSlug { slug: 1 }),
+        });
+
+        let err = InvitationServiceTrait::revoke_organization_invite(&service, request)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    // =========================================================================
+    // get_organization_invite — validation paths
+    // =========================================================================
+
+    #[tokio::test]
+    async fn get_invite_missing_slug_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_invitation_service();
+
+        let request =
+            Request::new(proto::GetOrganizationInviteRequest { slug: None, caller: None });
+
+        let err =
+            InvitationServiceTrait::get_organization_invite(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_invite_unknown_slug_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_invitation_service();
+
+        let request = Request::new(proto::GetOrganizationInviteRequest {
+            slug: Some(proto::InviteSlug { slug: 9999 }),
+            caller: Some(proto::UserSlug { slug: 1 }),
+        });
+
+        let err =
+            InvitationServiceTrait::get_organization_invite(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
 
     // =========================================================================
     // Constants

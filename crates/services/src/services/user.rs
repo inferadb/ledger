@@ -2768,9 +2768,432 @@ impl proto::user_service_server::UserService for UserService {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
+    use std::sync::Arc;
+
+    use inferadb_ledger_proto::proto::{
+        self, user_service_server::UserService as UserServiceTrait,
+    };
+    use inferadb_ledger_raft::log_storage::AppliedState;
+    use inferadb_ledger_test_utils::TestDir;
+    use parking_lot::RwLock;
+    use tonic::Request;
+
     use super::*;
+    use crate::proposal::mock::MockProposalService;
+
+    /// Creates a `UserService` backed by a [`MockProposalService`].
+    fn make_user_service()
+    -> (super::UserService, Arc<MockProposalService>, Arc<RwLock<AppliedState>>, TestDir) {
+        let temp = TestDir::new();
+        let mock = Arc::new(MockProposalService::new());
+        let (ctx, applied_state) =
+            super::super::service_infra::tests::test_service_context_with_mock(mock.clone(), &temp);
+        let service = super::UserService::new(ctx);
+        (service, mock, applied_state, temp)
+    }
+
+    // =========================================================================
+    // get_user — read-only handler
+    // =========================================================================
+
+    #[tokio::test]
+    async fn get_user_missing_slug_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_user_service();
+
+        let request = Request::new(proto::GetUserRequest { slug: None, caller: None });
+
+        let err = UserServiceTrait::get_user(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_user_unknown_slug_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_user_service();
+
+        let request = Request::new(proto::GetUserRequest {
+            slug: Some(proto::UserSlug { slug: 9999 }),
+            caller: None,
+        });
+
+        let err = UserServiceTrait::get_user(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn get_user_known_slug_not_in_state_returns_not_found() {
+        let (service, _mock, applied_state, _temp) = make_user_service();
+
+        let user_slug = inferadb_ledger_types::UserSlug::new(5000);
+        let user_id = inferadb_ledger_types::UserId::new(1);
+        {
+            let mut state = applied_state.write();
+            state.user_slug_index.insert(user_slug, user_id);
+            state.user_id_to_slug.insert(user_id, user_slug);
+        }
+
+        let request = Request::new(proto::GetUserRequest {
+            slug: Some(proto::UserSlug { slug: user_slug.value() }),
+            caller: None,
+        });
+
+        // User slug resolves, but no user record in state layer → NotFound
+        let err = UserServiceTrait::get_user(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    // =========================================================================
+    // list_users — read-only handler
+    // =========================================================================
+
+    #[tokio::test]
+    async fn list_users_empty_state_returns_empty() {
+        let (service, _mock, _applied_state, _temp) = make_user_service();
+
+        let request = Request::new(proto::ListUsersRequest {
+            caller: None,
+            page_size: 10,
+            page_token: None,
+            region: None,
+        });
+
+        let response = UserServiceTrait::list_users(&service, request).await.unwrap();
+        let inner = response.into_inner();
+        assert!(inner.users.is_empty());
+        assert!(inner.next_page_token.is_none());
+    }
+
+    // =========================================================================
+    // update_user — validation paths
+    // =========================================================================
+
+    #[tokio::test]
+    async fn update_user_missing_slug_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_user_service();
+
+        let request = Request::new(proto::UpdateUserRequest {
+            slug: None,
+            caller: None,
+            name: Some("New Name".to_string()),
+            role: None,
+            primary_email: None,
+        });
+
+        let err = UserServiceTrait::update_user(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn update_user_no_fields_returns_invalid_argument() {
+        let (service, _mock, applied_state, _temp) = make_user_service();
+
+        let user_slug = inferadb_ledger_types::UserSlug::new(5000);
+        let user_id = inferadb_ledger_types::UserId::new(1);
+        {
+            let mut state = applied_state.write();
+            state.user_slug_index.insert(user_slug, user_id);
+            state.user_id_to_slug.insert(user_id, user_slug);
+        }
+
+        let request = Request::new(proto::UpdateUserRequest {
+            slug: Some(proto::UserSlug { slug: user_slug.value() }),
+            caller: None,
+            name: None,
+            role: None,
+            primary_email: None,
+        });
+
+        let err = UserServiceTrait::update_user(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("At least one field"));
+    }
+
+    #[tokio::test]
+    async fn update_user_unknown_slug_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_user_service();
+
+        let request = Request::new(proto::UpdateUserRequest {
+            slug: Some(proto::UserSlug { slug: 9999 }),
+            caller: None,
+            name: Some("New Name".to_string()),
+            role: None,
+            primary_email: None,
+        });
+
+        let err = UserServiceTrait::update_user(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn update_user_role_via_mock_success() {
+        let (service, mock, applied_state, _temp) = make_user_service();
+
+        let user_slug = inferadb_ledger_types::UserSlug::new(5000);
+        let user_id = inferadb_ledger_types::UserId::new(1);
+        {
+            let mut state = applied_state.write();
+            state.user_slug_index.insert(user_slug, user_id);
+            state.user_id_to_slug.insert(user_id, user_slug);
+        }
+
+        mock.enqueue(Ok(LedgerResponse::UserUpdated { user_id }));
+
+        let request = Request::new(proto::UpdateUserRequest {
+            slug: Some(proto::UserSlug { slug: user_slug.value() }),
+            caller: None,
+            name: None,
+            role: Some(i32::from(proto::UserRole::Admin)),
+            primary_email: None,
+        });
+
+        // The handler will succeed for the proposal, but may fail on the
+        // post-proposal state read (user not in state). That's fine — we test
+        // the proposal path reached the mock.
+        let _ = UserServiceTrait::update_user(&service, request).await;
+
+        let proposals = mock.proposals();
+        assert_eq!(proposals.len(), 1);
+        match &proposals[0].0 {
+            LedgerRequest::System(SystemRequest::UpdateUser { .. }) => {},
+            other => panic!("Expected UpdateUser proposal, got: {other:?}"),
+        }
+    }
+
+    // =========================================================================
+    // delete_user — validation paths
+    // =========================================================================
+
+    #[tokio::test]
+    async fn delete_user_missing_slug_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_user_service();
+
+        let request = Request::new(proto::DeleteUserRequest { slug: None, caller: None });
+
+        let err = UserServiceTrait::delete_user(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn delete_user_unknown_slug_returns_not_found() {
+        let (service, _mock, _applied_state, _temp) = make_user_service();
+
+        let request = Request::new(proto::DeleteUserRequest {
+            slug: Some(proto::UserSlug { slug: 9999 }),
+            caller: Some(proto::UserSlug { slug: 1 }),
+        });
+
+        let err = UserServiceTrait::delete_user(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn delete_user_no_caller_returns_invalid_argument() {
+        let (service, _mock, applied_state, _temp) = make_user_service();
+
+        let user_slug = inferadb_ledger_types::UserSlug::new(5000);
+        let user_id = inferadb_ledger_types::UserId::new(1);
+        {
+            let mut state = applied_state.write();
+            state.user_slug_index.insert(user_slug, user_id);
+            state.user_id_to_slug.insert(user_id, user_slug);
+        }
+
+        let request = Request::new(proto::DeleteUserRequest {
+            slug: Some(proto::UserSlug { slug: user_slug.value() }),
+            caller: None,
+        });
+
+        let err = UserServiceTrait::delete_user(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn delete_user_via_mock_success() {
+        let (service, mock, applied_state, _temp) = make_user_service();
+
+        let user_slug = inferadb_ledger_types::UserSlug::new(5000);
+        let user_id = inferadb_ledger_types::UserId::new(1);
+        let caller_slug = inferadb_ledger_types::UserSlug::new(6000);
+        let caller_id = inferadb_ledger_types::UserId::new(2);
+        {
+            let mut state = applied_state.write();
+            state.user_slug_index.insert(user_slug, user_id);
+            state.user_id_to_slug.insert(user_id, user_slug);
+            state.user_slug_index.insert(caller_slug, caller_id);
+            state.user_id_to_slug.insert(caller_id, caller_slug);
+        }
+
+        mock.enqueue(Ok(LedgerResponse::UserSoftDeleted { user_id, retention_days: 30 }));
+
+        let request = Request::new(proto::DeleteUserRequest {
+            slug: Some(proto::UserSlug { slug: user_slug.value() }),
+            caller: Some(proto::UserSlug { slug: caller_slug.value() }),
+        });
+
+        let response = UserServiceTrait::delete_user(&service, request).await.unwrap();
+        let inner = response.into_inner();
+        assert!(inner.slug.is_some());
+        assert_eq!(inner.retention_days, 30);
+
+        let proposals = mock.proposals();
+        assert_eq!(proposals.len(), 1);
+        match &proposals[0].0 {
+            LedgerRequest::System(SystemRequest::DeleteUser { .. }) => {},
+            other => panic!("Expected DeleteUser proposal, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_user_raft_error_propagates() {
+        let (service, mock, applied_state, _temp) = make_user_service();
+
+        let user_slug = inferadb_ledger_types::UserSlug::new(5000);
+        let user_id = inferadb_ledger_types::UserId::new(1);
+        let caller_slug = inferadb_ledger_types::UserSlug::new(6000);
+        let caller_id = inferadb_ledger_types::UserId::new(2);
+        {
+            let mut state = applied_state.write();
+            state.user_slug_index.insert(user_slug, user_id);
+            state.user_id_to_slug.insert(user_id, user_slug);
+            state.user_slug_index.insert(caller_slug, caller_id);
+            state.user_id_to_slug.insert(caller_id, caller_slug);
+        }
+
+        mock.enqueue(Err(tonic::Status::unavailable("leader changed")));
+
+        let request = Request::new(proto::DeleteUserRequest {
+            slug: Some(proto::UserSlug { slug: user_slug.value() }),
+            caller: Some(proto::UserSlug { slug: caller_slug.value() }),
+        });
+
+        let err = UserServiceTrait::delete_user(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+    }
+
+    // =========================================================================
+    // search_users — read-only handler
+    // =========================================================================
+
+    #[tokio::test]
+    async fn search_users_no_filter_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_user_service();
+
+        let request = Request::new(proto::SearchUsersRequest {
+            caller: None,
+            filter: None,
+            page_token: None,
+            page_size: 0,
+        });
+
+        let err = UserServiceTrait::search_users(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn search_users_no_email_filter_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_user_service();
+
+        let request = Request::new(proto::SearchUsersRequest {
+            caller: None,
+            filter: Some(proto::UserSearchFilter {
+                email: None,
+                status: None,
+                role: None,
+                name_prefix: None,
+            }),
+            page_token: None,
+            page_size: 0,
+        });
+
+        let err = UserServiceTrait::search_users(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn search_users_empty_result() {
+        let (service, _mock, _applied_state, _temp) = make_user_service();
+
+        let request = Request::new(proto::SearchUsersRequest {
+            caller: None,
+            filter: Some(proto::UserSearchFilter {
+                email: Some("nobody@example.com".to_string()),
+                status: None,
+                role: None,
+                name_prefix: None,
+            }),
+            page_token: None,
+            page_size: 0,
+        });
+
+        let response = UserServiceTrait::search_users(&service, request).await.unwrap();
+        assert!(response.into_inner().users.is_empty());
+    }
+
+    // =========================================================================
+    // create_user_email — validation paths
+    // =========================================================================
+
+    #[tokio::test]
+    async fn create_user_email_missing_user_returns_invalid_argument() {
+        let (service, _mock, _applied_state, _temp) = make_user_service();
+
+        let request = Request::new(proto::CreateUserEmailRequest {
+            user: None,
+            caller: None,
+            email: "test@example.com".to_string(),
+            email_hmac: "abc123".to_string(),
+        });
+
+        let err = UserServiceTrait::create_user_email(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn create_user_email_invalid_email_returns_invalid_argument() {
+        let (service, _mock, applied_state, _temp) = make_user_service();
+
+        let user_slug = inferadb_ledger_types::UserSlug::new(5000);
+        let user_id = inferadb_ledger_types::UserId::new(1);
+        {
+            let mut state = applied_state.write();
+            state.user_slug_index.insert(user_slug, user_id);
+            state.user_id_to_slug.insert(user_id, user_slug);
+        }
+
+        let request = Request::new(proto::CreateUserEmailRequest {
+            user: Some(proto::UserSlug { slug: user_slug.value() }),
+            caller: None,
+            email: "not-an-email".to_string(),
+            email_hmac: "abc123".to_string(),
+        });
+
+        let err = UserServiceTrait::create_user_email(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn create_user_email_empty_hmac_returns_invalid_argument() {
+        let (service, _mock, applied_state, _temp) = make_user_service();
+
+        let user_slug = inferadb_ledger_types::UserSlug::new(5000);
+        let user_id = inferadb_ledger_types::UserId::new(1);
+        {
+            let mut state = applied_state.write();
+            state.user_slug_index.insert(user_slug, user_id);
+            state.user_id_to_slug.insert(user_id, user_slug);
+        }
+
+        let request = Request::new(proto::CreateUserEmailRequest {
+            user: Some(proto::UserSlug { slug: user_slug.value() }),
+            caller: None,
+            email: "test@example.com".to_string(),
+            email_hmac: String::new(),
+        });
+
+        let err = UserServiceTrait::create_user_email(&service, request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
 
     // =========================================================================
     // dynamic_truncate tests (RFC 4226 §5.4)

@@ -42,6 +42,7 @@ use tower::ServiceBuilder;
 use crate::{
     api_version::{ApiVersionLayer, api_version_interceptor},
     jwt::JwtEngine,
+    proposal::RaftProposalService,
     services::{
         AdminService, AppService, DiscoveryService, EventsService, HealthService,
         InvitationService, OrganizationService, RaftService, ReadService, RegionResolver,
@@ -303,10 +304,12 @@ impl LedgerServer {
         let admin_service = admin_service.with_health_state(self.health_state.clone());
 
         // Build shared service context for Organization, Vault, User, and App services.
-        // All four share the same Raft, state, applied_state, and config — ServiceContext
-        // consolidates these into a single clonable struct.
+        // All four share the same proposal path, state, applied_state, and config —
+        // ServiceContext consolidates these into a single clonable struct.
+        let proposer: Arc<dyn crate::proposal::ProposalService> =
+            Arc::new(RaftProposalService::new(system.raft().clone(), Some(self.manager.clone())));
         let svc_ctx = ServiceContext {
-            raft: system.raft().clone(),
+            proposer,
             state: system.state().clone(),
             applied_state: system.applied_state().clone(),
             sampler: None,
@@ -317,7 +320,6 @@ impl LedgerServer {
             proposal_timeout: self.proposal_timeout,
             event_handle: self.event_handle.clone(),
             health_state: Some(self.health_state.clone()),
-            manager: Some(self.manager.clone()),
             email_blinding_key: self.email_blinding_key.clone(),
             jwt_engine: self.token_service.as_ref().map(|ts| ts.jwt_engine.clone()),
             jwt_config: self.token_service.as_ref().map(|ts| ts.jwt_config.clone()),

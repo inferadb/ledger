@@ -8,20 +8,19 @@
 use std::{sync::Arc, time::Duration};
 
 use inferadb_ledger_raft::{
-    error::classify_raft_error,
     log_storage::AppliedStateAccessor,
     logging::{OperationType, RequestContext, Sampler},
-    raft_manager::RaftManager,
     trace_context,
-    types::{LedgerRequest, LedgerResponse, LedgerTypeConfig, RaftPayload, SystemRequest},
+    types::{LedgerRequest, LedgerResponse, SystemRequest},
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
     EmailBlindingKey, Region, config::ValidationConfig, events::EventEntry,
 };
-use openraft::Raft;
 use tonic::Status;
+
+use crate::proposal::ProposalService;
 
 /// Shared infrastructure for gRPC services that propose writes through Raft.
 ///
@@ -32,8 +31,11 @@ use tonic::Status;
 /// Cloneable — all inner types are `Arc`-wrapped or `Copy`.
 #[derive(Clone)]
 pub(crate) struct ServiceContext {
-    /// Raft consensus handle for proposing write operations.
-    pub(crate) raft: Arc<Raft<LedgerTypeConfig>>,
+    /// Proposal service for submitting writes through Raft consensus.
+    ///
+    /// Abstracts over `openraft::Raft` and `RaftManager` so handlers can be
+    /// unit-tested with a mock implementation.
+    pub(crate) proposer: Arc<dyn ProposalService>,
     /// State layer for direct entity/relationship reads.
     pub(crate) state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied Raft state (slug resolution, metadata).
@@ -50,16 +52,6 @@ pub(crate) struct ServiceContext {
     pub(crate) event_handle: Option<inferadb_ledger_raft::event_writer::EventHandle<FileBackend>>,
     /// Health state for drain-phase write rejection.
     pub(crate) health_state: Option<inferadb_ledger_raft::graceful_shutdown::HealthState>,
-    /// Multi-region Raft manager for proposing to regional Raft groups.
-    ///
-    /// Required for onboarding handlers and any operation that proposes to
-    /// a specific region's Raft group (e.g., PII writes, verification codes).
-    /// `None` when the service does not need regional proposals (tests, single-region).
-    ///
-    /// Used by `propose_regional` and `regional_state` for onboarding
-    /// handlers and PII data residency enforcement.
-    #[allow(dead_code)]
-    pub(crate) manager: Option<Arc<RaftManager>>,
     /// HMAC key for privacy-preserving email uniqueness enforcement.
     ///
     /// When present, onboarding RPCs (email verification, registration) are
@@ -133,8 +125,9 @@ impl ServiceContext {
 
     /// Proposes a `LedgerRequest` through Raft with deadline handling.
     ///
-    /// Maps Raft errors via `classify_raft_error`: leadership errors become
-    /// `UNAVAILABLE` (retryable), other Raft errors become `INTERNAL`.
+    /// Delegates to the [`ProposalService`] and records timing on the
+    /// `RequestContext`. Error classification (leadership → `UNAVAILABLE`,
+    /// timeout → `DEADLINE_EXCEEDED`) is handled by the proposer.
     pub(crate) async fn propose_request(
         &self,
         request: LedgerRequest,
@@ -142,27 +135,15 @@ impl ServiceContext {
         ctx: &mut RequestContext,
     ) -> Result<LedgerResponse, Status> {
         let timeout = self.effective_timeout(grpc_metadata);
-        let payload = RaftPayload::new(request, ctx.caller_or_zero());
 
         ctx.start_raft_timer();
-        let result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
+        let result = self.proposer.propose(request, ctx.caller_or_zero(), timeout).await;
         ctx.end_raft_timer();
 
-        match result {
-            Ok(Ok(resp)) => Ok(resp.data),
-            Ok(Err(e)) => {
-                ctx.set_error("RaftError", &e.to_string());
-                Err(classify_raft_error(&e.to_string()))
-            },
-            Err(_elapsed) => {
-                inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
-                ctx.set_error("Timeout", "Raft proposal timed out");
-                Err(Status::deadline_exceeded(format!(
-                    "Raft proposal timed out after {}ms",
-                    timeout.as_millis()
-                )))
-            },
+        if let Err(ref e) = result {
+            ctx.set_error("ProposalError", e.message());
         }
+        result
     }
 
     /// Proposes a system request through Raft with deadline handling.
@@ -183,15 +164,9 @@ impl ServiceContext {
 
     /// Proposes a system request to a specific region's Raft group.
     ///
-    /// Resolves `region` to a [`RegionGroup`] via the [`RaftManager`], then
-    /// proposes the request through that group's Raft instance. This is the
-    /// service-layer equivalent of the saga orchestrator's `target_region()`
-    /// routing.
-    ///
-    /// Used by onboarding handlers for PII-carrying requests that must stay
-    /// in-region (verification codes, user profiles) and for cross-region
-    /// session creation (proposing `CreateRefreshToken` to a user's actual
-    /// region).
+    /// Wraps the `SystemRequest` as `LedgerRequest::System` and delegates to
+    /// the [`ProposalService`]. Used by onboarding handlers for PII-carrying
+    /// requests that must stay in-region and for cross-region session creation.
     ///
     /// # Errors
     ///
@@ -206,44 +181,24 @@ impl ServiceContext {
         grpc_metadata: &tonic::metadata::MetadataMap,
         ctx: &mut RequestContext,
     ) -> Result<LedgerResponse, Status> {
-        let manager = self.manager.as_ref().ok_or_else(|| {
-            Status::failed_precondition("Regional proposals require RaftManager configuration")
-        })?;
-
-        let region_group = manager.get_region_group(region).map_err(|e| {
-            Status::unavailable(format!("Region {region} is not active on this node: {e}"))
-        })?;
-
         let timeout = self.effective_timeout(grpc_metadata);
         let request = LedgerRequest::System(system_request);
-        let payload = RaftPayload::new(request, ctx.caller_or_zero());
 
         ctx.start_raft_timer();
-        let result = tokio::time::timeout(timeout, region_group.raft().client_write(payload)).await;
+        let result =
+            self.proposer.propose_to_region(region, request, ctx.caller_or_zero(), timeout).await;
         ctx.end_raft_timer();
 
-        match result {
-            Ok(Ok(resp)) => Ok(resp.data),
-            Ok(Err(e)) => {
-                ctx.set_error("RaftError", &e.to_string());
-                Err(classify_raft_error(&e.to_string()))
-            },
-            Err(_elapsed) => {
-                inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
-                ctx.set_error("Timeout", "Regional Raft proposal timed out");
-                Err(Status::deadline_exceeded(format!(
-                    "Regional Raft proposal timed out after {}ms (region: {region})",
-                    timeout.as_millis()
-                )))
-            },
+        if let Err(ref e) = result {
+            ctx.set_error("ProposalError", e.message());
         }
+        result
     }
 
     /// Returns the state layer for a specific region's Raft group.
     ///
-    /// Enables direct reads from a region's state without proposing through
-    /// Raft. Used by service handlers that need to read onboarding accounts,
-    /// user profiles, or other regional data before or after proposals.
+    /// Delegates to the [`ProposalService`]. Enables direct reads from a
+    /// region's state without proposing through Raft.
     ///
     /// # Errors
     ///
@@ -253,15 +208,7 @@ impl ServiceContext {
         &self,
         region: Region,
     ) -> Result<Arc<StateLayer<FileBackend>>, Status> {
-        let manager = self.manager.as_ref().ok_or_else(|| {
-            Status::failed_precondition("Regional state access requires RaftManager configuration")
-        })?;
-
-        let region_group = manager.get_region_group(region).map_err(|e| {
-            Status::unavailable(format!("Region {region} is not active on this node: {e}"))
-        })?;
-
-        Ok(region_group.state().clone())
+        self.proposer.regional_state(region)
     }
 
     /// Proposes a top-level `LedgerRequest` to a specific region's Raft group.
@@ -278,36 +225,17 @@ impl ServiceContext {
         grpc_metadata: &tonic::metadata::MetadataMap,
         ctx: &mut RequestContext,
     ) -> Result<LedgerResponse, Status> {
-        let manager = self.manager.as_ref().ok_or_else(|| {
-            Status::failed_precondition("Regional proposals require RaftManager configuration")
-        })?;
-
-        let region_group = manager.get_region_group(region).map_err(|e| {
-            Status::unavailable(format!("Region {region} is not active on this node: {e}"))
-        })?;
-
         let timeout = self.effective_timeout(grpc_metadata);
-        let payload = RaftPayload::new(request, ctx.caller_or_zero());
 
         ctx.start_raft_timer();
-        let result = tokio::time::timeout(timeout, region_group.raft().client_write(payload)).await;
+        let result =
+            self.proposer.propose_to_region(region, request, ctx.caller_or_zero(), timeout).await;
         ctx.end_raft_timer();
 
-        match result {
-            Ok(Ok(resp)) => Ok(resp.data),
-            Ok(Err(e)) => {
-                ctx.set_error("RaftError", &e.to_string());
-                Err(classify_raft_error(&e.to_string()))
-            },
-            Err(_elapsed) => {
-                inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
-                ctx.set_error("Timeout", "Regional Raft proposal timed out");
-                Err(Status::deadline_exceeded(format!(
-                    "Regional Raft proposal timed out after {}ms (region: {region})",
-                    timeout.as_millis()
-                )))
-            },
+        if let Err(ref e) = result {
+            ctx.set_error("ProposalError", e.message());
         }
+        result
     }
 
     /// Proposes a user-scoped `SystemRequest` to a region with PII encryption.
@@ -426,33 +354,79 @@ impl ServiceContext {
         self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)
     }
 
+    /// Returns current Raft metrics for the GLOBAL group.
+    ///
+    /// Used by vault creation to populate genesis block headers with leader ID
+    /// and term. Returns `None` when metrics are unavailable (e.g., in tests
+    /// with a mock proposer).
+    pub(crate) fn raft_metrics(&self) -> Option<crate::proposal::LedgerRaftMetrics> {
+        self.proposer.raft_metrics()
+    }
+
     /// Computes the effective Raft proposal timeout, respecting gRPC deadlines.
     fn effective_timeout(&self, grpc_metadata: &tonic::metadata::MetadataMap) -> Duration {
         let grpc_deadline =
             inferadb_ledger_raft::deadline::extract_deadline_from_metadata(grpc_metadata);
         inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline)
     }
-
-    /// Returns a reference to the Raft manager, if configured.
-    #[allow(dead_code)]
-    pub(crate) fn manager(&self) -> Option<&Arc<RaftManager>> {
-        self.manager.as_ref()
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
-mod tests {
-    use inferadb_ledger_raft::raft_manager::{RaftManagerConfig, RegionConfig};
+pub(crate) mod tests {
+    use inferadb_ledger_raft::{
+        log_storage::AppliedState,
+        raft_manager::{RaftManager, RaftManagerConfig, RegionConfig},
+    };
     use inferadb_ledger_test_utils::TestDir;
+    use parking_lot::RwLock;
 
     use super::*;
+    use crate::proposal::RaftProposalService;
 
-    /// Creates a `ServiceContext` with `manager: None` for testing error paths.
+    /// Creates a `ServiceContext` backed by a [`MockProposalService`] and a
+    /// real (empty) `StateLayer<FileBackend>` for state reads.
     ///
-    /// Requires a started system region to populate the Raft/state/applied_state
-    /// fields (these are mandatory), but sets `manager` to `None` so that
-    /// `propose_regional` and `regional_state` hit the FAILED_PRECONDITION path.
+    /// The returned `AppliedState` is wrapped in `Arc<RwLock<_>>` so tests
+    /// can populate slug indexes, org metadata, and other applied state before
+    /// calling handlers.
+    ///
+    /// [`MockProposalService`]: crate::proposal::mock::MockProposalService
+    pub(crate) fn test_service_context_with_mock(
+        proposer: Arc<dyn crate::proposal::ProposalService>,
+        temp: &TestDir,
+    ) -> (ServiceContext, Arc<RwLock<AppliedState>>) {
+        let db_path = temp.path().join("test_mock.db");
+        let db = Arc::new(
+            inferadb_ledger_store::Database::create(&db_path).expect("create test database"),
+        );
+        let state = Arc::new(inferadb_ledger_state::StateLayer::new(db));
+        let applied_state_inner = Arc::new(RwLock::new(AppliedState::default()));
+        let applied_state = inferadb_ledger_raft::log_storage::AppliedStateAccessor::new_for_test(
+            applied_state_inner.clone(),
+        );
+
+        let ctx = ServiceContext {
+            proposer,
+            state,
+            applied_state,
+            sampler: None,
+            node_id: None,
+            validation_config: Arc::new(ValidationConfig::default()),
+            proposal_timeout: Duration::from_secs(5),
+            event_handle: None,
+            health_state: None,
+            email_blinding_key: None,
+            jwt_engine: None,
+            jwt_config: None,
+            key_manager: None,
+            saga_handle: Arc::new(tokio::sync::OnceCell::new()),
+        };
+        (ctx, applied_state_inner)
+    }
+
+    /// Creates a `ServiceContext` with a proposer that has no manager,
+    /// for testing FAILED_PRECONDITION error paths.
     async fn create_test_context_without_manager() -> (ServiceContext, TestDir) {
         let temp = TestDir::new();
         let node_id = 1u64;
@@ -462,8 +436,11 @@ mod tests {
             RegionConfig::system(node_id, "127.0.0.1:0".to_string()).without_background_jobs();
         let system = manager.start_system_region(region_config).await.expect("start system region");
 
+        let proposer: Arc<dyn ProposalService> =
+            Arc::new(RaftProposalService::new(system.raft().clone(), None));
+
         let ctx = ServiceContext {
-            raft: system.raft().clone(),
+            proposer,
             state: system.state().clone(),
             applied_state: system.applied_state().clone(),
             sampler: None,
@@ -472,7 +449,6 @@ mod tests {
             proposal_timeout: Duration::from_secs(5),
             event_handle: None,
             health_state: None,
-            manager: None,
             email_blinding_key: None,
             jwt_engine: None,
             jwt_config: None,
@@ -493,8 +469,11 @@ mod tests {
             RegionConfig::system(node_id, "127.0.0.1:0".to_string()).without_background_jobs();
         let system = manager.start_system_region(region_config).await.expect("start system region");
 
+        let proposer: Arc<dyn ProposalService> =
+            Arc::new(RaftProposalService::new(system.raft().clone(), Some(manager.clone())));
+
         let ctx = ServiceContext {
-            raft: system.raft().clone(),
+            proposer,
             state: system.state().clone(),
             applied_state: system.applied_state().clone(),
             sampler: None,
@@ -503,7 +482,6 @@ mod tests {
             proposal_timeout: Duration::from_secs(5),
             event_handle: None,
             health_state: None,
-            manager: Some(manager.clone()),
             email_blinding_key: None,
             jwt_engine: None,
             jwt_config: None,
@@ -597,14 +575,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manager_accessor_returns_none_when_unconfigured() {
-        let (ctx, _temp) = create_test_context_without_manager().await;
-        assert!(ctx.manager().is_none());
-    }
-
-    #[tokio::test]
-    async fn manager_accessor_returns_some_when_configured() {
+    async fn raft_metrics_returns_some_with_real_proposer() {
         let (ctx, _manager, _temp) = create_test_context_with_manager().await;
-        assert!(ctx.manager().is_some());
+        assert!(ctx.raft_metrics().is_some());
     }
 }
