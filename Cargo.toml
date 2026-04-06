@@ -44,7 +44,7 @@ validit = "0.2"
 
 # Crypto
 sha1 = "0.10"
-sha2 = "0.10"
+sha2 = "0.11"
 seahash = "4"
 hmac = "0.12"
 rs_merkle = "1"
