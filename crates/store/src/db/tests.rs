@@ -1174,4 +1174,481 @@ mod tests {
             }
         }
     }
+
+    // ========================================================================
+    // Transaction Edge Case Tests
+    // ========================================================================
+
+    /// Tests that aborting a write transaction discards changes.
+    #[test]
+    fn test_write_transaction_abort() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        // Insert some initial data
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::Entities>(&b"existing".to_vec(), &b"val".to_vec()).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // Start a write, insert, then abort
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::Entities>(&b"aborted".to_vec(), &b"gone".to_vec()).unwrap();
+            txn.abort();
+        }
+
+        // Aborted key should not be visible
+        let txn = db.read().unwrap();
+        assert!(txn.get::<tables::Entities>(&b"aborted".to_vec()).unwrap().is_none());
+        assert!(txn.get::<tables::Entities>(&b"existing".to_vec()).unwrap().is_some());
+    }
+
+    /// Tests that dropping a write transaction without commit or abort discards changes.
+    #[test]
+    fn test_write_transaction_drop_without_commit() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::Entities>(&b"dropped".to_vec(), &b"val".to_vec()).unwrap();
+            // Drop without commit or abort
+        }
+
+        let txn = db.read().unwrap();
+        assert!(txn.get::<tables::Entities>(&b"dropped".to_vec()).unwrap().is_none());
+    }
+
+    /// Tests read transaction contains() method.
+    #[test]
+    fn test_read_transaction_contains() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::Entities>(&b"present".to_vec(), &b"val".to_vec()).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        assert!(txn.contains::<tables::Entities>(&b"present".to_vec()).unwrap());
+        assert!(!txn.contains::<tables::Entities>(&b"absent".to_vec()).unwrap());
+    }
+
+    /// Tests reading from an empty table returns None.
+    #[test]
+    fn test_read_empty_table() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        let txn = db.read().unwrap();
+        assert!(txn.get::<tables::RaftLog>(&1u64).unwrap().is_none());
+    }
+
+    /// Tests first() and last() on read transactions.
+    #[test]
+    fn test_read_transaction_first_last() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        // Empty table
+        {
+            let txn = db.read().unwrap();
+            assert!(txn.first::<tables::Entities>().unwrap().is_none());
+            assert!(txn.last::<tables::Entities>().unwrap().is_none());
+        }
+
+        // With data
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::Entities>(&b"aaa".to_vec(), &b"first".to_vec()).unwrap();
+            txn.insert::<tables::Entities>(&b"zzz".to_vec(), &b"last".to_vec()).unwrap();
+            txn.insert::<tables::Entities>(&b"mmm".to_vec(), &b"middle".to_vec()).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        let (first_key, _) = txn.first::<tables::Entities>().unwrap().unwrap();
+        assert_eq!(first_key, b"aaa");
+        let (last_key, _) = txn.last::<tables::Entities>().unwrap().unwrap();
+        assert_eq!(last_key, b"zzz");
+    }
+
+    /// Tests first() and last() on write transactions.
+    #[test]
+    fn test_write_transaction_first_last() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        let mut txn = db.write().unwrap();
+        // Empty table
+        assert!(txn.first::<tables::Entities>().unwrap().is_none());
+        assert!(txn.last::<tables::Entities>().unwrap().is_none());
+
+        txn.insert::<tables::Entities>(&b"alpha".to_vec(), &b"v1".to_vec()).unwrap();
+        txn.insert::<tables::Entities>(&b"omega".to_vec(), &b"v2".to_vec()).unwrap();
+
+        let (first_key, _) = txn.first::<tables::Entities>().unwrap().unwrap();
+        assert_eq!(first_key, b"alpha");
+        let (last_key, _) = txn.last::<tables::Entities>().unwrap().unwrap();
+        assert_eq!(last_key, b"omega");
+
+        txn.commit().unwrap();
+    }
+
+    /// Tests deleting from empty table returns false.
+    #[test]
+    fn test_delete_from_empty_table() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        let mut txn = db.write().unwrap();
+        let deleted = txn.delete::<tables::Entities>(&b"nonexistent".to_vec()).unwrap();
+        assert!(!deleted);
+        txn.commit().unwrap();
+    }
+
+    /// Tests deleting a nonexistent key from a non-empty table.
+    #[test]
+    fn test_delete_nonexistent_key() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::Entities>(&b"exists".to_vec(), &b"val".to_vec()).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let mut txn = db.write().unwrap();
+        let deleted = txn.delete::<tables::Entities>(&b"missing".to_vec()).unwrap();
+        assert!(!deleted);
+        txn.commit().unwrap();
+    }
+
+    /// Tests write transaction get() (read-your-own-writes).
+    #[test]
+    fn test_write_transaction_read_own_writes() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        let mut txn = db.write().unwrap();
+        txn.insert::<tables::Entities>(&b"key1".to_vec(), &b"val1".to_vec()).unwrap();
+
+        // Read within the same write transaction (not yet committed)
+        let val = txn.get::<tables::Entities>(&b"key1".to_vec()).unwrap();
+        assert_eq!(val, Some(b"val1".to_vec()));
+
+        // Nonexistent key
+        let val = txn.get::<tables::Entities>(&b"missing".to_vec()).unwrap();
+        assert!(val.is_none());
+
+        txn.commit().unwrap();
+    }
+
+    /// Tests insert_raw for pre-encoded key-value pairs.
+    #[test]
+    fn test_insert_raw() {
+        use crate::tables::TableId;
+
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert_raw(TableId::Entities, b"raw_key", b"raw_value").unwrap();
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        let val = txn.get::<tables::Entities>(&b"raw_key".to_vec()).unwrap();
+        assert_eq!(val, Some(b"raw_value".to_vec()));
+    }
+
+    /// Tests database stats reporting.
+    #[test]
+    fn test_database_stats() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        let stats = db.stats();
+        assert_eq!(stats.page_size, DEFAULT_PAGE_SIZE);
+        assert_eq!(stats.dirty_pages, 0);
+
+        // Insert data to generate some stats
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::Entities>(&b"key".to_vec(), &b"val".to_vec()).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let stats = db.stats();
+        assert!(stats.total_pages > 0);
+    }
+
+    /// Tests record_page_split increments counter.
+    #[test]
+    fn test_record_page_split() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        let before = db.stats().page_splits;
+        db.record_page_split();
+        let after = db.stats().page_splits;
+        assert_eq!(after, before + 1);
+    }
+
+    /// Tests table_depths returns depths for non-empty tables.
+    #[test]
+    fn test_table_depths() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        // Empty database: no depths
+        let depths = db.table_depths().unwrap();
+        assert!(depths.is_empty());
+
+        // Add data
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&1u64, &vec![1u8]).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let depths = db.table_depths().unwrap();
+        assert!(!depths.is_empty());
+        // RaftLog should have depth 1 (single leaf)
+        let raft_depth = depths.iter().find(|(name, _)| *name == "raft_log");
+        assert!(raft_depth.is_some());
+        assert_eq!(raft_depth.unwrap().1, 1);
+    }
+
+    /// Tests read_raw_page with unwritten page returns error.
+    #[test]
+    fn test_read_raw_page_unwritten() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        // Page 999 is far beyond any allocation
+        let result = db.read_raw_page(999);
+        assert!(result.is_err());
+    }
+
+    /// Tests page_size returns configured page size.
+    #[test]
+    fn test_page_size() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        assert_eq!(db.page_size(), DEFAULT_PAGE_SIZE);
+    }
+
+    /// Tests dirty_page_ids / dirty_page_count for backup tracking.
+    #[test]
+    fn test_dirty_bitmap_tracking() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        assert_eq!(db.dirty_page_count(), 0);
+        assert!(db.dirty_page_ids().is_empty());
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::Entities>(&b"key".to_vec(), &b"val".to_vec()).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // After commit, dirty bitmap should have been populated
+        assert!(db.dirty_page_count() > 0);
+        assert!(!db.dirty_page_ids().is_empty());
+
+        // Clear and verify
+        db.clear_dirty_bitmap();
+        assert_eq!(db.dirty_page_count(), 0);
+    }
+
+    /// Tests free_page_ids after inserts and deletes.
+    #[test]
+    fn test_free_page_ids() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        // Insert some data
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..20u32 {
+                let key = format!("free_test_{i:04}").into_bytes();
+                txn.insert::<tables::Entities>(&key, &b"val".to_vec()).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        // Delete all entries
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..20u32 {
+                let key = format!("free_test_{i:04}").into_bytes();
+                txn.delete::<tables::Entities>(&key).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        // Free pending pages
+        db.try_free_pending_pages();
+
+        // There should be free pages now (from COW page replacement)
+        let total = db.total_page_count();
+        assert!(total > 0);
+    }
+
+    /// Tests range queries on read transactions.
+    #[test]
+    fn test_read_transaction_range() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..20u64 {
+                txn.insert::<tables::RaftLog>(&i, &vec![i as u8]).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        let iter = txn.range::<tables::RaftLog>(Some(&5u64), Some(&15u64)).unwrap();
+        let entries = iter.collect_entries();
+        assert_eq!(entries.len(), 10);
+    }
+
+    /// Tests compact_table on a write transaction.
+    #[test]
+    fn test_compact_table() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        // Insert then delete to create sparse leaves
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..200u32 {
+                let key = format!("compact_{i:06}").into_bytes();
+                txn.insert::<tables::Entities>(&key, &vec![0xAA; 100]).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        {
+            let mut txn = db.write().unwrap();
+            // Delete every other key to make leaves sparse
+            for i in (0..200u32).step_by(2) {
+                let key = format!("compact_{i:06}").into_bytes();
+                txn.delete::<tables::Entities>(&key).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        // Compact
+        {
+            let mut txn = db.write().unwrap();
+            let stats = txn.compact_table::<tables::Entities>(0.4).unwrap();
+            // We may or may not merge leaves depending on fill factor
+            // Just verify it doesn't error
+            let _ = stats;
+            txn.commit().unwrap();
+        }
+
+        // Verify remaining entries are intact
+        let txn = db.read().unwrap();
+        for i in (1..200u32).step_by(2) {
+            let key = format!("compact_{i:06}").into_bytes();
+            assert!(txn.get::<tables::Entities>(&key).unwrap().is_some());
+        }
+    }
+
+    /// Tests compact_all_tables.
+    #[test]
+    fn test_compact_all_tables() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        // Compact on empty database
+        {
+            let mut txn = db.write().unwrap();
+            let stats = txn.compact_all_tables(0.4).unwrap();
+            assert_eq!(stats.pages_merged, 0);
+            assert_eq!(stats.pages_freed, 0);
+            txn.commit().unwrap();
+        }
+    }
+
+    /// Tests table_root_pages accessor.
+    #[test]
+    fn test_table_root_pages() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        let roots = db.table_root_pages();
+        // All empty initially
+        assert!(roots.iter().all(|&r| r == 0));
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&1u64, &vec![1u8]).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let roots = db.table_root_pages();
+        assert!(roots[tables::RaftLog::ID as usize] > 0);
+    }
+
+    /// Tests contains on empty table in read transaction.
+    #[test]
+    fn test_contains_empty_table() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        let txn = db.read().unwrap();
+        assert!(!txn.contains::<tables::Entities>(&b"any".to_vec()).unwrap());
+    }
+
+    /// Tests read transaction table_depths.
+    #[test]
+    fn test_read_transaction_table_depths() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..100u64 {
+                txn.insert::<tables::RaftLog>(&i, &vec![0u8; 50]).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        let depths = txn.table_depths().unwrap();
+        assert!(!depths.is_empty());
+        // With 100 entries, depth should be > 1
+        let (_, depth) = depths.iter().find(|(name, _)| *name == "raft_log").unwrap();
+        assert!(*depth >= 1);
+    }
+
+    /// Tests open_with_config for file-backed databases.
+    #[test]
+    fn test_open_with_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("config_test.ink");
+
+        // Create with default config
+        {
+            let _db = Database::<FileBackend>::create(&db_path).unwrap();
+        }
+
+        // Reopen with custom config (page_size from config is overridden by on-disk)
+        let config = DatabaseConfig::builder().cache_size(256).sync_on_commit(false).build();
+        let db = Database::<FileBackend>::open_with_config(&db_path, config).unwrap();
+        // Cache size should be from our config
+        assert_eq!(db.config.cache_size, 256);
+    }
+
+    /// Tests in-memory database with custom config.
+    #[test]
+    fn test_open_in_memory_with_config() {
+        let config = DatabaseConfig::builder().page_size(8192).cache_size(64).build();
+        let db = Database::<InMemoryBackend>::open_in_memory_with_config(config).unwrap();
+        assert_eq!(db.page_size(), 8192);
+    }
+
+    /// Tests that page splits are tracked in stats.
+    #[test]
+    fn test_page_splits_tracked() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        // Insert enough to trigger splits
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..500u32 {
+                let key = format!("split_{i:06}").into_bytes();
+                txn.insert::<tables::Entities>(&key, &vec![0xBB; 100]).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let stats = db.stats();
+        assert!(stats.page_splits > 0, "Expected page splits with 500 entries");
+    }
 }

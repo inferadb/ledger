@@ -4260,4 +4260,439 @@ mod tests {
         };
         assert_eq!(classify_system_request(&request), RaftScope::Regional);
     }
+
+    // ============================================
+    // Display coverage for all LedgerResponse variants
+    // ============================================
+
+    #[test]
+    fn test_ledger_response_display_empty() {
+        assert_eq!(format!("{}", LedgerResponse::Empty), "Empty");
+    }
+
+    #[test]
+    fn test_ledger_response_display_organization_created() {
+        let r = LedgerResponse::OrganizationCreated {
+            organization_id: OrganizationId::new(1),
+            organization_slug: OrganizationSlug::new(100),
+        };
+        assert!(format!("{r}").starts_with("OrganizationCreated("));
+    }
+
+    #[test]
+    fn test_ledger_response_display_organization_profile_written() {
+        let r =
+            LedgerResponse::OrganizationProfileWritten { organization_id: OrganizationId::new(2) };
+        assert_eq!(format!("{r}"), "OrganizationProfileWritten(id=org:2)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_organization_status_updated() {
+        let r =
+            LedgerResponse::OrganizationStatusUpdated { organization_id: OrganizationId::new(3) };
+        assert_eq!(format!("{r}"), "OrganizationStatusUpdated(id=org:3)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_vault_created() {
+        let r = LedgerResponse::VaultCreated { vault: VaultId::new(5), slug: VaultSlug::new(500) };
+        assert!(format!("{r}").starts_with("VaultCreated("));
+    }
+
+    #[test]
+    fn test_ledger_response_display_organization_deleted() {
+        let r = LedgerResponse::OrganizationDeleted {
+            organization_id: OrganizationId::new(4),
+            deleted_at: chrono::Utc::now(),
+            retention_days: 90,
+        };
+        assert!(format!("{r}").contains("retention_days=90"));
+    }
+
+    #[test]
+    fn test_ledger_response_display_organization_updated() {
+        let r = LedgerResponse::OrganizationUpdated { organization_id: OrganizationId::new(5) };
+        assert_eq!(format!("{r}"), "OrganizationUpdated(id=org:5)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_organization_member_removed() {
+        let r =
+            LedgerResponse::OrganizationMemberRemoved { organization_id: OrganizationId::new(6) };
+        assert_eq!(format!("{r}"), "OrganizationMemberRemoved(id=org:6)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_organization_member_role_updated() {
+        let r = LedgerResponse::OrganizationMemberRoleUpdated {
+            organization_id: OrganizationId::new(7),
+        };
+        assert_eq!(format!("{r}"), "OrganizationMemberRoleUpdated(id=org:7)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_organization_member_added() {
+        let r = LedgerResponse::OrganizationMemberAdded {
+            organization_id: OrganizationId::new(8),
+            already_member: true,
+        };
+        assert!(format!("{r}").contains("already_member=true"));
+    }
+
+    #[test]
+    fn test_ledger_response_display_invite_created() {
+        let r = LedgerResponse::OrganizationInviteCreated {
+            invite_id: InviteId::new(1),
+            invite_slug: InviteSlug::new(100),
+            expires_at: chrono::Utc::now(),
+        };
+        assert!(format!("{r}").starts_with("OrganizationInviteCreated("));
+    }
+
+    #[test]
+    fn test_ledger_response_display_invite_resolved() {
+        let r = LedgerResponse::OrganizationInviteResolved { invite_id: InviteId::new(2) };
+        assert_eq!(format!("{r}"), "OrganizationInviteResolved(id=invite:2)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_invite_indexes_purged() {
+        let r = LedgerResponse::OrganizationInviteIndexesPurged { invite_id: InviteId::new(3) };
+        assert_eq!(format!("{r}"), "OrganizationInviteIndexesPurged(id=invite:3)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_invite_email_rehashed() {
+        let r = LedgerResponse::InviteEmailIndexRehashed { invite_id: InviteId::new(4) };
+        assert_eq!(format!("{r}"), "InviteEmailIndexRehashed(id=invite:4)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_organization_purged() {
+        let r = LedgerResponse::OrganizationPurged { organization_id: OrganizationId::new(9) };
+        assert_eq!(format!("{r}"), "OrganizationPurged(id=org:9)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_organization_migrated() {
+        let r = LedgerResponse::OrganizationMigrated {
+            organization: OrganizationId::new(10),
+            old_region: Region::US_EAST_VA,
+            new_region: Region::DE_CENTRAL_FRANKFURT,
+        };
+        assert!(format!("{r}").contains("OrganizationMigrated("));
+    }
+
+    #[test]
+    fn test_ledger_response_display_organization_suspended() {
+        let r = LedgerResponse::OrganizationSuspended { organization: OrganizationId::new(11) };
+        assert_eq!(format!("{r}"), "OrganizationSuspended(id=org:11)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_organization_resumed() {
+        let r = LedgerResponse::OrganizationResumed { organization: OrganizationId::new(12) };
+        assert_eq!(format!("{r}"), "OrganizationResumed(id=org:12)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_migration_started() {
+        let r = LedgerResponse::MigrationStarted {
+            organization: OrganizationId::new(13),
+            target_region_group: Region::JP_EAST_TOKYO,
+        };
+        assert!(format!("{r}").starts_with("MigrationStarted("));
+    }
+
+    #[test]
+    fn test_ledger_response_display_migration_completed() {
+        let r = LedgerResponse::MigrationCompleted {
+            organization: OrganizationId::new(14),
+            old_region: Region::US_EAST_VA,
+            new_region: Region::US_WEST_OR,
+        };
+        assert!(format!("{r}").starts_with("MigrationCompleted("));
+    }
+
+    #[test]
+    fn test_ledger_response_display_vault_deleted() {
+        let r = LedgerResponse::VaultDeleted { success: true };
+        assert_eq!(format!("{r}"), "VaultDeleted(success=true)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_vault_updated() {
+        let r = LedgerResponse::VaultUpdated { success: false };
+        assert_eq!(format!("{r}"), "VaultUpdated(success=false)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_vault_health_updated() {
+        let r = LedgerResponse::VaultHealthUpdated { success: true };
+        assert_eq!(format!("{r}"), "VaultHealthUpdated(success=true)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_user_created() {
+        let r = LedgerResponse::UserCreated { user_id: UserId::new(1), slug: UserSlug::new(100) };
+        assert!(format!("{r}").starts_with("UserCreated("));
+    }
+
+    #[test]
+    fn test_ledger_response_display_user_updated() {
+        let r = LedgerResponse::UserUpdated { user_id: UserId::new(2) };
+        assert_eq!(format!("{r}"), "UserUpdated(id=user:2)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_user_soft_deleted() {
+        let r = LedgerResponse::UserSoftDeleted { user_id: UserId::new(3), retention_days: 30 };
+        assert!(format!("{r}").contains("retention_days=30"));
+    }
+
+    #[test]
+    fn test_ledger_response_display_user_email_created() {
+        let r = LedgerResponse::UserEmailCreated { email_id: UserEmailId::new(1) };
+        assert_eq!(format!("{r}"), "UserEmailCreated(id=email:1)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_user_email_deleted() {
+        let r = LedgerResponse::UserEmailDeleted { email_id: UserEmailId::new(2) };
+        assert_eq!(format!("{r}"), "UserEmailDeleted(id=email:2)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_user_email_verified() {
+        let r = LedgerResponse::UserEmailVerified { email_id: UserEmailId::new(3) };
+        assert_eq!(format!("{r}"), "UserEmailVerified(id=email:3)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_user_erased() {
+        let r = LedgerResponse::UserErased { user_id: UserId::new(4) };
+        assert_eq!(format!("{r}"), "UserErased(id=user:4)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_users_migrated() {
+        let r = LedgerResponse::UsersMigrated { users: 100, migrated: 90, skipped: 5, errors: 5 };
+        assert!(format!("{r}").contains("migrated=90"));
+    }
+
+    #[test]
+    fn test_ledger_response_display_error() {
+        let r = LedgerResponse::Error {
+            code: inferadb_ledger_types::ErrorCode::Internal,
+            message: "something broke".to_string(),
+        };
+        assert!(format!("{r}").contains("something broke"));
+    }
+
+    #[test]
+    fn test_ledger_response_display_precondition_failed() {
+        let r = LedgerResponse::PreconditionFailed {
+            key: "my_key".to_string(),
+            current_version: Some(5),
+            current_value: None,
+            failed_condition: None,
+        };
+        assert_eq!(format!("{r}"), "PreconditionFailed(key=my_key)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_batch_write() {
+        let r = LedgerResponse::BatchWrite {
+            responses: vec![LedgerResponse::Empty, LedgerResponse::Empty],
+        };
+        assert_eq!(format!("{r}"), "BatchWrite(count=2)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_team_created() {
+        let r = LedgerResponse::OrganizationTeamCreated {
+            team_id: TeamId::new(1),
+            team_slug: TeamSlug::new(100),
+        };
+        assert!(format!("{r}").starts_with("OrganizationTeamCreated("));
+    }
+
+    #[test]
+    fn test_ledger_response_display_team_deleted() {
+        let r =
+            LedgerResponse::OrganizationTeamDeleted { organization_id: OrganizationId::new(15) };
+        assert_eq!(format!("{r}"), "OrganizationTeamDeleted(org=org:15)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_app_created() {
+        let r = LedgerResponse::AppCreated { app_id: AppId::new(1), app_slug: AppSlug::new(100) };
+        assert!(format!("{r}").starts_with("AppCreated("));
+    }
+
+    #[test]
+    fn test_ledger_response_display_app_deleted() {
+        let r = LedgerResponse::AppDeleted { organization_id: OrganizationId::new(16) };
+        assert_eq!(format!("{r}"), "AppDeleted(org=org:16)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_app_toggled() {
+        let r = LedgerResponse::AppToggled { organization_id: OrganizationId::new(17) };
+        assert_eq!(format!("{r}"), "AppToggled(org=org:17)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_app_credential_toggled() {
+        let r = LedgerResponse::AppCredentialToggled { organization_id: OrganizationId::new(18) };
+        assert_eq!(format!("{r}"), "AppCredentialToggled(org=org:18)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_app_client_secret_rotated() {
+        let r = LedgerResponse::AppClientSecretRotated { organization_id: OrganizationId::new(19) };
+        assert_eq!(format!("{r}"), "AppClientSecretRotated(org=org:19)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_app_client_assertion_created() {
+        let r =
+            LedgerResponse::AppClientAssertionCreated { assertion_id: ClientAssertionId::new(1) };
+        assert!(format!("{r}").starts_with("AppClientAssertionCreated("));
+    }
+
+    #[test]
+    fn test_ledger_response_display_app_client_assertion_deleted() {
+        let r =
+            LedgerResponse::AppClientAssertionDeleted { organization_id: OrganizationId::new(20) };
+        assert_eq!(format!("{r}"), "AppClientAssertionDeleted(org=org:20)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_app_client_assertion_toggled() {
+        let r =
+            LedgerResponse::AppClientAssertionToggled { organization_id: OrganizationId::new(21) };
+        assert_eq!(format!("{r}"), "AppClientAssertionToggled(org=org:21)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_app_vault_added() {
+        let r = LedgerResponse::AppVaultAdded { organization_id: OrganizationId::new(22) };
+        assert_eq!(format!("{r}"), "AppVaultAdded(org=org:22)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_app_vault_updated() {
+        let r = LedgerResponse::AppVaultUpdated { organization_id: OrganizationId::new(23) };
+        assert_eq!(format!("{r}"), "AppVaultUpdated(org=org:23)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_app_vault_removed() {
+        let r = LedgerResponse::AppVaultRemoved { organization_id: OrganizationId::new(24) };
+        assert_eq!(format!("{r}"), "AppVaultRemoved(org=org:24)");
+    }
+
+    #[test]
+    fn test_ledger_response_display_email_verification_created() {
+        let r = LedgerResponse::EmailVerificationCreated;
+        assert_eq!(format!("{r}"), "EmailVerificationCreated");
+    }
+
+    #[test]
+    fn test_ledger_response_display_email_code_verified_new_user() {
+        let r = LedgerResponse::EmailCodeVerified { result: EmailCodeVerifiedResult::NewUser };
+        assert!(format!("{r}").contains("NewUser"));
+    }
+
+    #[test]
+    fn test_ledger_response_display_onboarding_user_created() {
+        let r = LedgerResponse::OnboardingUserCreated {
+            user_id: UserId::new(1),
+            organization_id: OrganizationId::new(2),
+        };
+        assert!(format!("{r}").contains("OnboardingUserCreated("));
+    }
+
+    #[test]
+    fn test_ledger_response_display_onboarding_user_profile_written() {
+        let r = LedgerResponse::OnboardingUserProfileWritten {
+            refresh_token_id: RefreshTokenId::new(10),
+        };
+        assert!(format!("{r}").contains("OnboardingUserProfileWritten("));
+    }
+
+    #[test]
+    fn test_ledger_response_display_onboarding_user_activated() {
+        let r = LedgerResponse::OnboardingUserActivated;
+        assert_eq!(format!("{r}"), "OnboardingUserActivated");
+    }
+
+    #[test]
+    fn test_ledger_response_display_user_profile_updated() {
+        let r = LedgerResponse::UserProfileUpdated { user_id: UserId::new(5) };
+        assert_eq!(format!("{r}"), "UserProfileUpdated(id=user:5)");
+    }
+
+    // ============================================
+    // RaftPayload constructor tests
+    // ============================================
+
+    #[test]
+    fn test_raft_payload_system_constructor() {
+        let payload = RaftPayload::system(LedgerRequest::DeleteExpiredRefreshTokens);
+        assert_eq!(payload.caller, 0);
+        assert!(payload.state_root_commitments.is_empty());
+        match payload.request {
+            LedgerRequest::DeleteExpiredRefreshTokens => {},
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_raft_payload_new_constructor() {
+        let payload = RaftPayload::new(
+            LedgerRequest::DeleteOrganization { organization: OrganizationId::new(1) },
+            42,
+        );
+        assert_eq!(payload.caller, 42);
+        assert!(payload.state_root_commitments.is_empty());
+    }
+
+    #[test]
+    fn test_raft_payload_with_commitments_constructor() {
+        let commitments = vec![StateRootCommitment {
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(1),
+            vault_height: 10,
+            state_root: [0xAA; 32],
+        }];
+        let payload = RaftPayload::with_commitments(
+            LedgerRequest::DeleteExpiredRefreshTokens,
+            commitments.clone(),
+            99,
+        );
+        assert_eq!(payload.caller, 99);
+        assert_eq!(payload.state_root_commitments.len(), 1);
+    }
+
+    #[test]
+    fn test_ledger_response_default_is_empty() {
+        let r = LedgerResponse::default();
+        assert_eq!(r, LedgerResponse::Empty);
+    }
+
+    #[test]
+    fn test_state_root_divergence_debug() {
+        let d = StateRootDivergence {
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(2),
+            vault_height: 100,
+            local_state_root: [0xAA; 32],
+            leader_state_root: [0xBB; 32],
+        };
+        let debug = format!("{d:?}");
+        assert!(debug.contains("StateRootDivergence"));
+        assert!(debug.contains("vault_height: 100"));
+    }
 }

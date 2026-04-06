@@ -474,3 +474,225 @@ impl MetricsCardinalityConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::field_reassign_with_default)]
+mod tests {
+    use super::*;
+
+    // OtelConfig tests
+
+    #[test]
+    fn otel_config_default_values() {
+        let config = OtelConfig::default();
+        assert!(!config.enabled);
+        assert!(config.endpoint.is_none());
+        assert_eq!(config.transport, OtelTransport::Grpc);
+        assert_eq!(config.batch_size, 512);
+        assert_eq!(config.batch_interval_ms, 5000);
+        assert_eq!(config.timeout_ms, 10000);
+        assert_eq!(config.shutdown_timeout_ms, 15000);
+        assert!(config.trace_raft_rpcs);
+    }
+
+    #[test]
+    fn otel_config_builder_defaults_valid() {
+        let config = OtelConfig::builder().build().unwrap();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn otel_config_enabled_without_endpoint_fails() {
+        let result = OtelConfig::builder().enabled(true).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn otel_config_enabled_with_endpoint_succeeds() {
+        let config = OtelConfig::builder()
+            .enabled(true)
+            .endpoint("http://localhost:4317".to_string())
+            .build()
+            .unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.endpoint.as_deref(), Some("http://localhost:4317"));
+    }
+
+    #[test]
+    fn otel_config_zero_batch_size_fails() {
+        let mut config = OtelConfig::default();
+        config.batch_size = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn otel_config_zero_batch_interval_fails() {
+        let mut config = OtelConfig::default();
+        config.batch_interval_ms = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn otel_config_zero_timeout_fails() {
+        let mut config = OtelConfig::default();
+        config.timeout_ms = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn otel_config_zero_shutdown_timeout_fails() {
+        let mut config = OtelConfig::default();
+        config.shutdown_timeout_ms = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn otel_config_use_grpc() {
+        let config = OtelConfig::default();
+        assert!(config.use_grpc());
+    }
+
+    #[test]
+    fn otel_config_endpoint_or_default_none() {
+        let config = OtelConfig::default();
+        assert_eq!(config.endpoint_or_default(), "");
+    }
+
+    #[test]
+    fn otel_config_endpoint_or_default_some() {
+        let mut config = OtelConfig::default();
+        config.endpoint = Some("http://example.com".to_string());
+        assert_eq!(config.endpoint_or_default(), "http://example.com");
+    }
+
+    #[test]
+    fn otel_config_for_test() {
+        let config = OtelConfig::for_test();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn otel_transport_default_is_grpc() {
+        assert_eq!(OtelTransport::default(), OtelTransport::Grpc);
+    }
+
+    #[test]
+    fn otel_config_serde_roundtrip() {
+        let config = OtelConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: OtelConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    // HotKeyConfig tests
+
+    #[test]
+    fn hot_key_config_default_values() {
+        let config = HotKeyConfig::default();
+        assert_eq!(config.window_secs, 60);
+        assert_eq!(config.threshold, 100);
+        assert_eq!(config.cms_width, 1024);
+        assert_eq!(config.cms_depth, 4);
+        assert_eq!(config.top_k, 10);
+    }
+
+    #[test]
+    fn hot_key_config_builder_defaults_valid() {
+        let config = HotKeyConfig::builder().build().unwrap();
+        assert_eq!(config.window_secs, 60);
+    }
+
+    #[test]
+    fn hot_key_config_zero_window_fails() {
+        let mut config = HotKeyConfig::default();
+        config.window_secs = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn hot_key_config_zero_threshold_fails() {
+        let mut config = HotKeyConfig::default();
+        config.threshold = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn hot_key_config_small_cms_width_fails() {
+        let mut config = HotKeyConfig::default();
+        config.cms_width = 63;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn hot_key_config_small_cms_depth_fails() {
+        let mut config = HotKeyConfig::default();
+        config.cms_depth = 1;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn hot_key_config_zero_top_k_fails() {
+        let mut config = HotKeyConfig::default();
+        config.top_k = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn hot_key_config_valid_custom() {
+        let config = HotKeyConfig::builder()
+            .window_secs(30)
+            .threshold(200)
+            .cms_width(2048)
+            .cms_depth(8)
+            .top_k(20)
+            .build()
+            .unwrap();
+        assert_eq!(config.window_secs, 30);
+        assert_eq!(config.threshold, 200);
+    }
+
+    // MetricsCardinalityConfig tests
+
+    #[test]
+    fn metrics_cardinality_default_values() {
+        let config = MetricsCardinalityConfig::default();
+        assert_eq!(config.warn_cardinality, 5000);
+        assert_eq!(config.max_cardinality, 10_000);
+    }
+
+    #[test]
+    fn metrics_cardinality_builder_defaults_valid() {
+        let config = MetricsCardinalityConfig::builder().build().unwrap();
+        assert_eq!(config.warn_cardinality, 5000);
+    }
+
+    #[test]
+    fn metrics_cardinality_zero_warn_fails() {
+        let mut config = MetricsCardinalityConfig::default();
+        config.warn_cardinality = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn metrics_cardinality_zero_max_fails() {
+        let mut config = MetricsCardinalityConfig::default();
+        config.max_cardinality = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn metrics_cardinality_warn_ge_max_fails() {
+        let mut config = MetricsCardinalityConfig::default();
+        config.warn_cardinality = 10_000;
+        config.max_cardinality = 10_000;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn metrics_cardinality_warn_exceeds_max_fails() {
+        let mut config = MetricsCardinalityConfig::default();
+        config.warn_cardinality = 15_000;
+        config.max_cardinality = 10_000;
+        assert!(config.validate().is_err());
+    }
+}

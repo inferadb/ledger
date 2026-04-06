@@ -74,8 +74,9 @@ mod tests {
     use inferadb_ledger_types::{
         ClientId, CredentialData, CredentialType, EmailVerifyTokenId, ErrorCode, InvitationStatus,
         InviteId, InviteSlug, Operation, OrganizationId, PasskeyCredential, PrimaryAuthMethod,
-        RecoveryCodeCredential, Region, TotpCredential, Transaction, UserCredentialId, UserEmailId,
-        UserId, UserSlug, VaultId, VaultSlug,
+        RecoveryCodeCredential, Region, SigningKeyScope, TeamId, TeamSlug, TokenSubject,
+        TotpCredential, Transaction, UserCredentialId, UserEmailId, UserId, UserSlug, VaultId,
+        VaultSlug,
         events::{EventAction, EventConfig, EventEntry, EventScope},
     };
     use openraft::{
@@ -8264,6 +8265,2914 @@ mod tests {
                 },
                 other => panic!("expected OrganizationInviteCreated, got {other}"),
             }
+        }
+    }
+
+    // ========================================================================
+    // Vault CRUD operations
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_delete_vault_success() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create a vault first
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateVault {
+                organization: org_id,
+                slug: VaultSlug::new(1),
+                name: Some("doomed-vault".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+        let vault_id = match response {
+            LedgerResponse::VaultCreated { vault, .. } => vault,
+            other => panic!("expected VaultCreated, got {other}"),
+        };
+
+        // Delete it
+        let (response, _) = store.apply_request(
+            &LedgerRequest::DeleteVault { organization: org_id, vault: vault_id },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::VaultDeleted { success } => assert!(success),
+            other => panic!("expected VaultDeleted, got {other}"),
+        }
+
+        // Verify vault is marked as deleted in state
+        let key = (org_id, vault_id);
+        let vault_meta = state.vaults.get(&key).expect("vault meta exists");
+        assert!(vault_meta.deleted, "vault should be marked deleted");
+    }
+
+    #[tokio::test]
+    async fn test_delete_vault_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::DeleteVault {
+                organization: OrganizationId::new(999),
+                vault: VaultId::new(999),
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code: ErrorCode::NotFound, .. } => {},
+            other => panic!("expected NotFound error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_vault_retention_policy() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create vault
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateVault {
+                organization: org_id,
+                slug: VaultSlug::new(1),
+                name: Some("test-vault".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+        let vault_id = match response {
+            LedgerResponse::VaultCreated { vault, .. } => vault,
+            other => panic!("expected VaultCreated, got {other}"),
+        };
+
+        // Update retention policy
+        let new_policy = BlockRetentionPolicy {
+            mode: inferadb_ledger_types::BlockRetentionMode::Compacted,
+            retention_blocks: 100,
+        };
+        let (response, _) = store.apply_request(
+            &LedgerRequest::UpdateVault {
+                organization: org_id,
+                vault: vault_id,
+                retention_policy: Some(new_policy),
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::VaultUpdated { success } => assert!(success),
+            other => panic!("expected VaultUpdated, got {other}"),
+        }
+
+        let key = (org_id, vault_id);
+        let vault_meta = state.vaults.get(&key).expect("vault meta exists");
+        assert_eq!(
+            vault_meta.retention_policy.mode,
+            inferadb_ledger_types::BlockRetentionMode::Compacted
+        );
+        assert_eq!(vault_meta.retention_policy.retention_blocks, 100);
+    }
+
+    #[tokio::test]
+    async fn test_update_vault_no_fields_still_succeeds() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateVault {
+                organization: org_id,
+                slug: VaultSlug::new(1),
+                name: Some("test-vault".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+        let vault_id = match response {
+            LedgerResponse::VaultCreated { vault, .. } => vault,
+            other => panic!("expected VaultCreated, got {other}"),
+        };
+
+        // Update with no fields
+        let (response, _) = store.apply_request(
+            &LedgerRequest::UpdateVault {
+                organization: org_id,
+                vault: vault_id,
+                retention_policy: None,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::VaultUpdated { success } => assert!(success),
+            other => panic!("expected VaultUpdated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_vault_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::UpdateVault {
+                organization: OrganizationId::new(999),
+                vault: VaultId::new(999),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code: ErrorCode::NotFound, .. } => {},
+            other => panic!("expected NotFound error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_deleted_vault_returns_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create and delete a vault
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateVault {
+                organization: org_id,
+                slug: VaultSlug::new(1),
+                name: Some("test-vault".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+        let vault_id = match response {
+            LedgerResponse::VaultCreated { vault, .. } => vault,
+            other => panic!("expected VaultCreated, got {other}"),
+        };
+
+        store.apply_request(
+            &LedgerRequest::DeleteVault { organization: org_id, vault: vault_id },
+            &mut state,
+        );
+
+        // Try to update deleted vault
+        let (response, _) = store.apply_request(
+            &LedgerRequest::UpdateVault {
+                organization: org_id,
+                vault: vault_id,
+                retention_policy: Some(BlockRetentionPolicy::default()),
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code: ErrorCode::NotFound, message } => {
+                assert!(message.contains("deleted"));
+            },
+            other => panic!("expected NotFound error for deleted vault, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // Team operations
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_create_organization_team_success() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let team_slug = TeamSlug::new(500);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateOrganizationTeam { organization: org_id, slug: team_slug },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationTeamCreated { team_id, team_slug: slug } => {
+                assert_eq!(team_id, TeamId::new(1));
+                assert_eq!(slug, team_slug);
+                // Verify slug index
+                assert_eq!(state.team_slug_index.get(&team_slug), Some(&(org_id, team_id)));
+                assert_eq!(state.team_id_to_slug.get(&team_id), Some(&team_slug));
+            },
+            other => panic!("expected OrganizationTeamCreated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_organization_team_duplicate_slug() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let team_slug = TeamSlug::new(500);
+
+        // Create first team
+        store.apply_request(
+            &LedgerRequest::CreateOrganizationTeam { organization: org_id, slug: team_slug },
+            &mut state,
+        );
+
+        // Try duplicate slug
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateOrganizationTeam { organization: org_id, slug: team_slug },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code: ErrorCode::AlreadyExists, message } => {
+                assert!(message.contains("already exists"));
+            },
+            other => panic!("expected AlreadyExists error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_organization_team_success() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let team_slug = TeamSlug::new(500);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateOrganizationTeam { organization: org_id, slug: team_slug },
+            &mut state,
+        );
+        let team_id = match response {
+            LedgerResponse::OrganizationTeamCreated { team_id, .. } => team_id,
+            other => panic!("expected OrganizationTeamCreated, got {other}"),
+        };
+
+        // Delete the team
+        let (response, _) = store.apply_request(
+            &LedgerRequest::DeleteOrganizationTeam { organization: org_id, team: team_id },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationTeamDeleted { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected OrganizationTeamDeleted, got {other}"),
+        }
+
+        // Verify slug index is cleaned up
+        assert!(!state.team_slug_index.contains_key(&team_slug));
+        assert!(!state.team_id_to_slug.contains_key(&team_id));
+    }
+
+    #[tokio::test]
+    async fn test_delete_organization_team_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::DeleteOrganizationTeam { organization: org_id, team: TeamId::new(999) },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code: ErrorCode::NotFound, .. } => {},
+            other => panic!("expected NotFound error, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // App operations
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_create_app_success() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let app_slug = inferadb_ledger_types::AppSlug::new(600);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::AppCreated { app_id, app_slug: slug } => {
+                assert_eq!(app_id, inferadb_ledger_types::AppId::new(1));
+                assert_eq!(slug, app_slug);
+                // Verify slug index
+                assert_eq!(state.app_slug_index.get(&app_slug), Some(&(org_id, app_id)));
+                assert_eq!(state.app_id_to_slug.get(&app_id), Some(&app_slug));
+            },
+            other => panic!("expected AppCreated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_app_duplicate_slug() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let app_slug = inferadb_ledger_types::AppSlug::new(600);
+
+        // Create first app
+        store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+
+        // Try duplicate slug
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code: ErrorCode::AlreadyExists, message } => {
+                assert!(message.contains("already exists"));
+            },
+            other => panic!("expected AlreadyExists error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_app_success() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let app_slug = inferadb_ledger_types::AppSlug::new(600);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+        let app_id = match response {
+            LedgerResponse::AppCreated { app_id, .. } => app_id,
+            other => panic!("expected AppCreated, got {other}"),
+        };
+
+        // Delete the app
+        let (response, _) = store.apply_request(
+            &LedgerRequest::DeleteApp { organization: org_id, app: app_id },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::AppDeleted { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected AppDeleted, got {other}"),
+        }
+
+        // Verify slug index is cleaned up
+        assert!(!state.app_slug_index.contains_key(&app_slug));
+        assert!(!state.app_id_to_slug.contains_key(&app_id));
+    }
+
+    #[tokio::test]
+    async fn test_delete_app_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::DeleteApp {
+                organization: org_id,
+                app: inferadb_ledger_types::AppId::new(999),
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code: ErrorCode::NotFound, .. } => {},
+            other => panic!("expected NotFound error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_app_enabled() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let app_slug = inferadb_ledger_types::AppSlug::new(600);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+        let app_id = match response {
+            LedgerResponse::AppCreated { app_id, .. } => app_id,
+            other => panic!("expected AppCreated, got {other}"),
+        };
+
+        // Enable the app
+        let (response, _) = store.apply_request(
+            &LedgerRequest::SetAppEnabled { organization: org_id, app: app_id, enabled: true },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::AppToggled { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected AppToggled, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_app_credential_enabled() {
+        use inferadb_ledger_state::system::AppCredentialType;
+
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let app_slug = inferadb_ledger_types::AppSlug::new(600);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+        let app_id = match response {
+            LedgerResponse::AppCreated { app_id, .. } => app_id,
+            other => panic!("expected AppCreated, got {other}"),
+        };
+
+        // Enable client_secret credential
+        let (response, _) = store.apply_request(
+            &LedgerRequest::SetAppCredentialEnabled {
+                organization: org_id,
+                app: app_id,
+                credential_type: AppCredentialType::ClientSecret,
+                enabled: true,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::AppCredentialToggled { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected AppCredentialToggled, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rotate_app_client_secret() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let app_slug = inferadb_ledger_types::AppSlug::new(600);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+        let app_id = match response {
+            LedgerResponse::AppCreated { app_id, .. } => app_id,
+            other => panic!("expected AppCreated, got {other}"),
+        };
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::RotateAppClientSecret {
+                organization: org_id,
+                app: app_id,
+                new_secret_hash: "$2b$12$test_hash".to_string(),
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::AppClientSecretRotated { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected AppClientSecretRotated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_app_client_assertion() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let app_slug = inferadb_ledger_types::AppSlug::new(600);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+        let app_id = match response {
+            LedgerResponse::AppCreated { app_id, .. } => app_id,
+            other => panic!("expected AppCreated, got {other}"),
+        };
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateAppClientAssertion {
+                organization: org_id,
+                app: app_id,
+                expires_at: Utc::now() + chrono::Duration::days(365),
+                public_key_bytes: vec![1u8; 32],
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::AppClientAssertionCreated { assertion_id } => {
+                assert_eq!(assertion_id, inferadb_ledger_types::ClientAssertionId::new(1));
+            },
+            other => panic!("expected AppClientAssertionCreated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_app_client_assertion() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let app_slug = inferadb_ledger_types::AppSlug::new(600);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+        let app_id = match response {
+            LedgerResponse::AppCreated { app_id, .. } => app_id,
+            other => panic!("expected AppCreated, got {other}"),
+        };
+
+        // Create an assertion
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateAppClientAssertion {
+                organization: org_id,
+                app: app_id,
+                expires_at: Utc::now() + chrono::Duration::days(365),
+                public_key_bytes: vec![1u8; 32],
+            },
+            &mut state,
+        );
+        let assertion_id = match response {
+            LedgerResponse::AppClientAssertionCreated { assertion_id } => assertion_id,
+            other => panic!("expected AppClientAssertionCreated, got {other}"),
+        };
+
+        // Delete it
+        let (response, _) = store.apply_request(
+            &LedgerRequest::DeleteAppClientAssertion {
+                organization: org_id,
+                app: app_id,
+                assertion: assertion_id,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::AppClientAssertionDeleted { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected AppClientAssertionDeleted, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_app_client_assertion_enabled() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let app_slug = inferadb_ledger_types::AppSlug::new(600);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+        let app_id = match response {
+            LedgerResponse::AppCreated { app_id, .. } => app_id,
+            other => panic!("expected AppCreated, got {other}"),
+        };
+
+        // Create an assertion
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateAppClientAssertion {
+                organization: org_id,
+                app: app_id,
+                expires_at: Utc::now() + chrono::Duration::days(365),
+                public_key_bytes: vec![1u8; 32],
+            },
+            &mut state,
+        );
+        let assertion_id = match response {
+            LedgerResponse::AppClientAssertionCreated { assertion_id } => assertion_id,
+            other => panic!("expected AppClientAssertionCreated, got {other}"),
+        };
+
+        // Toggle enabled
+        let (response, _) = store.apply_request(
+            &LedgerRequest::SetAppClientAssertionEnabled {
+                organization: org_id,
+                app: app_id,
+                assertion: assertion_id,
+                enabled: true,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::AppClientAssertionToggled { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected AppClientAssertionToggled, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_add_app_vault_connection() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create vault
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateVault {
+                organization: org_id,
+                slug: VaultSlug::new(1),
+                name: Some("test-vault".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+        let vault_id = match response {
+            LedgerResponse::VaultCreated { vault, .. } => vault,
+            other => panic!("expected VaultCreated, got {other}"),
+        };
+
+        // Create app
+        let app_slug = inferadb_ledger_types::AppSlug::new(600);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+        let app_id = match response {
+            LedgerResponse::AppCreated { app_id, .. } => app_id,
+            other => panic!("expected AppCreated, got {other}"),
+        };
+
+        // Add vault connection
+        let (response, _) = store.apply_request(
+            &LedgerRequest::AddAppVault {
+                organization: org_id,
+                app: app_id,
+                vault: vault_id,
+                vault_slug: VaultSlug::new(1),
+                allowed_scopes: vec!["read".to_string(), "write".to_string()],
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::AppVaultAdded { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected AppVaultAdded, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_add_app_vault_duplicate() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create vault
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateVault {
+                organization: org_id,
+                slug: VaultSlug::new(1),
+                name: Some("test-vault".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+        let vault_id = match response {
+            LedgerResponse::VaultCreated { vault, .. } => vault,
+            other => panic!("expected VaultCreated, got {other}"),
+        };
+
+        // Create app
+        let app_slug = inferadb_ledger_types::AppSlug::new(600);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+        let app_id = match response {
+            LedgerResponse::AppCreated { app_id, .. } => app_id,
+            other => panic!("expected AppCreated, got {other}"),
+        };
+
+        // Add vault connection
+        store.apply_request(
+            &LedgerRequest::AddAppVault {
+                organization: org_id,
+                app: app_id,
+                vault: vault_id,
+                vault_slug: VaultSlug::new(1),
+                allowed_scopes: vec!["read".to_string()],
+            },
+            &mut state,
+        );
+
+        // Try duplicate connection
+        let (response, _) = store.apply_request(
+            &LedgerRequest::AddAppVault {
+                organization: org_id,
+                app: app_id,
+                vault: vault_id,
+                vault_slug: VaultSlug::new(1),
+                allowed_scopes: vec!["read".to_string()],
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code: ErrorCode::AlreadyExists, .. } => {},
+            other => panic!("expected AlreadyExists error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remove_app_vault_connection() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create vault
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateVault {
+                organization: org_id,
+                slug: VaultSlug::new(1),
+                name: Some("test-vault".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+        let vault_id = match response {
+            LedgerResponse::VaultCreated { vault, .. } => vault,
+            other => panic!("expected VaultCreated, got {other}"),
+        };
+
+        // Create app
+        let app_slug = inferadb_ledger_types::AppSlug::new(600);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+        let app_id = match response {
+            LedgerResponse::AppCreated { app_id, .. } => app_id,
+            other => panic!("expected AppCreated, got {other}"),
+        };
+
+        // Add vault connection
+        store.apply_request(
+            &LedgerRequest::AddAppVault {
+                organization: org_id,
+                app: app_id,
+                vault: vault_id,
+                vault_slug: VaultSlug::new(1),
+                allowed_scopes: vec!["read".to_string()],
+            },
+            &mut state,
+        );
+
+        // Remove it
+        let (response, _) = store.apply_request(
+            &LedgerRequest::RemoveAppVault { organization: org_id, app: app_id, vault: vault_id },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::AppVaultRemoved { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected AppVaultRemoved, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_app_vault_scopes() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create vault
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateVault {
+                organization: org_id,
+                slug: VaultSlug::new(1),
+                name: Some("test-vault".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+        let vault_id = match response {
+            LedgerResponse::VaultCreated { vault, .. } => vault,
+            other => panic!("expected VaultCreated, got {other}"),
+        };
+
+        // Create app
+        let app_slug = inferadb_ledger_types::AppSlug::new(600);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+        let app_id = match response {
+            LedgerResponse::AppCreated { app_id, .. } => app_id,
+            other => panic!("expected AppCreated, got {other}"),
+        };
+
+        // Add vault connection
+        store.apply_request(
+            &LedgerRequest::AddAppVault {
+                organization: org_id,
+                app: app_id,
+                vault: vault_id,
+                vault_slug: VaultSlug::new(1),
+                allowed_scopes: vec!["read".to_string()],
+            },
+            &mut state,
+        );
+
+        // Update scopes
+        let (response, _) = store.apply_request(
+            &LedgerRequest::UpdateAppVault {
+                organization: org_id,
+                app: app_id,
+                vault: vault_id,
+                allowed_scopes: vec!["read".to_string(), "write".to_string(), "admin".to_string()],
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::AppVaultUpdated { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected AppVaultUpdated, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // Signing key operations
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_create_signing_key_success() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "test-kid-1".to_string(),
+                public_key_bytes: vec![1u8; 32],
+                encrypted_private_key: vec![2u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::SigningKeyCreated { id, kid } => {
+                assert_eq!(id, inferadb_ledger_types::SigningKeyId::new(1));
+                assert_eq!(kid, "test-kid-1");
+            },
+            other => panic!("expected SigningKeyCreated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_signing_key_idempotent() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        // Create initial key
+        store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "test-kid-1".to_string(),
+                public_key_bytes: vec![1u8; 32],
+                encrypted_private_key: vec![2u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+
+        // Same kid => idempotent return
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "test-kid-1".to_string(),
+                public_key_bytes: vec![1u8; 32],
+                encrypted_private_key: vec![2u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::SigningKeyCreated { kid, .. } => {
+                assert_eq!(kid, "test-kid-1");
+            },
+            other => panic!("expected idempotent SigningKeyCreated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_signing_key_active_exists_fails() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        // Create initial key
+        store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "test-kid-1".to_string(),
+                public_key_bytes: vec![1u8; 32],
+                encrypted_private_key: vec![2u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+
+        // Different kid, same scope => fails (active key exists)
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "test-kid-2".to_string(),
+                public_key_bytes: vec![3u8; 32],
+                encrypted_private_key: vec![4u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
+                assert!(message.contains("Active signing key already exists"));
+            },
+            other => panic!("expected FailedPrecondition error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rotate_signing_key_success() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        // Create initial key
+        store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "old-kid".to_string(),
+                public_key_bytes: vec![1u8; 32],
+                encrypted_private_key: vec![2u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+
+        // Rotate
+        let (response, _) = store.apply_request(
+            &LedgerRequest::RotateSigningKey {
+                old_kid: "old-kid".to_string(),
+                new_kid: "new-kid".to_string(),
+                new_public_key_bytes: vec![3u8; 32],
+                new_encrypted_private_key: vec![4u8; 100],
+                rmk_version: 1,
+                grace_period_secs: 3600,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::SigningKeyRotated { old_kid, new_kid } => {
+                assert_eq!(old_kid, "old-kid");
+                assert_eq!(new_kid, "new-kid");
+            },
+            other => panic!("expected SigningKeyRotated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rotate_signing_key_immediate_revocation() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "old-kid".to_string(),
+                public_key_bytes: vec![1u8; 32],
+                encrypted_private_key: vec![2u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+
+        // Rotate with grace_period_secs = 0 (immediate revocation)
+        let (response, _) = store.apply_request(
+            &LedgerRequest::RotateSigningKey {
+                old_kid: "old-kid".to_string(),
+                new_kid: "new-kid".to_string(),
+                new_public_key_bytes: vec![3u8; 32],
+                new_encrypted_private_key: vec![4u8; 100],
+                rmk_version: 1,
+                grace_period_secs: 0,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::SigningKeyRotated { old_kid, new_kid } => {
+                assert_eq!(old_kid, "old-kid");
+                assert_eq!(new_kid, "new-kid");
+            },
+            other => panic!("expected SigningKeyRotated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_revoke_signing_key() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "test-kid".to_string(),
+                public_key_bytes: vec![1u8; 32],
+                encrypted_private_key: vec![2u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::RevokeSigningKey { kid: "test-kid".to_string() },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::SigningKeyRevoked { kid } => {
+                assert_eq!(kid, "test-kid");
+            },
+            other => panic!("expected SigningKeyRevoked, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_revoke_signing_key_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::RevokeSigningKey { kid: "nonexistent".to_string() },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code: ErrorCode::NotFound, .. } => {},
+            other => panic!("expected NotFound error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_transition_signing_key_revoked() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        // Create and rotate (with grace period) to get a Rotated key
+        store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "old-kid".to_string(),
+                public_key_bytes: vec![1u8; 32],
+                encrypted_private_key: vec![2u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+        store.apply_request(
+            &LedgerRequest::RotateSigningKey {
+                old_kid: "old-kid".to_string(),
+                new_kid: "new-kid".to_string(),
+                new_public_key_bytes: vec![3u8; 32],
+                new_encrypted_private_key: vec![4u8; 100],
+                rmk_version: 1,
+                grace_period_secs: 3600,
+            },
+            &mut state,
+        );
+
+        // Transition rotated key to revoked
+        let (response, _) = store.apply_request(
+            &LedgerRequest::TransitionSigningKeyRevoked { kid: "old-kid".to_string() },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::SigningKeyTransitioned { kid } => {
+                assert_eq!(kid, "old-kid");
+            },
+            other => panic!("expected SigningKeyTransitioned, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // Refresh token operations
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_create_refresh_token() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        // Need a signing key for token creation
+        store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "signing-kid".to_string(),
+                public_key_bytes: vec![1u8; 32],
+                encrypted_private_key: vec![2u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateRefreshToken {
+                token_hash: [0xAA; 32],
+                family: [0xBB; 16],
+                token_type: inferadb_ledger_types::TokenType::UserSession,
+                subject: TokenSubject::User(UserSlug::new(42)),
+                organization: None,
+                vault: None,
+                kid: "signing-kid".to_string(),
+                ttl_secs: 86400,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::RefreshTokenCreated { id } => {
+                assert_eq!(id, inferadb_ledger_types::RefreshTokenId::new(1));
+            },
+            other => panic!("expected RefreshTokenCreated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_revoke_all_user_sessions_no_state_layer() {
+        // Without a state layer, this falls through to the else branch
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::RevokeAllUserSessions { user: UserId::new(42) },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code: ErrorCode::Internal, message } => {
+                assert!(message.contains("State layer not available"));
+            },
+            other => panic!("expected Internal error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_revoke_all_app_sessions() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create app
+        let app_slug = inferadb_ledger_types::AppSlug::new(600);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateApp { organization: org_id, slug: app_slug },
+            &mut state,
+        );
+        let app_id = match response {
+            LedgerResponse::AppCreated { app_id, .. } => app_id,
+            other => panic!("expected AppCreated, got {other}"),
+        };
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::RevokeAllAppSessions { organization: org_id, app: app_id },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::AllAppSessionsRevoked { count, version } => {
+                assert_eq!(count, 0);
+                assert_eq!(version, inferadb_ledger_types::TokenVersion::new(1));
+            },
+            other => panic!("expected AllAppSessionsRevoked, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_revoke_token_family() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store
+            .apply_request(&LedgerRequest::RevokeTokenFamily { family: [0xBB; 16] }, &mut state);
+
+        match response {
+            LedgerResponse::TokenFamilyRevoked { count } => {
+                // No tokens in that family
+                assert_eq!(count, 0);
+            },
+            other => panic!("expected TokenFamilyRevoked, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_expired_refresh_tokens() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let (response, _) =
+            store.apply_request(&LedgerRequest::DeleteExpiredRefreshTokens, &mut state);
+
+        match response {
+            LedgerResponse::ExpiredRefreshTokensDeleted { count } => {
+                assert_eq!(count, 0);
+            },
+            other => panic!("expected ExpiredRefreshTokensDeleted, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // System request: User operations
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_create_user() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let user_id = UserId::new(42);
+        let user_slug = UserSlug::new(4200);
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateUser {
+                user: user_id,
+                slug: user_slug,
+                admin: false,
+                region: Region::US_EAST_VA,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::UserCreated { user_id: uid, slug } => {
+                assert_eq!(uid, user_id);
+                assert_eq!(slug, user_slug);
+            },
+            other => panic!("expected UserCreated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_user_updates_slug_indexes() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let user_id = UserId::new(42);
+        let user_slug = UserSlug::new(4200);
+        store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateUser {
+                user: user_id,
+                slug: user_slug,
+                admin: false,
+                region: Region::US_EAST_VA,
+            }),
+            &mut state,
+        );
+
+        // Verify slug index was populated
+        assert_eq!(state.user_slug_index.get(&user_slug), Some(&user_id));
+        assert_eq!(state.user_id_to_slug.get(&user_id), Some(&user_slug));
+    }
+
+    #[tokio::test]
+    async fn test_update_user_without_state_layer_returns_empty() {
+        // Without a state layer, UpdateUser degrades to Empty
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::UpdateUser {
+                user_id: UserId::new(42),
+                role: Some(inferadb_ledger_types::UserRole::Admin),
+                primary_email: None,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Empty => {},
+            other => panic!("expected Empty (no state layer), got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_user_without_state_layer_returns_empty() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::DeleteUser { user_id: UserId::new(42) }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Empty => {},
+            other => panic!("expected Empty (no state layer), got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // System request: email hash, blinding key, directory status
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_register_email_hash() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let user_id = UserId::new(42);
+        store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateUser {
+                user: user_id,
+                slug: UserSlug::new(4200),
+                admin: false,
+                region: Region::US_EAST_VA,
+            }),
+            &mut state,
+        );
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::RegisterEmailHash {
+                hmac_hex: "abcdef0123456789".to_string(),
+                user_id,
+            }),
+            &mut state,
+        );
+
+        // RegisterEmailHash returns Empty on success
+        match response {
+            LedgerResponse::Empty => {},
+            LedgerResponse::Error { code, message } => {
+                panic!("expected Empty, got Error({code:?}): {message}");
+            },
+            other => panic!("expected Empty, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remove_email_hash() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let user_id = UserId::new(42);
+        store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateUser {
+                user: user_id,
+                slug: UserSlug::new(4200),
+                admin: false,
+                region: Region::US_EAST_VA,
+            }),
+            &mut state,
+        );
+
+        // Register first
+        store.apply_request(
+            &LedgerRequest::System(SystemRequest::RegisterEmailHash {
+                hmac_hex: "abcdef0123456789".to_string(),
+                user_id,
+            }),
+            &mut state,
+        );
+
+        // Remove
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::RemoveEmailHash {
+                hmac_hex: "abcdef0123456789".to_string(),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Empty => {},
+            other => panic!("expected Empty, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_blinding_key_version() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::SetBlindingKeyVersion { version: 2 }),
+            &mut state,
+        );
+
+        // State is stored in the state layer (sys_service), not in AppliedState
+        match response {
+            LedgerResponse::Empty => {},
+            other => panic!("expected Empty, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_rehash_progress() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::UpdateRehashProgress {
+                region: Region::US_EAST_VA,
+                entries_rehashed: 500,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Empty => {},
+            other => panic!("expected Empty, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_clear_rehash_progress() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        // Set progress first
+        store.apply_request(
+            &LedgerRequest::System(SystemRequest::UpdateRehashProgress {
+                region: Region::US_EAST_VA,
+                entries_rehashed: 500,
+            }),
+            &mut state,
+        );
+
+        // Clear it
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::ClearRehashProgress {
+                region: Region::US_EAST_VA,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Empty => {},
+            other => panic!("expected Empty, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_organization_routing() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+                organization: org_id,
+                region: Region::IE_EAST_DUBLIN,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationMigrated { organization, old_region, new_region } => {
+                assert_eq!(organization, org_id);
+                assert_eq!(old_region, Region::US_EAST_VA);
+                assert_eq!(new_region, Region::IE_EAST_DUBLIN);
+            },
+            other => panic!("expected OrganizationMigrated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_add_and_remove_node() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        // AddNode/RemoveNode return Empty (state stored elsewhere)
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::AddNode {
+                node_id: 5,
+                address: "127.0.0.1:8080".to_string(),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Empty => {},
+            other => panic!("expected Empty, got {other}"),
+        }
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::RemoveNode { node_id: 5 }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Empty => {},
+            other => panic!("expected Empty, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // Organization status operations
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_update_organization_status() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Verify it starts active (create_active_organization sets Active)
+        let org_meta = state.organizations.get(&org_id).expect("org exists");
+        assert_eq!(org_meta.status, OrganizationStatus::Active);
+
+        // Transition to Suspended via status update
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+                organization: org_id,
+                status: OrganizationStatus::Suspended,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationStatusUpdated { organization_id } => {
+                assert_eq!(organization_id, org_id);
+                let updated_meta = state.organizations.get(&org_id).expect("org exists");
+                assert_eq!(updated_meta.status, OrganizationStatus::Suspended);
+            },
+            other => panic!("expected OrganizationStatusUpdated, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // BatchWrite
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_batch_write_multiple_vault_operations() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Batch: create two vaults
+        let requests = vec![
+            LedgerRequest::CreateVault {
+                organization: org_id,
+                slug: VaultSlug::new(1),
+                name: Some("vault-1".to_string()),
+                retention_policy: None,
+            },
+            LedgerRequest::CreateVault {
+                organization: org_id,
+                slug: VaultSlug::new(2),
+                name: Some("vault-2".to_string()),
+                retention_policy: None,
+            },
+        ];
+
+        let (response, _) =
+            store.apply_request(&LedgerRequest::BatchWrite { requests }, &mut state);
+
+        match response {
+            LedgerResponse::BatchWrite { responses } => {
+                assert_eq!(responses.len(), 2);
+                assert!(matches!(
+                    &responses[0],
+                    LedgerResponse::VaultCreated { vault, .. } if *vault == VaultId::new(1)
+                ));
+                assert!(matches!(
+                    &responses[1],
+                    LedgerResponse::VaultCreated { vault, .. } if *vault == VaultId::new(2)
+                ));
+            },
+            other => panic!("expected BatchWrite, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_write_empty() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let (response, vault_entry) =
+            store.apply_request(&LedgerRequest::BatchWrite { requests: vec![] }, &mut state);
+
+        match response {
+            LedgerResponse::BatchWrite { responses } => {
+                assert!(responses.is_empty());
+            },
+            other => panic!("expected BatchWrite, got {other}"),
+        }
+        assert!(vault_entry.is_none());
+    }
+
+    // ========================================================================
+    // Write operations (entity writes)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_write_to_deleted_org_rejected() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Delete the org
+        store
+            .apply_request(&LedgerRequest::DeleteOrganization { organization: org_id }, &mut state);
+
+        // Try to write to deleted org
+        let (response, _) = store.apply_request(
+            &LedgerRequest::Write {
+                organization: org_id,
+                vault: VaultId::new(1),
+                transactions: vec![],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
+                assert!(message.contains("deleted"));
+            },
+            other => panic!("expected FailedPrecondition error for deleted org, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_empty_transactions() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Create a vault
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateVault {
+                organization: org_id,
+                slug: VaultSlug::new(1),
+                name: Some("test-vault".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+        let vault_id = match response {
+            LedgerResponse::VaultCreated { vault, .. } => vault,
+            other => panic!("expected VaultCreated, got {other}"),
+        };
+
+        // Write with empty transactions
+        let (response, vault_entry) = store.apply_request(
+            &LedgerRequest::Write {
+                organization: org_id,
+                vault: vault_id,
+                transactions: vec![],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Write { block_height, .. } => {
+                assert_eq!(block_height, 1);
+            },
+            other => panic!("expected Write, got {other}"),
+        }
+        assert!(vault_entry.is_some(), "write should produce a vault entry");
+    }
+
+    // ========================================================================
+    // Organization member operations
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_update_organization_member_role() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Add a member as Member
+        let new_user = UserId::new(42);
+        store.apply_request(
+            &LedgerRequest::AddOrganizationMember {
+                organization: org_id,
+                user: new_user,
+                user_slug: UserSlug::new(4200),
+                role: OrganizationMemberRole::Member,
+            },
+            &mut state,
+        );
+
+        // Promote to Admin
+        let (response, _) = store.apply_request(
+            &LedgerRequest::UpdateOrganizationMemberRole {
+                organization: org_id,
+                target: new_user,
+                role: OrganizationMemberRole::Admin,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationMemberRoleUpdated { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected OrganizationMemberRoleUpdated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remove_organization_member() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Add a second admin so we can remove one
+        let second_admin = UserId::new(42);
+        store.apply_request(
+            &LedgerRequest::AddOrganizationMember {
+                organization: org_id,
+                user: second_admin,
+                user_slug: UserSlug::new(4200),
+                role: OrganizationMemberRole::Admin,
+            },
+            &mut state,
+        );
+
+        // Remove the second admin
+        let (response, _) = store.apply_request(
+            &LedgerRequest::RemoveOrganizationMember { organization: org_id, target: second_admin },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationMemberRemoved { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected OrganizationMemberRemoved, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remove_last_admin_blocked() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // The admin user (UserId::new(1)) from create_active_organization
+        let (response, _) = store.apply_request(
+            &LedgerRequest::RemoveOrganizationMember {
+                organization: org_id,
+                target: UserId::new(1),
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
+                assert!(message.contains("last administrator"));
+            },
+            other => panic!("expected FailedPrecondition error, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // PurgeOrganization
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_purge_organization() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Delete the org first (purge requires Deleted/Deleting status)
+        store
+            .apply_request(&LedgerRequest::DeleteOrganization { organization: org_id }, &mut state);
+
+        // Purge
+        let (response, _) = store
+            .apply_request(&LedgerRequest::PurgeOrganization { organization: org_id }, &mut state);
+
+        match response {
+            LedgerResponse::OrganizationPurged { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected OrganizationPurged, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // UpdateUserDirectoryStatus
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_update_user_directory_status_without_state_layer() {
+        // Without a state layer, UpdateUserDirectoryStatus returns Empty
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::UpdateUserDirectoryStatus {
+                user_id: UserId::new(42),
+                status: inferadb_ledger_state::system::UserDirectoryStatus::Migrating,
+                region: Some(Region::IE_EAST_DUBLIN),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Empty => {},
+            other => panic!("expected Empty (no state layer), got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // Write to suspended org rejected
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_create_vault_in_provisioning_org_rejected() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Create org but DON'T activate it (stays in Provisioning)
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateOrganization {
+                slug: inferadb_ledger_types::OrganizationSlug::new(100),
+                region: Region::US_EAST_VA,
+                tier: Default::default(),
+                admin: UserId::new(1),
+            }),
+            &mut state,
+        );
+        let org_id = match response {
+            LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
+            other => panic!("expected OrganizationCreated, got {other}"),
+        };
+
+        // Try to create vault in Provisioning org
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateVault {
+                organization: org_id,
+                slug: VaultSlug::new(1),
+                name: Some("test".to_string()),
+                retention_policy: None,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert!(
+                    code == ErrorCode::FailedPrecondition || code == ErrorCode::NotFound,
+                    "expected FailedPrecondition or NotFound, got {code:?}"
+                );
+            },
+            other => panic!("expected Error, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // UseRefreshToken lifecycle tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_use_refresh_token_success() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        // Create a signing key (required for token operations)
+        store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "sk-1".to_string(),
+                public_key_bytes: vec![1u8; 32],
+                encrypted_private_key: vec![2u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+
+        // Create a user so we have a valid slug in the index
+        let user_slug = UserSlug::new(500);
+        let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
+
+        // Create a refresh token via the state layer
+        let (response, _) = store.apply_request(
+            &LedgerRequest::CreateRefreshToken {
+                token_hash: [0xAA; 32],
+                family: [0xBB; 16],
+                token_type: inferadb_ledger_types::TokenType::UserSession,
+                subject: TokenSubject::User(user_slug),
+                organization: None,
+                vault: None,
+                kid: "sk-1".to_string(),
+                ttl_secs: 86400,
+            },
+            &mut state,
+        );
+        match &response {
+            LedgerResponse::RefreshTokenCreated { id } => {
+                assert_eq!(id.value(), 1);
+            },
+            other => panic!("expected RefreshTokenCreated, got {other}"),
+        }
+
+        // Now write a User record to the state layer so UseRefreshToken can read it
+        // (UseRefreshToken with expected_version needs the user entity)
+        if let Some(state_layer) = &store.state_layer {
+            let user = inferadb_ledger_state::system::User {
+                id: user_id,
+                slug: user_slug,
+                region: Region::US_EAST_VA,
+                name: "Test".to_string(),
+                email: UserEmailId::new(1),
+                status: inferadb_ledger_types::UserStatus::Active,
+                role: inferadb_ledger_types::UserRole::default(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                deleted_at: None,
+                version: inferadb_ledger_types::TokenVersion::new(0),
+            };
+            let key = inferadb_ledger_state::system::SystemKeys::user_key(user_id);
+            let value = inferadb_ledger_types::encode(&user).expect("encode user");
+            let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
+            state_layer
+                .apply_operations(inferadb_ledger_state::system::SYSTEM_VAULT_ID, &ops, 0)
+                .expect("write user to state layer");
+        }
+
+        // Use the refresh token (rotate it)
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::UseRefreshToken {
+                old_token_hash: [0xAA; 32],
+                new_token_hash: [0xCC; 32],
+                new_kid: "sk-1".to_string(),
+                ttl_secs: 86400,
+                expected_version: Some(inferadb_ledger_types::TokenVersion::new(0)),
+                max_family_lifetime_secs: 604800,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::RefreshTokenRotated { new_id, token_version, .. } => {
+                assert_eq!(new_id.value(), 2);
+                assert_eq!(token_version, Some(inferadb_ledger_types::TokenVersion::new(0)));
+            },
+            other => panic!("expected RefreshTokenRotated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_use_refresh_token_reuse_detected() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "sk-1".to_string(),
+                public_key_bytes: vec![1u8; 32],
+                encrypted_private_key: vec![2u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+
+        let user_slug = UserSlug::new(500);
+        create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
+
+        // Create token
+        store.apply_request(
+            &LedgerRequest::CreateRefreshToken {
+                token_hash: [0xAA; 32],
+                family: [0xBB; 16],
+                token_type: inferadb_ledger_types::TokenType::UserSession,
+                subject: TokenSubject::User(user_slug),
+                organization: None,
+                vault: None,
+                kid: "sk-1".to_string(),
+                ttl_secs: 86400,
+            },
+            &mut state,
+        );
+
+        // Use it once (no version check)
+        let r1 = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::UseRefreshToken {
+                old_token_hash: [0xAA; 32],
+                new_token_hash: [0xCC; 32],
+                new_kid: "sk-1".to_string(),
+                ttl_secs: 86400,
+                expected_version: None,
+                max_family_lifetime_secs: 604800,
+            },
+            &mut state,
+        );
+        assert!(
+            matches!(r1, LedgerResponse::RefreshTokenRotated { .. }),
+            "first use should succeed"
+        );
+
+        // Try to reuse the old token hash (already used)
+        let r2 = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::UseRefreshToken {
+                old_token_hash: [0xAA; 32],
+                new_token_hash: [0xDD; 32],
+                new_kid: "sk-1".to_string(),
+                ttl_secs: 86400,
+                expected_version: None,
+                max_family_lifetime_secs: 604800,
+            },
+            &mut state,
+        );
+
+        match r2 {
+            LedgerResponse::Error { code, message } => {
+                assert_eq!(code, ErrorCode::Unauthenticated);
+                assert!(message.contains("reuse"));
+            },
+            other => panic!("expected Unauthenticated reuse error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_use_refresh_token_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::UseRefreshToken {
+                old_token_hash: [0xFF; 32],
+                new_token_hash: [0xCC; 32],
+                new_kid: "sk-1".to_string(),
+                ttl_secs: 86400,
+                expected_version: None,
+                max_family_lifetime_secs: 604800,
+            },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::Unauthenticated);
+            },
+            other => panic!("expected Unauthenticated, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // RevokeTokenFamily with actual tokens
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_revoke_token_family_with_tokens() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "sk-1".to_string(),
+                public_key_bytes: vec![1u8; 32],
+                encrypted_private_key: vec![2u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+
+        let family = [0xBB; 16];
+
+        // Create a token in that family
+        store.apply_request(
+            &LedgerRequest::CreateRefreshToken {
+                token_hash: [0xAA; 32],
+                family,
+                token_type: inferadb_ledger_types::TokenType::UserSession,
+                subject: TokenSubject::User(UserSlug::new(42)),
+                organization: None,
+                vault: None,
+                kid: "sk-1".to_string(),
+                ttl_secs: 86400,
+            },
+            &mut state,
+        );
+
+        // Revoke the family
+        let (response, _) =
+            store.apply_request(&LedgerRequest::RevokeTokenFamily { family }, &mut state);
+
+        match response {
+            LedgerResponse::TokenFamilyRevoked { count } => {
+                assert!(count >= 1, "should have revoked at least 1 token");
+            },
+            other => panic!("expected TokenFamilyRevoked, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // RevokeAllUserSessions with actual user
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_revoke_all_user_sessions_with_user() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let user_slug = UserSlug::new(500);
+        let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
+
+        // Write user entity to state layer
+        if let Some(state_layer) = &store.state_layer {
+            let user = inferadb_ledger_state::system::User {
+                id: user_id,
+                slug: user_slug,
+                region: Region::US_EAST_VA,
+                name: "Test".to_string(),
+                email: UserEmailId::new(1),
+                status: inferadb_ledger_types::UserStatus::Active,
+                role: inferadb_ledger_types::UserRole::default(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                deleted_at: None,
+                version: inferadb_ledger_types::TokenVersion::new(0),
+            };
+            let key = inferadb_ledger_state::system::SystemKeys::user_key(user_id);
+            let value = inferadb_ledger_types::encode(&user).expect("encode user");
+            let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
+            state_layer
+                .apply_operations(inferadb_ledger_state::system::SYSTEM_VAULT_ID, &ops, 0)
+                .expect("write user");
+        }
+
+        let (response, _) = store
+            .apply_request(&LedgerRequest::RevokeAllUserSessions { user: user_id }, &mut state);
+
+        match response {
+            LedgerResponse::AllUserSessionsRevoked { count, version } => {
+                assert_eq!(count, 0, "no sessions created yet");
+                assert_eq!(version, inferadb_ledger_types::TokenVersion::new(1));
+            },
+            other => panic!("expected AllUserSessionsRevoked, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_revoke_all_user_sessions_user_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        // User slug not in the index
+        let (response, _) = store.apply_request(
+            &LedgerRequest::RevokeAllUserSessions { user: UserId::new(9999) },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::NotFound);
+            },
+            other => panic!("expected NotFound error, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // Signing key: revoke already-revoked is idempotent
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_revoke_signing_key_idempotent() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "test-kid".to_string(),
+                public_key_bytes: vec![1u8; 32],
+                encrypted_private_key: vec![2u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+
+        // First revoke
+        store.apply_request(
+            &LedgerRequest::RevokeSigningKey { kid: "test-kid".to_string() },
+            &mut state,
+        );
+
+        // Second revoke (idempotent)
+        let (response, _) = store.apply_request(
+            &LedgerRequest::RevokeSigningKey { kid: "test-kid".to_string() },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::SigningKeyRevoked { kid } => {
+                assert_eq!(kid, "test-kid");
+            },
+            other => panic!("expected SigningKeyRevoked (idempotent), got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // TransitionSigningKeyRevoked: non-rotated key is a no-op
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_transition_signing_key_active_is_noop() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        store.apply_request(
+            &LedgerRequest::CreateSigningKey {
+                scope: SigningKeyScope::Global,
+                kid: "active-kid".to_string(),
+                public_key_bytes: vec![1u8; 32],
+                encrypted_private_key: vec![2u8; 100],
+                rmk_version: 1,
+            },
+            &mut state,
+        );
+
+        // Transition an Active key -> no-op
+        let (response, _) = store.apply_request(
+            &LedgerRequest::TransitionSigningKeyRevoked { kid: "active-kid".to_string() },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::SigningKeyTransitioned { kid } => {
+                assert_eq!(kid, "active-kid");
+            },
+            other => panic!("expected SigningKeyTransitioned (no-op), got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_transition_signing_key_not_found_is_noop() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::TransitionSigningKeyRevoked { kid: "nonexistent".to_string() },
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::SigningKeyTransitioned { kid } => {
+                assert_eq!(kid, "nonexistent");
+            },
+            other => panic!("expected SigningKeyTransitioned (idempotent no-op), got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // Email verification lifecycle
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_create_email_verification() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateEmailVerification {
+                email_hmac: "hmac-test-001".to_string(),
+                code_hash: [0xAA; 32],
+                region: Region::US_EAST_VA,
+                expires_at: Utc::now() + Duration::minutes(10),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::EmailVerificationCreated => {},
+            other => panic!("expected EmailVerificationCreated, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_email_code_new_user() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let email_hmac = "hmac-new-user".to_string();
+        let code_hash = [0xBB; 32];
+        let expires_at = fixed_timestamp() + Duration::minutes(10);
+
+        // Create verification
+        store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateEmailVerification {
+                email_hmac: email_hmac.clone(),
+                code_hash,
+                region: Region::US_EAST_VA,
+                expires_at,
+            }),
+            &mut state,
+        );
+
+        // Verify with correct code
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::VerifyEmailCode {
+                email_hmac: email_hmac.clone(),
+                code_hash,
+                region: Region::US_EAST_VA,
+                existing_user_hmac_hit: false,
+                onboarding_token_hash: [0xCC; 32],
+                onboarding_expires_at: expires_at + Duration::hours(24),
+                totp: None,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::EmailCodeVerified { result } => {
+                assert!(
+                    matches!(result, crate::types::EmailCodeVerifiedResult::NewUser),
+                    "expected NewUser result"
+                );
+            },
+            other => panic!("expected EmailCodeVerified, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_email_code_wrong_code() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let email_hmac = "hmac-wrong-code".to_string();
+        let code_hash = [0xBB; 32];
+        let expires_at = fixed_timestamp() + Duration::minutes(10);
+
+        store.apply_request(
+            &LedgerRequest::System(SystemRequest::CreateEmailVerification {
+                email_hmac: email_hmac.clone(),
+                code_hash,
+                region: Region::US_EAST_VA,
+                expires_at,
+            }),
+            &mut state,
+        );
+
+        // Verify with wrong code
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::VerifyEmailCode {
+                email_hmac: email_hmac.clone(),
+                code_hash: [0xFF; 32], // wrong!
+                region: Region::US_EAST_VA,
+                existing_user_hmac_hit: false,
+                onboarding_token_hash: [0xCC; 32],
+                onboarding_expires_at: expires_at + Duration::hours(24),
+                totp: None,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::InvalidArgument);
+            },
+            other => panic!("expected InvalidArgument error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_email_code_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::VerifyEmailCode {
+                email_hmac: "nonexistent".to_string(),
+                code_hash: [0xAA; 32],
+                region: Region::US_EAST_VA,
+                existing_user_hmac_hit: false,
+                onboarding_token_hash: [0xCC; 32],
+                onboarding_expires_at: fixed_timestamp() + Duration::hours(24),
+                totp: None,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::NotFound);
+            },
+            other => panic!("expected NotFound error, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // CleanupExpiredOnboarding
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_cleanup_expired_onboarding_empty() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::CleanupExpiredOnboarding),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OnboardingCleanedUp {
+                verification_codes_deleted,
+                onboarding_accounts_deleted,
+                totp_challenges_deleted,
+            } => {
+                assert_eq!(verification_codes_deleted, 0);
+                assert_eq!(onboarding_accounts_deleted, 0);
+                assert_eq!(totp_challenges_deleted, 0);
+            },
+            other => panic!("expected OnboardingCleanedUp, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_expired_onboarding_without_state_layer() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::CleanupExpiredOnboarding),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::Internal);
+            },
+            other => panic!("expected Internal error (no state layer), got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // System: AddNode and RemoveNode return Empty
+    // ========================================================================
+
+    #[test]
+    fn test_add_node_returns_empty() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::AddNode {
+                node_id: 1,
+                address: "127.0.0.1:9000".to_string(),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Empty => {},
+            other => panic!("expected Empty, got {other}"),
+        }
+    }
+
+    #[test]
+    fn test_remove_node_returns_empty() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::RemoveNode { node_id: 1 }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Empty => {},
+            other => panic!("expected Empty, got {other}"),
+        }
+    }
+
+    // ========================================================================
+    // UpdateOrganizationRouting
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_update_organization_routing_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+                organization: OrganizationId::new(9999),
+                region: Region::US_WEST_OR,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::NotFound);
+            },
+            other => panic!("expected NotFound error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_organization_routing_deleted_org() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        // Delete the org
+        store
+            .apply_request(&LedgerRequest::DeleteOrganization { organization: org_id }, &mut state);
+
+        // Try to route a deleted org
+        let (response, _) = store.apply_request(
+            &LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+                organization: org_id,
+                region: Region::US_WEST_OR,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::FailedPrecondition);
+            },
+            other => panic!("expected FailedPrecondition error, got {other}"),
         }
     }
 }

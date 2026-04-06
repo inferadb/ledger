@@ -1060,6 +1060,311 @@ mod tests {
         assert_eq!(heights, vec![100, 300, 400]);
     }
 
+    #[test]
+    fn test_parse_snapshot_height_valid() {
+        assert_eq!(parse_snapshot_height("000000100.snap"), Some(100));
+        assert_eq!(parse_snapshot_height("000000000.snap"), Some(0));
+        assert_eq!(parse_snapshot_height("999999999.snap"), Some(999_999_999));
+    }
+
+    #[test]
+    fn test_parse_snapshot_height_no_snap_extension() {
+        assert_eq!(parse_snapshot_height("000000100.txt"), None);
+        assert_eq!(parse_snapshot_height("000000100"), None);
+        assert_eq!(parse_snapshot_height(""), None);
+    }
+
+    #[test]
+    fn test_parse_snapshot_height_non_digit() {
+        assert_eq!(parse_snapshot_height("abc.snap"), None);
+        assert_eq!(parse_snapshot_height("12x45.snap"), None);
+        assert_eq!(parse_snapshot_height("hello_world.snap"), None);
+    }
+
+    #[test]
+    fn test_parse_snapshot_height_just_extension() {
+        // ".snap" alone — strip_suffix gives "" which is all-digits (vacuous truth)
+        // and "".parse::<u64>() fails → None
+        assert_eq!(parse_snapshot_height(".snap"), None);
+    }
+
+    #[test]
+    fn test_load_latest_hot_empty() {
+        let temp = TempDir::new().expect("create temp dir");
+        let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
+        let manager = TieredSnapshotManager::new_hot_only(hot, TieredStorageConfig::default());
+
+        let result = manager.load_latest_hot().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_latest_hot_returns_highest() {
+        let temp = TempDir::new().expect("create temp dir");
+        let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
+        let manager = TieredSnapshotManager::new_hot_only(hot, TieredStorageConfig::default());
+
+        for height in [100, 200, 300] {
+            manager.store(&create_test_snapshot(height)).unwrap();
+        }
+
+        let latest = manager.load_latest_hot().unwrap().unwrap();
+        assert_eq!(latest.region_height(), 300);
+    }
+
+    #[test]
+    fn test_demote_to_warm_no_warm_tier() {
+        let temp = TempDir::new().expect("create temp dir");
+        let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
+        let manager = TieredSnapshotManager::new_hot_only(hot, TieredStorageConfig::default());
+
+        for height in [100, 200, 300, 400, 500] {
+            manager.store(&create_test_snapshot(height)).unwrap();
+        }
+
+        // No warm tier configured — demote returns 0
+        let demoted = manager.demote_to_warm().unwrap();
+        assert_eq!(demoted, 0);
+    }
+
+    #[test]
+    fn test_demote_to_warm_within_hot_count() {
+        let temp = TempDir::new().expect("create temp dir");
+        let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
+        let warm: Box<dyn StorageBackend> =
+            Box::new(ObjectStorageBackend::new_test("bucket".to_string(), "prefix".to_string()));
+        let config = TieredStorageConfig { hot_count: 10, ..Default::default() };
+        let manager = TieredSnapshotManager::new_with_warm(hot, warm, config);
+
+        for height in [100, 200] {
+            manager.store(&create_test_snapshot(height)).unwrap();
+        }
+
+        // Only 2 in hot, hot_count = 10 — nothing to demote
+        let demoted = manager.demote_to_warm().unwrap();
+        assert_eq!(demoted, 0);
+    }
+
+    #[test]
+    fn test_load_from_cached_tier() {
+        let temp = TempDir::new().expect("create temp dir");
+        let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
+        let warm: Box<dyn StorageBackend> =
+            Box::new(ObjectStorageBackend::new_test("bucket".to_string(), "prefix".to_string()));
+        let config = TieredStorageConfig { hot_count: 1, ..Default::default() };
+        let manager = TieredSnapshotManager::new_with_warm(hot, warm, config);
+
+        for height in [100, 200] {
+            manager.store(&create_test_snapshot(height)).unwrap();
+        }
+
+        // Demote height=100 to warm
+        manager.demote_to_warm().unwrap();
+
+        // First load populates cache, second load hits cache
+        let loaded1 = manager.load(100).unwrap();
+        assert_eq!(loaded1.region_height(), 100);
+
+        // Load again — should use cached tier location
+        let loaded2 = manager.load(100).unwrap();
+        assert_eq!(loaded2.region_height(), 100);
+    }
+
+    #[test]
+    fn test_load_from_tier_warm_not_available() {
+        let temp = TempDir::new().expect("create temp dir");
+        let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
+        let manager = TieredSnapshotManager::new_hot_only(hot, TieredStorageConfig::default());
+
+        // Manually insert a cached location pointing to warm tier
+        manager.locations.write().insert(999, StorageTier::Warm);
+
+        let result = manager.load(999);
+        assert!(matches!(
+            result,
+            Err(TieredStorageError::TierNotAvailable { tier: StorageTier::Warm })
+        ));
+    }
+
+    #[test]
+    fn test_load_from_tier_cold_not_available() {
+        let temp = TempDir::new().expect("create temp dir");
+        let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
+        let manager = TieredSnapshotManager::new_hot_only(hot, TieredStorageConfig::default());
+
+        // Manually insert a cached location pointing to cold tier
+        manager.locations.write().insert(999, StorageTier::Cold);
+
+        let result = manager.load(999);
+        assert!(matches!(
+            result,
+            Err(TieredStorageError::TierNotAvailable { tier: StorageTier::Cold })
+        ));
+    }
+
+    #[test]
+    fn test_get_tier_not_found() {
+        let temp = TempDir::new().expect("create temp dir");
+        let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
+        let manager = TieredSnapshotManager::new_hot_only(hot, TieredStorageConfig::default());
+
+        assert_eq!(manager.get_tier(999).unwrap(), None);
+    }
+
+    #[test]
+    fn test_get_tier_discovers_hot_without_cache() {
+        let temp = TempDir::new().expect("create temp dir");
+        let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
+        let manager = TieredSnapshotManager::new_hot_only(hot, TieredStorageConfig::default());
+
+        manager.store(&create_test_snapshot(100)).unwrap();
+
+        // Clear cache
+        manager.locations.write().clear();
+
+        // Should discover in hot tier
+        assert_eq!(manager.get_tier(100).unwrap(), Some(StorageTier::Hot));
+    }
+
+    #[test]
+    fn test_get_tier_discovers_warm_without_cache() {
+        let temp = TempDir::new().expect("create temp dir");
+        let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
+        let warm: Box<dyn StorageBackend> =
+            Box::new(ObjectStorageBackend::new_test("bucket".to_string(), "prefix".to_string()));
+        let config = TieredStorageConfig { hot_count: 1, ..Default::default() };
+        let manager = TieredSnapshotManager::new_with_warm(hot, warm, config);
+
+        for height in [100, 200] {
+            manager.store(&create_test_snapshot(height)).unwrap();
+        }
+        manager.demote_to_warm().unwrap();
+
+        // Clear cache
+        manager.locations.write().clear();
+
+        // Should discover 100 in warm tier
+        assert_eq!(manager.get_tier(100).unwrap(), Some(StorageTier::Warm));
+    }
+
+    #[test]
+    fn test_list_all_with_warm_tier() {
+        let temp = TempDir::new().expect("create temp dir");
+        let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
+        let warm: Box<dyn StorageBackend> =
+            Box::new(ObjectStorageBackend::new_test("bucket".to_string(), "prefix".to_string()));
+        let config = TieredStorageConfig { hot_count: 1, ..Default::default() };
+        let manager = TieredSnapshotManager::new_with_warm(hot, warm, config);
+
+        for height in [100, 200, 300] {
+            manager.store(&create_test_snapshot(height)).unwrap();
+        }
+        manager.demote_to_warm().unwrap();
+
+        let all = manager.list_all().unwrap();
+        assert_eq!(all.len(), 3);
+
+        // Should be sorted by height
+        let heights: Vec<u64> = all.iter().map(|l| l.height).collect();
+        assert_eq!(heights, vec![100, 200, 300]);
+
+        // Check tier distribution
+        let warm_count = all.iter().filter(|l| l.tier == StorageTier::Warm).count();
+        let hot_count = all.iter().filter(|l| l.tier == StorageTier::Hot).count();
+        assert_eq!(warm_count, 2);
+        assert_eq!(hot_count, 1);
+    }
+
+    #[test]
+    fn test_find_snapshot_for_no_snapshots() {
+        let temp = TempDir::new().expect("create temp dir");
+        let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
+        let manager = TieredSnapshotManager::new_hot_only(hot, TieredStorageConfig::default());
+
+        assert_eq!(manager.find_snapshot_for(100).unwrap(), None);
+    }
+
+    #[test]
+    fn test_find_snapshot_for_exact_match() {
+        let temp = TempDir::new().expect("create temp dir");
+        let hot = Box::new(LocalBackend::new(temp.path().join("hot"), 10));
+        let manager = TieredSnapshotManager::new_hot_only(hot, TieredStorageConfig::default());
+
+        manager.store(&create_test_snapshot(100)).unwrap();
+        assert_eq!(manager.find_snapshot_for(100).unwrap(), Some(100));
+    }
+
+    #[test]
+    fn test_local_backend_delete_nonexistent() {
+        let temp = TempDir::new().expect("create temp dir");
+        let backend = LocalBackend::new(temp.path().join("snapshots"), 10);
+
+        // Deleting non-existent snapshot should succeed (no-op)
+        backend.delete(999).unwrap();
+    }
+
+    #[test]
+    fn test_local_backend_tier() {
+        let temp = TempDir::new().expect("create temp dir");
+        let backend = LocalBackend::new(temp.path().join("snapshots"), 10);
+        assert_eq!(backend.tier(), StorageTier::Hot);
+    }
+
+    #[test]
+    fn test_object_storage_backend_test_roundtrip() {
+        let backend = ObjectStorageBackend::new_test("bucket".to_string(), "prefix".to_string());
+        assert_eq!(backend.tier(), StorageTier::Warm);
+
+        // Initially empty
+        assert!(!backend.exists(100).unwrap());
+        assert!(backend.list().unwrap().is_empty());
+
+        // Store
+        let snapshot = create_test_snapshot(100);
+        backend.store(&snapshot).unwrap();
+
+        // Exists
+        assert!(backend.exists(100).unwrap());
+        assert_eq!(backend.list().unwrap(), vec![100]);
+
+        // Load
+        let loaded = backend.load(100).unwrap();
+        assert_eq!(loaded.region_height(), 100);
+
+        // Delete
+        backend.delete(100).unwrap();
+        assert!(!backend.exists(100).unwrap());
+        assert!(backend.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_object_storage_backend_test_load_not_found() {
+        let backend = ObjectStorageBackend::new_test("bucket".to_string(), "prefix".to_string());
+
+        let result = backend.load(999);
+        assert!(matches!(result, Err(TieredStorageError::SnapshotNotFound { height: 999 })));
+    }
+
+    #[test]
+    fn test_object_storage_backend_test_list_sorted() {
+        let backend = ObjectStorageBackend::new_test("bucket".to_string(), "prefix".to_string());
+
+        // Store in non-sorted order
+        for height in [300, 100, 200] {
+            backend.store(&create_test_snapshot(height)).unwrap();
+        }
+
+        let heights = backend.list().unwrap();
+        assert_eq!(heights, vec![100, 200, 300]);
+    }
+
+    #[test]
+    fn test_storage_tier_equality() {
+        assert_eq!(StorageTier::Hot, StorageTier::Hot);
+        assert_ne!(StorageTier::Hot, StorageTier::Warm);
+        assert_ne!(StorageTier::Warm, StorageTier::Cold);
+    }
+
     /// Tests tiered manager with real object storage backend (local filesystem).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_tiered_manager_with_real_object_storage() {

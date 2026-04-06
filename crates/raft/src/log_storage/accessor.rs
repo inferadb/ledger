@@ -488,6 +488,497 @@ mod tests {
         assert_eq!(result, IdempotencyCheckResult::Miss);
     }
 
+    // ── Vault height tests ──
+
+    #[test]
+    fn vault_height_returns_zero_for_unknown() {
+        let accessor =
+            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        assert_eq!(accessor.vault_height(OrganizationId::new(1), VaultId::new(1)), 0);
+    }
+
+    #[test]
+    fn vault_height_returns_stored_value() {
+        let mut state = AppliedState::default();
+        state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 42);
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert_eq!(accessor.vault_height(OrganizationId::new(1), VaultId::new(2)), 42);
+    }
+
+    #[test]
+    fn max_vault_height_empty() {
+        let accessor =
+            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        assert_eq!(accessor.max_vault_height(), 0);
+    }
+
+    #[test]
+    fn max_vault_height_returns_max() {
+        let mut state = AppliedState::default();
+        state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 10);
+        state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 50);
+        state.vault_heights.insert((OrganizationId::new(2), VaultId::new(1)), 30);
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert_eq!(accessor.max_vault_height(), 50);
+    }
+
+    #[test]
+    fn org_max_vault_height_filters_by_org() {
+        let mut state = AppliedState::default();
+        state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 10);
+        state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 50);
+        state.vault_heights.insert((OrganizationId::new(2), VaultId::new(1)), 100);
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert_eq!(accessor.org_max_vault_height(OrganizationId::new(1)), 50);
+        assert_eq!(accessor.org_max_vault_height(OrganizationId::new(2)), 100);
+        assert_eq!(accessor.org_max_vault_height(OrganizationId::new(3)), 0);
+    }
+
+    #[test]
+    fn vault_height_count() {
+        let mut state = AppliedState::default();
+        state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 10);
+        state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 20);
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert_eq!(accessor.vault_height_count(), 2);
+    }
+
+    #[test]
+    fn for_each_vault_height_visits_all() {
+        let mut state = AppliedState::default();
+        state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 10);
+        state.vault_heights.insert((OrganizationId::new(2), VaultId::new(3)), 20);
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let mut visited = Vec::new();
+        accessor.for_each_vault_height(|org, vault, height| {
+            visited.push((org, vault, height));
+        });
+        assert_eq!(visited.len(), 2);
+    }
+
+    #[test]
+    fn org_vault_heights_filters_correctly() {
+        let mut state = AppliedState::default();
+        state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 10);
+        state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 20);
+        state.vault_heights.insert((OrganizationId::new(2), VaultId::new(1)), 30);
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let heights = accessor.org_vault_heights(OrganizationId::new(1));
+        assert_eq!(heights.len(), 2);
+    }
+
+    // ── Vault metadata tests ──
+
+    #[test]
+    fn get_vault_returns_none_for_unknown() {
+        let accessor =
+            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        assert!(accessor.get_vault(OrganizationId::new(1), VaultId::new(1)).is_none());
+    }
+
+    #[test]
+    fn get_vault_excludes_deleted() {
+        let mut state = AppliedState::default();
+        state.vaults.insert(
+            (OrganizationId::new(1), VaultId::new(1)),
+            super::super::types::VaultMeta {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
+                slug: VaultSlug::new(100),
+                name: Some("test".to_string()),
+                deleted: true,
+                last_write_timestamp: 0,
+                retention_policy: Default::default(),
+            },
+        );
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert!(accessor.get_vault(OrganizationId::new(1), VaultId::new(1)).is_none());
+    }
+
+    #[test]
+    fn list_vaults_excludes_deleted_and_other_orgs() {
+        let mut state = AppliedState::default();
+        state.vaults.insert(
+            (OrganizationId::new(1), VaultId::new(1)),
+            super::super::types::VaultMeta {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
+                slug: VaultSlug::new(100),
+                name: None,
+                deleted: false,
+                last_write_timestamp: 0,
+                retention_policy: Default::default(),
+            },
+        );
+        state.vaults.insert(
+            (OrganizationId::new(1), VaultId::new(2)),
+            super::super::types::VaultMeta {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(2),
+                slug: VaultSlug::new(200),
+                name: None,
+                deleted: true,
+                last_write_timestamp: 0,
+                retention_policy: Default::default(),
+            },
+        );
+        state.vaults.insert(
+            (OrganizationId::new(2), VaultId::new(3)),
+            super::super::types::VaultMeta {
+                organization: OrganizationId::new(2),
+                vault: VaultId::new(3),
+                slug: VaultSlug::new(300),
+                name: None,
+                deleted: false,
+                last_write_timestamp: 0,
+                retention_policy: Default::default(),
+            },
+        );
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let vaults = accessor.list_vaults(OrganizationId::new(1));
+        assert_eq!(vaults.len(), 1);
+        assert_eq!(vaults[0].vault, VaultId::new(1));
+    }
+
+    #[test]
+    fn vault_count_excludes_deleted() {
+        let mut state = AppliedState::default();
+        state.vaults.insert(
+            (OrganizationId::new(1), VaultId::new(1)),
+            super::super::types::VaultMeta {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
+                slug: VaultSlug::new(100),
+                name: None,
+                deleted: false,
+                last_write_timestamp: 0,
+                retention_policy: Default::default(),
+            },
+        );
+        state.vaults.insert(
+            (OrganizationId::new(1), VaultId::new(2)),
+            super::super::types::VaultMeta {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(2),
+                slug: VaultSlug::new(200),
+                name: None,
+                deleted: true,
+                last_write_timestamp: 0,
+                retention_policy: Default::default(),
+            },
+        );
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert_eq!(accessor.vault_count(OrganizationId::new(1)), 1);
+    }
+
+    // ── Organization tests ──
+
+    #[test]
+    fn list_organizations_excludes_deleted() {
+        use inferadb_ledger_state::system::OrganizationStatus;
+        let mut state = AppliedState::default();
+        state.organizations.insert(
+            OrganizationId::new(1),
+            super::super::types::OrganizationMeta {
+                organization: OrganizationId::new(1),
+                slug: inferadb_ledger_types::OrganizationSlug::new(100),
+                region: inferadb_ledger_types::Region::GLOBAL,
+                status: OrganizationStatus::Active,
+                tier: Default::default(),
+                pending_region: None,
+                storage_bytes: 0,
+            },
+        );
+        state.organizations.insert(
+            OrganizationId::new(2),
+            super::super::types::OrganizationMeta {
+                organization: OrganizationId::new(2),
+                slug: inferadb_ledger_types::OrganizationSlug::new(200),
+                region: inferadb_ledger_types::Region::GLOBAL,
+                status: OrganizationStatus::Deleted,
+                tier: Default::default(),
+                pending_region: None,
+                storage_bytes: 0,
+            },
+        );
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let orgs = accessor.list_organizations();
+        assert_eq!(orgs.len(), 1);
+        assert_eq!(orgs[0].organization, OrganizationId::new(1));
+    }
+
+    #[test]
+    fn get_organization_excludes_deleted() {
+        use inferadb_ledger_state::system::OrganizationStatus;
+        let mut state = AppliedState::default();
+        state.organizations.insert(
+            OrganizationId::new(1),
+            super::super::types::OrganizationMeta {
+                organization: OrganizationId::new(1),
+                slug: inferadb_ledger_types::OrganizationSlug::new(100),
+                region: inferadb_ledger_types::Region::GLOBAL,
+                status: OrganizationStatus::Deleted,
+                tier: Default::default(),
+                pending_region: None,
+                storage_bytes: 0,
+            },
+        );
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert!(accessor.get_organization(OrganizationId::new(1)).is_none());
+    }
+
+    // ── Slug resolution tests ──
+
+    #[test]
+    fn resolve_slug_to_id_and_back() {
+        let mut state = AppliedState::default();
+        state
+            .slug_index
+            .insert(inferadb_ledger_types::OrganizationSlug::new(100), OrganizationId::new(1));
+        state
+            .id_to_slug
+            .insert(OrganizationId::new(1), inferadb_ledger_types::OrganizationSlug::new(100));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert_eq!(
+            accessor.resolve_slug_to_id(inferadb_ledger_types::OrganizationSlug::new(100)),
+            Some(OrganizationId::new(1))
+        );
+        assert_eq!(
+            accessor.resolve_id_to_slug(OrganizationId::new(1)),
+            Some(inferadb_ledger_types::OrganizationSlug::new(100))
+        );
+    }
+
+    #[test]
+    fn resolve_vault_slug_to_id_and_back() {
+        let mut state = AppliedState::default();
+        state.vault_slug_index.insert(VaultSlug::new(200), VaultId::new(2));
+        state.vault_id_to_slug.insert(VaultId::new(2), VaultSlug::new(200));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert_eq!(accessor.resolve_vault_slug_to_id(VaultSlug::new(200)), Some(VaultId::new(2)));
+        assert_eq!(accessor.resolve_vault_id_to_slug(VaultId::new(2)), Some(VaultSlug::new(200)));
+    }
+
+    #[test]
+    fn resolve_user_slug_to_id_and_back() {
+        let mut state = AppliedState::default();
+        state.user_slug_index.insert(
+            inferadb_ledger_types::UserSlug::new(300),
+            inferadb_ledger_types::UserId::new(3),
+        );
+        state.user_id_to_slug.insert(
+            inferadb_ledger_types::UserId::new(3),
+            inferadb_ledger_types::UserSlug::new(300),
+        );
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert_eq!(
+            accessor.resolve_user_slug_to_id(inferadb_ledger_types::UserSlug::new(300)),
+            Some(inferadb_ledger_types::UserId::new(3))
+        );
+        assert_eq!(
+            accessor.resolve_user_id_to_slug(inferadb_ledger_types::UserId::new(3)),
+            Some(inferadb_ledger_types::UserSlug::new(300))
+        );
+    }
+
+    #[test]
+    fn resolve_team_slug() {
+        let mut state = AppliedState::default();
+        state.team_slug_index.insert(
+            inferadb_ledger_types::TeamSlug::new(400),
+            (OrganizationId::new(1), inferadb_ledger_types::TeamId::new(4)),
+        );
+        state.team_id_to_slug.insert(
+            inferadb_ledger_types::TeamId::new(4),
+            inferadb_ledger_types::TeamSlug::new(400),
+        );
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert_eq!(
+            accessor.resolve_team_slug(inferadb_ledger_types::TeamSlug::new(400)),
+            Some((OrganizationId::new(1), inferadb_ledger_types::TeamId::new(4)))
+        );
+        assert_eq!(
+            accessor.resolve_team_id_to_slug(inferadb_ledger_types::TeamId::new(4)),
+            Some(inferadb_ledger_types::TeamSlug::new(400))
+        );
+    }
+
+    #[test]
+    fn resolve_app_slug() {
+        let mut state = AppliedState::default();
+        state.app_slug_index.insert(
+            inferadb_ledger_types::AppSlug::new(500),
+            (OrganizationId::new(1), inferadb_ledger_types::AppId::new(5)),
+        );
+        state
+            .app_id_to_slug
+            .insert(inferadb_ledger_types::AppId::new(5), inferadb_ledger_types::AppSlug::new(500));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert_eq!(
+            accessor.resolve_app_slug(inferadb_ledger_types::AppSlug::new(500)),
+            Some((OrganizationId::new(1), inferadb_ledger_types::AppId::new(5)))
+        );
+        assert_eq!(
+            accessor.resolve_app_id_to_slug(inferadb_ledger_types::AppId::new(5)),
+            Some(inferadb_ledger_types::AppSlug::new(500))
+        );
+    }
+
+    // ── Storage and usage tests ──
+
+    #[test]
+    fn organization_storage_bytes_default_zero() {
+        let accessor =
+            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        assert_eq!(accessor.organization_storage_bytes(OrganizationId::new(1)), 0);
+    }
+
+    #[test]
+    fn organization_storage_bytes_returns_stored() {
+        let mut state = AppliedState::default();
+        state.organization_storage_bytes.insert(OrganizationId::new(1), 1024);
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert_eq!(accessor.organization_storage_bytes(OrganizationId::new(1)), 1024);
+    }
+
+    #[test]
+    fn organization_usage_combines_storage_and_vault_count() {
+        let mut state = AppliedState::default();
+        state.organization_storage_bytes.insert(OrganizationId::new(1), 2048);
+        state.vaults.insert(
+            (OrganizationId::new(1), VaultId::new(1)),
+            super::super::types::VaultMeta {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
+                slug: VaultSlug::new(100),
+                name: None,
+                deleted: false,
+                last_write_timestamp: 0,
+                retention_policy: Default::default(),
+            },
+        );
+        state.vaults.insert(
+            (OrganizationId::new(1), VaultId::new(2)),
+            super::super::types::VaultMeta {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(2),
+                slug: VaultSlug::new(200),
+                name: None,
+                deleted: true, // deleted, should not count
+                last_write_timestamp: 0,
+                retention_policy: Default::default(),
+            },
+        );
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let usage = accessor.organization_usage(OrganizationId::new(1));
+        assert_eq!(usage.storage_bytes, 2048);
+        assert_eq!(usage.vault_count, 1);
+    }
+
+    // ── Region height and client sequence tests ──
+
+    #[test]
+    fn region_height_default_zero() {
+        let accessor =
+            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        assert_eq!(accessor.region_height(), 0);
+    }
+
+    #[test]
+    fn region_height_returns_stored() {
+        let state = AppliedState { region_height: 999, ..Default::default() };
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert_eq!(accessor.region_height(), 999);
+    }
+
+    #[test]
+    fn client_sequence_returns_zero_for_unknown() {
+        let accessor =
+            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        assert_eq!(accessor.client_sequence(OrganizationId::new(1), VaultId::new(1), "unknown"), 0);
+    }
+
+    #[test]
+    fn client_sequence_returns_stored() {
+        let mut state = AppliedState::default();
+        state.client_sequences.insert(
+            (OrganizationId::new(1), VaultId::new(1), ClientId::new("client-1")),
+            ClientSequenceEntry { sequence: 42, ..Default::default() },
+        );
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        assert_eq!(
+            accessor.client_sequence(OrganizationId::new(1), VaultId::new(1), "client-1"),
+            42
+        );
+    }
+
+    // ── User organization index test ──
+
+    #[test]
+    fn user_organization_ids_returns_empty_for_unknown() {
+        let accessor =
+            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        assert!(accessor.user_organization_ids(inferadb_ledger_types::UserId::new(1)).is_empty());
+    }
+
+    #[test]
+    fn user_organization_ids_returns_stored() {
+        let mut state = AppliedState::default();
+        let mut orgs = HashSet::new();
+        orgs.insert(OrganizationId::new(1));
+        orgs.insert(OrganizationId::new(2));
+        state.user_org_index.insert(inferadb_ledger_types::UserId::new(42), orgs);
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let result = accessor.user_organization_ids(inferadb_ledger_types::UserId::new(42));
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&OrganizationId::new(1)));
+    }
+
+    // ── all_vaults test ──
+
+    #[test]
+    fn all_vaults_excludes_deleted() {
+        let mut state = AppliedState::default();
+        state.vaults.insert(
+            (OrganizationId::new(1), VaultId::new(1)),
+            super::super::types::VaultMeta {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
+                slug: VaultSlug::new(100),
+                name: None,
+                deleted: false,
+                last_write_timestamp: 0,
+                retention_policy: Default::default(),
+            },
+        );
+        state.vaults.insert(
+            (OrganizationId::new(1), VaultId::new(2)),
+            super::super::types::VaultMeta {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(2),
+                slug: VaultSlug::new(200),
+                name: None,
+                deleted: true,
+                last_write_timestamp: 0,
+                retention_policy: Default::default(),
+            },
+        );
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let all = accessor.all_vaults();
+        assert_eq!(all.len(), 1);
+    }
+
+    // ── vault_health test ──
+
+    #[test]
+    fn vault_health_returns_default_for_unknown() {
+        let accessor =
+            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        let health = accessor.vault_health(OrganizationId::new(1), VaultId::new(1));
+        // Default should be Healthy
+        assert_eq!(health, VaultHealthStatus::Healthy);
+    }
+
     #[test]
     fn idempotency_check_different_vault_is_miss() {
         let key = [7u8; 16];

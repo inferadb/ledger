@@ -857,7 +857,7 @@ impl OrganizationPurgeConfig {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::field_reassign_with_default)]
 mod tiered_storage_tests {
     use super::*;
 
@@ -933,5 +933,188 @@ mod tiered_storage_tests {
         let config = TieredStorageConfig { region_overrides: overrides, ..Default::default() };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("empty warm_url"));
+    }
+
+    // StorageConfig tests
+
+    #[test]
+    fn storage_config_default_valid() {
+        let config = StorageConfig::default();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.cache_size_bytes, 256 * 1024 * 1024);
+        assert_eq!(config.compression_level, 3);
+    }
+
+    #[test]
+    fn storage_config_builder_defaults_valid() {
+        let config = StorageConfig::builder().build().unwrap();
+        assert_eq!(config.cache_size_bytes, 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn storage_config_small_cache_fails() {
+        let mut config = StorageConfig::default();
+        config.cache_size_bytes = 1024; // 1 KB, below 1 MB minimum
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn storage_config_compression_below_range_fails() {
+        let mut config = StorageConfig::default();
+        config.compression_level = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn storage_config_compression_above_range_fails() {
+        let mut config = StorageConfig::default();
+        config.compression_level = 23;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn storage_config_compression_at_boundaries() {
+        let mut config = StorageConfig::default();
+        config.compression_level = 1;
+        assert!(config.validate().is_ok());
+        config.compression_level = 22;
+        assert!(config.validate().is_ok());
+    }
+
+    // BTreeCompactionConfig tests
+
+    #[test]
+    fn compaction_config_default_valid() {
+        let config = BTreeCompactionConfig::default();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.min_fill_factor, 0.4);
+        assert_eq!(config.interval_secs, 3600);
+    }
+
+    #[test]
+    fn compaction_config_builder_defaults_valid() {
+        let config = BTreeCompactionConfig::builder().build().unwrap();
+        assert_eq!(config.min_fill_factor, 0.4);
+    }
+
+    #[test]
+    fn compaction_config_zero_fill_factor_fails() {
+        let mut config = BTreeCompactionConfig::default();
+        config.min_fill_factor = 0.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn compaction_config_fill_factor_one_fails() {
+        let mut config = BTreeCompactionConfig::default();
+        config.min_fill_factor = 1.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn compaction_config_negative_fill_factor_fails() {
+        let mut config = BTreeCompactionConfig::default();
+        config.min_fill_factor = -0.1;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn compaction_config_low_interval_fails() {
+        let mut config = BTreeCompactionConfig::default();
+        config.interval_secs = 59;
+        assert!(config.validate().is_err());
+    }
+
+    // IntegrityConfig tests
+
+    #[test]
+    fn integrity_config_default_valid() {
+        let config = IntegrityConfig::default();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.scrub_interval_secs, 3600);
+        assert_eq!(config.pages_per_cycle_percent, 1.0);
+        assert_eq!(config.full_scan_period_secs, 345_600);
+    }
+
+    #[test]
+    fn integrity_config_builder_defaults_valid() {
+        let config = IntegrityConfig::builder().build().unwrap();
+        assert_eq!(config.scrub_interval_secs, 3600);
+    }
+
+    #[test]
+    fn integrity_config_low_scrub_interval_fails() {
+        let mut config = IntegrityConfig::default();
+        config.scrub_interval_secs = 59;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn integrity_config_zero_pages_percent_fails() {
+        let mut config = IntegrityConfig::default();
+        config.pages_per_cycle_percent = 0.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn integrity_config_over_100_pages_percent_fails() {
+        let mut config = IntegrityConfig::default();
+        config.pages_per_cycle_percent = 100.1;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn integrity_config_full_scan_less_than_scrub_fails() {
+        let mut config = IntegrityConfig::default();
+        config.full_scan_period_secs = 59;
+        config.scrub_interval_secs = 60;
+        assert!(config.validate().is_err());
+    }
+
+    // BackupConfig tests
+
+    #[test]
+    fn backup_config_builder_valid() {
+        let config = BackupConfig::builder().destination("/var/backups").build().unwrap();
+        assert_eq!(config.destination, "/var/backups");
+        assert_eq!(config.retention_count, 7);
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn backup_config_empty_destination_fails() {
+        let result = BackupConfig::builder().destination("").build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn backup_config_zero_retention_fails() {
+        let result = BackupConfig::builder().destination("/backups").retention_count(0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn backup_config_enabled_low_interval_fails() {
+        let result =
+            BackupConfig::builder().destination("/backups").enabled(true).interval_secs(59).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn backup_config_disabled_low_interval_ok() {
+        let config = BackupConfig::builder()
+            .destination("/backups")
+            .enabled(false)
+            .interval_secs(1)
+            .build()
+            .unwrap();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn backup_config_zero_retention_days_fails() {
+        let result =
+            BackupConfig::builder().destination("/backups").max_backup_retention_days(0).build();
+        assert!(result.is_err());
     }
 }

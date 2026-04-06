@@ -990,4 +990,146 @@ mod tests {
         };
         assert!(err.contains("Legacy flat layout"), "error should mention legacy layout: {err}");
     }
+
+    // =================================================================
+    // parse_hex_key tests
+    // =================================================================
+
+    #[test]
+    fn test_parse_hex_key_valid() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let result = parse_hex_key(hex).unwrap();
+        assert_eq!(result[0], 0x01);
+        assert_eq!(result[1], 0x23);
+        assert_eq!(result[15], 0xef);
+        assert_eq!(result.len(), 32);
+    }
+
+    #[test]
+    fn test_parse_hex_key_all_zeros() {
+        let hex = "0000000000000000000000000000000000000000000000000000000000000000";
+        let result = parse_hex_key(hex).unwrap();
+        assert_eq!(result, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_parse_hex_key_all_ff() {
+        let hex = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let result = parse_hex_key(hex).unwrap();
+        assert_eq!(result, [0xff; 32]);
+    }
+
+    #[test]
+    fn test_parse_hex_key_uppercase() {
+        let hex = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
+        let result = parse_hex_key(hex).unwrap();
+        assert_eq!(result[0], 0xAB);
+        assert_eq!(result[1], 0xCD);
+    }
+
+    #[test]
+    fn test_parse_hex_key_trims_whitespace() {
+        let hex = "  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  ";
+        let result = parse_hex_key(hex).unwrap();
+        assert_eq!(result[0], 0x01);
+    }
+
+    #[test]
+    fn test_parse_hex_key_too_short() {
+        let hex = "0123456789abcdef";
+        let err = parse_hex_key(hex).unwrap_err();
+        assert!(err.contains("expected 64 hex characters"));
+    }
+
+    #[test]
+    fn test_parse_hex_key_too_long() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef00";
+        let err = parse_hex_key(hex).unwrap_err();
+        assert!(err.contains("expected 64 hex characters"));
+    }
+
+    #[test]
+    fn test_parse_hex_key_empty() {
+        let err = parse_hex_key("").unwrap_err();
+        assert!(err.contains("expected 64 hex characters"));
+    }
+
+    #[test]
+    fn test_parse_hex_key_invalid_chars() {
+        let hex = "gg23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let err = parse_hex_key(hex).unwrap_err();
+        assert!(err.contains("invalid hex at position 0"));
+    }
+
+    #[test]
+    fn test_parse_hex_key_invalid_char_mid_string() {
+        let hex = "0123456789abcdefXX23456789abcdef0123456789abcdef0123456789abcdef";
+        let err = parse_hex_key(hex).unwrap_err();
+        assert!(err.contains("invalid hex at position 16"));
+    }
+
+    // =================================================================
+    // BootstrapError display tests
+    // =================================================================
+
+    #[test]
+    fn test_bootstrap_error_display() {
+        let err = BootstrapError::Database { message: "disk full".to_string() };
+        assert_eq!(err.to_string(), "database error: disk full");
+
+        let err = BootstrapError::Storage { message: "corrupt".to_string() };
+        assert_eq!(err.to_string(), "storage error: corrupt");
+
+        let err = BootstrapError::Raft { message: "term mismatch".to_string() };
+        assert_eq!(err.to_string(), "raft error: term mismatch");
+
+        let err = BootstrapError::Initialize { message: "failed".to_string() };
+        assert_eq!(err.to_string(), "initialization error: failed");
+
+        let err = BootstrapError::NodeId { message: "bad id".to_string() };
+        assert_eq!(err.to_string(), "node id error: bad id");
+
+        let err = BootstrapError::Timeout { message: "30s elapsed".to_string() };
+        assert_eq!(err.to_string(), "bootstrap timeout: 30s elapsed");
+
+        let err = BootstrapError::Config { message: "bad cluster size".to_string() };
+        assert_eq!(err.to_string(), "configuration error: bad cluster size");
+
+        let err = BootstrapError::Server { message: "bind failed".to_string() };
+        assert_eq!(err.to_string(), "server error: bind failed");
+    }
+
+    // =================================================================
+    // Config validation integration tests
+    // =================================================================
+
+    #[test]
+    fn test_bootstrap_config_validation_fails_with_cluster_1() {
+        let config = Config { cluster: Some(1), ..Config::default() };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("at least 2 nodes"));
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_node_invalid_config_rejected() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().to_path_buf();
+
+        // Write a node_id so resolution doesn't fail first
+        crate::node_id::write_node_id(&data_dir, 1).expect("write node_id");
+
+        // cluster=1 fails validation
+        let config = Config { cluster: Some(1), ..Config::default() };
+        let health = inferadb_ledger_raft::HealthState::new();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let result = bootstrap_node(&config, &data_dir, health, rx, None).await;
+
+        match result {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(msg.contains("at least 2 nodes"), "Expected config error, got: {msg}");
+            },
+            Ok(_) => panic!("bootstrap should fail with invalid config"),
+        }
+    }
 }

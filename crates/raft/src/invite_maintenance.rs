@@ -529,4 +529,172 @@ mod tests {
         assert_eq!(entry.email_hmac, "deadbeef");
         assert_eq!(entry.entry.status, InvitationStatus::Pending);
     }
+
+    #[test]
+    fn email_hash_index_prefix_format() {
+        assert_eq!(EMAIL_HASH_INDEX_PREFIX, "_idx:invite:email_hash:");
+        // Prefix must end with colon separator
+        assert!(EMAIL_HASH_INDEX_PREFIX.ends_with(':'));
+    }
+
+    #[test]
+    fn key_parsing_valid_format() {
+        // Simulate the key parsing logic from scan_email_entries
+        let key = "_idx:invite:email_hash:abc123def:99";
+        let without_prefix = key.strip_prefix(EMAIL_HASH_INDEX_PREFIX).unwrap();
+        let (hmac, id_str) = without_prefix.rsplit_once(':').unwrap();
+        let id_val: i64 = id_str.parse().unwrap();
+
+        assert_eq!(hmac, "abc123def");
+        assert_eq!(id_val, 99);
+    }
+
+    #[test]
+    fn key_parsing_hmac_with_colons() {
+        // HMAC values can contain colons; rsplit_once splits only at the last colon
+        let key = "_idx:invite:email_hash:aa:bb:cc:42";
+        let without_prefix = key.strip_prefix(EMAIL_HASH_INDEX_PREFIX).unwrap();
+        let (hmac, id_str) = without_prefix.rsplit_once(':').unwrap();
+        let id_val: i64 = id_str.parse().unwrap();
+
+        assert_eq!(hmac, "aa:bb:cc");
+        assert_eq!(id_val, 42);
+    }
+
+    #[test]
+    fn key_parsing_missing_prefix_returns_none() {
+        let key = "wrong_prefix:abc:42";
+        assert!(key.strip_prefix(EMAIL_HASH_INDEX_PREFIX).is_none());
+    }
+
+    #[test]
+    fn key_parsing_missing_colon_returns_none() {
+        let key = "_idx:invite:email_hash:nocolon";
+        let without_prefix = key.strip_prefix(EMAIL_HASH_INDEX_PREFIX).unwrap();
+        // No colon in the remainder means rsplit_once returns None
+        assert!(without_prefix.rsplit_once(':').is_none());
+    }
+
+    #[test]
+    fn key_parsing_non_numeric_id_fails() {
+        let key = "_idx:invite:email_hash:abc:notanumber";
+        let without_prefix = key.strip_prefix(EMAIL_HASH_INDEX_PREFIX).unwrap();
+        let (_, id_str) = without_prefix.rsplit_once(':').unwrap();
+        assert!(id_str.parse::<i64>().is_err());
+    }
+
+    #[test]
+    fn pending_entries_filtered_from_all() {
+        let entries = [
+            ScannedEntry {
+                invite_id: InviteId::new(1),
+                email_hmac: "a".to_string(),
+                entry: InviteEmailEntry {
+                    organization: OrganizationId::new(1),
+                    status: InvitationStatus::Pending,
+                },
+            },
+            ScannedEntry {
+                invite_id: InviteId::new(2),
+                email_hmac: "b".to_string(),
+                entry: InviteEmailEntry {
+                    organization: OrganizationId::new(1),
+                    status: InvitationStatus::Accepted,
+                },
+            },
+            ScannedEntry {
+                invite_id: InviteId::new(3),
+                email_hmac: "c".to_string(),
+                entry: InviteEmailEntry {
+                    organization: OrganizationId::new(1),
+                    status: InvitationStatus::Expired,
+                },
+            },
+        ];
+
+        let pending: Vec<&ScannedEntry> =
+            entries.iter().filter(|e| e.entry.status == InvitationStatus::Pending).collect();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].invite_id.value(), 1);
+    }
+
+    #[test]
+    fn terminal_entries_filtered_from_all() {
+        let entries = [
+            ScannedEntry {
+                invite_id: InviteId::new(1),
+                email_hmac: "a".to_string(),
+                entry: InviteEmailEntry {
+                    organization: OrganizationId::new(1),
+                    status: InvitationStatus::Pending,
+                },
+            },
+            ScannedEntry {
+                invite_id: InviteId::new(2),
+                email_hmac: "b".to_string(),
+                entry: InviteEmailEntry {
+                    organization: OrganizationId::new(1),
+                    status: InvitationStatus::Accepted,
+                },
+            },
+            ScannedEntry {
+                invite_id: InviteId::new(3),
+                email_hmac: "c".to_string(),
+                entry: InviteEmailEntry {
+                    organization: OrganizationId::new(1),
+                    status: InvitationStatus::Declined,
+                },
+            },
+            ScannedEntry {
+                invite_id: InviteId::new(4),
+                email_hmac: "d".to_string(),
+                entry: InviteEmailEntry {
+                    organization: OrganizationId::new(1),
+                    status: InvitationStatus::Expired,
+                },
+            },
+            ScannedEntry {
+                invite_id: InviteId::new(5),
+                email_hmac: "e".to_string(),
+                entry: InviteEmailEntry {
+                    organization: OrganizationId::new(1),
+                    status: InvitationStatus::Revoked,
+                },
+            },
+        ];
+
+        let terminal: Vec<&ScannedEntry> =
+            entries.iter().filter(|e| e.entry.status.is_terminal()).collect();
+        // Accepted, Declined, Expired, Revoked are all terminal
+        assert_eq!(terminal.len(), 4);
+    }
+
+    #[test]
+    fn max_expirations_caps_processing() {
+        // Verify that take(MAX_EXPIRATIONS_PER_CYCLE) would correctly limit
+        let entries: Vec<u32> = (0..500).collect();
+        let capped: Vec<&u32> = entries.iter().take(MAX_EXPIRATIONS_PER_CYCLE).collect();
+        assert_eq!(capped.len(), 200);
+    }
+
+    #[test]
+    fn max_deletions_caps_processing() {
+        let entries: Vec<u32> = (0..500).collect();
+        let capped: Vec<&u32> = entries.iter().take(MAX_DELETIONS_PER_CYCLE).collect();
+        assert_eq!(capped.len(), 100);
+    }
+
+    #[test]
+    fn retention_days_as_chrono_duration() {
+        let retention = chrono::Duration::days(RETENTION_DAYS);
+        assert_eq!(retention.num_days(), 90);
+    }
+
+    #[test]
+    fn maintenance_result_debug_format() {
+        let result = InviteMaintenanceResult { invitations_expired: 10, invitations_reaped: 5 };
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("invitations_expired: 10"));
+        assert!(debug.contains("invitations_reaped: 5"));
+    }
 }

@@ -270,3 +270,160 @@ impl RuntimeConfig {
         sections
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    // ── RuntimeEventsConfig::validate ───────────────────────────────
+
+    #[test]
+    fn events_validate_accepts_valid_config() {
+        let cfg = RuntimeEventsConfig {
+            default_ttl_days: Some(30),
+            ingest_rate_limit_per_source: Some(100),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn events_validate_rejects_ttl_out_of_range() {
+        let cfg = RuntimeEventsConfig { default_ttl_days: Some(0), ..Default::default() };
+        let err = cfg.validate().expect_err("should fail");
+        assert!(err.to_string().contains("default_ttl_days"));
+
+        let cfg = RuntimeEventsConfig { default_ttl_days: Some(3651), ..Default::default() };
+        let err = cfg.validate().expect_err("should fail");
+        assert!(err.to_string().contains("default_ttl_days"));
+    }
+
+    #[test]
+    fn events_validate_rejects_zero_rate_limit() {
+        let cfg =
+            RuntimeEventsConfig { ingest_rate_limit_per_source: Some(0), ..Default::default() };
+        let err = cfg.validate().expect_err("should fail");
+        assert!(err.to_string().contains("ingest_rate_limit_per_source"));
+    }
+
+    #[test]
+    fn events_validate_accepts_none_fields() {
+        let cfg = RuntimeEventsConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    // ── RuntimeConfig::validate ─────────────────────────────────────
+
+    #[test]
+    fn runtime_config_validate_propagates_events_error() {
+        let cfg = RuntimeConfig {
+            events: Some(RuntimeEventsConfig { default_ttl_days: Some(0), ..Default::default() }),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn runtime_config_validate_empty_is_ok() {
+        let cfg = RuntimeConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    // ── ConfigChange Display ────────────────────────────────────────
+
+    #[test]
+    fn config_change_display() {
+        let change = ConfigChange {
+            field: "rate_limit.client_burst".to_string(),
+            old: "100".to_string(),
+            new: "200".to_string(),
+        };
+        assert_eq!(change.to_string(), "rate_limit.client_burst: 100 → 200");
+    }
+
+    // ── detailed_diff ───────────────────────────────────────────────
+
+    #[test]
+    fn detailed_diff_no_changes_for_identical_configs() {
+        let a = RuntimeConfig::default();
+        let b = RuntimeConfig::default();
+        assert!(a.detailed_diff(&b).is_empty());
+    }
+
+    #[test]
+    fn detailed_diff_detects_events_change() {
+        let a = RuntimeConfig::default();
+        let b = RuntimeConfig {
+            events: Some(RuntimeEventsConfig { enabled: Some(true), ..Default::default() }),
+            ..Default::default()
+        };
+        let changes = a.detailed_diff(&b);
+        assert!(!changes.is_empty());
+        assert!(changes.iter().any(|c| c.field.contains("events")));
+    }
+
+    // ── diff ────────────────────────────────────────────────────────
+
+    #[test]
+    fn diff_returns_top_level_section_names() {
+        let a = RuntimeConfig::default();
+        let b = RuntimeConfig {
+            events: Some(RuntimeEventsConfig { enabled: Some(true), ..Default::default() }),
+            ..Default::default()
+        };
+        let sections = a.diff(&b);
+        assert!(sections.contains(&"events".to_string()));
+    }
+
+    #[test]
+    fn diff_empty_for_identical() {
+        let a = RuntimeConfig::default();
+        let b = RuntimeConfig::default();
+        assert!(a.diff(&b).is_empty());
+    }
+
+    // ── collect_json_diffs ──────────────────────────────────────────
+
+    #[test]
+    fn collect_json_diffs_nested_objects() {
+        let old: serde_json::Value = serde_json::json!({"a": {"b": 1, "c": 2}});
+        let new: serde_json::Value = serde_json::json!({"a": {"b": 1, "c": 3}});
+        let mut out = Vec::new();
+        collect_json_diffs("", &old, &new, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].field, "a.c");
+        assert_eq!(out[0].old, "2");
+        assert_eq!(out[0].new, "3");
+    }
+
+    #[test]
+    fn collect_json_diffs_addition_and_removal() {
+        let old: serde_json::Value = serde_json::json!({"x": 1});
+        let new: serde_json::Value = serde_json::json!({"y": 2});
+        let mut out = Vec::new();
+        collect_json_diffs("", &old, &new, &mut out);
+        assert_eq!(out.len(), 2);
+        let fields: Vec<&str> = out.iter().map(|c| c.field.as_str()).collect();
+        assert!(fields.contains(&"x"));
+        assert!(fields.contains(&"y"));
+    }
+
+    #[test]
+    fn collect_json_diffs_equal_values_produce_nothing() {
+        let v: serde_json::Value = serde_json::json!({"a": 1});
+        let mut out = Vec::new();
+        collect_json_diffs("", &v, &v, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn collect_json_diffs_scalar_change() {
+        let old = serde_json::json!(42);
+        let new = serde_json::json!(99);
+        let mut out = Vec::new();
+        collect_json_diffs("top", &old, &new, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].field, "top");
+    }
+}

@@ -606,3 +606,214 @@ define_string_id!(
 /// human-readable [`NodeId`] strings (e.g., `"node-1"`) via the
 /// `_system` organization's node registry.
 pub type LedgerNodeId = u64;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::borrow::Borrow;
+
+    use super::*;
+
+    // ── define_id! (OrganizationId as representative) ───────────────
+
+    #[test]
+    fn id_new_and_value() {
+        let id = OrganizationId::new(42);
+        assert_eq!(id.value(), 42);
+    }
+
+    #[test]
+    fn id_from_and_into() {
+        let id: OrganizationId = 7_i64.into();
+        assert_eq!(id.value(), 7);
+        let raw: i64 = id.into();
+        assert_eq!(raw, 7);
+    }
+
+    #[test]
+    fn id_display_has_prefix() {
+        assert_eq!(OrganizationId::new(42).to_string(), "org:42");
+        assert_eq!(VaultId::new(7).to_string(), "vault:7");
+        assert_eq!(UserId::new(1).to_string(), "user:1");
+        assert_eq!(SigningKeyId::new(3).to_string(), "sigkey:3");
+    }
+
+    #[test]
+    fn id_from_str() {
+        let id: OrganizationId = "42".parse().expect("parse");
+        assert_eq!(id.value(), 42);
+    }
+
+    #[test]
+    fn id_from_str_invalid() {
+        let result = "not_a_number".parse::<OrganizationId>();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn id_serde_roundtrip() {
+        let id = OrganizationId::new(99);
+        let json = serde_json::to_string(&id).expect("serialize");
+        assert_eq!(json, "99");
+        let back: OrganizationId = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, id);
+    }
+
+    #[test]
+    fn id_ord_and_eq() {
+        let a = VaultId::new(1);
+        let b = VaultId::new(2);
+        assert!(a < b);
+        assert_eq!(a, VaultId::new(1));
+    }
+
+    // ── define_slug! (OrganizationSlug as representative) ───────────
+
+    #[test]
+    fn slug_new_and_value() {
+        let slug = OrganizationSlug::new(123456);
+        assert_eq!(slug.value(), 123456);
+    }
+
+    #[test]
+    fn slug_from_and_into() {
+        let slug: OrganizationSlug = 99_u64.into();
+        assert_eq!(slug.value(), 99);
+        let raw: u64 = slug.into();
+        assert_eq!(raw, 99);
+    }
+
+    #[test]
+    fn slug_display_no_prefix() {
+        assert_eq!(OrganizationSlug::new(42).to_string(), "42");
+        assert_eq!(VaultSlug::new(777).to_string(), "777");
+    }
+
+    #[test]
+    fn slug_from_str() {
+        let slug: OrganizationSlug = "12345".parse().expect("parse");
+        assert_eq!(slug.value(), 12345);
+    }
+
+    #[test]
+    fn slug_from_str_invalid() {
+        let result = "abc".parse::<VaultSlug>();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn slug_serde_roundtrip() {
+        let slug = VaultSlug::new(55);
+        let json = serde_json::to_string(&slug).expect("serialize");
+        assert_eq!(json, "55");
+        let back: VaultSlug = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, slug);
+    }
+
+    // ── define_string_id! (NodeId as representative) ────────────────
+
+    #[test]
+    fn string_id_new_and_value() {
+        let id = NodeId::new("node-1");
+        assert_eq!(id.value(), "node-1");
+    }
+
+    #[test]
+    fn string_id_into_inner() {
+        let id = NodeId::new("node-1");
+        let s: String = id.into_inner();
+        assert_eq!(s, "node-1");
+    }
+
+    #[test]
+    fn string_id_as_bytes() {
+        let id = NodeId::new("abc");
+        assert_eq!(id.as_bytes(), b"abc");
+    }
+
+    #[test]
+    fn string_id_from_string_and_str() {
+        let from_string: NodeId = String::from("node-2").into();
+        let from_str: NodeId = "node-2".into();
+        assert_eq!(from_string, from_str);
+    }
+
+    #[test]
+    fn string_id_as_ref_and_borrow() {
+        let id = ClientId::new("client-x");
+        let r: &str = id.as_ref();
+        assert_eq!(r, "client-x");
+        let b: &str = id.borrow();
+        assert_eq!(b, "client-x");
+    }
+
+    #[test]
+    fn string_id_display() {
+        let id = NodeId::new("leader-node");
+        assert_eq!(id.to_string(), "leader-node");
+    }
+
+    #[test]
+    fn string_id_into_string() {
+        let id = ClientId::new("c1");
+        let s: String = id.into();
+        assert_eq!(s, "c1");
+    }
+
+    #[test]
+    fn string_id_serde_roundtrip() {
+        let id = NodeId::new("node-3");
+        let json = serde_json::to_string(&id).expect("serialize");
+        assert_eq!(json, "\"node-3\"");
+        let back: NodeId = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.value(), "node-3");
+    }
+
+    // ── TokenVersion ────────────────────────────────────────────────
+
+    #[test]
+    fn token_version_new_and_value() {
+        let v = TokenVersion::new(5);
+        assert_eq!(v.value(), 5);
+    }
+
+    #[test]
+    fn token_version_default_is_zero() {
+        assert_eq!(TokenVersion::default().value(), 0);
+    }
+
+    #[test]
+    fn token_version_increment() {
+        let v = TokenVersion::new(3);
+        assert_eq!(v.increment().value(), 4);
+    }
+
+    #[test]
+    fn token_version_increment_saturates() {
+        let v = TokenVersion::new(u64::MAX);
+        assert_eq!(v.increment().value(), u64::MAX);
+    }
+
+    #[test]
+    fn token_version_from_and_into() {
+        let v: TokenVersion = 10_u64.into();
+        assert_eq!(v.value(), 10);
+        let raw: u64 = v.into();
+        assert_eq!(raw, 10);
+    }
+
+    #[test]
+    fn token_version_display() {
+        assert_eq!(TokenVersion::new(0).to_string(), "v0");
+        assert_eq!(TokenVersion::new(42).to_string(), "v42");
+    }
+
+    #[test]
+    fn token_version_serde_roundtrip() {
+        let v = TokenVersion::new(7);
+        let json = serde_json::to_string(&v).expect("serialize");
+        assert_eq!(json, "7");
+        let back: TokenVersion = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, v);
+    }
+}

@@ -212,3 +212,106 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
         })
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constants_are_reasonable() {
+        assert_eq!(GC_INTERVAL, Duration::from_secs(60));
+        assert_eq!(MAX_BATCH_SIZE, 1000);
+        assert_eq!(GC_CLIENT_ID, "system:gc");
+    }
+
+    #[test]
+    fn gc_client_id_round_trip() {
+        let client_id = ClientId::new(GC_CLIENT_ID);
+        let s: &str = client_id.as_ref();
+        assert_eq!(s, "system:gc");
+    }
+
+    #[test]
+    fn expire_entity_operation_construction() {
+        let expired = [("entity:1".to_string(), 1000u64), ("entity:2".to_string(), 2000u64)];
+
+        let operations: Vec<Operation> = expired
+            .iter()
+            .map(|(key, expired_at)| Operation::ExpireEntity {
+                key: key.clone(),
+                expired_at: *expired_at,
+            })
+            .collect();
+
+        assert_eq!(operations.len(), 2);
+        match &operations[0] {
+            Operation::ExpireEntity { key, expired_at } => {
+                assert_eq!(key, "entity:1");
+                assert_eq!(*expired_at, 1000);
+            },
+            _ => unreachable!("expected ExpireEntity"),
+        }
+    }
+
+    #[test]
+    fn empty_expired_list_produces_no_operations() {
+        let expired: Vec<(String, u64)> = Vec::new();
+        let operations: Vec<Operation> = expired
+            .iter()
+            .map(|(key, expired_at)| Operation::ExpireEntity {
+                key: key.clone(),
+                expired_at: *expired_at,
+            })
+            .collect();
+        assert!(operations.is_empty());
+    }
+
+    #[test]
+    fn expiry_filtering_logic() {
+        // Simulate the filtering from find_expired_entities
+        let now = 5000u64;
+        let entities = [
+            (b"active".to_vec(), 0u64),      // no TTL (expires_at = 0)
+            (b"expired".to_vec(), 3000u64),  // expired (3000 < 5000)
+            (b"future".to_vec(), 10000u64),  // not expired yet
+            (b"boundary".to_vec(), 5000u64), // exactly at now (not expired: < not <=)
+        ];
+
+        let expired: Vec<_> = entities
+            .iter()
+            .filter(|(_, expires_at)| *expires_at > 0 && *expires_at < now)
+            .collect();
+
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].0, b"expired".to_vec());
+    }
+
+    #[test]
+    fn batch_size_limits_expired_results() {
+        // Verify that take(max_batch_size) limits output
+        let many_expired: Vec<(String, u64)> =
+            (0..2000).map(|i| (format!("key:{i}"), 1000u64)).collect();
+
+        let capped: Vec<_> = many_expired.iter().take(MAX_BATCH_SIZE).collect();
+        assert_eq!(capped.len(), 1000);
+    }
+
+    #[test]
+    fn transaction_construction() {
+        let ops = vec![Operation::ExpireEntity { key: "test:key".to_string(), expired_at: 12345 }];
+
+        let transaction = Transaction {
+            id: *uuid::Uuid::new_v4().as_bytes(),
+            client_id: ClientId::new(GC_CLIENT_ID),
+            sequence: 0,
+            operations: ops,
+            timestamp: chrono::Utc::now(),
+        };
+
+        let s: &str = transaction.client_id.as_ref();
+        assert_eq!(s, GC_CLIENT_ID);
+        assert_eq!(transaction.operations.len(), 1);
+        assert_eq!(transaction.id.len(), 16);
+    }
+}

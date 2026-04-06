@@ -1645,4 +1645,278 @@ mod tests {
     fn test_parse_hex_family_invalid_chars() {
         assert!(parse_hex_family("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_none());
     }
+
+    #[test]
+    fn test_parse_hex_family_uppercase() {
+        let family = [
+            0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+            0x66, 0x77,
+        ];
+        let hex = "ABCDEF01234567890011223344556677";
+        let parsed = parse_hex_family(hex).unwrap();
+        assert_eq!(parsed, family);
+    }
+
+    #[test]
+    fn test_parse_hex_family_mixed_case() {
+        let hex = "aAbBcCdD00112233eEfF4455AABB6677";
+        let parsed = parse_hex_family(hex);
+        assert!(parsed.is_some());
+    }
+
+    #[test]
+    fn test_parse_hex_family_empty() {
+        assert!(parse_hex_family("").is_none());
+    }
+
+    #[test]
+    fn test_list_rotated_keys_past_grace() {
+        let svc = create_test_service();
+        let now = Utc::now();
+        let past = now - Duration::hours(2);
+        let future = now + Duration::hours(2);
+
+        // Active key — should not be returned
+        let active =
+            make_signing_key(1, "active-kid", SigningKeyScope::Global, SigningKeyStatus::Active);
+        svc.store_signing_key(&active).unwrap();
+
+        // Rotated key with valid_until in the future — should not be returned
+        let mut rotated_future = make_signing_key(
+            2,
+            "rotated-future",
+            SigningKeyScope::Global,
+            SigningKeyStatus::Rotated,
+        );
+        rotated_future.valid_until = Some(future);
+        svc.store_signing_key(&rotated_future).unwrap();
+
+        // Rotated key with valid_until in the past — should be returned
+        let mut rotated_past = make_signing_key(
+            3,
+            "rotated-past",
+            SigningKeyScope::Organization(OrganizationId::new(1)),
+            SigningKeyStatus::Rotated,
+        );
+        rotated_past.valid_until = Some(past);
+        svc.store_signing_key(&rotated_past).unwrap();
+
+        // Revoked key — should not be returned
+        let revoked =
+            make_signing_key(4, "revoked-kid", SigningKeyScope::Global, SigningKeyStatus::Revoked);
+        svc.store_signing_key(&revoked).unwrap();
+
+        // Rotated key with no valid_until — should not be returned (valid_until is None)
+        let rotated_no_end = make_signing_key(
+            5,
+            "rotated-noend",
+            SigningKeyScope::Global,
+            SigningKeyStatus::Rotated,
+        );
+        svc.store_signing_key(&rotated_no_end).unwrap();
+
+        let kids = svc.list_rotated_keys_past_grace(now).unwrap();
+        assert_eq!(kids.len(), 1);
+        assert_eq!(kids[0], "rotated-past");
+    }
+
+    #[test]
+    fn test_update_signing_key_status_to_active() {
+        let svc = create_test_service();
+        let now = Utc::now();
+
+        // Store a rotated key
+        let mut key = make_signing_key(
+            1,
+            "kid-reactivate",
+            SigningKeyScope::Global,
+            SigningKeyStatus::Rotated,
+        );
+        key.rotated_at = Some(now - Duration::hours(1));
+        key.valid_until = Some(now + Duration::hours(3));
+        svc.store_signing_key(&key).unwrap();
+
+        // Re-activate it (Active status — no timestamp changes)
+        let updated = svc
+            .update_signing_key_status("kid-reactivate", SigningKeyStatus::Active, None, now)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(updated.status, SigningKeyStatus::Active);
+        // rotated_at and valid_until should remain unchanged
+        assert!(updated.rotated_at.is_some());
+        assert!(updated.valid_until.is_some());
+    }
+
+    #[test]
+    fn test_revoke_all_app_sessions() {
+        let svc = create_test_service();
+        let now = Utc::now();
+        let org = OrganizationId::new(10);
+        let app_id = inferadb_ledger_types::AppId::new(20);
+        let app_slug = AppSlug::new(2000);
+
+        // First, store an App entity directly so increment_app_token_version works
+        let app = crate::system::types::App {
+            id: app_id,
+            slug: app_slug,
+            organization: org,
+            name: "test-app".to_string(),
+            description: None,
+            enabled: true,
+            credentials: Default::default(),
+            version: inferadb_ledger_types::TokenVersion::default(),
+            created_at: now,
+            updated_at: now,
+        };
+        let app_key = crate::system::keys::SystemKeys::app_key(org, app_id);
+        let app_value = inferadb_ledger_types::encode(&app).unwrap();
+        let ops = vec![inferadb_ledger_types::Operation::SetEntity {
+            key: app_key,
+            value: app_value,
+            condition: None,
+            expires_at: None,
+        }];
+        svc.state.apply_operations(crate::system::service::SYSTEM_VAULT_ID, &ops, 0).unwrap();
+
+        // Store some tokens for this app
+        let family = [0xAAu8; 16];
+        let token = make_refresh_token(
+            1,
+            [0xBBu8; 32],
+            family,
+            TokenType::VaultAccess,
+            TokenSubject::App(app_slug),
+            Some(org),
+            Some(VaultId::new(5)),
+        );
+        svc.store_refresh_token(&token).unwrap();
+
+        let result = svc.revoke_all_app_sessions(org, app_id, app_slug, now).unwrap();
+        assert_eq!(result.revoked_count, 1);
+        assert_eq!(result.new_version.value(), 1);
+
+        // Token should be revoked
+        let t = svc.get_refresh_token_by_hash(&[0xBBu8; 32]).unwrap().unwrap();
+        assert!(t.revoked_at.is_some());
+    }
+
+    #[test]
+    fn test_increment_app_token_version_not_found() {
+        let svc = create_test_service();
+        let result = svc.increment_app_token_version(
+            OrganizationId::new(99),
+            inferadb_ledger_types::AppId::new(99),
+            Utc::now(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_delete_expired_refresh_tokens_with_org_and_vault_indexes() {
+        let svc = create_test_service();
+        let now = Utc::now();
+        let org = OrganizationId::new(42);
+        let app_slug = AppSlug::new(100);
+        let vault = VaultId::new(200);
+
+        // Expired token with org and vault indexes
+        let mut token = make_refresh_token(
+            1,
+            [0xCCu8; 32],
+            [0xDDu8; 16],
+            TokenType::VaultAccess,
+            TokenSubject::App(app_slug),
+            Some(org),
+            Some(vault),
+        );
+        token.expires_at = now - Duration::hours(2);
+
+        svc.store_refresh_token(&token).unwrap();
+
+        let result = svc.delete_expired_refresh_tokens(now).unwrap();
+        assert_eq!(result.expired_count, 1);
+
+        // Token should be gone
+        assert!(svc.get_refresh_token_by_hash(&[0xCCu8; 32]).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_revoke_token_family_empty_family() {
+        let svc = create_test_service();
+        let family = [0xFFu8; 16];
+
+        // No tokens in this family — revoke should succeed with count 0
+        let result = svc.revoke_token_family(&family, Utc::now()).unwrap();
+        assert_eq!(result.revoked_count, 0);
+    }
+
+    #[test]
+    fn test_revoke_all_subject_tokens_no_tokens() {
+        let svc = create_test_service();
+        let subject = TokenSubject::User(UserSlug::new(9999));
+
+        let result = svc.revoke_all_subject_tokens(&subject, Utc::now()).unwrap();
+        assert_eq!(result.revoked_count, 0);
+    }
+
+    #[test]
+    fn test_revoke_all_org_refresh_tokens_no_tokens() {
+        let svc = create_test_service();
+        let result =
+            svc.revoke_all_org_refresh_tokens(OrganizationId::new(9999), Utc::now()).unwrap();
+        assert_eq!(result.revoked_count, 0);
+    }
+
+    #[test]
+    fn test_store_refresh_token_with_org_index() {
+        let svc = create_test_service();
+        let org = OrganizationId::new(77);
+        let hash = [0xEEu8; 32];
+        let family = [0xF0u8; 16];
+
+        // Token with org but no vault (user session with org scope)
+        let token = make_refresh_token(
+            1,
+            hash,
+            family,
+            TokenType::UserSession,
+            TokenSubject::User(UserSlug::new(500)),
+            Some(org),
+            None,
+        );
+
+        svc.store_refresh_token(&token).unwrap();
+
+        // Verify org-scoped revocation finds it
+        let result = svc.revoke_all_org_refresh_tokens(org, Utc::now()).unwrap();
+        assert_eq!(result.revoked_count, 1);
+    }
+
+    #[test]
+    fn test_multiple_tokens_same_family_revoke() {
+        let svc = create_test_service();
+        let family = [0xA0u8; 16];
+        let subject = TokenSubject::User(UserSlug::new(600));
+
+        // Store 3 tokens in the same family
+        for i in 0..3 {
+            let mut hash = [0u8; 32];
+            hash[0] = i;
+            let token = make_refresh_token(
+                i64::from(i) + 1,
+                hash,
+                family,
+                TokenType::UserSession,
+                subject,
+                None,
+                None,
+            );
+            svc.store_refresh_token(&token).unwrap();
+        }
+
+        // Revoke by subject — should find the family once and revoke all 3
+        let result = svc.revoke_all_subject_tokens(&subject, Utc::now()).unwrap();
+        assert_eq!(result.revoked_count, 3);
+    }
 }

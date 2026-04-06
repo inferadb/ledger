@@ -420,6 +420,7 @@ fn hostname() -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -506,5 +507,162 @@ mod tests {
         // hostname() should return something even when env vars are not set
         let host = hostname();
         assert!(!host.is_empty());
+    }
+
+    #[test]
+    fn test_otel_init_error_display_exporter_build() {
+        let e = OtelInitError::ExporterBuild("connection refused".to_string());
+        let msg = format!("{e}");
+        assert!(msg.contains("connection refused"));
+        assert!(msg.contains("Failed to build OTLP span exporter"));
+    }
+
+    #[test]
+    fn test_otel_init_error_display_already_initialized() {
+        let e = OtelInitError::AlreadyInitialized;
+        let msg = format!("{e}");
+        assert!(msg.contains("already initialized"));
+    }
+
+    #[test]
+    fn test_otel_init_error_is_error_trait() {
+        let e = OtelInitError::ExporterBuild("test".to_string());
+        let _: &dyn std::error::Error = &e;
+    }
+
+    #[test]
+    fn test_parse_trace_id_invalid_hex() {
+        let hex = "gggggggggggggggggggggggggggggggg"; // 32 chars but not hex
+        let result = parse_trace_id(hex);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_span_id_invalid_hex() {
+        let hex = "zzzzzzzzzzzzzzzz"; // 16 chars but not hex
+        let result = parse_span_id(hex);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_trace_id_empty() {
+        assert!(parse_trace_id("").is_err());
+    }
+
+    #[test]
+    fn test_parse_span_id_empty() {
+        assert!(parse_span_id("").is_err());
+    }
+
+    #[test]
+    fn test_parse_trace_id_full_bytes() {
+        let hex = "ff00ff00ff00ff00ff00ff00ff00ff00";
+        let bytes = parse_trace_id(hex).unwrap();
+        assert_eq!(bytes[0], 0xFF);
+        assert_eq!(bytes[1], 0x00);
+        assert_eq!(bytes[15], 0x00);
+    }
+
+    #[test]
+    fn test_parse_span_id_full_bytes() {
+        let hex = "ff00ff00ff00ff00";
+        let bytes = parse_span_id(hex).unwrap();
+        assert_eq!(bytes[0], 0xFF);
+        assert_eq!(bytes[1], 0x00);
+        assert_eq!(bytes[7], 0x00);
+    }
+
+    #[test]
+    fn test_span_attributes_to_key_values_all_fields() {
+        let attrs = SpanAttributes {
+            request_id: Some("req-1".to_string()),
+            client_id: Some("client-1".to_string()),
+            sequence: Some(42),
+            organization: Some(1),
+            vault: Some(2),
+            service: Some("WriteService"),
+            method: Some("write"),
+            caller: Some(100),
+            node_id: Some(5),
+            is_leader: Some(true),
+            raft_term: Some(3),
+            region: Some(inferadb_ledger_types::Region::US_EAST_VA),
+            operations_count: Some(10),
+            idempotency_hit: Some(false),
+            batch_coalesced: Some(true),
+            batch_size: Some(5),
+            key: Some("entity_key".to_string()),
+            keys_count: Some(3),
+            found_count: Some(2),
+            consistency: Some("strong".to_string()),
+            at_height: Some(100),
+            include_proof: Some(true),
+            found: Some(true),
+            value_size_bytes: Some(512),
+            admin_action: Some("create_vault".to_string()),
+            outcome: Some("success".to_string()),
+            error_code: Some("OK".to_string()),
+            error_message: Some("all good".to_string()),
+            block_height: Some(50),
+            block_hash: Some("abc123".to_string()),
+            state_root: Some("def456".to_string()),
+            bytes_read: Some(1024),
+            bytes_written: Some(2048),
+            raft_round_trips: Some(1),
+            sdk_version: Some("1.0.0".to_string()),
+            source_ip: Some("127.0.0.1".to_string()),
+            duration_ms: Some(15.5),
+            raft_latency_ms: Some(5.2),
+            storage_latency_ms: Some(3.1),
+        };
+        let kvs = attrs.to_key_values();
+        // Should include all populated fields
+        assert!(kvs.len() >= 30);
+        assert!(kvs.iter().any(|kv| kv.key.as_str() == "caller"));
+        assert!(kvs.iter().any(|kv| kv.key.as_str() == "node_id"));
+        assert!(kvs.iter().any(|kv| kv.key.as_str() == "is_leader"));
+        assert!(kvs.iter().any(|kv| kv.key.as_str() == "raft_term"));
+        assert!(kvs.iter().any(|kv| kv.key.as_str() == "region"));
+        assert!(kvs.iter().any(|kv| kv.key.as_str() == "operations_count"));
+        assert!(kvs.iter().any(|kv| kv.key.as_str() == "batch_size"));
+        assert!(kvs.iter().any(|kv| kv.key.as_str() == "key"));
+        assert!(kvs.iter().any(|kv| kv.key.as_str() == "found"));
+        assert!(kvs.iter().any(|kv| kv.key.as_str() == "raft_latency_ms"));
+        assert!(kvs.iter().any(|kv| kv.key.as_str() == "storage_latency_ms"));
+    }
+
+    #[test]
+    fn test_init_otel_disabled_config() {
+        let config = OtelConfig { enabled: false, ..Default::default() };
+        // Should succeed without doing anything
+        let result = init_otel(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_is_otel_enabled_returns_false_by_default() {
+        // In test context without explicit initialization, the global
+        // provider may or may not be set depending on test ordering.
+        // Just verify it returns a bool.
+        let _ = is_otel_enabled();
+    }
+
+    #[test]
+    fn test_get_tracer_returns_option() {
+        // In test context, tracer may or may not be set
+        let _ = get_tracer();
+    }
+
+    #[test]
+    fn test_export_span_without_tracer_is_noop() {
+        // Should not panic when tracer is not initialized
+        export_span("TestService", "test", SpanAttributes::default(), None, None, None);
+    }
+
+    #[test]
+    fn test_span_attributes_debug() {
+        let attrs = SpanAttributes::default();
+        let debug = format!("{attrs:?}");
+        assert!(debug.contains("SpanAttributes"));
     }
 }

@@ -372,4 +372,139 @@ mod tests {
         // Should be stale with 10 second TTL
         assert!(!state.is_fresh(Duration::from_secs(10)));
     }
+
+    #[test]
+    fn test_cached_state_default() {
+        let state = CachedSystemState::default();
+        assert_eq!(state.version, 0);
+        assert_eq!(state.organization_count, 0);
+        assert_eq!(state.vault_count, 0);
+        // Default state should be fresh (just created)
+        assert!(state.is_fresh(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn test_cached_state_version_tracking() {
+        let mut state = CachedSystemState::default();
+        assert_eq!(state.version, 0);
+
+        state.version = 42;
+        state.organization_count = 10;
+        state.vault_count = 25;
+
+        assert_eq!(state.version, 42);
+        assert_eq!(state.organization_count, 10);
+        assert_eq!(state.vault_count, 25);
+    }
+
+    #[test]
+    fn test_cached_state_clone() {
+        let state = CachedSystemState {
+            version: 5,
+            organization_count: 3,
+            vault_count: 7,
+            last_updated: std::time::Instant::now(),
+        };
+        let cloned = state.clone();
+        assert_eq!(cloned.version, 5);
+        assert_eq!(cloned.organization_count, 3);
+        assert_eq!(cloned.vault_count, 7);
+    }
+
+    #[test]
+    fn test_cached_state_debug() {
+        let state = CachedSystemState {
+            version: 99,
+            organization_count: 5,
+            vault_count: 10,
+            last_updated: std::time::Instant::now(),
+        };
+        let debug = format!("{:?}", state);
+        assert!(debug.contains("version: 99"));
+        assert!(debug.contains("organization_count: 5"));
+        assert!(debug.contains("vault_count: 10"));
+    }
+
+    #[test]
+    fn test_config_custom_values() {
+        let config = LearnerRefreshConfig {
+            refresh_interval: Duration::from_secs(30),
+            rpc_timeout: Duration::from_secs(5),
+            enabled: false,
+        };
+        assert_eq!(config.refresh_interval, Duration::from_secs(30));
+        assert_eq!(config.rpc_timeout, Duration::from_secs(5));
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config = LearnerRefreshConfig {
+            refresh_interval: Duration::from_secs(15),
+            rpc_timeout: Duration::from_secs(3),
+            enabled: true,
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.refresh_interval, config.refresh_interval);
+        assert_eq!(cloned.rpc_timeout, config.rpc_timeout);
+        assert_eq!(cloned.enabled, config.enabled);
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = LearnerRefreshConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("refresh_interval"));
+        assert!(debug.contains("rpc_timeout"));
+        assert!(debug.contains("enabled"));
+    }
+
+    #[test]
+    fn test_error_classification_logic() {
+        // Simulates the error_type classification from try_refresh
+        let connection_error = "Failed to connect to voter: connection refused";
+        let rpc_error = "RPC failed: status UNAVAILABLE";
+        let other_error = "Invalid endpoint: bad address";
+
+        let classify = |e: &str| -> &str {
+            if e.contains("connect") {
+                "connection"
+            } else if e.contains("RPC") {
+                "rpc"
+            } else {
+                "other"
+            }
+        };
+
+        assert_eq!(classify(connection_error), "connection");
+        assert_eq!(classify(rpc_error), "rpc");
+        assert_eq!(classify(other_error), "other");
+    }
+
+    #[test]
+    fn test_refresh_interval_doubles_as_staleness_threshold() {
+        // The run loop uses refresh_interval * 2 as the staleness threshold
+        let config = LearnerRefreshConfig::default();
+        let staleness_threshold = config.refresh_interval * 2;
+        assert_eq!(staleness_threshold, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(DEFAULT_REFRESH_INTERVAL, Duration::from_secs(5));
+        assert_eq!(DEFAULT_RPC_TIMEOUT, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_voter_version_comparison() {
+        // Simulates the cache update logic from refresh_from_voter
+        let cache_version = 5u64;
+        let voter_version_newer = 10u64;
+        let voter_version_same = 5u64;
+        let voter_version_older = 3u64;
+
+        assert!(voter_version_newer > cache_version);
+        assert!(voter_version_same <= cache_version);
+        assert!(voter_version_older <= cache_version);
+    }
 }

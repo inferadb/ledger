@@ -1290,3 +1290,123 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         Ok(Response::new(DeclineInvitationResponse { invitation: Some(proto_inv) }))
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // Constants
+    // =========================================================================
+
+    #[test]
+    fn constants_are_reasonable() {
+        const {
+            assert!(MAX_PENDING_PER_EMAIL > 0);
+            assert!(MAX_TOTAL_PER_EMAIL >= MAX_PENDING_PER_EMAIL);
+            assert!(DECLINE_COOLDOWN_SECS > 0);
+            assert!(SCAN_CEILING > 0);
+            assert!(MAX_LIST_INVITATIONS > 0);
+        }
+    }
+
+    #[test]
+    fn decline_cooldown_is_24_hours() {
+        const { assert!(DECLINE_COOLDOWN_SECS == 86_400) }
+    }
+
+    // =========================================================================
+    // email_matches (constant-time email HMAC comparison)
+    // =========================================================================
+
+    #[test]
+    fn email_matches_single_match() {
+        let user_hmacs = vec!["abc123".to_string()];
+        assert!(InvitationService::email_matches(&user_hmacs, "abc123"));
+    }
+
+    #[test]
+    fn email_matches_no_match() {
+        let user_hmacs = vec!["abc123".to_string()];
+        assert!(!InvitationService::email_matches(&user_hmacs, "xyz789"));
+    }
+
+    #[test]
+    fn email_matches_multiple_hmacs_second_matches() {
+        let user_hmacs = vec!["aaa".to_string(), "bbb".to_string(), "ccc".to_string()];
+        assert!(InvitationService::email_matches(&user_hmacs, "bbb"));
+    }
+
+    #[test]
+    fn email_matches_empty_user_hmacs() {
+        let user_hmacs: Vec<String> = vec![];
+        assert!(!InvitationService::email_matches(&user_hmacs, "abc123"));
+    }
+
+    #[test]
+    fn email_matches_empty_invitation_hmac() {
+        let user_hmacs = vec!["abc".to_string()];
+        assert!(!InvitationService::email_matches(&user_hmacs, ""));
+    }
+
+    #[test]
+    fn email_matches_both_empty() {
+        let user_hmacs: Vec<String> = vec!["".to_string()];
+        assert!(InvitationService::email_matches(&user_hmacs, ""));
+    }
+
+    #[test]
+    fn email_matches_case_sensitive() {
+        let user_hmacs = vec!["AbC".to_string()];
+        assert!(!InvitationService::email_matches(&user_hmacs, "abc"));
+    }
+
+    #[test]
+    fn email_matches_last_element_matches() {
+        let user_hmacs: Vec<String> = (0..10).map(|i| format!("hmac_{i}")).collect();
+        assert!(InvitationService::email_matches(&user_hmacs, "hmac_9"));
+    }
+
+    // =========================================================================
+    // generate_token
+    // =========================================================================
+
+    #[test]
+    fn generate_token_returns_hex_and_hash() {
+        let (hex, hash) = InvitationService::generate_token();
+        // Hex string should be 64 chars (32 bytes * 2 hex chars)
+        assert_eq!(hex.len(), 64, "hex token should be 64 characters");
+        // Hash should be 32 bytes (SHA-256)
+        assert_eq!(hash.len(), 32, "hash should be 32 bytes");
+    }
+
+    #[test]
+    fn generate_token_unique() {
+        let (hex1, hash1) = InvitationService::generate_token();
+        let (hex2, hash2) = InvitationService::generate_token();
+        assert_ne!(hex1, hex2, "two generated tokens should differ");
+        assert_ne!(hash1, hash2, "two generated hashes should differ");
+    }
+
+    #[test]
+    fn generate_token_hash_is_sha256_of_raw_bytes() {
+        let (hex, hash) = InvitationService::generate_token();
+        // Decode the hex back to raw bytes and verify the hash
+        let raw_bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        let expected_hash: [u8; 32] = Sha256::digest(&raw_bytes).into();
+        assert_eq!(hash, expected_hash);
+    }
+
+    #[test]
+    fn generate_token_hex_is_valid_lowercase() {
+        let (hex, _) = InvitationService::generate_token();
+        assert!(
+            hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "token should be lowercase hex"
+        );
+    }
+}

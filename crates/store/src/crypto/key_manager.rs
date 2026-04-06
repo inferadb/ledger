@@ -1574,4 +1574,485 @@ mod tests {
         assert!(versions[&Region::US_EAST_VA].is_empty());
         assert!(versions[&Region::US_WEST_OR].is_empty());
     }
+
+    // ─── InMemoryKeyManager tests ──────────────────────────────
+
+    #[test]
+    fn test_in_memory_key_manager_new_empty() {
+        let manager = InMemoryKeyManager::new();
+        assert!(manager.current_rmk(Region::GLOBAL).is_err());
+        assert!(manager.list_versions(Region::GLOBAL).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_in_memory_key_manager_default() {
+        let manager = InMemoryKeyManager::default();
+        assert!(manager.current_rmk(Region::GLOBAL).is_err());
+    }
+
+    #[test]
+    fn test_in_memory_key_manager_generate_for_regions() {
+        let manager =
+            InMemoryKeyManager::generate_for_regions(&[Region::GLOBAL, Region::US_EAST_VA]);
+        assert!(manager.current_rmk(Region::GLOBAL).is_ok());
+        assert!(manager.current_rmk(Region::US_EAST_VA).is_ok());
+        // Unprovisioned region
+        assert!(manager.current_rmk(Region::US_WEST_OR).is_err());
+    }
+
+    #[test]
+    fn test_in_memory_key_manager_insert_and_retrieve() {
+        let manager = InMemoryKeyManager::new();
+        manager.insert(Region::GLOBAL, 1, [0xAA; 32]);
+        let rmk = manager.rmk_by_version(Region::GLOBAL, 1).unwrap();
+        assert_eq!(rmk.version, 1);
+        assert_eq!(rmk.as_bytes(), &[0xAA; 32]);
+    }
+
+    #[test]
+    fn test_in_memory_key_manager_current_returns_highest() {
+        let manager = InMemoryKeyManager::new();
+        manager.insert(Region::GLOBAL, 1, [0xAA; 32]);
+        manager.insert(Region::GLOBAL, 3, [0xCC; 32]);
+        manager.insert(Region::GLOBAL, 2, [0xBB; 32]);
+        let rmk = manager.current_rmk(Region::GLOBAL).unwrap();
+        assert_eq!(rmk.version, 3);
+    }
+
+    #[test]
+    fn test_in_memory_key_manager_rotate() {
+        let manager = InMemoryKeyManager::new();
+        manager.insert(Region::GLOBAL, 1, [0xAA; 32]);
+
+        let v2 = manager.rotate_rmk(Region::GLOBAL).unwrap();
+        assert_eq!(v2, 2);
+        assert!(manager.rmk_by_version(Region::GLOBAL, 2).is_ok());
+    }
+
+    #[test]
+    fn test_in_memory_key_manager_rotate_empty() {
+        let manager = InMemoryKeyManager::new();
+        let v1 = manager.rotate_rmk(Region::GLOBAL).unwrap();
+        assert_eq!(v1, 1);
+    }
+
+    #[test]
+    fn test_in_memory_key_manager_decommission() {
+        let manager = InMemoryKeyManager::new();
+        manager.insert(Region::GLOBAL, 1, [0xAA; 32]);
+        manager.insert(Region::GLOBAL, 2, [0xBB; 32]);
+
+        manager.decommission_rmk(Region::GLOBAL, 1).unwrap();
+        assert!(manager.rmk_by_version(Region::GLOBAL, 1).is_err());
+        assert!(manager.rmk_by_version(Region::GLOBAL, 2).is_ok());
+    }
+
+    #[test]
+    fn test_in_memory_key_manager_decommission_nonexistent() {
+        let manager = InMemoryKeyManager::new();
+        assert!(manager.decommission_rmk(Region::GLOBAL, 99).is_err());
+    }
+
+    #[test]
+    fn test_in_memory_key_manager_list_versions() {
+        let manager = InMemoryKeyManager::new();
+        manager.insert(Region::GLOBAL, 1, [0xAA; 32]);
+        manager.insert(Region::GLOBAL, 2, [0xBB; 32]);
+
+        let versions = manager.list_versions(Region::GLOBAL).unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].version, 1);
+        assert_eq!(versions[0].status, RmkStatus::Deprecated);
+        assert_eq!(versions[1].version, 2);
+        assert_eq!(versions[1].status, RmkStatus::Active);
+    }
+
+    #[test]
+    fn test_in_memory_key_manager_health_check_ok() {
+        let manager = InMemoryKeyManager::generate_for_regions(&[Region::GLOBAL]);
+        assert!(manager.health_check(Region::GLOBAL).is_ok());
+    }
+
+    #[test]
+    fn test_in_memory_key_manager_health_check_missing() {
+        let manager = InMemoryKeyManager::new();
+        assert!(manager.health_check(Region::GLOBAL).is_err());
+    }
+
+    // ─── hex_digit tests ───────────────────────────────────────
+
+    #[test]
+    fn test_hex_digit_lowercase() {
+        assert_eq!(hex_digit(b'0'), Some(0));
+        assert_eq!(hex_digit(b'9'), Some(9));
+        assert_eq!(hex_digit(b'a'), Some(10));
+        assert_eq!(hex_digit(b'f'), Some(15));
+    }
+
+    #[test]
+    fn test_hex_digit_uppercase() {
+        assert_eq!(hex_digit(b'A'), Some(10));
+        assert_eq!(hex_digit(b'F'), Some(15));
+    }
+
+    #[test]
+    fn test_hex_digit_invalid() {
+        assert_eq!(hex_digit(b'g'), None);
+        assert_eq!(hex_digit(b'G'), None);
+        assert_eq!(hex_digit(b' '), None);
+        assert_eq!(hex_digit(b'\0'), None);
+    }
+
+    // ─── EnvKeyManager list_versions tests ─────────────────────
+
+    #[test]
+    fn test_env_key_manager_list_versions_multiple() {
+        let mut keys = HashMap::new();
+        keys.insert((Region::GLOBAL, 1), [0xAA; 32]);
+        keys.insert((Region::GLOBAL, 2), [0xBB; 32]);
+        keys.insert((Region::GLOBAL, 3), [0xCC; 32]);
+        let manager = EnvKeyManager { keys };
+
+        let versions = manager.list_versions(Region::GLOBAL).unwrap();
+        assert_eq!(versions.len(), 3);
+        assert_eq!(versions[0].status, RmkStatus::Deprecated);
+        assert_eq!(versions[1].status, RmkStatus::Deprecated);
+        assert_eq!(versions[2].status, RmkStatus::Active);
+    }
+
+    #[test]
+    fn test_env_key_manager_list_versions_empty() {
+        let manager = EnvKeyManager { keys: HashMap::new() };
+        let versions = manager.list_versions(Region::GLOBAL).unwrap();
+        assert!(versions.is_empty());
+    }
+
+    #[test]
+    fn test_env_key_manager_rmk_by_version_missing() {
+        let manager = EnvKeyManager { keys: HashMap::new() };
+        assert!(manager.rmk_by_version(Region::GLOBAL, 1).is_err());
+    }
+
+    #[test]
+    fn test_env_key_manager_health_check_missing_region() {
+        let manager = EnvKeyManager { keys: HashMap::new() };
+        assert!(manager.health_check(Region::GLOBAL).is_err());
+    }
+
+    // ─── SecretsManagerKeyManager edge cases ───────────────────
+
+    #[test]
+    fn test_secrets_manager_rmk_by_version_cached() {
+        let client = MockSecretsClient::new();
+        client.add_secret("ledger/rmk/global", 1, &[0xAA; 32]);
+        let config = mock_config();
+        let manager = SecretsManagerKeyManager::new(Box::new(client), config);
+
+        // First call fetches and caches
+        let rmk1 = manager.rmk_by_version(Region::GLOBAL, 1).unwrap();
+        // Second call hits cache
+        let rmk2 = manager.rmk_by_version(Region::GLOBAL, 1).unwrap();
+        assert_eq!(rmk1.as_bytes(), rmk2.as_bytes());
+    }
+
+    #[test]
+    fn test_secrets_manager_empty_versions() {
+        let client = MockSecretsClient::new();
+        let config = mock_config();
+        let manager = SecretsManagerKeyManager::new(Box::new(client), config);
+
+        assert!(manager.current_rmk(Region::GLOBAL).is_err());
+    }
+
+    #[test]
+    fn test_secrets_manager_list_versions_empty() {
+        let client = MockSecretsClient::new();
+        let config = mock_config();
+        let manager = SecretsManagerKeyManager::new(Box::new(client), config);
+
+        let versions = manager.list_versions(Region::GLOBAL).unwrap();
+        assert!(versions.is_empty());
+    }
+
+    // ─── EnvKeyManager parse_env_key edge cases ────────────────
+
+    #[test]
+    fn test_parse_env_key_version_zero() {
+        let result = EnvKeyManager::parse_env_key("GLOBAL_V0");
+        assert_eq!(result, Some((Region::GLOBAL, 0)));
+    }
+
+    #[test]
+    fn test_parse_env_key_high_version() {
+        let result = EnvKeyManager::parse_env_key("GLOBAL_V999");
+        assert_eq!(result, Some((Region::GLOBAL, 999)));
+    }
+
+    #[test]
+    fn test_parse_env_key_non_numeric_version() {
+        let result = EnvKeyManager::parse_env_key("GLOBAL_Vabc");
+        assert!(result.is_none());
+    }
+
+    // ─── VersionSidecarEntry tests ─────────────────────────────
+
+    #[test]
+    fn test_version_sidecar_entry_serde_roundtrip() {
+        let entries = vec![
+            VersionSidecarEntry { version: 1, status: RmkStatus::Active },
+            VersionSidecarEntry { version: 2, status: RmkStatus::Deprecated },
+            VersionSidecarEntry { version: 3, status: RmkStatus::Decommissioned },
+        ];
+        let json = serde_json::to_string(&entries).unwrap();
+        let recovered: Vec<VersionSidecarEntry> = serde_json::from_str(&json).unwrap();
+        assert_eq!(entries, recovered);
+    }
+
+    // ─── validate_rmk_provisioning with no active version ──────
+
+    #[test]
+    fn test_validate_provisioning_no_active_version() {
+        let manager = InMemoryKeyManager::new();
+        // Insert key but then decommission it — list_versions returns empty
+        // after decommission since InMemoryKeyManager removes the key entirely
+        manager.insert(Region::GLOBAL, 1, [0xAA; 32]);
+        manager.insert(Region::US_EAST_VA, 1, [0xBB; 32]);
+        manager.insert(Region::US_WEST_OR, 1, [0xCC; 32]);
+
+        // This should pass since all regions have version 1 active
+        assert!(validate_rmk_provisioning(&manager, Region::US_EAST_VA).is_ok());
+
+        // Decommission one region's only key
+        manager.decommission_rmk(Region::GLOBAL, 1).unwrap();
+
+        // Now validation should fail
+        let err = validate_rmk_provisioning(&manager, Region::US_EAST_VA).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("No RMK versions") || msg.contains("No active"));
+    }
+
+    // ─── FileKeyManager discover_versions_from_files ────────────
+
+    #[test]
+    fn test_discover_versions_from_files_no_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = FileKeyManager::new(dir.path().to_path_buf());
+
+        let versions = manager.discover_versions_from_files(Region::GLOBAL).unwrap();
+        assert!(versions.is_empty());
+    }
+
+    #[test]
+    fn test_discover_versions_from_files_ignores_non_key_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let region_dir = dir.path().join("global");
+        fs::create_dir_all(&region_dir).unwrap();
+
+        // Write valid key files and some non-key files
+        fs::write(region_dir.join("v1.key"), [0xAA; 32]).unwrap();
+        fs::write(region_dir.join("v2.key"), [0xBB; 32]).unwrap();
+        fs::write(region_dir.join("notes.txt"), "not a key").unwrap();
+        fs::write(region_dir.join("versions.json"), "[]").unwrap();
+
+        let manager = FileKeyManager::new(dir.path().to_path_buf());
+        let versions = manager.discover_versions_from_files(Region::GLOBAL).unwrap();
+        assert_eq!(versions, vec![1, 2]);
+    }
+
+    // ─── FileKeyManager decommission nonexistent ────────────────
+
+    #[test]
+    fn test_file_key_manager_decommission_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = FileKeyManager::new(dir.path().to_path_buf());
+
+        assert!(manager.decommission_rmk(Region::GLOBAL, 99).is_err());
+    }
+
+    // ─── SecretsManagerKeyManager rotation caches ──────────────
+
+    #[test]
+    fn test_secrets_manager_rotate_caches_new_key() {
+        let client = MockSecretsClient::new();
+        client.add_secret("ledger/rmk/global", 1, &[0xAA; 32]);
+        let config = mock_config();
+        let manager = SecretsManagerKeyManager::new(Box::new(client), config);
+
+        // Rotate creates version 2
+        let v2 = manager.rotate_rmk(Region::GLOBAL).unwrap();
+        assert_eq!(v2, 2);
+
+        // Newly rotated key should be retrievable (cached)
+        let rmk = manager.rmk_by_version(Region::GLOBAL, 2).unwrap();
+        assert_eq!(rmk.version, 2);
+    }
+
+    #[test]
+    fn test_secrets_manager_decommission_removes_from_cache() {
+        let client = MockSecretsClient::new();
+        client.add_secret("ledger/rmk/global", 1, &[0xAA; 32]);
+        client.add_secret("ledger/rmk/global", 2, &[0xBB; 32]);
+        let config = mock_config();
+        let manager = SecretsManagerKeyManager::new(Box::new(client), config);
+
+        // Fetch v1 to populate cache
+        let _rmk = manager.rmk_by_version(Region::GLOBAL, 1).unwrap();
+
+        // Decommission removes from both backend and cache
+        manager.decommission_rmk(Region::GLOBAL, 1).unwrap();
+
+        // Should fail (removed from backend)
+        assert!(manager.rmk_by_version(Region::GLOBAL, 1).is_err());
+    }
+
+    // ─── validate_rmk_provisioning: all decommissioned ─────────
+
+    #[test]
+    fn test_validate_provisioning_all_decommissioned_no_active() {
+        // Manually set up a FileKeyManager with versions.json listing only
+        // decommissioned versions
+        let dir = tempfile::tempdir().unwrap();
+        let region_dir = dir.path().join("global");
+        fs::create_dir_all(&region_dir).unwrap();
+
+        // Write versions.json with only decommissioned entries
+        let entries = vec![VersionSidecarEntry { version: 1, status: RmkStatus::Decommissioned }];
+        let data = serde_json::to_string_pretty(&entries).unwrap();
+        fs::write(region_dir.join("versions.json"), data).unwrap();
+
+        // Provision the other required regions normally
+        let manager = FileKeyManager::new(dir.path().to_path_buf());
+        manager.rotate_rmk(Region::US_EAST_VA).unwrap();
+        manager.rotate_rmk(Region::US_WEST_OR).unwrap();
+
+        let err = validate_rmk_provisioning(&manager, Region::US_EAST_VA).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("No active"), "expected 'No active' in error message, got: {msg}");
+    }
+
+    // ─── InMemoryKeyManager: multi-region scenarios ────────────
+
+    #[test]
+    fn test_in_memory_key_manager_multi_region_isolation() {
+        let manager = InMemoryKeyManager::new();
+        manager.insert(Region::GLOBAL, 1, [0xAA; 32]);
+        manager.insert(Region::US_EAST_VA, 1, [0xBB; 32]);
+        manager.insert(Region::US_EAST_VA, 2, [0xCC; 32]);
+
+        // GLOBAL should have 1 version
+        let global_versions = manager.list_versions(Region::GLOBAL).unwrap();
+        assert_eq!(global_versions.len(), 1);
+
+        // US_EAST_VA should have 2 versions
+        let va_versions = manager.list_versions(Region::US_EAST_VA).unwrap();
+        assert_eq!(va_versions.len(), 2);
+
+        // Decommission from one region doesn't affect another
+        manager.decommission_rmk(Region::US_EAST_VA, 1).unwrap();
+        assert!(manager.rmk_by_version(Region::US_EAST_VA, 1).is_err());
+        assert!(manager.rmk_by_version(Region::GLOBAL, 1).is_ok());
+    }
+
+    #[test]
+    fn test_in_memory_key_manager_rotate_increments_from_highest() {
+        let manager = InMemoryKeyManager::new();
+        // Insert non-sequential versions
+        manager.insert(Region::GLOBAL, 5, [0xAA; 32]);
+        manager.insert(Region::GLOBAL, 10, [0xBB; 32]);
+
+        let new_version = manager.rotate_rmk(Region::GLOBAL).unwrap();
+        assert_eq!(new_version, 11, "should increment from highest (10)");
+    }
+
+    // ─── SecretsManagerKeyManager: unmapped region ─────────────
+
+    #[test]
+    fn test_secrets_manager_rotate_unmapped_region() {
+        let client = MockSecretsClient::new();
+        let config = mock_config();
+        let manager = SecretsManagerKeyManager::new(Box::new(client), config);
+
+        let err = manager.rotate_rmk(Region::DE_CENTRAL_FRANKFURT).unwrap_err();
+        assert!(err.to_string().contains("No secret path configured"));
+    }
+
+    #[test]
+    fn test_secrets_manager_decommission_unmapped_region() {
+        let client = MockSecretsClient::new();
+        let config = mock_config();
+        let manager = SecretsManagerKeyManager::new(Box::new(client), config);
+
+        let err = manager.decommission_rmk(Region::DE_CENTRAL_FRANKFURT, 1).unwrap_err();
+        assert!(err.to_string().contains("No secret path configured"));
+    }
+
+    #[test]
+    fn test_secrets_manager_health_check_unmapped_region() {
+        let client = MockSecretsClient::new();
+        let config = mock_config();
+        let manager = SecretsManagerKeyManager::new(Box::new(client), config);
+
+        let err = manager.health_check(Region::DE_CENTRAL_FRANKFURT).unwrap_err();
+        assert!(err.to_string().contains("No secret path configured"));
+    }
+
+    // ─── FileKeyManager: rotate multiple regions independently ──
+
+    #[test]
+    fn test_file_key_manager_multiple_regions_independent() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = FileKeyManager::new(dir.path().to_path_buf());
+
+        // Rotate different numbers of times in different regions
+        manager.rotate_rmk(Region::GLOBAL).unwrap();
+        manager.rotate_rmk(Region::US_EAST_VA).unwrap();
+        manager.rotate_rmk(Region::US_EAST_VA).unwrap();
+        manager.rotate_rmk(Region::US_EAST_VA).unwrap();
+
+        let global_versions = manager.list_versions(Region::GLOBAL).unwrap();
+        let va_versions = manager.list_versions(Region::US_EAST_VA).unwrap();
+
+        assert_eq!(global_versions.len(), 1);
+        assert_eq!(va_versions.len(), 3);
+
+        // Current of each should be the latest
+        assert_eq!(manager.current_rmk(Region::GLOBAL).unwrap().version, 1);
+        assert_eq!(manager.current_rmk(Region::US_EAST_VA).unwrap().version, 3);
+    }
+
+    // ─── rmk_versions_for_health with protected region ─────────
+
+    #[test]
+    fn test_rmk_versions_for_health_protected_region() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = FileKeyManager::new(dir.path().to_path_buf());
+
+        manager.rotate_rmk(Region::GLOBAL).unwrap();
+        manager.rotate_rmk(Region::US_EAST_VA).unwrap();
+        manager.rotate_rmk(Region::US_WEST_OR).unwrap();
+        manager.rotate_rmk(Region::DE_CENTRAL_FRANKFURT).unwrap();
+
+        // Protected region node needs 4 regions
+        let versions = rmk_versions_for_health(&manager, Region::DE_CENTRAL_FRANKFURT);
+        assert_eq!(versions.len(), 4);
+        assert!(versions.contains_key(&Region::DE_CENTRAL_FRANKFURT));
+    }
+
+    // ─── decode_hex edge cases ─────────────────────────────────
+
+    #[test]
+    fn test_decode_hex_with_whitespace() {
+        // decode_hex trims whitespace
+        let hex = format!("  {}  ", "ab".repeat(32));
+        let result = EnvKeyManager::decode_hex(&hex);
+        assert_eq!(result, Some([0xAB; 32]));
+    }
+
+    #[test]
+    fn test_decode_hex_mixed_case() {
+        // Mix of upper and lowercase hex digits
+        let hex = "aAbBcCdDeEfF0011223344556677889900aAbBcCdDeEfF001122334455667788";
+        let result = EnvKeyManager::decode_hex(hex);
+        assert!(result.is_some());
+    }
 }

@@ -1748,4 +1748,124 @@ mod tests {
         let err = validate_not_keys_directory(backup_path, keys_dir).unwrap_err();
         assert!(matches!(err, BackupError::KeyDirectoryExcluded { .. }));
     }
+
+    // ── validate_backup_id tests ──
+
+    #[test]
+    fn test_validate_backup_id_valid() {
+        assert!(validate_backup_id("20260101T000000Z-000001000").is_ok());
+        assert!(validate_backup_id("simple-id").is_ok());
+    }
+
+    #[test]
+    fn test_validate_backup_id_empty() {
+        let err = validate_backup_id("").unwrap_err();
+        assert!(matches!(err, BackupError::InvalidBackupId { .. }));
+    }
+
+    #[test]
+    fn test_validate_backup_id_slash() {
+        let err = validate_backup_id("foo/bar").unwrap_err();
+        assert!(matches!(err, BackupError::InvalidBackupId { .. }));
+    }
+
+    #[test]
+    fn test_validate_backup_id_backslash() {
+        let err = validate_backup_id("foo\\bar").unwrap_err();
+        assert!(matches!(err, BackupError::InvalidBackupId { .. }));
+    }
+
+    #[test]
+    fn test_validate_backup_id_dotdot() {
+        let err = validate_backup_id("..sneaky").unwrap_err();
+        assert!(matches!(err, BackupError::InvalidBackupId { .. }));
+    }
+
+    // ── BackupError Display tests ──
+
+    #[test]
+    fn test_backup_error_display_io() {
+        let e =
+            BackupError::Io { source: std::io::Error::new(std::io::ErrorKind::NotFound, "gone") };
+        assert!(format!("{e}").contains("Backup IO error"));
+    }
+
+    #[test]
+    fn test_backup_error_display_not_found() {
+        let e = BackupError::NotFound { backup_id: "backup-123".to_string() };
+        assert!(format!("{e}").contains("backup-123"));
+    }
+
+    #[test]
+    fn test_backup_error_display_not_confirmed() {
+        let e = BackupError::NotConfirmed;
+        assert!(format!("{e}").contains("confirm=true"));
+    }
+
+    #[test]
+    fn test_backup_error_display_invalid() {
+        let e = BackupError::Invalid { message: "corrupt header".to_string() };
+        assert!(format!("{e}").contains("corrupt header"));
+    }
+
+    #[test]
+    fn test_backup_error_display_schema_version_mismatch() {
+        let e = BackupError::SchemaVersionMismatch { backup_version: 1, server_version: 2 };
+        assert!(format!("{e}").contains("1"));
+        assert!(format!("{e}").contains("2"));
+    }
+
+    #[test]
+    fn test_backup_error_display_serialization() {
+        let e = BackupError::Serialization { message: "bad json".to_string() };
+        assert!(format!("{e}").contains("bad json"));
+    }
+
+    #[test]
+    fn test_backup_error_display_cross_region_restore() {
+        let e = BackupError::CrossRegionRestore {
+            backup_region: Region::DE_CENTRAL_FRANKFURT,
+            node_region: Region::US_EAST_VA,
+        };
+        let msg = format!("{e}");
+        assert!(msg.contains("Cross-region restore rejected"));
+    }
+
+    #[test]
+    fn test_backup_error_display_key_directory_excluded() {
+        let e = BackupError::KeyDirectoryExcluded { path: "/data/keys/v1.key".to_string() };
+        assert!(format!("{e}").contains("keys directory"));
+    }
+
+    #[test]
+    fn test_backup_error_display_invalid_backup_id() {
+        let e = BackupError::InvalidBackupId { backup_id: "../foo".to_string() };
+        assert!(format!("{e}").contains("path separators"));
+    }
+
+    // ── BackupType serde ──
+
+    #[test]
+    fn test_backup_type_serde_roundtrip() {
+        let full = serde_json::to_string(&BackupType::Full).expect("serialize");
+        let deserialized: BackupType = serde_json::from_str(&full).expect("deserialize");
+        assert_eq!(deserialized, BackupType::Full);
+
+        let inc = serde_json::to_string(&BackupType::Incremental).expect("serialize");
+        let deserialized: BackupType = serde_json::from_str(&inc).expect("deserialize");
+        assert_eq!(deserialized, BackupType::Incremental);
+    }
+
+    #[test]
+    fn test_default_backup_type_is_full() {
+        assert_eq!(default_backup_type(), BackupType::Full);
+    }
+
+    #[test]
+    fn test_backup_manager_backup_dir() {
+        let temp = TempDir::new().expect("create temp dir");
+        let config = create_test_backup_config(temp.path());
+        let manager = BackupManager::new(&config).expect("create manager");
+        assert_eq!(manager.backup_dir(), temp.path());
+    }
 }

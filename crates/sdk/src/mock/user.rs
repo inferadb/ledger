@@ -433,50 +433,151 @@ impl inferadb_ledger_proto::proto::user_service_server::UserService for MockUser
 
     async fn create_user_credential(
         &self,
-        _request: Request<proto::CreateUserCredentialRequest>,
+        request: Request<proto::CreateUserCredentialRequest>,
     ) -> Result<Response<proto::CreateUserCredentialResponse>, Status> {
-        Err(Status::unimplemented("CreateUserCredential not implemented in mock"))
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let now = Self::now_timestamp();
+
+        let credential = proto::UserCredential {
+            id: 1,
+            user: req.user,
+            credential_type: req.credential_type,
+            name: req.name,
+            enabled: true,
+            created_at: Some(now),
+            last_used_at: None,
+            data: match req.data {
+                Some(proto::create_user_credential_request::Data::Passkey(pk)) => {
+                    Some(proto::user_credential::Data::Passkey(pk))
+                },
+                Some(proto::create_user_credential_request::Data::Totp(totp)) => {
+                    Some(proto::user_credential::Data::Totp(totp))
+                },
+                Some(proto::create_user_credential_request::Data::RecoveryCode(rc)) => {
+                    Some(proto::user_credential::Data::RecoveryCode(rc))
+                },
+                None => None,
+            },
+        };
+
+        Ok(Response::new(proto::CreateUserCredentialResponse { credential: Some(credential) }))
     }
 
     async fn list_user_credentials(
         &self,
-        _request: Request<proto::ListUserCredentialsRequest>,
+        request: Request<proto::ListUserCredentialsRequest>,
     ) -> Result<Response<proto::ListUserCredentialsResponse>, Status> {
-        Err(Status::unimplemented("ListUserCredentials not implemented in mock"))
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let now = Self::now_timestamp();
+
+        let passkey = proto::UserCredential {
+            id: 1,
+            user: req.user,
+            credential_type: proto::CredentialType::Passkey.into(),
+            name: "Touch ID".to_string(),
+            enabled: true,
+            created_at: Some(now),
+            last_used_at: None,
+            data: Some(proto::user_credential::Data::Passkey(proto::PasskeyCredentialData {
+                credential_id: vec![1, 2, 3],
+                public_key: vec![4, 5, 6],
+                sign_count: 10,
+                transports: vec!["internal".to_string()],
+                backup_eligible: false,
+                backup_state: false,
+                attestation_format: None,
+                aaguid: None,
+            })),
+        };
+
+        let credentials = if req.credential_type.is_some() {
+            // Filter by type if specified
+            let filter_type = req.credential_type;
+            vec![passkey]
+                .into_iter()
+                .filter(|c| filter_type.is_none_or(|t| c.credential_type == t))
+                .collect()
+        } else {
+            vec![passkey]
+        };
+
+        Ok(Response::new(proto::ListUserCredentialsResponse { credentials }))
     }
 
     async fn update_user_credential(
         &self,
-        _request: Request<proto::UpdateUserCredentialRequest>,
+        request: Request<proto::UpdateUserCredentialRequest>,
     ) -> Result<Response<proto::UpdateUserCredentialResponse>, Status> {
-        Err(Status::unimplemented("UpdateUserCredential not implemented in mock"))
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let now = Self::now_timestamp();
+
+        let credential = proto::UserCredential {
+            id: req.credential_id,
+            user: req.user,
+            credential_type: proto::CredentialType::Passkey.into(),
+            name: req.name.unwrap_or_else(|| "updated".to_string()),
+            enabled: req.enabled.unwrap_or(true),
+            created_at: Some(now),
+            last_used_at: None,
+            data: req.passkey.map(proto::user_credential::Data::Passkey),
+        };
+
+        Ok(Response::new(proto::UpdateUserCredentialResponse { credential: Some(credential) }))
     }
 
     async fn delete_user_credential(
         &self,
         _request: Request<proto::DeleteUserCredentialRequest>,
     ) -> Result<Response<proto::DeleteUserCredentialResponse>, Status> {
-        Err(Status::unimplemented("DeleteUserCredential not implemented in mock"))
+        self.state.check_injection().await?;
+        Ok(Response::new(proto::DeleteUserCredentialResponse {}))
     }
 
     async fn create_totp_challenge(
         &self,
         _request: Request<proto::CreateTotpChallengeRequest>,
     ) -> Result<Response<proto::CreateTotpChallengeResponse>, Status> {
-        Err(Status::unimplemented("CreateTotpChallenge not implemented in mock"))
+        self.state.check_injection().await?;
+
+        Ok(Response::new(proto::CreateTotpChallengeResponse { challenge_nonce: vec![0u8; 32] }))
     }
 
     async fn verify_totp(
         &self,
         _request: Request<proto::VerifyTotpRequest>,
     ) -> Result<Response<proto::VerifyTotpResponse>, Status> {
-        Err(Status::unimplemented("VerifyTotp not implemented in mock"))
+        self.state.check_injection().await?;
+
+        Ok(Response::new(proto::VerifyTotpResponse {
+            tokens: Some(proto::TokenPair {
+                access_token: "mock-totp-access".to_string(),
+                refresh_token: "mock-totp-refresh".to_string(),
+                access_expires_at: None,
+                refresh_expires_at: None,
+            }),
+        }))
     }
 
     async fn consume_recovery_code(
         &self,
         _request: Request<proto::ConsumeRecoveryCodeRequest>,
     ) -> Result<Response<proto::ConsumeRecoveryCodeResponse>, Status> {
-        Err(Status::unimplemented("ConsumeRecoveryCode not implemented in mock"))
+        self.state.check_injection().await?;
+
+        Ok(Response::new(proto::ConsumeRecoveryCodeResponse {
+            tokens: Some(proto::TokenPair {
+                access_token: "mock-recovery-access".to_string(),
+                refresh_token: "mock-recovery-refresh".to_string(),
+                access_expires_at: None,
+                refresh_expires_at: None,
+            }),
+            remaining_codes: 7,
+        }))
     }
 }

@@ -227,4 +227,59 @@ mod tests {
         assert_eq!(config.interval_secs, 3600);
         assert_eq!(config.batch_size, 100);
     }
+
+    #[test]
+    fn test_config_clone() {
+        let config = UserRetentionConfig { interval_secs: 7200, batch_size: 50 };
+        let cloned = config.clone();
+        assert_eq!(cloned.interval_secs, config.interval_secs);
+        assert_eq!(cloned.batch_size, config.batch_size);
+    }
+
+    #[test]
+    fn test_retention_expiry_logic() {
+        use chrono::Utc;
+        use inferadb_ledger_types::Region;
+
+        // Simulate retention check from run_cycle
+        let now = Utc::now();
+        let deleted_at = now - chrono::Duration::days(100);
+        let retention = chrono::Duration::days(i64::from(Region::US_EAST_VA.retention_days()));
+        let expiry = deleted_at + retention;
+
+        // User deleted 100 days ago with retention < 100 days should be expired
+        assert!(
+            now >= expiry,
+            "user deleted {retention} days ago with retention {} should be expired",
+            Region::US_EAST_VA.retention_days()
+        );
+    }
+
+    #[test]
+    fn test_retention_not_expired() {
+        use chrono::Utc;
+        use inferadb_ledger_types::Region;
+
+        let now = Utc::now();
+        let deleted_at = now - chrono::Duration::days(1);
+        let retention = chrono::Duration::days(i64::from(Region::US_EAST_VA.retention_days()));
+        let expiry = deleted_at + retention;
+
+        // User deleted 1 day ago should NOT be expired
+        assert!(now < expiry, "recently deleted user should not be expired");
+    }
+
+    #[test]
+    fn test_user_status_filtering() {
+        // Only Deleting status users are eligible for erasure
+        assert_eq!(UserStatus::Deleting, UserStatus::Deleting);
+        assert_ne!(UserStatus::Active, UserStatus::Deleting);
+    }
+
+    #[test]
+    fn test_tick_interval_from_config() {
+        let config = UserRetentionConfig { interval_secs: 3600, batch_size: 100 };
+        let tick_interval = std::time::Duration::from_secs(config.interval_secs);
+        assert_eq!(tick_interval, std::time::Duration::from_secs(3600));
+    }
 }

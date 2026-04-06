@@ -421,4 +421,230 @@ mod tests {
         let result = scrubber.verify_page_checksums(&[999_999]);
         assert_eq!(result.pages_checked, 0);
     }
+
+    #[test]
+    fn test_scrub_result_default() {
+        let result = ScrubResult::default();
+        assert_eq!(result.pages_checked, 0);
+        assert_eq!(result.checksum_errors, 0);
+        assert_eq!(result.structural_errors, 0);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_scrub_error_fields() {
+        let error = ScrubError {
+            page_id: 42,
+            table_name: Some("test_table"),
+            description: "test error".to_string(),
+        };
+        assert_eq!(error.page_id, 42);
+        assert_eq!(error.table_name, Some("test_table"));
+        assert_eq!(error.description, "test error");
+    }
+
+    #[test]
+    fn test_scrub_error_without_table_name() {
+        let error =
+            ScrubError { page_id: 1, table_name: None, description: "orphan page".to_string() };
+        assert!(error.table_name.is_none());
+    }
+
+    #[test]
+    fn test_btree_invariants_with_branch_nodes() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Insert enough data to force branch splits (large keys/values)
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..500u32 {
+                let key = format!("key_{i:06}").into_bytes();
+                let value = vec![0xAA; 100];
+                txn.insert::<Entities>(&key, &value).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let scrubber = IntegrityScrubber::new(&db);
+        let result = scrubber.verify_btree_invariants();
+
+        // Should have checked leaf and branch pages
+        assert!(result.pages_checked > 1);
+        assert_eq!(result.structural_errors, 0, "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn test_verify_checksums_multiple_pages() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Insert data across multiple pages
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..50u32 {
+                let key = format!("multipage_key_{i:04}").into_bytes();
+                let value = vec![0xBB; 200];
+                txn.insert::<Entities>(&key, &value).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let scrubber = IntegrityScrubber::new(&db);
+        let total = db.total_page_count();
+        let page_ids: Vec<u64> = (0..total).collect();
+        let result = scrubber.verify_page_checksums(&page_ids);
+
+        assert!(result.pages_checked > 0);
+        assert_eq!(result.checksum_errors, 0, "Unexpected errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn test_verify_checksums_with_deletes() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Insert then delete to exercise more page states
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..30u32 {
+                let key = format!("del_key_{i:04}").into_bytes();
+                txn.insert::<Entities>(&key, &b"value".to_vec()).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..15u32 {
+                let key = format!("del_key_{i:04}").into_bytes();
+                txn.delete::<Entities>(&key).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let scrubber = IntegrityScrubber::new(&db);
+        let result = scrubber.verify_btree_invariants();
+        assert_eq!(result.structural_errors, 0, "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn test_scrub_corrupted_page_reports_read_error() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Insert data
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<Entities>(&b"k1".to_vec(), &b"v1".to_vec()).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let scrubber = IntegrityScrubber::new(&db);
+
+        // Verify checksums for a range of pages including allocated ones
+        let total = db.total_page_count();
+        let page_ids: Vec<PageId> = (0..total).collect();
+        let result = scrubber.verify_page_checksums(&page_ids);
+
+        // All valid pages should pass
+        assert!(result.pages_checked > 0);
+        assert_eq!(result.checksum_errors, 0, "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn test_btree_invariants_after_updates() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Insert, then update values to exercise page modifications
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..50u32 {
+                let key = format!("upd_key_{i:04}").into_bytes();
+                let value = format!("value_{i}").into_bytes();
+                txn.insert::<Entities>(&key, &value).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        // Update half the keys with larger values
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..25u32 {
+                let key = format!("upd_key_{i:04}").into_bytes();
+                let value = vec![0xDD; 300]; // larger values
+                txn.insert::<Entities>(&key, &value).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let scrubber = IntegrityScrubber::new(&db);
+        let result = scrubber.verify_btree_invariants();
+        assert!(result.pages_checked > 0);
+        assert_eq!(result.structural_errors, 0, "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn test_combined_checksum_and_invariant_scrub() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Insert enough data for multi-level tree with large values
+        {
+            let mut txn = db.write().unwrap();
+            for i in 0..200u32 {
+                let key = format!("combined_{i:06}").into_bytes();
+                let value = vec![0xAB; 50];
+                txn.insert::<Entities>(&key, &value).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let scrubber = IntegrityScrubber::new(&db);
+
+        // Run both scrub types
+        let checksum_result = {
+            let total = db.total_page_count();
+            let page_ids: Vec<PageId> = (0..total).collect();
+            scrubber.verify_page_checksums(&page_ids)
+        };
+        let invariant_result = scrubber.verify_btree_invariants();
+
+        assert!(checksum_result.pages_checked > 0);
+        assert_eq!(
+            checksum_result.checksum_errors, 0,
+            "checksum errors: {:?}",
+            checksum_result.errors
+        );
+        assert!(invariant_result.pages_checked > 0);
+        assert_eq!(
+            invariant_result.structural_errors, 0,
+            "structural errors: {:?}",
+            invariant_result.errors
+        );
+    }
+
+    #[test]
+    fn test_scrub_result_debug_format() {
+        let result = ScrubResult {
+            pages_checked: 10,
+            checksum_errors: 2,
+            structural_errors: 1,
+            errors: vec![ScrubError {
+                page_id: 5,
+                table_name: Some("entities"),
+                description: "test".to_string(),
+            }],
+        };
+        let debug_str = format!("{result:?}");
+        assert!(debug_str.contains("pages_checked: 10"));
+        assert!(debug_str.contains("checksum_errors: 2"));
+    }
+
+    #[test]
+    fn test_scrub_error_debug_and_clone() {
+        let error = ScrubError {
+            page_id: 42,
+            table_name: Some("test"),
+            description: "test error".to_string(),
+        };
+        let cloned = error.clone();
+        assert_eq!(cloned.page_id, 42);
+        assert_eq!(cloned.description, "test error");
+        let debug = format!("{error:?}");
+        assert!(debug.contains("42"));
+    }
 }

@@ -1466,4 +1466,601 @@ mod tests {
         assert!(TOTP_CHALLENGES_GC_TOTAL.starts_with("ledger_"));
         assert!(TOTP_CHALLENGES_GC_TOTAL.ends_with("_total"));
     }
+
+    // =========================================================================
+    // Coverage tests for record_* and set_* functions
+    // =========================================================================
+
+    // --- Write service ---
+
+    #[test]
+    fn test_record_write_both_paths() {
+        record_write(true, 0.005);
+        record_write(false, 0.123);
+    }
+
+    #[test]
+    fn test_record_batch_write_both_paths() {
+        record_batch_write(true, 10, 0.01);
+        record_batch_write(false, 0, 1.5);
+    }
+
+    #[test]
+    fn test_record_rate_limit_exceeded() {
+        record_rate_limit_exceeded(OrganizationId::new(1));
+    }
+
+    #[test]
+    fn test_record_rate_limit_rejected() {
+        record_rate_limit_rejected("global", "burst");
+        record_rate_limit_rejected("organization", "sustained");
+    }
+
+    // --- Read service ---
+
+    #[test]
+    fn test_record_read_both_paths() {
+        record_read(true, 0.001);
+        record_read(false, 0.5);
+    }
+
+    #[test]
+    fn test_record_verified_read_both_paths() {
+        record_verified_read(true, 0.002);
+        record_verified_read(false, 0.3);
+    }
+
+    #[test]
+    fn test_record_read_forward() {
+        record_read_forward("read");
+        record_read_forward("get_block");
+    }
+
+    // --- Cross-region forwarding ---
+
+    #[test]
+    fn test_record_cross_region_forward() {
+        record_cross_region_forward("write", "us-east-va", "eu-central-de", 0.05);
+    }
+
+    #[test]
+    fn test_record_data_residency_violation() {
+        record_data_residency_violation("us-east-va");
+    }
+
+    // --- Raft consensus ---
+
+    #[test]
+    fn test_record_raft_proposal() {
+        record_raft_proposal();
+    }
+
+    #[test]
+    fn test_record_raft_proposal_timeout() {
+        record_raft_proposal_timeout();
+    }
+
+    #[test]
+    fn test_set_pending_proposals() {
+        set_pending_proposals(42);
+        set_pending_proposals(0);
+    }
+
+    #[test]
+    fn test_record_raft_apply_latency() {
+        record_raft_apply_latency(0.003);
+    }
+
+    #[test]
+    fn test_set_raft_commit_index() {
+        set_raft_commit_index(100);
+    }
+
+    #[test]
+    fn test_set_raft_term() {
+        set_raft_term(5);
+    }
+
+    #[test]
+    fn test_set_is_leader_both_paths() {
+        set_is_leader(true);
+        set_is_leader(false);
+    }
+
+    // --- State machine ---
+
+    #[test]
+    fn test_record_state_root_computation() {
+        record_state_root_computation(VaultId::new(1), 0.002);
+    }
+
+    #[test]
+    fn test_record_state_root_verification() {
+        record_state_root_verification();
+    }
+
+    #[test]
+    fn test_record_state_root_divergence() {
+        record_state_root_divergence(OrganizationId::new(1), VaultId::new(2));
+    }
+
+    #[test]
+    fn test_set_dirty_buckets() {
+        set_dirty_buckets(VaultId::new(1), 5);
+    }
+
+    // --- Storage ---
+
+    #[test]
+    fn test_record_storage_write() {
+        record_storage_write(4096);
+    }
+
+    #[test]
+    fn test_record_storage_read() {
+        record_storage_read(2048);
+    }
+
+    // --- Snapshot ---
+
+    #[test]
+    fn test_record_snapshot_created() {
+        record_snapshot_created(1_000_000, 2.5);
+    }
+
+    #[test]
+    fn test_record_snapshot_restore() {
+        record_snapshot_restore(3.0);
+    }
+
+    // --- Idempotency cache ---
+
+    #[test]
+    fn test_record_idempotency_hit() {
+        record_idempotency_hit();
+    }
+
+    #[test]
+    fn test_record_idempotency_miss() {
+        record_idempotency_miss();
+    }
+
+    #[test]
+    fn test_set_idempotency_cache_size() {
+        set_idempotency_cache_size(128);
+    }
+
+    #[test]
+    fn test_record_idempotency_evictions() {
+        record_idempotency_evictions(10);
+    }
+
+    // --- Connections ---
+
+    #[test]
+    fn test_increment_decrement_connections() {
+        increment_connections();
+        decrement_connections();
+    }
+
+    // --- gRPC request ---
+
+    #[test]
+    fn test_record_grpc_request() {
+        record_grpc_request("WriteService", "write", "OK", "none", 0.01, "us-east-va");
+        record_grpc_request("ReadService", "read", "Internal", "internal", 0.5, "global");
+    }
+
+    // --- Batching ---
+
+    #[test]
+    fn test_record_batch_coalesce() {
+        record_batch_coalesce(5);
+    }
+
+    #[test]
+    fn test_record_batch_flush() {
+        record_batch_flush(0.002);
+    }
+
+    #[test]
+    fn test_record_eager_commit() {
+        record_eager_commit();
+    }
+
+    #[test]
+    fn test_record_timeout_commit() {
+        record_timeout_commit();
+    }
+
+    // --- Recovery ---
+
+    #[test]
+    fn test_record_recovery_success() {
+        record_recovery_success(OrganizationId::new(1), VaultId::new(2));
+    }
+
+    #[test]
+    fn test_record_recovery_failure() {
+        record_recovery_failure(OrganizationId::new(1), VaultId::new(2), "snapshot_mismatch");
+    }
+
+    #[test]
+    fn test_record_determinism_bug() {
+        record_determinism_bug(OrganizationId::new(1), VaultId::new(2));
+    }
+
+    #[test]
+    fn test_record_recovery_attempt() {
+        record_recovery_attempt(OrganizationId::new(1), VaultId::new(2), 1, "success");
+        record_recovery_attempt(OrganizationId::new(1), VaultId::new(2), 3, "failure");
+    }
+
+    #[test]
+    fn test_set_vault_health_all_states() {
+        let org = OrganizationId::new(1);
+        let vault = VaultId::new(2);
+        set_vault_health(org, vault, "healthy");
+        set_vault_health(org, vault, "diverged");
+        set_vault_health(org, vault, "recovering");
+        // Unknown fallback
+        set_vault_health(org, vault, "something_else");
+    }
+
+    // --- Learner refresh ---
+
+    #[test]
+    fn test_record_learner_refresh_both_paths() {
+        record_learner_refresh(true, 0.01);
+        record_learner_refresh(false, 0.5);
+    }
+
+    #[test]
+    fn test_record_learner_cache_stale() {
+        record_learner_cache_stale();
+    }
+
+    #[test]
+    fn test_record_learner_voter_error() {
+        record_learner_voter_error(42, "connection_refused");
+    }
+
+    // --- Serialization ---
+
+    #[test]
+    fn test_record_proto_decode() {
+        record_proto_decode(0.001, "write");
+    }
+
+    #[test]
+    fn test_record_postcard_encode() {
+        record_postcard_encode(0.0005, "raft_entry");
+    }
+
+    #[test]
+    fn test_record_postcard_decode() {
+        record_postcard_decode(0.0003, "raft_entry");
+    }
+
+    #[test]
+    fn test_record_serialization_bytes() {
+        record_serialization_bytes(512, "encode", "raft_entry");
+        record_serialization_bytes(256, "decode", "snapshot");
+    }
+
+    // --- B+ tree compaction ---
+
+    #[test]
+    fn test_record_btree_compaction() {
+        record_btree_compaction(10, 5);
+    }
+
+    // --- Post-erasure compaction ---
+
+    #[test]
+    fn test_record_post_erasure_compaction_triggered() {
+        record_post_erasure_compaction_triggered("us-east-va");
+    }
+
+    // --- Organization purge ---
+
+    #[test]
+    fn test_record_org_purge_regional_failure() {
+        record_org_purge_regional_failure("eu-central-de");
+    }
+
+    #[test]
+    fn test_record_org_purge_global_failure() {
+        record_org_purge_global_failure();
+    }
+
+    #[test]
+    fn test_record_org_purge_retry_exhausted() {
+        record_org_purge_retry_exhausted();
+    }
+
+    // --- Hot key detection ---
+
+    #[test]
+    fn test_record_hot_key_detected() {
+        record_hot_key_detected(VaultId::new(1), "users:123", 500.0);
+    }
+
+    // --- SLI/SLO ---
+
+    #[test]
+    fn test_set_batch_queue_depth() {
+        set_batch_queue_depth(10, "us-east-va");
+    }
+
+    #[test]
+    fn test_set_rate_limit_queue_depth() {
+        set_rate_limit_queue_depth(5, "global");
+    }
+
+    #[test]
+    fn test_set_cluster_quorum_status_both_paths() {
+        set_cluster_quorum_status(true);
+        set_cluster_quorum_status(false);
+    }
+
+    #[test]
+    fn test_record_leader_election() {
+        record_leader_election();
+    }
+
+    // --- Resource saturation ---
+
+    #[test]
+    fn test_set_disk_bytes() {
+        set_disk_bytes(1_000_000, 500_000, "us-east-va");
+    }
+
+    #[test]
+    fn test_set_page_cache_metrics() {
+        set_page_cache_metrics(1000, 50, 512, "global");
+    }
+
+    #[test]
+    fn test_set_btree_depth() {
+        set_btree_depth("entities", 4, "us-east-va");
+    }
+
+    #[test]
+    fn test_set_btree_page_splits() {
+        set_btree_page_splits(25, "global");
+    }
+
+    #[test]
+    fn test_set_compaction_lag_blocks() {
+        set_compaction_lag_blocks(100, "us-east-va");
+    }
+
+    #[test]
+    fn test_set_snapshot_disk_bytes() {
+        set_snapshot_disk_bytes(50_000_000, "global");
+    }
+
+    // --- Organization resource accounting ---
+
+    #[test]
+    fn test_set_organization_storage_bytes() {
+        set_organization_storage_bytes(OrganizationId::new(1), 1_000_000);
+    }
+
+    #[test]
+    fn test_record_organization_operation() {
+        record_organization_operation(OrganizationId::new(1), "write");
+        record_organization_operation(OrganizationId::new(1), "read");
+    }
+
+    #[test]
+    fn test_record_organization_latency() {
+        record_organization_latency(OrganizationId::new(1), "write", 0.01);
+    }
+
+    // --- Background jobs ---
+
+    #[test]
+    fn test_record_background_job_duration() {
+        record_background_job_duration("gc", 1.5);
+    }
+
+    #[test]
+    fn test_record_background_job_run() {
+        record_background_job_run("compaction", "success");
+        record_background_job_run("compaction", "failure");
+    }
+
+    #[test]
+    fn test_record_background_job_items() {
+        record_background_job_items("integrity_scrub", 200);
+    }
+
+    // --- Saga PII cache ---
+
+    #[test]
+    fn test_record_saga_pii_cache_sizes() {
+        record_saga_pii_cache_sizes(10, 5, 3);
+    }
+
+    // --- DEK re-wrapping ---
+
+    #[test]
+    fn test_record_rewrap_pages() {
+        record_rewrap_pages(100);
+    }
+
+    #[test]
+    fn test_record_rewrap_remaining() {
+        record_rewrap_remaining(500);
+    }
+
+    #[test]
+    fn test_record_rewrap_duration() {
+        record_rewrap_duration(0.25);
+    }
+
+    // --- Cardinality overflow ---
+
+    #[test]
+    fn test_record_cardinality_overflow() {
+        record_cardinality_overflow("ledger_writes_total");
+    }
+
+    // --- Events ingestion ---
+
+    #[test]
+    fn test_record_events_ingest() {
+        record_events_ingest("engine", "accepted", 10);
+        record_events_ingest("control", "rejected", 2);
+    }
+
+    #[test]
+    fn test_record_events_ingest_batch_size() {
+        record_events_ingest_batch_size("engine", 50);
+    }
+
+    #[test]
+    fn test_record_events_ingest_rate_limited() {
+        record_events_ingest_rate_limited("control");
+    }
+
+    #[test]
+    fn test_record_events_ingest_duration() {
+        record_events_ingest_duration(0.015);
+    }
+
+    // --- Event writes ---
+
+    #[test]
+    fn test_record_event_write() {
+        record_event_write("apply_phase", "system", "user_created");
+        record_event_write("handler_phase", "organization", "entity_updated");
+    }
+
+    // --- Timer factories ---
+
+    #[test]
+    fn test_write_timer() {
+        let timer = write_timer();
+        drop(timer);
+    }
+
+    #[test]
+    fn test_read_timer() {
+        let timer = read_timer();
+        let _ = timer.stop();
+    }
+
+    #[test]
+    fn test_raft_apply_timer() {
+        let timer = raft_apply_timer();
+        drop(timer);
+    }
+
+    // --- Integrity scrubber ---
+
+    #[test]
+    fn test_record_integrity_pages_checked() {
+        record_integrity_pages_checked(1000);
+    }
+
+    #[test]
+    fn test_record_integrity_errors() {
+        record_integrity_errors("checksum", 2);
+        record_integrity_errors("structural", 1);
+    }
+
+    #[test]
+    fn test_record_integrity_scan_duration() {
+        record_integrity_scan_duration(5.0);
+    }
+
+    // --- Events GC ---
+
+    #[test]
+    fn test_record_events_gc_entries_deleted() {
+        record_events_gc_entries_deleted(50);
+    }
+
+    #[test]
+    fn test_record_events_gc_cycle_duration() {
+        record_events_gc_cycle_duration(0.5);
+    }
+
+    #[test]
+    fn test_record_events_gc_cycle() {
+        record_events_gc_cycle("success");
+        record_events_gc_cycle("failure");
+    }
+
+    // --- Leader transfer ---
+
+    #[test]
+    fn test_record_leader_transfer_both_paths() {
+        record_leader_transfer(true, 0.1);
+        record_leader_transfer(false, 5.0);
+    }
+
+    #[test]
+    fn test_record_trigger_election_both_paths() {
+        record_trigger_election(true);
+        record_trigger_election(false);
+    }
+
+    // --- Region node count ---
+
+    #[test]
+    fn test_record_region_node_count_not_protected() {
+        // Non-protected region: no warning regardless of count
+        record_region_node_count("us-east-va", 1, false);
+    }
+
+    #[test]
+    fn test_record_region_node_count_protected_above_threshold() {
+        // Protected region with sufficient nodes: no warning
+        record_region_node_count("eu-central-de", MIN_NODES_PER_PROTECTED_REGION + 1, true);
+    }
+
+    #[test]
+    fn test_record_region_node_count_protected_below_threshold() {
+        // Protected region with critically low count: triggers warning log
+        record_region_node_count("eu-central-de", 1, true);
+    }
+
+    // --- Onboarding ---
+
+    #[test]
+    fn test_record_onboarding_initiation() {
+        record_onboarding_initiation("success");
+        record_onboarding_initiation("failure");
+    }
+
+    #[test]
+    fn test_record_onboarding_verification() {
+        record_onboarding_verification("success");
+        record_onboarding_verification("failure");
+    }
+
+    #[test]
+    fn test_record_onboarding_registration() {
+        record_onboarding_registration("success");
+        record_onboarding_registration("failure");
+    }
+
+    #[test]
+    fn test_record_onboarding_gc_codes() {
+        record_onboarding_gc_codes(15);
+    }
+
+    #[test]
+    fn test_record_onboarding_gc_accounts() {
+        record_onboarding_gc_accounts(3);
+    }
+
+    #[test]
+    fn test_record_totp_gc_challenges() {
+        record_totp_gc_challenges(7);
+    }
 }

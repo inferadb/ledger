@@ -2194,3 +2194,49 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         Ok(Response::new(ListEntitiesResponse { entities, next_page_token, block_height }))
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_read_key_accepts_normal_key() {
+        assert!(validate_read_key("user:1").is_ok());
+    }
+
+    #[test]
+    fn validate_read_key_accepts_empty_key() {
+        // Empty keys are allowed by the read validator (other validation catches this)
+        assert!(validate_read_key("").is_ok());
+    }
+
+    #[test]
+    fn validate_read_key_rejects_system_prefix() {
+        let result = validate_read_key("_meta:seq");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("reserved for system keys"));
+    }
+
+    #[test]
+    fn validate_read_key_rejects_underscore_only() {
+        let result = validate_read_key("_");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_read_key_rejects_various_system_prefixes() {
+        for prefix in ["_dir:", "_idx:", "_meta:", "_shred:", "_tmp:", "_audit:"] {
+            let result = validate_read_key(prefix);
+            assert!(result.is_err(), "Should reject key with prefix {prefix}");
+        }
+    }
+
+    #[test]
+    fn validate_read_key_accepts_key_with_underscore_not_at_start() {
+        assert!(validate_read_key("user_name:1").is_ok());
+        assert!(validate_read_key("a_b").is_ok());
+    }
+}

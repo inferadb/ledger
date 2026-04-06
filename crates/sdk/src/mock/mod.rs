@@ -42,10 +42,14 @@
 //! ```
 
 mod admin;
+mod app;
 mod discovery;
+mod events;
 mod health;
+mod invitation;
 mod organization;
 mod read;
+mod token;
 mod user;
 mod vault;
 mod write;
@@ -64,19 +68,25 @@ use std::{
 };
 
 use admin::MockAdminService;
+use app::MockAppService;
 use discovery::MockDiscoveryService;
+use events::MockEventsService;
 use health::MockHealthService;
 use inferadb_ledger_proto::proto::{
-    self, admin_service_server::AdminServiceServer, health_service_server::HealthServiceServer,
+    self, admin_service_server::AdminServiceServer, app_service_server::AppServiceServer,
+    events_service_server::EventsServiceServer, health_service_server::HealthServiceServer,
+    invitation_service_server::InvitationServiceServer,
     organization_service_server::OrganizationServiceServer, read_service_server::ReadServiceServer,
     system_discovery_service_server::SystemDiscoveryServiceServer,
-    user_service_server::UserServiceServer, vault_service_server::VaultServiceServer,
-    write_service_server::WriteServiceServer,
+    token_service_server::TokenServiceServer, user_service_server::UserServiceServer,
+    vault_service_server::VaultServiceServer, write_service_server::WriteServiceServer,
 };
 use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
+use invitation::MockInvitationService;
 use organization::MockOrganizationService;
 use parking_lot::RwLock;
 use read::MockReadService;
+use token::MockTokenService;
 use tokio::sync::oneshot;
 use tonic::transport::Server;
 use user::MockUserService;
@@ -163,6 +173,15 @@ struct MockState {
 
     /// Next team slug to assign
     next_team: AtomicU64,
+
+    /// Invitation storage
+    invitations: RwLock<Vec<proto::Invitation>>,
+
+    /// Next invite slug to assign
+    next_invite: AtomicU64,
+
+    /// Event storage
+    events: RwLock<Vec<proto::EventEntry>>,
 }
 
 /// Member entry in mock organization storage.
@@ -224,6 +243,7 @@ impl MockState {
             next_user_slug: AtomicU64::new(1000),
             next_user_email_id: AtomicU64::new(1),
             next_team: AtomicU64::new(1),
+            next_invite: AtomicU64::new(1),
             ..Default::default()
         }
     }
@@ -319,11 +339,15 @@ impl MockLedgerServer {
         let read_service = MockReadService::new(state.clone());
         let write_service = MockWriteService::new(state.clone());
         let admin_service = MockAdminService::new(state.clone());
+        let app_service = MockAppService::new(state.clone());
         let organization_service = MockOrganizationService::new(state.clone());
         let vault_service = MockVaultService::new(state.clone());
         let health_service = MockHealthService::new(state.clone());
         let discovery_service = MockDiscoveryService::new(state.clone());
+        let token_service = MockTokenService::new(state.clone());
         let user_service = MockUserService::new(state.clone());
+        let invitation_service = MockInvitationService::new(state.clone());
+        let events_service = MockEventsService::new(state.clone());
 
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -335,11 +359,15 @@ impl MockLedgerServer {
                 .add_service(ReadServiceServer::new(read_service))
                 .add_service(WriteServiceServer::new(write_service))
                 .add_service(AdminServiceServer::new(admin_service))
+                .add_service(AppServiceServer::new(app_service))
                 .add_service(OrganizationServiceServer::new(organization_service))
                 .add_service(VaultServiceServer::new(vault_service))
                 .add_service(HealthServiceServer::new(health_service))
                 .add_service(SystemDiscoveryServiceServer::new(discovery_service))
+                .add_service(TokenServiceServer::new(token_service))
                 .add_service(UserServiceServer::new(user_service))
+                .add_service(InvitationServiceServer::new(invitation_service))
+                .add_service(EventsServiceServer::new(events_service))
                 .serve_with_incoming_shutdown(incoming, async {
                     let _ = shutdown_rx.await;
                 })
@@ -558,6 +586,77 @@ impl MockLedgerServer {
         });
     }
 
+    /// Adds a mock invitation for invitation tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `invite_slug` - External invitation slug.
+    /// * `org_slug` - Organization that sent the invitation.
+    /// * `inviter_slug` - User who created the invitation.
+    /// * `email` - Invitee email (admin view).
+    /// * `org_name` - Organization name (user view).
+    /// * `role` - Role assigned upon acceptance (proto i32).
+    /// * `status` - Invitation status (proto i32).
+    pub fn add_invitation(
+        &self,
+        invite_slug: u64,
+        org_slug: OrganizationSlug,
+        inviter_slug: u64,
+        email: &str,
+        org_name: &str,
+        role: i32,
+        status: i32,
+    ) {
+        let mut invitations = self.state.invitations.write();
+        invitations.push(proto::Invitation {
+            slug: Some(proto::InviteSlug { slug: invite_slug }),
+            organization: Some(proto::OrganizationSlug { slug: org_slug.value() }),
+            inviter: Some(proto::UserSlug { slug: inviter_slug }),
+            invitee_email: email.to_string(),
+            organization_name: org_name.to_string(),
+            role,
+            team: None,
+            status,
+            created_at: None,
+            expires_at: None,
+            resolved_at: None,
+        });
+    }
+
+    /// Adds a mock event for events tests.
+    pub fn add_event(
+        &self,
+        event_id: Vec<u8>,
+        organization: OrganizationSlug,
+        event_type: &str,
+        principal: &str,
+    ) {
+        let mut events = self.state.events.write();
+        events.push(proto::EventEntry {
+            event_id,
+            source_service: "ledger".to_string(),
+            event_type: event_type.to_string(),
+            timestamp: None,
+            scope: proto::EventScope::Organization as i32,
+            action: event_type.to_string(),
+            emission_path: proto::EventEmissionPath::EmissionPathApplyPhase as i32,
+            principal: principal.to_string(),
+            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+            vault: None,
+            outcome: proto::EventOutcome::Success as i32,
+            error_code: None,
+            error_detail: None,
+            denial_reason: None,
+            details: std::collections::HashMap::new(),
+            block_height: None,
+            node_id: None,
+            trace_id: None,
+            correlation_id: None,
+            operations_count: None,
+            expires_at: 0,
+        });
+    }
+
     /// Resets all state to initial values.
     pub fn reset(&self) {
         self.state.entities.write().clear();
@@ -569,6 +668,8 @@ impl MockLedgerServer {
         self.state.peers.write().clear();
         self.state.users.write().clear();
         self.state.user_emails.write().clear();
+        self.state.invitations.write().clear();
+        self.state.events.write().clear();
         self.state.unavailable_count.store(0, Ordering::SeqCst);
         self.state.delay_ms.store(0, Ordering::SeqCst);
         self.state.write_count.store(0, Ordering::SeqCst);
@@ -576,6 +677,7 @@ impl MockLedgerServer {
         self.state.block_height.store(1, Ordering::SeqCst);
         self.state.next_user_slug.store(1000, Ordering::SeqCst);
         self.state.next_user_email_id.store(1, Ordering::SeqCst);
+        self.state.next_invite.store(1, Ordering::SeqCst);
     }
 
     /// Shuts down the server gracefully.

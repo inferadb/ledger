@@ -431,4 +431,54 @@ mod tests {
         assert_eq!(delays[1], Duration::from_millis(500));
         assert_eq!(delays[2], Duration::from_millis(2500));
     }
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(MAX_RETRIES, 3);
+        assert_eq!(BACKOFF_BASE, Duration::from_millis(100));
+        assert_eq!(BACKOFF_MULTIPLIER, 5);
+    }
+
+    #[test]
+    fn test_backoff_total_wait() {
+        // Total wait across all retries: 100 + 500 + 2500 = 3100ms
+        let total: Duration =
+            (0..MAX_RETRIES).map(|attempt| BACKOFF_BASE * BACKOFF_MULTIPLIER.pow(attempt)).sum();
+        assert_eq!(total, Duration::from_millis(3100));
+    }
+
+    #[test]
+    fn test_config_large_batch_size() {
+        let config = OrganizationPurgeConfig::builder()
+            .interval_secs(3600)
+            .batch_size(10_000)
+            .build()
+            .expect("large batch is valid");
+        assert_eq!(config.batch_size, 10_000);
+    }
+
+    #[test]
+    fn test_priority_set_operations() {
+        // Verify HashSet behavior used in run_cycle for priority retries
+        let mut priority: HashSet<OrganizationId> = HashSet::new();
+        let org1 = OrganizationId::new(1);
+        let org2 = OrganizationId::new(2);
+
+        priority.insert(org1);
+        priority.insert(org2);
+        assert_eq!(priority.len(), 2);
+
+        priority.remove(&org1);
+        assert_eq!(priority.len(), 1);
+        assert!(priority.contains(&org2));
+        assert!(!priority.contains(&org1));
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config = OrganizationPurgeConfig { interval_secs: 7200, batch_size: 25 };
+        let cloned = config.clone();
+        assert_eq!(cloned.interval_secs, config.interval_secs);
+        assert_eq!(cloned.batch_size, config.batch_size);
+    }
 }

@@ -319,4 +319,413 @@ mod tests {
             assert_eq!(decoded, value);
         }
     }
+
+    // ─── u64 Key roundtrip and edge cases ──────────────────────
+
+    #[test]
+    fn test_u64_key_roundtrip_zero() {
+        let mut buf = Vec::new();
+        Key::encode(&0u64, &mut buf);
+        assert_eq!(<u64 as Key>::decode(&buf), Some(0u64));
+    }
+
+    #[test]
+    fn test_u64_key_roundtrip_max() {
+        let mut buf = Vec::new();
+        Key::encode(&u64::MAX, &mut buf);
+        assert_eq!(<u64 as Key>::decode(&buf), Some(u64::MAX));
+    }
+
+    #[test]
+    fn test_u64_key_decode_too_short() {
+        assert_eq!(<u64 as Key>::decode(&[0u8; 7]), None);
+        assert_eq!(<u64 as Key>::decode(&[]), None);
+    }
+
+    #[test]
+    fn test_u64_key_encoded_size() {
+        assert_eq!(Key::encoded_size(&42u64), 8);
+    }
+
+    #[test]
+    fn test_u64_key_compare_encoded_ordering() {
+        let pairs: Vec<(u64, u64)> = vec![(0, 1), (1, 100), (0, u64::MAX)];
+        for (a, b) in pairs {
+            let mut buf_a = Vec::new();
+            let mut buf_b = Vec::new();
+            Key::encode(&a, &mut buf_a);
+            Key::encode(&b, &mut buf_b);
+            assert_eq!(<u64 as Key>::compare_encoded(&buf_a, &buf_b), Ordering::Less);
+            assert_eq!(<u64 as Key>::compare_encoded(&buf_b, &buf_a), Ordering::Greater);
+            assert_eq!(<u64 as Key>::compare_encoded(&buf_a, &buf_a), Ordering::Equal);
+        }
+    }
+
+    #[test]
+    fn test_u64_key_type() {
+        assert_eq!(<u64 as Key>::KEY_TYPE, KeyType::U64);
+    }
+
+    // ─── i64 Key roundtrip and edge cases ──────────────────────
+
+    #[test]
+    fn test_i64_key_roundtrip_boundaries() {
+        for val in [i64::MIN, -1, 0, 1, i64::MAX] {
+            let mut buf = Vec::new();
+            val.encode(&mut buf);
+            assert_eq!(<i64 as Key>::decode(&buf), Some(val));
+        }
+    }
+
+    #[test]
+    fn test_i64_key_decode_too_short() {
+        assert_eq!(<i64 as Key>::decode(&[0u8; 7]), None);
+        assert_eq!(<i64 as Key>::decode(&[]), None);
+    }
+
+    #[test]
+    fn test_i64_key_encoded_size() {
+        assert_eq!(Key::encoded_size(&-42i64), 8);
+    }
+
+    #[test]
+    fn test_i64_key_compare_encoded_preserves_sign_order() {
+        // The XOR transform should make negative < 0 < positive in byte order
+        let values = [i64::MIN, -100, -1, 0, 1, 100, i64::MAX];
+        let encoded: Vec<Vec<u8>> = values
+            .iter()
+            .map(|v| {
+                let mut buf = Vec::new();
+                v.encode(&mut buf);
+                buf
+            })
+            .collect();
+
+        for i in 0..encoded.len() - 1 {
+            assert_eq!(
+                <i64 as Key>::compare_encoded(&encoded[i], &encoded[i + 1]),
+                Ordering::Less,
+                "Expected {:?} < {:?}",
+                values[i],
+                values[i + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn test_i64_key_type() {
+        assert_eq!(<i64 as Key>::KEY_TYPE, KeyType::I64);
+    }
+
+    // ─── String Key roundtrip and edge cases ───────────────────
+
+    #[test]
+    fn test_string_key_roundtrip() {
+        let s = "hello world".to_string();
+        let mut buf = Vec::new();
+        s.encode(&mut buf);
+        assert_eq!(<String as Key>::decode(&buf), Some(s));
+    }
+
+    #[test]
+    fn test_string_key_empty() {
+        let s = String::new();
+        let mut buf = Vec::new();
+        s.encode(&mut buf);
+        assert!(buf.is_empty());
+        assert_eq!(<String as Key>::decode(&buf), Some(String::new()));
+    }
+
+    #[test]
+    fn test_string_key_encoded_size() {
+        assert_eq!(Key::encoded_size(&"hello".to_string()), 5);
+        assert_eq!(Key::encoded_size(&String::new()), 0);
+    }
+
+    #[test]
+    fn test_string_key_decode_invalid_utf8() {
+        let invalid_utf8 = [0xFF, 0xFE, 0xFD];
+        assert_eq!(<String as Key>::decode(&invalid_utf8), None);
+    }
+
+    #[test]
+    fn test_string_key_compare_encoded() {
+        let mut buf_a = Vec::new();
+        let mut buf_b = Vec::new();
+        "apple".to_string().encode(&mut buf_a);
+        "banana".to_string().encode(&mut buf_b);
+        assert_eq!(<String as Key>::compare_encoded(&buf_a, &buf_b), Ordering::Less);
+    }
+
+    #[test]
+    fn test_string_key_type() {
+        assert_eq!(<String as Key>::KEY_TYPE, KeyType::Str);
+    }
+
+    // ─── &str Key ──────────────────────────────────────────────
+
+    #[test]
+    fn test_str_ref_key_encode() {
+        let mut buf = Vec::new();
+        Key::encode(&"hello", &mut buf);
+        assert_eq!(&buf, b"hello");
+    }
+
+    #[test]
+    fn test_str_ref_key_decode_always_none() {
+        // Can't return borrowed reference from owned data
+        assert_eq!(<&str as Key>::decode(b"hello"), None);
+    }
+
+    #[test]
+    fn test_str_ref_key_encoded_size() {
+        assert_eq!(Key::encoded_size(&"test"), 4);
+    }
+
+    #[test]
+    fn test_str_ref_key_type() {
+        assert_eq!(<&str as Key>::KEY_TYPE, KeyType::Str);
+    }
+
+    // ─── Vec<u8> Key roundtrip and edge cases ──────────────────
+
+    #[test]
+    fn test_vec_u8_key_roundtrip() {
+        let v = vec![1u8, 2, 3, 4];
+        let mut buf = Vec::new();
+        Key::encode(&v, &mut buf);
+        assert_eq!(<Vec<u8> as Key>::decode(&buf), Some(v));
+    }
+
+    #[test]
+    fn test_vec_u8_key_empty() {
+        let v: Vec<u8> = Vec::new();
+        let mut buf = Vec::new();
+        Key::encode(&v, &mut buf);
+        assert!(buf.is_empty());
+        assert_eq!(<Vec<u8> as Key>::decode(&buf), Some(Vec::new()));
+    }
+
+    #[test]
+    fn test_vec_u8_key_encoded_size() {
+        assert_eq!(Key::encoded_size(&vec![0u8; 10]), 10);
+    }
+
+    #[test]
+    fn test_vec_u8_key_type() {
+        assert_eq!(<Vec<u8> as Key>::KEY_TYPE, KeyType::Bytes);
+    }
+
+    // ─── &[u8] Key ─────────────────────────────────────────────
+
+    #[test]
+    fn test_slice_u8_key_encode() {
+        let data: &[u8] = &[0xAA, 0xBB];
+        let mut buf = Vec::new();
+        Key::encode(&data, &mut buf);
+        assert_eq!(buf, vec![0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn test_slice_u8_key_decode_always_none() {
+        assert_eq!(<&[u8] as Key>::decode(&[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn test_slice_u8_key_encoded_size() {
+        let data: &[u8] = &[1, 2, 3];
+        assert_eq!(Key::encoded_size(&data), 3);
+    }
+
+    #[test]
+    fn test_slice_u8_key_type() {
+        assert_eq!(<&[u8] as Key>::KEY_TYPE, KeyType::Bytes);
+    }
+
+    // ─── Vec<u8> Value ─────────────────────────────────────────
+
+    #[test]
+    fn test_vec_u8_value_roundtrip() {
+        let v = vec![10u8, 20, 30];
+        let mut buf = Vec::new();
+        <Vec<u8> as Value>::encode(&v, &mut buf);
+        assert_eq!(<Vec<u8> as Value>::decode(&buf), Some(v));
+    }
+
+    #[test]
+    fn test_vec_u8_value_empty() {
+        let v: Vec<u8> = Vec::new();
+        let mut buf = Vec::new();
+        <Vec<u8> as Value>::encode(&v, &mut buf);
+        assert_eq!(<Vec<u8> as Value>::decode(&buf), Some(Vec::new()));
+    }
+
+    #[test]
+    fn test_vec_u8_value_encoded_size() {
+        assert_eq!(Value::encoded_size(&vec![0u8; 7]), 7);
+    }
+
+    // ─── &[u8] Value ───────────────────────────────────────────
+
+    #[test]
+    fn test_slice_u8_value_encode() {
+        let data: &[u8] = &[0xCC, 0xDD];
+        let mut buf = Vec::new();
+        Value::encode(&data, &mut buf);
+        assert_eq!(buf, vec![0xCC, 0xDD]);
+    }
+
+    #[test]
+    fn test_slice_u8_value_decode_always_none() {
+        assert_eq!(<&[u8] as Value>::decode(&[5, 6]), None);
+    }
+
+    #[test]
+    fn test_slice_u8_value_encoded_size() {
+        let data: &[u8] = &[1, 2, 3, 4, 5];
+        assert_eq!(Value::encoded_size(&data), 5);
+    }
+
+    // ─── u64 Value ─────────────────────────────────────────────
+
+    #[test]
+    fn test_u64_value_roundtrip() {
+        let v = 12345u64;
+        let mut buf = Vec::new();
+        Value::encode(&v, &mut buf);
+        assert_eq!(buf.len(), 8);
+        assert_eq!(<u64 as Value>::decode(&buf), Some(12345u64));
+    }
+
+    #[test]
+    fn test_u64_value_zero() {
+        let mut buf = Vec::new();
+        <u64 as Value>::encode(&0u64, &mut buf);
+        assert_eq!(<u64 as Value>::decode(&buf), Some(0u64));
+    }
+
+    #[test]
+    fn test_u64_value_max() {
+        let mut buf = Vec::new();
+        <u64 as Value>::encode(&u64::MAX, &mut buf);
+        assert_eq!(<u64 as Value>::decode(&buf), Some(u64::MAX));
+    }
+
+    #[test]
+    fn test_u64_value_decode_too_short() {
+        assert_eq!(<u64 as Value>::decode(&[0u8; 7]), None);
+        assert_eq!(<u64 as Value>::decode(&[]), None);
+    }
+
+    #[test]
+    fn test_u64_value_encoded_size() {
+        assert_eq!(Value::encoded_size(&42u64), 8);
+    }
+
+    // ─── Length-prefixed encoding ──────────────────────────────
+
+    #[test]
+    fn test_length_prefixed_roundtrip() {
+        let data = b"hello world";
+        let mut buf = Vec::new();
+        encode_length_prefixed(data, &mut buf);
+        let (decoded, total_size) = decode_length_prefixed(&buf).unwrap();
+        assert_eq!(decoded, data);
+        assert_eq!(total_size, buf.len());
+    }
+
+    #[test]
+    fn test_length_prefixed_empty() {
+        let data: &[u8] = &[];
+        let mut buf = Vec::new();
+        encode_length_prefixed(data, &mut buf);
+        let (decoded, total_size) = decode_length_prefixed(&buf).unwrap();
+        assert!(decoded.is_empty());
+        assert_eq!(total_size, 1); // 1-byte varint for length 0
+    }
+
+    #[test]
+    fn test_length_prefixed_truncated_data() {
+        // Encode a valid length-prefixed slice then truncate the data portion
+        let data = b"hello";
+        let mut buf = Vec::new();
+        encode_length_prefixed(data, &mut buf);
+        // Truncate so the data portion is incomplete
+        buf.truncate(2);
+        assert!(decode_length_prefixed(&buf).is_none());
+    }
+
+    // ─── Varint edge cases ─────────────────────────────────────
+
+    #[test]
+    fn test_varint_single_byte() {
+        let mut buf = Vec::new();
+        encode_varint(0, &mut buf);
+        assert_eq!(buf.len(), 1);
+        assert_eq!(buf[0], 0);
+
+        buf.clear();
+        encode_varint(127, &mut buf);
+        assert_eq!(buf.len(), 1);
+        assert_eq!(buf[0], 127);
+    }
+
+    #[test]
+    fn test_varint_multi_byte() {
+        let mut buf = Vec::new();
+        encode_varint(128, &mut buf);
+        assert!(buf.len() > 1);
+        let (decoded, _) = decode_varint(&buf).unwrap();
+        assert_eq!(decoded, 128);
+    }
+
+    #[test]
+    fn test_varint_decode_empty() {
+        assert!(decode_varint(&[]).is_none());
+    }
+
+    #[test]
+    fn test_varint_decode_too_long() {
+        // 5 continuation bytes (all with high bit set) means varint is too long
+        let buf = [0x80, 0x80, 0x80, 0x80, 0x80];
+        assert!(decode_varint(&buf).is_none());
+    }
+
+    #[test]
+    fn test_varint_decode_incomplete() {
+        // Single byte with continuation bit but no following byte
+        let buf = [0x80];
+        assert!(decode_varint(&buf).is_none());
+    }
+
+    #[test]
+    fn test_varint_max_u32() {
+        let mut buf = Vec::new();
+        encode_varint(u32::MAX, &mut buf);
+        let (decoded, _) = decode_varint(&buf).unwrap();
+        assert_eq!(decoded, u32::MAX);
+    }
+
+    // ─── KeyType discriminant coverage ─────────────────────────
+
+    #[test]
+    fn test_key_type_equality() {
+        assert_eq!(KeyType::U64, KeyType::U64);
+        assert_ne!(KeyType::U64, KeyType::I64);
+        assert_ne!(KeyType::Str, KeyType::Bytes);
+    }
+
+    #[test]
+    fn test_key_type_debug() {
+        // Ensure Debug is derived
+        let s = format!("{:?}", KeyType::Bytes);
+        assert_eq!(s, "Bytes");
+    }
+
+    #[test]
+    fn test_key_type_clone() {
+        let kt = KeyType::Str;
+        let cloned = kt;
+        assert_eq!(kt, cloned);
+    }
 }

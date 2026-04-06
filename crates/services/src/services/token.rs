@@ -1374,6 +1374,7 @@ impl TokenServiceImpl {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -1514,5 +1515,231 @@ mod tests {
         let err = crate::jwt::JwtError::KeyEncryption;
         let status = TokenServiceImpl::jwt_error_to_status(err);
         assert_eq!(status.code(), tonic::Code::Internal);
+    }
+
+    #[test]
+    fn jwt_error_to_status_key_decryption() {
+        let err = crate::jwt::JwtError::KeyDecryption;
+        let status = TokenServiceImpl::jwt_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::Internal);
+    }
+
+    #[test]
+    fn jwt_error_to_status_signing() {
+        let err = crate::jwt::JwtError::Signing {
+            source: jsonwebtoken::errors::Error::from(
+                jsonwebtoken::errors::ErrorKind::InvalidKeyFormat,
+            ),
+            location: snafu::location!(),
+        };
+        let status = TokenServiceImpl::jwt_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::Internal);
+    }
+
+    #[test]
+    fn jwt_error_to_status_decoding() {
+        let err = crate::jwt::JwtError::Decoding {
+            source: jsonwebtoken::errors::Error::from(
+                jsonwebtoken::errors::ErrorKind::InvalidToken,
+            ),
+            location: snafu::location!(),
+        };
+        let status = TokenServiceImpl::jwt_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn jwt_error_to_status_invalid_token_type() {
+        use inferadb_ledger_types::token::TokenError;
+
+        use crate::jwt::JwtError;
+
+        let err = JwtError::Token {
+            source: TokenError::InvalidTokenType { expected: "access".to_string() },
+            location: snafu::location!(),
+        };
+        let status = TokenServiceImpl::jwt_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("access"));
+    }
+
+    #[test]
+    fn jwt_error_to_status_signing_key_not_found() {
+        use inferadb_ledger_types::token::TokenError;
+
+        use crate::jwt::JwtError;
+
+        let err = JwtError::Token {
+            source: TokenError::SigningKeyNotFound { kid: "missing-kid".to_string() },
+            location: snafu::location!(),
+        };
+        let status = TokenServiceImpl::jwt_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::NotFound);
+    }
+
+    #[test]
+    fn jwt_error_to_status_signing_key_expired() {
+        use inferadb_ledger_types::token::TokenError;
+
+        use crate::jwt::JwtError;
+
+        let err = JwtError::Token {
+            source: TokenError::SigningKeyExpired { kid: "old-kid".to_string() },
+            location: snafu::location!(),
+        };
+        let status = TokenServiceImpl::jwt_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[test]
+    fn jwt_error_to_status_invalid_signature() {
+        use inferadb_ledger_types::token::TokenError;
+
+        use crate::jwt::JwtError;
+
+        let err =
+            JwtError::Token { source: TokenError::InvalidSignature, location: snafu::location!() };
+        let status = TokenServiceImpl::jwt_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    // =========================================================================
+    // parse_assertion_header tests
+    // =========================================================================
+
+    /// Encodes a JSON header as base64url (no padding).
+    fn encode_jwt_part(json: &serde_json::Value) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(json).unwrap())
+    }
+
+    #[test]
+    fn parse_assertion_header_valid_eddsa() {
+        let header = serde_json::json!({ "alg": "EdDSA", "kid": "123" });
+        let token = format!("{}.payload.signature", encode_jwt_part(&header));
+        let (kid, assertion_id) = TokenServiceImpl::parse_assertion_header(&token).unwrap();
+        assert_eq!(kid, "123");
+        assert_eq!(assertion_id.value(), 123);
+    }
+
+    #[test]
+    fn parse_assertion_header_rejects_non_eddsa_algorithm() {
+        let header = serde_json::json!({ "alg": "RS256", "kid": "123" });
+        let token = format!("{}.payload.signature", encode_jwt_part(&header));
+        let status = TokenServiceImpl::parse_assertion_header(&token).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert!(status.message().contains("Unsupported algorithm"));
+    }
+
+    #[test]
+    fn parse_assertion_header_rejects_missing_alg() {
+        let header = serde_json::json!({ "kid": "123" });
+        let token = format!("{}.payload.signature", encode_jwt_part(&header));
+        let status = TokenServiceImpl::parse_assertion_header(&token).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert!(status.message().contains("Missing alg"));
+    }
+
+    #[test]
+    fn parse_assertion_header_rejects_missing_kid() {
+        let header = serde_json::json!({ "alg": "EdDSA" });
+        let token = format!("{}.payload.signature", encode_jwt_part(&header));
+        let status = TokenServiceImpl::parse_assertion_header(&token).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert!(status.message().contains("Missing kid"));
+    }
+
+    #[test]
+    fn parse_assertion_header_rejects_non_numeric_kid() {
+        let header = serde_json::json!({ "alg": "EdDSA", "kid": "not-a-number" });
+        let token = format!("{}.payload.signature", encode_jwt_part(&header));
+        let status = TokenServiceImpl::parse_assertion_header(&token).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert!(status.message().contains("Invalid kid format"));
+    }
+
+    #[test]
+    fn parse_assertion_header_rejects_invalid_base64() {
+        let status = TokenServiceImpl::parse_assertion_header("!!!.payload.sig").unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn parse_assertion_header_rejects_no_dots() {
+        // Token with no dot separators still has a "first part" that isn't valid base64 JSON
+        let status = TokenServiceImpl::parse_assertion_header("nodotshere").unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    // =========================================================================
+    // extract_issuer_from_jwt tests
+    // =========================================================================
+
+    #[test]
+    fn extract_issuer_valid_jwt() {
+        let header = serde_json::json!({ "alg": "EdDSA", "kid": "1" });
+        let payload = serde_json::json!({ "iss": "12345", "sub": "test" });
+        let token =
+            format!("{}.{}.signature", encode_jwt_part(&header), encode_jwt_part(&payload),);
+        let slug = TokenServiceImpl::extract_issuer_from_jwt(&token).unwrap();
+        assert_eq!(slug.value(), 12345);
+    }
+
+    #[test]
+    fn extract_issuer_missing_iss_claim() {
+        let header = serde_json::json!({ "alg": "EdDSA" });
+        let payload = serde_json::json!({ "sub": "test" });
+        let token =
+            format!("{}.{}.signature", encode_jwt_part(&header), encode_jwt_part(&payload),);
+        let status = TokenServiceImpl::extract_issuer_from_jwt(&token).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert!(status.message().contains("Missing iss"));
+    }
+
+    #[test]
+    fn extract_issuer_non_numeric_iss() {
+        let header = serde_json::json!({ "alg": "EdDSA" });
+        let payload = serde_json::json!({ "iss": "not-a-number" });
+        let token =
+            format!("{}.{}.signature", encode_jwt_part(&header), encode_jwt_part(&payload),);
+        let status = TokenServiceImpl::extract_issuer_from_jwt(&token).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert!(status.message().contains("Invalid iss"));
+    }
+
+    #[test]
+    fn extract_issuer_wrong_part_count() {
+        let status = TokenServiceImpl::extract_issuer_from_jwt("only.two").unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert!(status.message().contains("Invalid assertion JWT format"));
+    }
+
+    #[test]
+    fn extract_issuer_invalid_payload_base64() {
+        let header = encode_jwt_part(&serde_json::json!({ "alg": "EdDSA" }));
+        let token = format!("{header}.!!!invalid!!!.signature");
+        let status = TokenServiceImpl::extract_issuer_from_jwt(&token).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn extract_issuer_invalid_payload_json() {
+        let header = encode_jwt_part(&serde_json::json!({ "alg": "EdDSA" }));
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not json");
+        let token = format!("{header}.{payload}.signature");
+        let status = TokenServiceImpl::extract_issuer_from_jwt(&token).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    // =========================================================================
+    // hash_refresh_token edge cases
+    // =========================================================================
+
+    #[test]
+    fn hash_refresh_token_empty_string() {
+        let hash = TokenServiceImpl::hash_refresh_token("");
+        assert_eq!(hash.len(), 32);
+        // SHA-256 of empty string is a well-known value
+        let expected: [u8; 32] = Sha256::digest(b"").into();
+        assert_eq!(hash, expected);
     }
 }

@@ -370,3 +370,565 @@ pub(crate) fn error_code_to_status(code: ErrorCode, message: String) -> Status {
         },
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
+mod tests {
+    use inferadb_ledger_proto::proto;
+    use inferadb_ledger_raft::graceful_shutdown::HealthState;
+    use inferadb_ledger_types::{ErrorCode, VaultId, config::ValidationConfig};
+
+    use super::*;
+
+    // =========================================================================
+    // check_not_draining
+    // =========================================================================
+
+    #[test]
+    fn check_not_draining_none_health_state_accepts() {
+        assert!(check_not_draining(None).is_ok());
+    }
+
+    #[test]
+    fn check_not_draining_starting_phase_rejects() {
+        let hs = HealthState::new(); // starts in Starting phase
+        let result = check_not_draining(Some(&hs));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Unavailable);
+    }
+
+    #[test]
+    fn check_not_draining_ready_phase_accepts() {
+        let hs = HealthState::new();
+        hs.mark_ready();
+        assert!(check_not_draining(Some(&hs)).is_ok());
+    }
+
+    #[test]
+    fn check_not_draining_draining_phase_rejects() {
+        let hs = HealthState::new();
+        hs.mark_ready();
+        hs.mark_draining();
+        let result = check_not_draining(Some(&hs));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Unavailable);
+    }
+
+    #[test]
+    fn check_not_draining_shutting_down_phase_rejects() {
+        let hs = HealthState::new();
+        hs.mark_shutting_down();
+        let result = check_not_draining(Some(&hs));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Unavailable);
+    }
+
+    // =========================================================================
+    // extract_caller
+    // =========================================================================
+
+    #[test]
+    fn extract_caller_sets_slug_when_present() {
+        let mut ctx = inferadb_ledger_raft::logging::RequestContext::new("test", "method");
+        let caller = Some(proto::UserSlug { slug: 42 });
+        extract_caller(&mut ctx, &caller);
+        assert_eq!(ctx.caller_or_zero(), 42);
+    }
+
+    #[test]
+    fn extract_caller_noop_when_none() {
+        let mut ctx = inferadb_ledger_raft::logging::RequestContext::new("test", "method");
+        extract_caller(&mut ctx, &None);
+        assert_eq!(ctx.caller_or_zero(), 0);
+    }
+
+    // =========================================================================
+    // validation_status
+    // =========================================================================
+
+    #[test]
+    fn validation_status_returns_invalid_argument() {
+        let status = validation_status("field too long");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), "field too long");
+        // Should have binary error details
+        assert!(!status.details().is_empty());
+    }
+
+    #[test]
+    fn validation_status_details_contain_error_code() {
+        let status = validation_status("bad input");
+        let details =
+            <proto::ErrorDetails as prost::Message>::decode(status.details()).expect("decode");
+        assert!(!details.is_retryable);
+        assert!(details.suggested_action.is_some());
+    }
+
+    // =========================================================================
+    // validate_operations
+    // =========================================================================
+
+    #[test]
+    fn validate_operations_empty_list_rejected() {
+        let config = ValidationConfig::default();
+        let err = validate_operations(&[], &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn validate_operations_valid_set_entity() {
+        let config = ValidationConfig::default();
+        let ops = vec![proto::Operation {
+            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+                key: "user:1".to_owned(),
+                value: b"data".to_vec(),
+                condition: None,
+                expires_at: None,
+            })),
+        }];
+        assert!(validate_operations(&ops, &config).is_ok());
+    }
+
+    #[test]
+    fn validate_operations_valid_delete_entity() {
+        let config = ValidationConfig::default();
+        let ops = vec![proto::Operation {
+            op: Some(proto::operation::Op::DeleteEntity(proto::DeleteEntity {
+                key: "user:1".to_owned(),
+            })),
+        }];
+        assert!(validate_operations(&ops, &config).is_ok());
+    }
+
+    #[test]
+    fn validate_operations_valid_expire_entity() {
+        let config = ValidationConfig::default();
+        let ops = vec![proto::Operation {
+            op: Some(proto::operation::Op::ExpireEntity(proto::ExpireEntity {
+                key: "user:1".to_owned(),
+                expired_at: 1000,
+            })),
+        }];
+        assert!(validate_operations(&ops, &config).is_ok());
+    }
+
+    #[test]
+    fn validate_operations_valid_create_relationship() {
+        let config = ValidationConfig::default();
+        let ops = vec![proto::Operation {
+            op: Some(proto::operation::Op::CreateRelationship(proto::CreateRelationship {
+                resource: "doc:readme".to_owned(),
+                relation: "viewer".to_owned(),
+                subject: "user:alice".to_owned(),
+            })),
+        }];
+        assert!(validate_operations(&ops, &config).is_ok());
+    }
+
+    #[test]
+    fn validate_operations_valid_delete_relationship() {
+        let config = ValidationConfig::default();
+        let ops = vec![proto::Operation {
+            op: Some(proto::operation::Op::DeleteRelationship(proto::DeleteRelationship {
+                resource: "doc:readme".to_owned(),
+                relation: "viewer".to_owned(),
+                subject: "user:alice".to_owned(),
+            })),
+        }];
+        assert!(validate_operations(&ops, &config).is_ok());
+    }
+
+    #[test]
+    fn validate_operations_missing_op_field_rejects() {
+        let config = ValidationConfig::default();
+        let ops = vec![proto::Operation { op: None }];
+        let err = validate_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("missing op field"));
+    }
+
+    #[test]
+    fn validate_operations_system_key_rejected() {
+        let config = ValidationConfig::default();
+        let ops = vec![proto::Operation {
+            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+                key: "_meta:seq".to_owned(),
+                value: b"x".to_vec(),
+                condition: None,
+                expires_at: None,
+            })),
+        }];
+        let err = validate_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn validate_operations_too_many_operations_rejected() {
+        let config = ValidationConfig::builder().max_operations_per_write(2).build().unwrap();
+        let ops: Vec<_> = (0..3)
+            .map(|i| proto::Operation {
+                op: Some(proto::operation::Op::DeleteEntity(proto::DeleteEntity {
+                    key: format!("k{i}"),
+                })),
+            })
+            .collect();
+        let err = validate_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn validate_operations_oversized_payload_rejected() {
+        let config = ValidationConfig::builder().max_batch_payload_bytes(10).build().unwrap();
+        let ops = vec![proto::Operation {
+            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+                key: "k".to_owned(),
+                value: vec![0u8; 20],
+                condition: None,
+                expires_at: None,
+            })),
+        }];
+        let err = validate_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    // =========================================================================
+    // record_hot_keys
+    // =========================================================================
+
+    #[test]
+    fn record_hot_keys_none_detector_is_noop() {
+        let ops = vec![proto::Operation {
+            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+                key: "k".to_owned(),
+                value: vec![],
+                condition: None,
+                expires_at: None,
+            })),
+        }];
+        // Should not panic with None detector
+        record_hot_keys(None, VaultId::new(1), &ops);
+    }
+
+    #[test]
+    fn record_hot_keys_with_detector_records_accesses() {
+        let detector = Arc::new(inferadb_ledger_raft::hot_key_detector::HotKeyDetector::new(
+            &inferadb_ledger_types::config::HotKeyConfig::default(),
+        ));
+        let ops = vec![
+            proto::Operation {
+                op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+                    key: "entity:1".to_owned(),
+                    value: vec![],
+                    condition: None,
+                    expires_at: None,
+                })),
+            },
+            proto::Operation {
+                op: Some(proto::operation::Op::DeleteEntity(proto::DeleteEntity {
+                    key: "entity:2".to_owned(),
+                })),
+            },
+            proto::Operation {
+                op: Some(proto::operation::Op::CreateRelationship(proto::CreateRelationship {
+                    resource: "doc:1".to_owned(),
+                    relation: "viewer".to_owned(),
+                    subject: "user:1".to_owned(),
+                })),
+            },
+            proto::Operation {
+                op: Some(proto::operation::Op::DeleteRelationship(proto::DeleteRelationship {
+                    resource: "doc:2".to_owned(),
+                    relation: "editor".to_owned(),
+                    subject: "user:2".to_owned(),
+                })),
+            },
+            proto::Operation {
+                op: Some(proto::operation::Op::ExpireEntity(proto::ExpireEntity {
+                    key: "entity:3".to_owned(),
+                    expired_at: 1000,
+                })),
+            },
+        ];
+        // Should not panic and should record all 5 keys
+        record_hot_keys(Some(&detector), VaultId::new(1), &ops);
+    }
+
+    #[test]
+    fn record_hot_keys_skips_none_op() {
+        let detector = Arc::new(inferadb_ledger_raft::hot_key_detector::HotKeyDetector::new(
+            &inferadb_ledger_types::config::HotKeyConfig::default(),
+        ));
+        let ops = vec![proto::Operation { op: None }];
+        record_hot_keys(Some(&detector), VaultId::new(1), &ops);
+    }
+
+    // =========================================================================
+    // hash_operations
+    // =========================================================================
+
+    #[test]
+    fn hash_operations_empty_returns_empty() {
+        assert!(hash_operations(&[]).is_empty());
+    }
+
+    #[test]
+    fn hash_operations_deterministic() {
+        let ops = vec![proto::Operation {
+            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+                key: "k".to_owned(),
+                value: b"v".to_vec(),
+                condition: None,
+                expires_at: None,
+            })),
+        }];
+        let h1 = hash_operations(&ops);
+        let h2 = hash_operations(&ops);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn hash_operations_different_ops_differ() {
+        let ops_a = vec![proto::Operation {
+            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+                key: "a".to_owned(),
+                value: b"v".to_vec(),
+                condition: None,
+                expires_at: None,
+            })),
+        }];
+        let ops_b = vec![proto::Operation {
+            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+                key: "b".to_owned(),
+                value: b"v".to_vec(),
+                condition: None,
+                expires_at: None,
+            })),
+        }];
+        assert_ne!(hash_operations(&ops_a), hash_operations(&ops_b));
+    }
+
+    #[test]
+    fn hash_operations_length_prefix_prevents_boundary_collision() {
+        // "ab" + "cd" vs "abc" + "d" should differ due to length prefixing
+        let ops_a = vec![proto::Operation {
+            op: Some(proto::operation::Op::CreateRelationship(proto::CreateRelationship {
+                resource: "ab".to_owned(),
+                relation: "cd".to_owned(),
+                subject: "ef".to_owned(),
+            })),
+        }];
+        let ops_b = vec![proto::Operation {
+            op: Some(proto::operation::Op::CreateRelationship(proto::CreateRelationship {
+                resource: "abc".to_owned(),
+                relation: "d".to_owned(),
+                subject: "ef".to_owned(),
+            })),
+        }];
+        assert_ne!(hash_operations(&ops_a), hash_operations(&ops_b));
+    }
+
+    #[test]
+    fn hash_operations_all_variants_produce_nonempty() {
+        let ops = vec![
+            proto::Operation {
+                op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+                    key: "k".to_owned(),
+                    value: b"v".to_vec(),
+                    condition: None,
+                    expires_at: Some(12345),
+                })),
+            },
+            proto::Operation {
+                op: Some(proto::operation::Op::DeleteEntity(proto::DeleteEntity {
+                    key: "k".to_owned(),
+                })),
+            },
+            proto::Operation {
+                op: Some(proto::operation::Op::ExpireEntity(proto::ExpireEntity {
+                    key: "k".to_owned(),
+                    expired_at: 999,
+                })),
+            },
+            proto::Operation {
+                op: Some(proto::operation::Op::CreateRelationship(proto::CreateRelationship {
+                    resource: "r".to_owned(),
+                    relation: "rel".to_owned(),
+                    subject: "s".to_owned(),
+                })),
+            },
+            proto::Operation {
+                op: Some(proto::operation::Op::DeleteRelationship(proto::DeleteRelationship {
+                    resource: "r".to_owned(),
+                    relation: "rel".to_owned(),
+                    subject: "s".to_owned(),
+                })),
+            },
+        ];
+        let hash = hash_operations(&ops);
+        assert!(!hash.is_empty());
+    }
+
+    #[test]
+    fn hash_operations_set_with_condition_differs_from_without() {
+        let ops_no_cond = vec![proto::Operation {
+            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+                key: "k".to_owned(),
+                value: b"v".to_vec(),
+                condition: None,
+                expires_at: None,
+            })),
+        }];
+        let ops_with_cond = vec![proto::Operation {
+            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+                key: "k".to_owned(),
+                value: b"v".to_vec(),
+                condition: Some(proto::SetCondition {
+                    condition: Some(proto::set_condition::Condition::NotExists(true)),
+                }),
+                expires_at: None,
+            })),
+        }];
+        assert_ne!(hash_operations(&ops_no_cond), hash_operations(&ops_with_cond));
+    }
+
+    #[test]
+    fn hash_operations_skips_none_op() {
+        let ops = vec![proto::Operation { op: None }];
+        assert!(hash_operations(&ops).is_empty());
+    }
+
+    #[test]
+    fn hash_operations_create_vs_delete_relationship_differ() {
+        let ops_create = vec![proto::Operation {
+            op: Some(proto::operation::Op::CreateRelationship(proto::CreateRelationship {
+                resource: "r".to_owned(),
+                relation: "rel".to_owned(),
+                subject: "s".to_owned(),
+            })),
+        }];
+        let ops_delete = vec![proto::Operation {
+            op: Some(proto::operation::Op::DeleteRelationship(proto::DeleteRelationship {
+                resource: "r".to_owned(),
+                relation: "rel".to_owned(),
+                subject: "s".to_owned(),
+            })),
+        }];
+        assert_ne!(hash_operations(&ops_create), hash_operations(&ops_delete));
+    }
+
+    // =========================================================================
+    // error_code_to_status
+    // =========================================================================
+
+    #[test]
+    fn error_code_not_found_maps_to_grpc_not_found() {
+        let s = error_code_to_status(ErrorCode::NotFound, "gone".into());
+        assert_eq!(s.code(), tonic::Code::NotFound);
+        assert_eq!(s.message(), "gone");
+    }
+
+    #[test]
+    fn error_code_already_exists_maps_to_grpc_already_exists() {
+        let s = error_code_to_status(ErrorCode::AlreadyExists, "dup".into());
+        assert_eq!(s.code(), tonic::Code::AlreadyExists);
+    }
+
+    #[test]
+    fn error_code_failed_precondition_maps_correctly() {
+        let s = error_code_to_status(ErrorCode::FailedPrecondition, "pre".into());
+        assert_eq!(s.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[test]
+    fn error_code_permission_denied_maps_correctly() {
+        let s = error_code_to_status(ErrorCode::PermissionDenied, "denied".into());
+        assert_eq!(s.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[test]
+    fn error_code_invalid_argument_maps_correctly() {
+        let s = error_code_to_status(ErrorCode::InvalidArgument, "bad".into());
+        assert_eq!(s.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn error_code_internal_maps_correctly() {
+        let s = error_code_to_status(ErrorCode::Internal, "oops".into());
+        assert_eq!(s.code(), tonic::Code::Internal);
+    }
+
+    #[test]
+    fn error_code_unauthenticated_maps_correctly() {
+        let s = error_code_to_status(ErrorCode::Unauthenticated, "no auth".into());
+        assert_eq!(s.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn error_code_rate_limited_maps_to_resource_exhausted() {
+        let s = error_code_to_status(ErrorCode::RateLimited, "slow down".into());
+        assert_eq!(s.code(), tonic::Code::ResourceExhausted);
+    }
+
+    #[test]
+    fn error_code_invitation_rate_limited_maps_to_resource_exhausted() {
+        let s = error_code_to_status(ErrorCode::InvitationRateLimited, "too many".into());
+        assert_eq!(s.code(), tonic::Code::ResourceExhausted);
+    }
+
+    #[test]
+    fn error_code_expired_maps_to_failed_precondition() {
+        let s = error_code_to_status(ErrorCode::Expired, "expired".into());
+        assert_eq!(s.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[test]
+    fn error_code_too_many_attempts_maps_to_failed_precondition() {
+        let s = error_code_to_status(ErrorCode::TooManyAttempts, "locked".into());
+        assert_eq!(s.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[test]
+    fn error_code_invitation_already_resolved_maps_to_failed_precondition() {
+        let s = error_code_to_status(ErrorCode::InvitationAlreadyResolved, "done".into());
+        assert_eq!(s.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[test]
+    fn error_code_invitation_email_mismatch_maps_to_not_found() {
+        let s = error_code_to_status(ErrorCode::InvitationEmailMismatch, "mismatch".into());
+        assert_eq!(s.code(), tonic::Code::NotFound);
+    }
+
+    #[test]
+    fn error_code_invitation_already_member_maps_to_already_exists() {
+        let s = error_code_to_status(ErrorCode::InvitationAlreadyMember, "member".into());
+        assert_eq!(s.code(), tonic::Code::AlreadyExists);
+    }
+
+    #[test]
+    fn error_code_invitation_duplicate_pending_maps_to_already_exists() {
+        let s = error_code_to_status(ErrorCode::InvitationDuplicatePending, "pending".into());
+        assert_eq!(s.code(), tonic::Code::AlreadyExists);
+    }
+
+    // =========================================================================
+    // storage_err
+    // =========================================================================
+
+    #[test]
+    fn storage_err_returns_internal_status() {
+        let s = storage_err("disk failure");
+        assert_eq!(s.code(), tonic::Code::Internal);
+        assert_eq!(s.message(), "Internal error");
+    }
+
+    // =========================================================================
+    // create_replay_context
+    // =========================================================================
+
+    #[test]
+    fn create_replay_context_returns_valid_state_layer() {
+        let (_temp_dir, _state) = create_replay_context().expect("should succeed");
+        // The temp_dir and state should be usable (no panic)
+    }
+}

@@ -981,3 +981,717 @@ impl Drop for RequestContext {
 /// Each request creates one `CanonicalLogLine` that accumulates context throughout
 /// its lifecycle and emits a single structured JSON event on completion.
 pub type CanonicalLogLine = RequestContext;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::*;
+
+    // ── Helper function tests ──
+
+    #[test]
+    fn truncate_string_short_unchanged() {
+        assert_eq!(truncate_string("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_string_exact_length() {
+        assert_eq!(truncate_string("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_string_long_truncated() {
+        let result = truncate_string("hello world", 8);
+        assert_eq!(result, "hello...");
+    }
+
+    #[test]
+    fn truncate_string_very_short_max() {
+        // max_len < 3 triggers saturating_sub
+        let result = truncate_string("abcdef", 2);
+        assert_eq!(result, "...");
+    }
+
+    #[test]
+    fn sanitize_string_replaces_control_chars() {
+        let input = "hello\x00world\x01test";
+        let result = sanitize_string(input);
+        assert_eq!(result, "hello\u{FFFD}world\u{FFFD}test");
+    }
+
+    #[test]
+    fn sanitize_string_preserves_newline_cr_tab() {
+        let input = "line1\nline2\rline3\ttab";
+        let result = sanitize_string(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn sanitize_string_normal_text_unchanged() {
+        let input = "normal text 123";
+        assert_eq!(sanitize_string(input), input);
+    }
+
+    #[test]
+    fn truncate_hash_short_unchanged() {
+        assert_eq!(truncate_hash("abcdef"), "abcdef");
+    }
+
+    #[test]
+    fn truncate_hash_exact_16() {
+        let hash = "0123456789abcdef";
+        assert_eq!(truncate_hash(hash), hash);
+    }
+
+    #[test]
+    fn truncate_hash_long_truncated() {
+        let hash = "0123456789abcdef0123456789abcdef";
+        assert_eq!(truncate_hash(hash), "0123456789abcdef");
+    }
+
+    // ── RequestContext construction tests ──
+
+    #[test]
+    fn new_sets_service_and_method() {
+        let ctx = RequestContext::new("WriteService", "write");
+        assert_eq!(ctx.service, "WriteService");
+        assert_eq!(ctx.method, "write");
+        assert!(!ctx.emitted);
+    }
+
+    #[test]
+    fn with_request_id_uses_given_id() {
+        let id = Uuid::new_v4();
+        let ctx = RequestContext::with_request_id("ReadService", "get", id);
+        assert_eq!(ctx.request_id(), id);
+        assert_eq!(ctx.service, "ReadService");
+    }
+
+    // ── Client info setters ──
+
+    #[test]
+    fn set_client_info_stores_truncated_sanitized() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_client_info("client\x00id", 42);
+        assert_eq!(ctx.client_id.as_deref(), Some("client\u{FFFD}id"));
+        assert_eq!(ctx.sequence, Some(42));
+    }
+
+    #[test]
+    fn set_client_id_only() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_client_id("c1");
+        assert_eq!(ctx.client_id.as_deref(), Some("c1"));
+        assert!(ctx.sequence.is_none());
+    }
+
+    #[test]
+    fn set_sequence_only() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_sequence(99);
+        assert_eq!(ctx.sequence, Some(99));
+        assert!(ctx.client_id.is_none());
+    }
+
+    #[test]
+    fn set_caller_and_caller_or_zero() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        assert_eq!(ctx.caller_or_zero(), 0);
+        ctx.set_caller(12345);
+        assert_eq!(ctx.caller_or_zero(), 12345);
+    }
+
+    // ── Target setters ──
+
+    #[test]
+    fn set_target_sets_both() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_target(1, 2);
+        assert_eq!(ctx.organization, Some(1));
+        assert_eq!(ctx.vault, Some(2));
+    }
+
+    #[test]
+    fn set_organization_only() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_organization(10);
+        assert_eq!(ctx.organization, Some(10));
+        assert!(ctx.vault.is_none());
+    }
+
+    #[test]
+    fn set_vault_only() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_vault(20);
+        assert_eq!(ctx.vault, Some(20));
+        assert!(ctx.organization.is_none());
+    }
+
+    // ── System context setters ──
+
+    #[test]
+    fn set_system_context_all_fields() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_system_context(1, true, 5, Some(Region::GLOBAL));
+        assert_eq!(ctx.node_id, Some(1));
+        assert_eq!(ctx.is_leader, Some(true));
+        assert_eq!(ctx.raft_term, Some(5));
+        assert_eq!(ctx.region, Some(Region::GLOBAL));
+    }
+
+    #[test]
+    fn set_node_id_only() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_node_id(99);
+        assert_eq!(ctx.node_id, Some(99));
+    }
+
+    #[test]
+    fn set_is_leader() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_is_leader(false);
+        assert_eq!(ctx.is_leader, Some(false));
+    }
+
+    #[test]
+    fn set_raft_term() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_raft_term(100);
+        assert_eq!(ctx.raft_term, Some(100));
+    }
+
+    #[test]
+    fn set_region() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_region(Region::DE_CENTRAL_FRANKFURT);
+        assert_eq!(ctx.region, Some(Region::DE_CENTRAL_FRANKFURT));
+    }
+
+    // ── Write operation setters ──
+
+    #[test]
+    fn set_write_operation_fields() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_write_operation(3, vec!["Set", "Delete"], true);
+        assert_eq!(ctx.operations_count, Some(3));
+        assert_eq!(ctx.operation_types.as_ref().unwrap().len(), 2);
+        assert_eq!(ctx.include_tx_proof, Some(true));
+    }
+
+    #[test]
+    fn set_operations_count() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_operations_count(5);
+        assert_eq!(ctx.operations_count, Some(5));
+    }
+
+    #[test]
+    fn set_operation_types() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_operation_types(vec!["Set"]);
+        assert_eq!(ctx.operation_types.as_ref().unwrap(), &["Set"]);
+    }
+
+    #[test]
+    fn set_include_tx_proof() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_include_tx_proof(false);
+        assert_eq!(ctx.include_tx_proof, Some(false));
+    }
+
+    #[test]
+    fn set_idempotency_hit() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_idempotency_hit(true);
+        assert_eq!(ctx.idempotency_hit, Some(true));
+    }
+
+    #[test]
+    fn set_batch_info() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_batch_info(true, 10);
+        assert_eq!(ctx.batch_coalesced, Some(true));
+        assert_eq!(ctx.batch_size, Some(10));
+    }
+
+    #[test]
+    fn set_condition_type() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_condition_type("MustNotExist");
+        assert_eq!(ctx.condition_type.as_deref(), Some("MustNotExist"));
+    }
+
+    // ── Read operation setters ──
+
+    #[test]
+    fn set_read_operation_fields() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_read_operation("my_key", "strong", true);
+        assert_eq!(ctx.key.as_deref(), Some("my_key"));
+        assert_eq!(ctx.consistency.as_deref(), Some("strong"));
+        assert_eq!(ctx.include_proof, Some(true));
+    }
+
+    #[test]
+    fn set_key_truncates() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        let long_key = "x".repeat(300);
+        ctx.set_key(&long_key);
+        assert!(ctx.key.as_ref().unwrap().len() <= 256);
+    }
+
+    #[test]
+    fn set_keys_count() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_keys_count(50);
+        assert_eq!(ctx.keys_count, Some(50));
+    }
+
+    #[test]
+    fn set_found_count() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_found_count(25);
+        assert_eq!(ctx.found_count, Some(25));
+    }
+
+    #[test]
+    fn set_consistency() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_consistency("eventual");
+        assert_eq!(ctx.consistency.as_deref(), Some("eventual"));
+    }
+
+    #[test]
+    fn set_at_height() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_at_height(42);
+        assert_eq!(ctx.at_height, Some(42));
+    }
+
+    #[test]
+    fn set_include_proof() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_include_proof(true);
+        assert_eq!(ctx.include_proof, Some(true));
+    }
+
+    #[test]
+    fn set_proof_size_bytes() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_proof_size_bytes(1024);
+        assert_eq!(ctx.proof_size_bytes, Some(1024));
+    }
+
+    #[test]
+    fn set_found() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_found(false);
+        assert_eq!(ctx.found, Some(false));
+    }
+
+    #[test]
+    fn set_value_size_bytes() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_value_size_bytes(512);
+        assert_eq!(ctx.value_size_bytes, Some(512));
+    }
+
+    // ── Admin operation setters ──
+
+    #[test]
+    fn set_admin_action() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_admin_action("create_organization");
+        assert_eq!(ctx.admin_action, Some("create_organization"));
+    }
+
+    #[test]
+    fn set_retention_mode() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_retention_mode("full");
+        assert_eq!(ctx.retention_mode.as_deref(), Some("full"));
+    }
+
+    #[test]
+    fn set_recovery_force() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_recovery_force(true);
+        assert_eq!(ctx.recovery_force, Some(true));
+    }
+
+    #[test]
+    fn set_admin_operation() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_admin_operation("delete_vault");
+        assert_eq!(ctx.admin_action, Some("delete_vault"));
+    }
+
+    // ── Outcome setters ──
+
+    #[test]
+    fn set_outcome_directly() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_outcome(Outcome::Success);
+        assert_eq!(ctx.outcome.as_ref().unwrap().as_str(), "success");
+    }
+
+    #[test]
+    fn set_success() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_success();
+        assert!(matches!(ctx.outcome, Some(Outcome::Success)));
+    }
+
+    #[test]
+    fn set_error() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_error("NOT_FOUND", "entity missing");
+        match &ctx.outcome {
+            Some(Outcome::Error { code, message }) => {
+                assert_eq!(code, "NOT_FOUND");
+                assert_eq!(message, "entity missing");
+            },
+            _ => panic!("expected Error outcome"),
+        }
+    }
+
+    #[test]
+    fn set_cached() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_cached();
+        assert!(matches!(ctx.outcome, Some(Outcome::Cached)));
+    }
+
+    #[test]
+    fn set_rate_limited() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_rate_limited();
+        assert!(matches!(ctx.outcome, Some(Outcome::RateLimited)));
+    }
+
+    #[test]
+    fn set_precondition_failed_with_key() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_precondition_failed(Some("my_key"));
+        match &ctx.outcome {
+            Some(Outcome::PreconditionFailed { key }) => {
+                assert_eq!(key.as_deref(), Some("my_key"));
+            },
+            _ => panic!("expected PreconditionFailed outcome"),
+        }
+    }
+
+    #[test]
+    fn set_precondition_failed_without_key() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_precondition_failed(None);
+        match &ctx.outcome {
+            Some(Outcome::PreconditionFailed { key }) => {
+                assert!(key.is_none());
+            },
+            _ => panic!("expected PreconditionFailed outcome"),
+        }
+    }
+
+    #[test]
+    fn set_block_height() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_block_height(500);
+        assert_eq!(ctx.block_height, Some(500));
+    }
+
+    #[test]
+    fn set_block_hash_truncates() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_block_hash("0123456789abcdef0123456789abcdef");
+        assert_eq!(ctx.block_hash.as_deref(), Some("0123456789abcdef"));
+    }
+
+    #[test]
+    fn set_state_root_truncates() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_state_root("fedcba9876543210fedcba9876543210");
+        assert_eq!(ctx.state_root.as_deref(), Some("fedcba9876543210"));
+    }
+
+    // ── I/O metrics setters ──
+
+    #[test]
+    fn set_bytes_read() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_bytes_read(1024);
+        assert_eq!(ctx.bytes_read, Some(1024));
+    }
+
+    #[test]
+    fn set_bytes_written() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_bytes_written(2048);
+        assert_eq!(ctx.bytes_written, Some(2048));
+    }
+
+    #[test]
+    fn increment_raft_round_trips() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.increment_raft_round_trips();
+        ctx.increment_raft_round_trips();
+        assert_eq!(ctx.raft_round_trips, Some(2));
+    }
+
+    #[test]
+    fn set_raft_round_trips() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_raft_round_trips(5);
+        assert_eq!(ctx.raft_round_trips, Some(5));
+    }
+
+    // ── Transport metadata setters ──
+
+    #[test]
+    fn set_sdk_version() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_sdk_version("1.2.3");
+        assert_eq!(ctx.sdk_version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn set_source_ip() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_source_ip("192.168.1.1");
+        assert_eq!(ctx.source_ip.as_deref(), Some("192.168.1.1"));
+    }
+
+    #[test]
+    fn extract_transport_metadata_from_grpc() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        metadata.insert("x-sdk-version", "2.0.0".parse().unwrap());
+        metadata.insert("x-forwarded-for", "10.0.0.1, 10.0.0.2".parse().unwrap());
+        ctx.extract_transport_metadata(&metadata);
+        assert_eq!(ctx.sdk_version.as_deref(), Some("2.0.0"));
+        assert_eq!(ctx.source_ip.as_deref(), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn extract_transport_metadata_missing_headers() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        let metadata = tonic::metadata::MetadataMap::new();
+        ctx.extract_transport_metadata(&metadata);
+        assert!(ctx.sdk_version.is_none());
+        assert!(ctx.source_ip.is_none());
+    }
+
+    // ── Trace context setters ──
+
+    #[test]
+    fn set_trace_context_all_fields() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_trace_context(
+            "0123456789abcdef0123456789abcdef",
+            "abcdef0123456789",
+            Some("parent123"),
+            1,
+        );
+        assert_eq!(ctx.trace_id.as_deref(), Some("0123456789abcdef0123456789abcdef"));
+        assert_eq!(ctx.span_id.as_deref(), Some("abcdef0123456789"));
+        assert_eq!(ctx.parent_span_id.as_deref(), Some("parent123"));
+        assert_eq!(ctx.trace_flags, Some(1));
+    }
+
+    #[test]
+    fn set_trace_id() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_trace_id("traceid".to_string());
+        assert_eq!(ctx.trace_id.as_deref(), Some("traceid"));
+    }
+
+    #[test]
+    fn set_span_id() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_span_id("spanid".to_string());
+        assert_eq!(ctx.span_id.as_deref(), Some("spanid"));
+    }
+
+    #[test]
+    fn set_parent_span_id() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_parent_span_id("parentid".to_string());
+        assert_eq!(ctx.parent_span_id.as_deref(), Some("parentid"));
+    }
+
+    #[test]
+    fn set_trace_flags() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_trace_flags(0x01);
+        assert_eq!(ctx.trace_flags, Some(1));
+    }
+
+    // ── Timing tests ──
+
+    #[test]
+    fn timing_raft_start_end() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.start_raft_timer();
+        assert!(ctx.timing.raft_start.is_some());
+        ctx.end_raft_timer();
+        assert!(ctx.timing.raft_start.is_none());
+        assert!(ctx.timing.raft_latency_ms.is_some());
+        assert_eq!(ctx.raft_round_trips, Some(1));
+    }
+
+    #[test]
+    fn end_raft_timer_without_start_is_noop() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.end_raft_timer();
+        assert!(ctx.timing.raft_latency_ms.is_none());
+    }
+
+    #[test]
+    fn timing_storage_start_end() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.start_storage_timer();
+        assert!(ctx.timing.storage_start.is_some());
+        ctx.end_storage_timer();
+        assert!(ctx.timing.storage_start.is_none());
+        assert!(ctx.timing.storage_latency_ms.is_some());
+    }
+
+    #[test]
+    fn end_storage_timer_without_start_is_noop() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.end_storage_timer();
+        assert!(ctx.timing.storage_latency_ms.is_none());
+    }
+
+    // ── Emission control ──
+
+    #[test]
+    fn suppress_emission_prevents_emit() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        assert!(ctx.emitted);
+    }
+
+    #[test]
+    fn set_operation_type() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_operation_type(OperationType::Read);
+        assert_eq!(ctx.operation_type, OperationType::Read);
+    }
+
+    #[test]
+    fn elapsed_secs_positive() {
+        let ctx = RequestContext::new("S", "m");
+        assert!(ctx.elapsed_secs() >= 0.0);
+        // suppress emission before drop
+        let mut ctx = ctx;
+        ctx.suppress_emission();
+    }
+
+    #[test]
+    fn emit_then_drop_does_not_double_emit() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.set_success();
+        ctx.emit();
+        assert!(ctx.emitted);
+        // second emit is a no-op
+        ctx.emit();
+    }
+
+    // ── Task-local context ──
+
+    #[test]
+    fn try_with_current_context_returns_false_without_scope() {
+        assert!(!try_with_current_context(|_ctx| {}));
+    }
+
+    #[test]
+    fn with_current_context_returns_none_without_scope() {
+        let result: Option<()> = with_current_context(|_ctx| {});
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn guard_run_with_sets_context() {
+        let ctx = RequestContext::new("TestService", "test");
+        let id = ctx.request_id();
+        RequestContextGuard::run_with(ctx, async {
+            let found_id = with_current_context(|ctx| ctx.request_id());
+            assert_eq!(found_id, Some(id));
+        })
+        .await;
+    }
+
+    #[test]
+    fn guard_run_with_sync_sets_context() {
+        let ctx = RequestContext::new("SyncService", "sync");
+        let id = ctx.request_id();
+        RequestContextGuard::run_with_sync(ctx, || {
+            let found_id = with_current_context(|ctx| ctx.request_id());
+            assert_eq!(found_id, Some(id));
+        });
+    }
+}

@@ -372,4 +372,103 @@ mod tests {
         let err = LeaderTransferError::Timeout { timeout: Duration::from_secs(10) };
         assert_eq!(err.to_string(), "Transfer timed out \u{2014} leader did not change within 10s");
     }
+
+    #[test]
+    fn test_config_debug() {
+        let config = LeaderTransferConfig::builder().build();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("timeout"));
+        assert!(debug.contains("poll_interval"));
+        assert!(debug.contains("replication_timeout"));
+        assert!(debug.contains("lease_expiry_wait"));
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config = LeaderTransferConfig::builder().timeout(Duration::from_secs(20)).build();
+        let cloned = config.clone();
+        assert_eq!(cloned.timeout, Duration::from_secs(20));
+        assert_eq!(cloned.poll_interval, config.poll_interval);
+    }
+
+    #[test]
+    fn test_transfer_guard_multiple_resets() {
+        let flag = AtomicBool::new(true);
+        {
+            let _guard = TransferGuard(&flag);
+        }
+        assert!(!flag.load(Ordering::Acquire));
+
+        // Setting it again and dropping another guard resets again
+        flag.store(true, Ordering::Release);
+        {
+            let _guard = TransferGuard(&flag);
+        }
+        assert!(!flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_transfer_lock_acquire_release() {
+        let lock = AtomicBool::new(false);
+
+        // Acquire succeeds on unlocked
+        assert!(lock.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok());
+
+        // Second acquire fails
+        assert!(lock.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err());
+
+        // Release via guard
+        {
+            let _guard = TransferGuard(&lock);
+        }
+        assert!(!lock.load(Ordering::Acquire));
+
+        // Can acquire again after release
+        assert!(lock.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok());
+    }
+
+    #[test]
+    fn test_error_debug_format() {
+        let err = LeaderTransferError::TargetRejected { message: "term mismatch".to_string() };
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("TargetRejected"));
+        assert!(debug.contains("term mismatch"));
+    }
+
+    #[test]
+    fn test_timeout_error_various_durations() {
+        let err = LeaderTransferError::Timeout { timeout: Duration::from_millis(500) };
+        assert!(err.to_string().contains("500ms"));
+
+        let err = LeaderTransferError::Timeout { timeout: Duration::from_secs(30) };
+        assert!(err.to_string().contains("30s"));
+    }
+
+    #[test]
+    fn test_lease_expiry_wait_exceeds_election_timeout() {
+        // Default lease_expiry_wait (800ms) should exceed typical election_timeout_max (600ms)
+        let config = LeaderTransferConfig::builder().build();
+        assert!(config.lease_expiry_wait >= Duration::from_millis(600));
+    }
+
+    #[test]
+    fn test_replication_timeout_clamped_to_overall() {
+        // When replication_timeout > timeout, min should clamp
+        let config = LeaderTransferConfig::builder()
+            .timeout(Duration::from_secs(3))
+            .replication_timeout(Duration::from_secs(10))
+            .build();
+        let clamped = config.replication_timeout.min(config.timeout);
+        assert_eq!(clamped, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn test_replication_timeout_not_clamped_when_smaller() {
+        let config = LeaderTransferConfig::builder()
+            .timeout(Duration::from_secs(10))
+            .replication_timeout(Duration::from_secs(3))
+            .build();
+        let clamped = config.replication_timeout.min(config.timeout);
+        assert_eq!(clamped, Duration::from_secs(3));
+    }
 }

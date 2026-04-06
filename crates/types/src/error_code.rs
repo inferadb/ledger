@@ -99,3 +99,76 @@ impl std::fmt::Display for ErrorCode {
         f.write_str(self.grpc_code_name())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grpc_code_name_maps_every_variant() {
+        let cases = [
+            (ErrorCode::NotFound, "NOT_FOUND"),
+            (ErrorCode::AlreadyExists, "ALREADY_EXISTS"),
+            (ErrorCode::FailedPrecondition, "FAILED_PRECONDITION"),
+            (ErrorCode::PermissionDenied, "PERMISSION_DENIED"),
+            (ErrorCode::InvalidArgument, "INVALID_ARGUMENT"),
+            (ErrorCode::Internal, "INTERNAL"),
+            (ErrorCode::Unauthenticated, "UNAUTHENTICATED"),
+            (ErrorCode::RateLimited, "RESOURCE_EXHAUSTED"),
+            (ErrorCode::Expired, "FAILED_PRECONDITION"),
+            (ErrorCode::TooManyAttempts, "FAILED_PRECONDITION"),
+            (ErrorCode::InvitationRateLimited, "RESOURCE_EXHAUSTED"),
+            (ErrorCode::InvitationAlreadyResolved, "FAILED_PRECONDITION"),
+            (ErrorCode::InvitationEmailMismatch, "NOT_FOUND"),
+            (ErrorCode::InvitationAlreadyMember, "ALREADY_EXISTS"),
+            (ErrorCode::InvitationDuplicatePending, "ALREADY_EXISTS"),
+        ];
+        for (code, expected) in cases {
+            assert_eq!(code.grpc_code_name(), expected, "mismatch for {code:?}");
+        }
+    }
+
+    #[test]
+    fn display_delegates_to_grpc_code_name() {
+        assert_eq!(ErrorCode::NotFound.to_string(), "NOT_FOUND");
+        assert_eq!(ErrorCode::Internal.to_string(), "INTERNAL");
+        assert_eq!(ErrorCode::RateLimited.to_string(), "RESOURCE_EXHAUSTED");
+    }
+
+    #[test]
+    fn default_is_internal() {
+        assert_eq!(ErrorCode::default(), ErrorCode::Internal);
+    }
+
+    #[test]
+    fn serde_roundtrip() {
+        let codes = [
+            ErrorCode::NotFound,
+            ErrorCode::AlreadyExists,
+            ErrorCode::Internal,
+            ErrorCode::RateLimited,
+            ErrorCode::InvitationDuplicatePending,
+        ];
+        for code in codes {
+            let json = serde_json::to_string(&code).expect("serialize");
+            let back: ErrorCode = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, code);
+        }
+    }
+
+    #[test]
+    fn clone_copy_eq_hash() {
+        let a = ErrorCode::NotFound;
+        let b = a;
+        #[allow(clippy::clone_on_copy)]
+        let c = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(a);
+        assert!(set.contains(&ErrorCode::NotFound));
+    }
+}

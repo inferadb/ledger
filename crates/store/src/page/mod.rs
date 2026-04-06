@@ -241,4 +241,112 @@ mod tests {
         page.data[PAGE_HEADER_SIZE + 50] ^= 0xFF;
         assert!(!page.verify_checksum());
     }
+
+    #[test]
+    fn test_page_header_from_bytes_too_short() {
+        let buf = [0u8; PAGE_HEADER_SIZE - 1];
+        assert!(PageHeader::from_bytes(&buf).is_err());
+    }
+
+    #[test]
+    fn test_page_header_from_bytes_invalid_page_type() {
+        let mut buf = [0u8; PAGE_HEADER_SIZE];
+        buf[0] = 0xFF; // Invalid page type discriminant
+        assert!(PageHeader::from_bytes(&buf).is_err());
+    }
+
+    #[test]
+    fn test_page_header_all_page_types() {
+        for page_type in [
+            PageType::BTreeLeaf,
+            PageType::BTreeBranch,
+            PageType::Overflow,
+            PageType::TableDirectory,
+            PageType::FreeList,
+        ] {
+            let header = PageHeader::new(page_type, 99);
+            let bytes = header.to_bytes();
+            let recovered = PageHeader::from_bytes(&bytes).unwrap();
+            assert_eq!(recovered.page_type, page_type);
+            assert_eq!(recovered.txn_id, 99);
+        }
+    }
+
+    #[test]
+    fn test_page_new_is_dirty() {
+        let page = Page::new(5, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1);
+        assert!(page.dirty);
+        assert_eq!(page.id, 5);
+        assert_eq!(page.size(), DEFAULT_PAGE_SIZE);
+    }
+
+    #[test]
+    fn test_page_from_bytes_is_clean() {
+        let data = vec![0u8; DEFAULT_PAGE_SIZE];
+        let page = Page::from_bytes(10, data);
+        assert!(!page.dirty);
+        assert_eq!(page.id, 10);
+    }
+
+    #[test]
+    fn test_page_content_size() {
+        let page = Page::new(0, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1);
+        assert_eq!(page.content_size(), DEFAULT_PAGE_SIZE - PAGE_HEADER_SIZE);
+    }
+
+    #[test]
+    fn test_page_content_mut_sets_dirty() {
+        let mut page = Page::new(0, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1);
+        page.dirty = false; // Reset to clean
+        let _ = page.content_mut(); // Should set dirty
+        assert!(page.dirty);
+    }
+
+    #[test]
+    fn test_page_set_item_count() {
+        let mut page = Page::new(0, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1);
+        page.dirty = false;
+        page.set_item_count(42);
+        assert!(page.dirty);
+        assert_eq!(page.item_count().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_page_page_type() {
+        let page = Page::new(0, DEFAULT_PAGE_SIZE, PageType::BTreeBranch, 1);
+        assert_eq!(page.page_type().unwrap(), PageType::BTreeBranch);
+    }
+
+    #[test]
+    fn test_page_debug_format() {
+        let page = Page::new(3, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 7);
+        let debug_str = format!("{page:?}");
+        assert!(debug_str.contains("Page"));
+        assert!(debug_str.contains("id: 3"));
+    }
+
+    #[test]
+    fn test_page_header_flags_preserved() {
+        let header = PageHeader {
+            page_type: PageType::BTreeLeaf,
+            flags: 0xAB,
+            item_count: 10,
+            checksum: 0x12345678,
+            txn_id: 999,
+        };
+        let bytes = header.to_bytes();
+        let recovered = PageHeader::from_bytes(&bytes).unwrap();
+        assert_eq!(recovered.flags, 0xAB);
+        assert_eq!(recovered.item_count, 10);
+        assert_eq!(recovered.checksum, 0x12345678);
+        assert_eq!(recovered.txn_id, 999);
+    }
+
+    #[test]
+    fn test_page_verify_checksum_zero_content() {
+        let mut page = Page::new(0, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 1);
+        // All content is zero by default; update checksum on empty content
+        page.update_checksum();
+        assert!(page.verify_checksum());
+    }
 }

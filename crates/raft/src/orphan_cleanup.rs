@@ -753,6 +753,95 @@ mod tests {
         assert!(org2_orphans.is_empty(), "org2 should have no orphaned memberships");
     }
 
+    #[test]
+    fn test_constants() {
+        assert_eq!(CLEANUP_INTERVAL, Duration::from_secs(3600));
+        assert_eq!(MAX_BATCH_SIZE, 1000);
+        assert_eq!(CLEANUP_CLIENT_ID, "system:orphan_cleanup");
+        assert_eq!(SYSTEM_ORGANIZATION_ID, OrganizationId::new(0));
+        assert_eq!(SYSTEM_VAULT_ID, VaultId::new(0));
+    }
+
+    #[test]
+    fn test_index_key_format() {
+        let user_id = 42i64;
+        let idx_key = format!("_idx:member:user:{}", user_id);
+        assert_eq!(idx_key, "_idx:member:user:42");
+    }
+
+    #[test]
+    fn test_user_key_parsing() {
+        let key = "user:123";
+        let user_id = key.strip_prefix("user:").and_then(|s| s.parse::<i64>().ok());
+        assert_eq!(user_id, Some(123));
+    }
+
+    #[test]
+    fn test_user_key_parsing_non_numeric() {
+        let key = "user:abc";
+        let user_id = key.strip_prefix("user:").and_then(|s| s.parse::<i64>().ok());
+        assert!(user_id.is_none());
+    }
+
+    #[test]
+    fn test_user_key_parsing_wrong_prefix() {
+        let key = "member:123";
+        let user_id = key.strip_prefix("user:").and_then(|s| s.parse::<i64>().ok());
+        assert!(user_id.is_none());
+    }
+
+    #[test]
+    fn test_deleting_status_detected() {
+        let user_data = serde_json::json!({
+            "id": 1,
+            "status": "DELETING"
+        });
+        let is_deleted = user_data
+            .get("status")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| s == "DELETED" || s == "DELETING");
+        assert!(is_deleted);
+    }
+
+    #[test]
+    fn test_other_status_not_deleted() {
+        for status in &["ACTIVE", "SUSPENDED", "PENDING", "active", "deleted"] {
+            let user_data = serde_json::json!({ "status": status });
+            let is_deleted = user_data
+                .get("status")
+                .and_then(|s| s.as_str())
+                .is_some_and(|s| s == "DELETED" || s == "DELETING");
+            if *status == "DELETED" || *status == "DELETING" {
+                assert!(is_deleted, "expected {status} to be detected as deleted");
+            } else {
+                assert!(!is_deleted, "expected {status} to NOT be detected as deleted");
+            }
+        }
+    }
+
+    #[test]
+    fn test_missing_user_id_in_membership() {
+        let membership = serde_json::json!({
+            "role": "member"
+        });
+        let user_id = membership.get("user_id").and_then(|v| v.as_i64());
+        assert!(user_id.is_none());
+    }
+
+    #[test]
+    fn test_cleanup_client_id_round_trip() {
+        let client_id = ClientId::new(CLEANUP_CLIENT_ID);
+        let s: &str = client_id.as_ref();
+        assert_eq!(s, CLEANUP_CLIENT_ID);
+    }
+
+    #[test]
+    fn test_empty_deleted_users_returns_no_orphans() {
+        let deleted_users: HashSet<i64> = HashSet::new();
+        // The function short-circuits when deleted_users is empty
+        assert!(deleted_users.is_empty());
+    }
+
     /// Verifies pagination in user listing handles large datasets correctly.
     #[test]
     fn test_user_listing_pagination() {

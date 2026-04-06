@@ -406,3 +406,166 @@ pub struct WriteResult {
     /// Status of each operation.
     pub statuses: Vec<WriteStatus>,
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+    use crate::{
+        hash::Hash,
+        types::{NodeId, OrganizationId, Region, VaultId},
+    };
+
+    fn zero_hash() -> Hash {
+        [0u8; 32]
+    }
+
+    fn make_vault_entry(org: i64, vault: i64, height: u64) -> VaultEntry {
+        VaultEntry {
+            organization: OrganizationId::new(org),
+            vault: VaultId::new(vault),
+            vault_height: height,
+            previous_vault_hash: zero_hash(),
+            transactions: vec![],
+            tx_merkle_root: [1u8; 32],
+            state_root: [2u8; 32],
+        }
+    }
+
+    fn make_region_block(entries: Vec<VaultEntry>) -> RegionBlock {
+        RegionBlock {
+            region: Region::GLOBAL,
+            region_height: 1,
+            previous_region_hash: zero_hash(),
+            vault_entries: entries,
+            timestamp: Utc::now(),
+            leader_id: NodeId::new("node-1"),
+            term: 1,
+            committed_index: 10,
+        }
+    }
+
+    // ── RegionBlock::to_region_header ───────────────────────────────
+
+    #[test]
+    fn to_region_header_empty_vault_entries_uses_empty_hash() {
+        let block = make_region_block(vec![]);
+        let header = block.to_region_header();
+
+        assert_eq!(header.height, 1);
+        assert_eq!(header.tx_merkle_root, crate::EMPTY_HASH);
+        assert_eq!(header.state_root, crate::EMPTY_HASH);
+        assert_eq!(header.organization, OrganizationId::new(0));
+        assert_eq!(header.vault, VaultId::new(0));
+    }
+
+    #[test]
+    fn to_region_header_with_entries_computes_merkle_roots() {
+        let block = make_region_block(vec![make_vault_entry(1, 10, 5), make_vault_entry(2, 20, 3)]);
+        let header = block.to_region_header();
+
+        assert_eq!(header.height, 1);
+        // Non-empty entries should produce non-empty-hash merkle roots.
+        assert_ne!(header.tx_merkle_root, crate::EMPTY_HASH);
+        assert_ne!(header.state_root, crate::EMPTY_HASH);
+        assert_eq!(header.term, 1);
+        assert_eq!(header.committed_index, 10);
+    }
+
+    // ── RegionBlock::extract_vault_block ────────────────────────────
+
+    #[test]
+    fn extract_vault_block_found() {
+        let block = make_region_block(vec![make_vault_entry(1, 10, 5), make_vault_entry(2, 20, 3)]);
+        let result = block.extract_vault_block(OrganizationId::new(2), VaultId::new(20), 3);
+        assert!(result.is_some());
+        let vb = result.expect("vault block present");
+        assert_eq!(vb.organization(), OrganizationId::new(2));
+        assert_eq!(vb.vault(), VaultId::new(20));
+        assert_eq!(vb.height(), 3);
+    }
+
+    #[test]
+    fn extract_vault_block_not_found_wrong_org() {
+        let block = make_region_block(vec![make_vault_entry(1, 10, 5)]);
+        let result = block.extract_vault_block(OrganizationId::new(99), VaultId::new(10), 5);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_vault_block_not_found_wrong_height() {
+        let block = make_region_block(vec![make_vault_entry(1, 10, 5)]);
+        let result = block.extract_vault_block(OrganizationId::new(1), VaultId::new(10), 999);
+        assert!(result.is_none());
+    }
+
+    // ── VaultBlock accessors ────────────────────────────────────────
+
+    #[test]
+    fn vault_block_accessors() {
+        let vb = VaultBlock {
+            header: BlockHeader::builder()
+                .height(7)
+                .organization(OrganizationId::new(3))
+                .vault(VaultId::new(42))
+                .previous_hash(zero_hash())
+                .tx_merkle_root(zero_hash())
+                .state_root(zero_hash())
+                .timestamp(Utc::now())
+                .term(2)
+                .committed_index(100)
+                .build(),
+            transactions: vec![],
+        };
+        assert_eq!(vb.organization(), OrganizationId::new(3));
+        assert_eq!(vb.vault(), VaultId::new(42));
+        assert_eq!(vb.height(), 7);
+    }
+
+    // ── Transaction builder validation ──────────────────────────────
+
+    #[test]
+    fn transaction_builder_rejects_empty_operations() {
+        let result = Transaction::builder()
+            .id([0u8; 16])
+            .client_id("client-1")
+            .sequence(1)
+            .operations(vec![])
+            .timestamp(Utc::now())
+            .build();
+        assert!(result.is_err());
+        let err = result.expect_err("should fail");
+        assert!(err.to_string().contains("at least one operation"));
+    }
+
+    #[test]
+    fn transaction_builder_rejects_zero_sequence() {
+        let result = Transaction::builder()
+            .id([0u8; 16])
+            .client_id("client-1")
+            .sequence(0)
+            .operations(vec![Operation::DeleteEntity { key: "k".to_string() }])
+            .timestamp(Utc::now())
+            .build();
+        assert!(result.is_err());
+        let err = result.expect_err("should fail");
+        assert!(err.to_string().contains("positive"));
+    }
+
+    #[test]
+    fn transaction_builder_success() {
+        let tx = Transaction::builder()
+            .id([1u8; 16])
+            .client_id("client-1")
+            .sequence(1)
+            .operations(vec![Operation::DeleteEntity { key: "k".to_string() }])
+            .timestamp(Utc::now())
+            .build();
+        assert!(tx.is_ok());
+        let tx = tx.expect("valid tx");
+        assert_eq!(tx.sequence, 1);
+        assert_eq!(tx.client_id.value(), "client-1");
+    }
+}

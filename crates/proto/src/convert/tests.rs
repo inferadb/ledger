@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use inferadb_ledger_types::{
-    CredentialType, InvitationStatus, InviteSlug, OrganizationId, OrganizationSlug,
-    PasskeyCredential, RecoveryCodeCredential, TotpAlgorithm, TotpCredential, UserCredential,
-    UserSlug, VaultSlug,
+    CredentialType, EmailVerifyTokenId, InvitationStatus, InviteSlug, OrganizationId,
+    OrganizationSlug, PasskeyCredential, RecoveryCodeCredential, TotpAlgorithm, TotpCredential,
+    UserCredential, UserEmailId, UserSlug, VaultSlug,
     events::{EventAction, EventEmission, EventEntry, EventOutcome, EventScope},
     hash::Hash,
     merkle::MerkleProof as InternalMerkleProof,
@@ -2050,4 +2050,136 @@ fn invitation_status_from_i32_invalid() {
 fn invitation_status_from_i32_unspecified_rejected() {
     // 0 = UNSPECIFIED — must be rejected, not silently mapped to Pending
     assert!(invitation_status_from_i32(0).is_err());
+}
+
+// -------------------------------------------------------------------------
+// UserEmailId conversion tests
+// -------------------------------------------------------------------------
+
+#[test]
+fn user_email_id_domain_to_proto() {
+    let domain = UserEmailId::new(42);
+    let proto_id: proto::UserEmailId = domain.into();
+    assert_eq!(proto_id.id, 42);
+}
+
+#[test]
+fn user_email_id_proto_to_domain() {
+    let proto_id = proto::UserEmailId { id: 99 };
+    let domain: UserEmailId = proto_id.into();
+    assert_eq!(domain.value(), 99);
+}
+
+#[test]
+fn user_email_id_proto_ref_to_domain() {
+    let proto_id = proto::UserEmailId { id: 77 };
+    let domain: UserEmailId = (&proto_id).into();
+    assert_eq!(domain.value(), 77);
+}
+
+#[test]
+fn user_email_id_roundtrip() {
+    let original = UserEmailId::new(123456);
+    let proto_id: proto::UserEmailId = original.into();
+    let roundtripped: UserEmailId = proto_id.into();
+    assert_eq!(original, roundtripped);
+}
+
+// -------------------------------------------------------------------------
+// EmailVerifyTokenId conversion tests
+// -------------------------------------------------------------------------
+
+#[test]
+fn email_verify_token_id_domain_to_proto() {
+    let domain = EmailVerifyTokenId::new(7);
+    let proto_id: proto::EmailVerifyTokenId = domain.into();
+    assert_eq!(proto_id.id, 7);
+}
+
+#[test]
+fn email_verify_token_id_proto_to_domain() {
+    let proto_id = proto::EmailVerifyTokenId { id: 55 };
+    let domain: EmailVerifyTokenId = proto_id.into();
+    assert_eq!(domain.value(), 55);
+}
+
+#[test]
+fn email_verify_token_id_proto_ref_to_domain() {
+    let proto_id = proto::EmailVerifyTokenId { id: 33 };
+    let domain: EmailVerifyTokenId = (&proto_id).into();
+    assert_eq!(domain.value(), 33);
+}
+
+#[test]
+fn email_verify_token_id_roundtrip() {
+    let original = EmailVerifyTokenId::new(987654);
+    let proto_id: proto::EmailVerifyTokenId = original.into();
+    let roundtripped: EmailVerifyTokenId = proto_id.into();
+    assert_eq!(original, roundtripped);
+}
+
+// -------------------------------------------------------------------------
+// Raft vote conversion tests
+// -------------------------------------------------------------------------
+
+#[test]
+fn raft_vote_uncommitted_roundtrip() {
+    let domain = openraft::Vote::new(5u64, 42u64);
+    let proto_vote: proto::RaftVote = domain.into();
+    assert_eq!(proto_vote.term, 5);
+    assert_eq!(proto_vote.node_id, 42);
+    assert!(!proto_vote.committed);
+    let roundtripped: openraft::Vote<u64> = proto_vote.into();
+    assert_eq!(domain, roundtripped);
+}
+
+#[test]
+fn raft_vote_committed_roundtrip() {
+    let domain = openraft::Vote::new_committed(3u64, 10u64);
+    let proto_vote: proto::RaftVote = domain.into();
+    assert_eq!(proto_vote.term, 3);
+    assert_eq!(proto_vote.node_id, 10);
+    assert!(proto_vote.committed);
+    let roundtripped: openraft::Vote<u64> = proto_vote.into();
+    assert_eq!(domain, roundtripped);
+}
+
+#[test]
+fn raft_vote_ref_to_proto() {
+    let domain = openraft::Vote::new(1u64, 2u64);
+    let proto_vote: proto::RaftVote = (&domain).into();
+    assert_eq!(proto_vote.term, 1);
+    assert_eq!(proto_vote.node_id, 2);
+}
+
+#[test]
+fn raft_vote_proto_ref_to_domain() {
+    let proto_vote = proto::RaftVote { term: 7, node_id: 99, committed: true };
+    let domain: openraft::Vote<u64> = (&proto_vote).into();
+    assert!(domain.committed);
+    assert_eq!(domain.leader_id.term, 7);
+}
+
+// -------------------------------------------------------------------------
+// Operation ExpireEntity conversion tests (covers remaining operations gap)
+// -------------------------------------------------------------------------
+
+#[test]
+fn operation_expire_entity_domain_to_proto_roundtrip() {
+    let domain_op = inferadb_ledger_types::Operation::ExpireEntity {
+        key: "expired-key".to_string(),
+        expired_at: 1700000000,
+    };
+    let proto_op: proto::Operation = domain_op.clone().into();
+    let roundtripped = inferadb_ledger_types::Operation::try_from(proto_op).unwrap();
+    assert_eq!(domain_op, roundtripped);
+}
+
+#[test]
+fn operation_expire_entity_ref_to_proto() {
+    let domain_op =
+        inferadb_ledger_types::Operation::ExpireEntity { key: "k".to_string(), expired_at: 42 };
+    let proto_op: proto::Operation = (&domain_op).into();
+    let roundtripped = inferadb_ledger_types::Operation::try_from(&proto_op).unwrap();
+    assert_eq!(domain_op, roundtripped);
 }

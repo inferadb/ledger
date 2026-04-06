@@ -2601,4 +2601,203 @@ mod tests {
         // Spot-check an updated entry
         assert_eq!(tree.get(b"id-000100").unwrap(), Some(b"updated-100".to_vec()),);
     }
+
+    // =========================================================================
+    // Depth, first, last, and edge case tests
+    // =========================================================================
+
+    #[test]
+    fn test_depth_empty_tree() {
+        let tree = make_tree();
+        assert_eq!(tree.depth().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_depth_single_leaf() {
+        let mut tree = make_tree();
+        tree.insert(b"key", b"val").unwrap();
+        assert_eq!(tree.depth().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_depth_multi_level() {
+        let mut tree = make_tree();
+        // Insert enough entries to create branches
+        for i in 0..500u32 {
+            let key = format!("depth_{i:06}");
+            tree.insert(key.as_bytes(), b"v").unwrap();
+        }
+        let depth = tree.depth().unwrap();
+        assert!(depth >= 2, "Expected depth >= 2 with 500 entries, got {depth}");
+    }
+
+    #[test]
+    fn test_first_empty_tree() {
+        let tree = make_tree();
+        assert!(tree.first().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_first_single_entry() {
+        let mut tree = make_tree();
+        tree.insert(b"only", b"one").unwrap();
+        let (k, v) = tree.first().unwrap().unwrap();
+        assert_eq!(k, b"only");
+        assert_eq!(v, b"one");
+    }
+
+    #[test]
+    fn test_first_multiple_entries() {
+        let mut tree = make_tree();
+        tree.insert(b"banana", b"2").unwrap();
+        tree.insert(b"apple", b"1").unwrap();
+        tree.insert(b"cherry", b"3").unwrap();
+        let (k, _) = tree.first().unwrap().unwrap();
+        assert_eq!(k, b"apple");
+    }
+
+    #[test]
+    fn test_last_empty_tree() {
+        let tree = make_tree();
+        assert!(tree.last().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_last_single_entry() {
+        let mut tree = make_tree();
+        tree.insert(b"only", b"one").unwrap();
+        let (k, v) = tree.last().unwrap().unwrap();
+        assert_eq!(k, b"only");
+        assert_eq!(v, b"one");
+    }
+
+    #[test]
+    fn test_last_multiple_entries() {
+        let mut tree = make_tree();
+        tree.insert(b"banana", b"2").unwrap();
+        tree.insert(b"apple", b"1").unwrap();
+        tree.insert(b"cherry", b"3").unwrap();
+        let (k, _) = tree.last().unwrap().unwrap();
+        assert_eq!(k, b"cherry");
+    }
+
+    #[test]
+    fn test_first_last_multi_leaf() {
+        let mut tree = make_tree();
+        // Enough entries to span multiple leaves
+        for i in 0..300u32 {
+            let key = format!("fl_{i:06}");
+            tree.insert(key.as_bytes(), b"v").unwrap();
+        }
+        let (first_k, _) = tree.first().unwrap().unwrap();
+        let (last_k, _) = tree.last().unwrap().unwrap();
+        assert_eq!(first_k, b"fl_000000");
+        assert_eq!(last_k, b"fl_000299");
+    }
+
+    #[test]
+    fn test_delete_empty_tree() {
+        let mut tree = make_tree();
+        assert!(tree.delete(b"nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_delete_last_entry_empties_root() {
+        let mut tree = make_tree();
+        tree.insert(b"only_key", b"only_val").unwrap();
+        let deleted = tree.delete(b"only_key").unwrap();
+        assert_eq!(deleted, Some(b"only_val".to_vec()));
+        assert!(tree.is_empty());
+        assert!(tree.get(b"only_key").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_update_value_grows() {
+        let mut tree = make_tree();
+        tree.insert(b"key", b"short").unwrap();
+
+        // Update with a larger value
+        let old = tree.insert(b"key", b"a much longer value than before").unwrap();
+        assert_eq!(old, Some(b"short".to_vec()));
+        assert_eq!(tree.get(b"key").unwrap(), Some(b"a much longer value than before".to_vec()));
+    }
+
+    #[test]
+    fn test_update_value_shrinks() {
+        let mut tree = make_tree();
+        tree.insert(b"key", b"a very long initial value here").unwrap();
+
+        let old = tree.insert(b"key", b"tiny").unwrap();
+        assert_eq!(old, Some(b"a very long initial value here".to_vec()));
+        assert_eq!(tree.get(b"key").unwrap(), Some(b"tiny".to_vec()));
+    }
+
+    #[test]
+    fn test_split_count_tracked() {
+        let mut tree = make_tree();
+        assert_eq!(tree.split_count(), 0);
+
+        // Insert enough to trigger splits
+        for i in 0..500u32 {
+            let key = format!("sc_{i:06}");
+            tree.insert(key.as_bytes(), &[0xAA; 100]).unwrap();
+        }
+        assert!(tree.split_count() > 0);
+    }
+
+    #[test]
+    fn test_iter_empty_tree() {
+        let tree = make_tree();
+        let mut iter = tree.iter().unwrap();
+        assert!(iter.next_entry().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_iter_all_entries_ordered() {
+        let mut tree = make_tree();
+        tree.insert(b"c", b"3").unwrap();
+        tree.insert(b"a", b"1").unwrap();
+        tree.insert(b"b", b"2").unwrap();
+
+        let mut iter = tree.iter().unwrap();
+        let (k1, v1) = iter.next_entry().unwrap().unwrap();
+        assert_eq!(k1, b"a");
+        assert_eq!(v1, b"1");
+        let (k2, _) = iter.next_entry().unwrap().unwrap();
+        assert_eq!(k2, b"b");
+        let (k3, _) = iter.next_entry().unwrap().unwrap();
+        assert_eq!(k3, b"c");
+        assert!(iter.next_entry().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_range_excluded_start() {
+        use super::cursor::{Bound, Range};
+
+        let mut tree = make_tree();
+        for i in 0..10u32 {
+            let key = format!("{i:02}");
+            tree.insert(key.as_bytes(), b"v").unwrap();
+        }
+
+        // Range with excluded start: (03, 07)
+        let range = Range { start: Bound::Excluded(b"03"), end: Bound::Excluded(b"07") };
+        let mut iter = tree.range(range).unwrap();
+        let mut keys = Vec::new();
+        while let Some((k, _)) = iter.next_entry().unwrap() {
+            keys.push(k);
+        }
+        // Should get 04, 05, 06 (excluded 03, excluded 07)
+        assert_eq!(keys.len(), 3);
+        assert_eq!(keys[0], b"04");
+        assert_eq!(keys[2], b"06");
+    }
+
+    #[test]
+    fn test_set_root_page() {
+        let mut tree = make_tree();
+        assert_eq!(tree.root_page(), 0);
+        tree.set_root_page(42);
+        assert_eq!(tree.root_page(), 42);
+    }
 }

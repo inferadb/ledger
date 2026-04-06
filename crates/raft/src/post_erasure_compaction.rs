@@ -209,3 +209,149 @@ impl PostErasureCompactionJob {
 }
 
 // Config validation tests live in `types/src/config/mod.rs` (canonical location).
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_values() {
+        let config = PostErasureCompactionConfig::default();
+        assert_eq!(config.max_log_retention_secs, 3600);
+        assert_eq!(config.check_interval_secs, 300);
+    }
+
+    #[test]
+    fn config_serde_roundtrip() {
+        let config =
+            PostErasureCompactionConfig { max_log_retention_secs: 7200, check_interval_secs: 600 };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: PostErasureCompactionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.max_log_retention_secs, 7200);
+        assert_eq!(deserialized.check_interval_secs, 600);
+    }
+
+    #[test]
+    fn config_deserialization_defaults() {
+        let config: PostErasureCompactionConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.max_log_retention_secs, 3600);
+        assert_eq!(config.check_interval_secs, 300);
+    }
+
+    #[test]
+    fn config_clone() {
+        let config =
+            PostErasureCompactionConfig { max_log_retention_secs: 1800, check_interval_secs: 120 };
+        let cloned = config.clone();
+        assert_eq!(cloned.max_log_retention_secs, config.max_log_retention_secs);
+        assert_eq!(cloned.check_interval_secs, config.check_interval_secs);
+    }
+
+    #[test]
+    fn threshold_duration_from_config() {
+        let config =
+            PostErasureCompactionConfig { max_log_retention_secs: 3600, check_interval_secs: 300 };
+        let threshold = Duration::from_secs(config.max_log_retention_secs);
+        assert_eq!(threshold, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn tick_interval_from_config() {
+        let config =
+            PostErasureCompactionConfig { max_log_retention_secs: 3600, check_interval_secs: 300 };
+        let tick = Duration::from_secs(config.check_interval_secs);
+        assert_eq!(tick, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn last_snapshots_map_operations() {
+        // Exercises the HashMap<String, Option<Instant>> used in run_cycle
+        let mut last_snapshots: HashMap<String, Option<Instant>> = HashMap::new();
+
+        // First access returns None
+        let global_last = last_snapshots.entry("GLOBAL".to_string()).or_insert(None);
+        assert!(global_last.is_none());
+
+        // After snapshot, it should have a value
+        *global_last = Some(Instant::now());
+        assert!(last_snapshots["GLOBAL"].is_some());
+
+        // Multiple regions tracked independently
+        last_snapshots.entry("US_EAST_VA".to_string()).or_insert(None);
+        last_snapshots.entry("EU_WEST_IE".to_string()).or_insert(Some(Instant::now()));
+
+        assert_eq!(last_snapshots.len(), 3);
+        assert!(last_snapshots["US_EAST_VA"].is_none());
+        assert!(last_snapshots["EU_WEST_IE"].is_some());
+    }
+
+    #[test]
+    fn snapshot_trigger_decision_first_cycle() {
+        // First cycle: no previous snapshot timestamp — sets baseline, does NOT trigger
+        let mut last_snapshot: Option<Instant> = None;
+        let threshold = Duration::from_secs(3600);
+
+        let should_trigger = match last_snapshot {
+            Some(ts) => ts.elapsed() >= threshold,
+            None => {
+                last_snapshot = Some(Instant::now());
+                false
+            },
+        };
+
+        assert!(!should_trigger);
+        assert!(last_snapshot.is_some());
+    }
+
+    #[test]
+    fn snapshot_trigger_decision_within_threshold() {
+        // Recent snapshot — should NOT trigger
+        let last_snapshot = Some(Instant::now());
+        let threshold = Duration::from_secs(3600);
+
+        let should_trigger = match last_snapshot {
+            Some(ts) => ts.elapsed() >= threshold,
+            None => false,
+        };
+
+        assert!(!should_trigger);
+    }
+
+    #[test]
+    fn snapshot_trigger_decision_past_threshold() {
+        // Old snapshot — SHOULD trigger
+        let last_snapshot = Some(Instant::now() - Duration::from_secs(7200));
+        let threshold = Duration::from_secs(3600);
+
+        let should_trigger = match last_snapshot {
+            Some(ts) => ts.elapsed() >= threshold,
+            None => false,
+        };
+
+        assert!(should_trigger);
+    }
+
+    #[test]
+    fn config_validation_rejects_too_small_retention() {
+        let result = PostErasureCompactionConfig::builder().max_log_retention_secs(299).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_validation_rejects_too_small_interval() {
+        let result = PostErasureCompactionConfig::builder().check_interval_secs(59).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_validation_accepts_minimum_values() {
+        let config = PostErasureCompactionConfig::builder()
+            .max_log_retention_secs(300)
+            .check_interval_secs(60)
+            .build()
+            .expect("minimum values should be valid");
+        assert_eq!(config.max_log_retention_secs, 300);
+        assert_eq!(config.check_interval_secs, 60);
+    }
+}

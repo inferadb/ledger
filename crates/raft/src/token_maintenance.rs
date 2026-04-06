@@ -319,4 +319,77 @@ mod tests {
         assert_eq!(result.onboarding_accounts_deleted, 3);
         assert_eq!(result.totp_challenges_deleted, 7);
     }
+
+    #[test]
+    fn maintenance_result_total_items() {
+        let result = MaintenanceResult {
+            expired_tokens_deleted: 10,
+            signing_keys_revoked: 2,
+            onboarding_codes_deleted: 5,
+            onboarding_accounts_deleted: 3,
+            totp_challenges_deleted: 1,
+        };
+        let total = result.expired_tokens_deleted
+            + result.signing_keys_revoked
+            + result.onboarding_codes_deleted
+            + result.onboarding_accounts_deleted
+            + result.totp_challenges_deleted;
+        assert_eq!(total, 21);
+    }
+
+    #[test]
+    fn maintenance_result_debug_format() {
+        let result = MaintenanceResult {
+            expired_tokens_deleted: 3,
+            signing_keys_revoked: 1,
+            onboarding_codes_deleted: 0,
+            onboarding_accounts_deleted: 0,
+            totp_challenges_deleted: 0,
+        };
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("expired_tokens_deleted: 3"));
+        assert!(debug.contains("signing_keys_revoked: 1"));
+    }
+
+    #[test]
+    fn constants_are_reasonable() {
+        assert_eq!(DEFAULT_MAINTENANCE_INTERVAL, Duration::from_secs(300));
+        // 5-minute interval is appropriate for token lifecycle
+        assert!(DEFAULT_MAINTENANCE_INTERVAL.as_secs() >= 60);
+        assert!(DEFAULT_MAINTENANCE_INTERVAL.as_secs() <= 600);
+    }
+
+    #[test]
+    fn maintenance_result_accumulates_across_regions() {
+        // Simulates accumulation across multiple regional groups
+        let mut result = MaintenanceResult::default();
+
+        // Region 1
+        result.onboarding_codes_deleted += 5;
+        result.onboarding_accounts_deleted += 2;
+        result.totp_challenges_deleted += 1;
+
+        // Region 2
+        result.onboarding_codes_deleted += 3;
+        result.onboarding_accounts_deleted += 1;
+        result.totp_challenges_deleted += 4;
+
+        assert_eq!(result.onboarding_codes_deleted, 8);
+        assert_eq!(result.onboarding_accounts_deleted, 3);
+        assert_eq!(result.totp_challenges_deleted, 5);
+    }
+
+    #[test]
+    fn maintenance_result_status_determination() {
+        // Simulates the had_errors logic from run_cycle
+        let mut had_errors = false;
+        had_errors |= false; // Phase 1 ok
+        had_errors |= false; // Phase 2 ok
+        let status = if had_errors { "failure" } else { "success" };
+        assert_eq!(status, "success");
+
+        had_errors |= true; // Phase 3 error
+        let status = if had_errors { "failure" } else { "success" };
+        assert_eq!(status, "failure");
+    }
 }

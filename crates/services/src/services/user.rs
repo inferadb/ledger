@@ -2949,4 +2949,119 @@ mod tests {
             "should accept 8-digit TOTP code"
         );
     }
+
+    // =========================================================================
+    // domain_user_to_proto tests
+    // =========================================================================
+
+    fn make_test_user() -> inferadb_ledger_state::system::User {
+        inferadb_ledger_state::system::User {
+            id: inferadb_ledger_types::UserId::new(42),
+            slug: inferadb_ledger_types::UserSlug::new(9999),
+            region: inferadb_ledger_types::Region::GLOBAL,
+            name: "Alice".to_string(),
+            email: inferadb_ledger_types::UserEmailId::new(7),
+            status: inferadb_ledger_types::UserStatus::Active,
+            role: inferadb_ledger_types::UserRole::User,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+            version: inferadb_ledger_types::TokenVersion::new(1),
+        }
+    }
+
+    #[test]
+    fn domain_user_to_proto_maps_basic_fields() {
+        let user = make_test_user();
+        let slug = Some(inferadb_ledger_types::UserSlug::new(9999));
+        let proto_user = domain_user_to_proto(&user, slug);
+
+        assert_eq!(proto_user.name, "Alice");
+        assert!(proto_user.id.is_some());
+        assert_eq!(proto_user.id.unwrap().id, 42);
+        assert!(proto_user.slug.is_some());
+        assert_eq!(proto_user.slug.unwrap().slug, 9999);
+        assert!(proto_user.email.is_some());
+        assert_eq!(proto_user.email.unwrap().id, 7);
+        assert!(proto_user.created_at.is_some());
+        assert!(proto_user.updated_at.is_some());
+        assert!(proto_user.deleted_at.is_none());
+    }
+
+    #[test]
+    fn domain_user_to_proto_none_slug() {
+        let user = make_test_user();
+        let proto_user = domain_user_to_proto(&user, None);
+        assert!(proto_user.slug.is_none());
+    }
+
+    #[test]
+    fn domain_user_to_proto_admin_role() {
+        let mut user = make_test_user();
+        user.role = inferadb_ledger_types::UserRole::Admin;
+        let proto_user = domain_user_to_proto(&user, None);
+        assert_eq!(proto_user.role, i32::from(proto::UserRole::Admin));
+    }
+
+    #[test]
+    fn domain_user_to_proto_deleted_user() {
+        let mut user = make_test_user();
+        user.deleted_at = Some(chrono::Utc::now());
+        user.status = inferadb_ledger_types::UserStatus::Deleted;
+        let proto_user = domain_user_to_proto(&user, None);
+        assert!(proto_user.deleted_at.is_some());
+    }
+
+    #[test]
+    fn domain_user_to_proto_suspended_status() {
+        let mut user = make_test_user();
+        user.status = inferadb_ledger_types::UserStatus::Suspended;
+        let proto_user = domain_user_to_proto(&user, None);
+        assert_eq!(proto_user.status, i32::from(proto::UserStatus::Suspended));
+    }
+
+    #[test]
+    fn domain_user_to_proto_pending_org_status() {
+        let mut user = make_test_user();
+        user.status = inferadb_ledger_types::UserStatus::PendingOrg;
+        let proto_user = domain_user_to_proto(&user, None);
+        let proto_status: proto::UserStatus = inferadb_ledger_types::UserStatus::PendingOrg.into();
+        assert_eq!(proto_user.status, i32::from(proto_status));
+    }
+
+    // =========================================================================
+    // domain_email_to_proto tests
+    // =========================================================================
+
+    #[test]
+    fn domain_email_to_proto_unverified() {
+        let email = inferadb_ledger_state::system::UserEmail {
+            id: inferadb_ledger_types::UserEmailId::new(10),
+            user: inferadb_ledger_types::UserId::new(42),
+            email: "alice@example.com".to_string(),
+            created_at: chrono::Utc::now(),
+            verified_at: None,
+        };
+        let proto_email = domain_email_to_proto(&email);
+        assert_eq!(proto_email.email, "alice@example.com");
+        assert!(proto_email.id.is_some());
+        assert_eq!(proto_email.id.unwrap().id, 10);
+        assert!(proto_email.user.is_some());
+        assert_eq!(proto_email.user.unwrap().id, 42);
+        assert!(proto_email.verified_at.is_none());
+        assert!(proto_email.created_at.is_some());
+    }
+
+    #[test]
+    fn domain_email_to_proto_verified() {
+        let email = inferadb_ledger_state::system::UserEmail {
+            id: inferadb_ledger_types::UserEmailId::new(10),
+            user: inferadb_ledger_types::UserId::new(42),
+            email: "alice@example.com".to_string(),
+            created_at: chrono::Utc::now(),
+            verified_at: Some(chrono::Utc::now()),
+        };
+        let proto_email = domain_email_to_proto(&email);
+        assert!(proto_email.verified_at.is_some());
+    }
 }

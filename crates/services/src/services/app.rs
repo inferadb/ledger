@@ -1372,3 +1372,80 @@ impl proto::app_service_server::AppService for AppService {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // parse_idempotency_key
+    // =========================================================================
+
+    #[test]
+    fn parse_idempotency_key_empty_returns_none() {
+        assert_eq!(parse_idempotency_key(&[]).unwrap(), None);
+    }
+
+    #[test]
+    fn parse_idempotency_key_exact_16_bytes_returns_some() {
+        let bytes = [1u8; 16];
+        let result = parse_idempotency_key(&bytes).unwrap();
+        assert_eq!(result, Some([1u8; 16]));
+    }
+
+    #[test]
+    fn parse_idempotency_key_too_short_returns_error() {
+        let bytes = [1u8; 8];
+        let err = parse_idempotency_key(&bytes).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("16 bytes"));
+    }
+
+    #[test]
+    fn parse_idempotency_key_too_long_returns_error() {
+        let bytes = [1u8; 32];
+        let err = parse_idempotency_key(&bytes).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    // =========================================================================
+    // map_credential_type
+    // =========================================================================
+
+    #[test]
+    fn map_credential_type_client_secret() {
+        let result = map_credential_type(AppCredentialType::ClientSecret as i32).unwrap();
+        assert_eq!(result, DomainAppCredentialType::ClientSecret);
+    }
+
+    #[test]
+    fn map_credential_type_mtls_ca() {
+        let result = map_credential_type(AppCredentialType::MtlsCa as i32).unwrap();
+        assert_eq!(result, DomainAppCredentialType::MtlsCa);
+    }
+
+    #[test]
+    fn map_credential_type_mtls_self_signed() {
+        let result = map_credential_type(AppCredentialType::MtlsSelfSigned as i32).unwrap();
+        assert_eq!(result, DomainAppCredentialType::MtlsSelfSigned);
+    }
+
+    #[test]
+    fn map_credential_type_client_assertion() {
+        let result = map_credential_type(AppCredentialType::ClientAssertion as i32).unwrap();
+        assert_eq!(result, DomainAppCredentialType::ClientAssertion);
+    }
+
+    #[test]
+    fn map_credential_type_unspecified_returns_error() {
+        let err = map_credential_type(AppCredentialType::Unspecified as i32).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn map_credential_type_invalid_value_returns_error() {
+        let err = map_credential_type(999).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+}

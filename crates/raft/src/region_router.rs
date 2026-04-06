@@ -918,6 +918,112 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_node_address_invalid_bare_hostname() {
+        let (router, _, _temp) = create_test_router();
+        let result = router.resolve_node_address("not a valid address:::");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalidate_nonexistent_org_is_noop() {
+        let (router, _, _temp) = create_test_router();
+        // Should not panic
+        router.invalidate(OrganizationId::new(999));
+        assert_eq!(router.stats().cached_organizations, 0);
+    }
+
+    #[test]
+    fn test_invalidate_region_with_no_connections() {
+        let (router, _, _temp) = create_test_router();
+        // Should not panic
+        router.invalidate_region(Region::GLOBAL);
+        assert_eq!(router.stats().active_connections, 0);
+    }
+
+    #[test]
+    fn test_update_leader_hint_nonexistent_org_is_noop() {
+        let (router, _, _temp) = create_test_router();
+        // Updating hint for a non-cached org should not panic
+        router.update_leader_hint(OrganizationId::new(999), "node-1:50051");
+        assert_eq!(router.stats().cached_organizations, 0);
+    }
+
+    #[test]
+    fn test_update_leader_hint_same_hint_is_noop() {
+        let (router, state, _temp) = create_test_router();
+        let system = SystemOrganizationService::new(Arc::clone(&state));
+        let registry = inferadb_ledger_state::system::OrganizationRegistry {
+            organization_id: OrganizationId::new(50),
+            region: Region::GLOBAL,
+            member_nodes: vec![NodeId::new("node-a:50051")],
+            status: inferadb_ledger_state::system::OrganizationStatus::Active,
+            config_version: 1,
+            created_at: chrono::Utc::now(),
+            deleted_at: None,
+        };
+        system
+            .register_organization(&registry, inferadb_ledger_types::OrganizationSlug::new(50))
+            .expect("register");
+        let _ = router.get_routing(OrganizationId::new(50)).expect("routing");
+        // Update with same hint — should be a no-op
+        router.update_leader_hint(OrganizationId::new(50), "node-a:50051");
+        let info = router.get_routing(OrganizationId::new(50)).expect("routing");
+        assert_eq!(info.leader_hint.as_deref(), Some("node-a:50051"));
+    }
+
+    #[test]
+    fn test_router_stats_stale_entries() {
+        let (router, _, _temp) = create_test_router();
+        // Insert a cache entry with old timestamp
+        {
+            let mut cache = router.cache.write();
+            cache.insert(
+                OrganizationId::new(1),
+                CacheEntry {
+                    region: Region::GLOBAL,
+                    member_nodes: vec![],
+                    leader_hint: None,
+                    config_version: 1,
+                    cached_at: Instant::now() - Duration::from_secs(120),
+                },
+            );
+        }
+        let stats = router.stats();
+        assert_eq!(stats.cached_organizations, 1);
+        assert_eq!(stats.stale_entries, 1);
+    }
+
+    #[test]
+    fn test_routing_error_display() {
+        let e = RoutingError::OrganizationNotFound { organization: OrganizationId::new(42) };
+        assert!(format!("{e}").contains("42"));
+
+        let e = RoutingError::NoAvailableNodes { region: Region::GLOBAL };
+        assert!(format!("{e}").contains("no available nodes"));
+
+        let e = RoutingError::ConnectionFailed {
+            region: Region::US_EAST_VA,
+            message: "timeout".to_string(),
+        };
+        assert!(format!("{e}").contains("timeout"));
+    }
+
+    #[test]
+    fn test_cache_entry_to_routing_info() {
+        let entry = CacheEntry {
+            region: Region::DE_CENTRAL_FRANKFURT,
+            member_nodes: vec![NodeId::new("node-1"), NodeId::new("node-2")],
+            leader_hint: Some(NodeId::new("node-1")),
+            config_version: 5,
+            cached_at: Instant::now(),
+        };
+        let info = entry.to_routing_info();
+        assert_eq!(info.region, Region::DE_CENTRAL_FRANKFURT);
+        assert_eq!(info.member_nodes.len(), 2);
+        assert_eq!(info.leader_hint.as_deref(), Some("node-1"));
+    }
+
+    #[test]
     fn test_routing_preserves_region_from_registry() {
         // Register orgs on different regions and verify the cache preserves them.
         let (router, state, _temp) = create_test_router_with_region(Region::GLOBAL);

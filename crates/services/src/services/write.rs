@@ -1573,8 +1573,39 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
     use inferadb_ledger_proto::proto;
+    use inferadb_ledger_raft::batching::BatchError;
     use inferadb_ledger_types::{config::ValidationConfig, validation};
     use tonic::Status;
+
+    use super::classify_batch_error;
+
+    // =========================================================================
+    // classify_batch_error
+    // =========================================================================
+
+    #[test]
+    fn classify_batch_error_dropped_returns_unavailable() {
+        let status = classify_batch_error(&BatchError::Dropped);
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+    }
+
+    #[test]
+    fn classify_batch_error_internal_returns_internal() {
+        let status = classify_batch_error(&BatchError::Internal("disk full".into()));
+        assert_eq!(status.code(), tonic::Code::Internal);
+    }
+
+    #[test]
+    fn classify_batch_error_raft_leadership_returns_unavailable() {
+        let status = classify_batch_error(&BatchError::RaftError("not leader".into()));
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+    }
+
+    #[test]
+    fn classify_batch_error_raft_generic_returns_internal() {
+        let status = classify_batch_error(&BatchError::RaftError("storage failure".into()));
+        assert_eq!(status.code(), tonic::Code::Internal);
+    }
 
     /// Helper: run the same validate-and-map-to-Status logic the service uses.
     fn validate_proto_operations(
