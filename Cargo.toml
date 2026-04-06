@@ -43,10 +43,10 @@ openraft = { version = "0.9", features = ["serde", "tracing-log", "loosen-follow
 validit = "0.2"
 
 # Crypto
-sha1 = "0.10"
-sha2 = "0.10"
+sha1 = "0.11"
+sha2 = "0.11"
 seahash = "4"
-hmac = "0.12"
+hmac = "0.13"
 rs_merkle = "1"
 subtle = "2"
 base64 = "0.22"
@@ -173,4 +173,3 @@ opt-level = 1
 # in failover tests. Disable debug assertions for openraft only.
 [profile.test.package.openraft]
 debug-assertions = false
-
