@@ -724,6 +724,254 @@ mod tests {
         assert_eq!(c1.accumulated_header_hash, c2.accumulated_header_hash);
         assert_eq!(c1.state_root_accumulator, c2.state_root_accumulator);
     }
+
+    #[test]
+    fn test_vault_entry_hash_deterministic() {
+        let entry = crate::types::VaultEntry {
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(2),
+            vault_height: 10,
+            previous_vault_hash: ZERO_HASH,
+            transactions: vec![],
+            tx_merkle_root: [1u8; 32],
+            state_root: [2u8; 32],
+        };
+
+        let h1 = vault_entry_hash(&entry);
+        let h2 = vault_entry_hash(&entry);
+        assert_eq!(h1, h2);
+        assert_ne!(h1, ZERO_HASH);
+    }
+
+    #[test]
+    fn test_vault_entry_hash_differs_on_any_field_change() {
+        let base = crate::types::VaultEntry {
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(2),
+            vault_height: 10,
+            previous_vault_hash: ZERO_HASH,
+            transactions: vec![],
+            tx_merkle_root: [1u8; 32],
+            state_root: [2u8; 32],
+        };
+
+        let base_hash = vault_entry_hash(&base);
+
+        // Change organization
+        let mut modified = base.clone();
+        modified.organization = OrganizationId::new(99);
+        assert_ne!(vault_entry_hash(&modified), base_hash);
+
+        // Change vault
+        let mut modified = base.clone();
+        modified.vault = VaultId::new(99);
+        assert_ne!(vault_entry_hash(&modified), base_hash);
+
+        // Change vault_height
+        let mut modified = base.clone();
+        modified.vault_height = 999;
+        assert_ne!(vault_entry_hash(&modified), base_hash);
+
+        // Change state_root
+        let mut modified = base.clone();
+        modified.state_root = [99u8; 32];
+        assert_ne!(vault_entry_hash(&modified), base_hash);
+    }
+
+    #[test]
+    fn test_tx_hash_with_set_entity_operation() {
+        let tx = Transaction {
+            id: [1u8; 16],
+            client_id: "c".into(),
+            sequence: 1,
+            operations: vec![crate::types::Operation::SetEntity {
+                key: "key1".to_string(),
+                value: b"val1".to_vec(),
+                condition: None,
+                expires_at: None,
+            }],
+            timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+        };
+
+        let h1 = tx_hash(&tx);
+        let h2 = tx_hash(&tx);
+        assert_eq!(h1, h2);
+        assert_ne!(h1, ZERO_HASH);
+    }
+
+    #[test]
+    fn test_tx_hash_with_all_condition_types() {
+        let make_tx = |cond: Option<crate::types::SetCondition>| Transaction {
+            id: [1u8; 16],
+            client_id: "c".into(),
+            sequence: 1,
+            operations: vec![crate::types::Operation::SetEntity {
+                key: "k".to_string(),
+                value: b"v".to_vec(),
+                condition: cond,
+                expires_at: Some(1234),
+            }],
+            timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+        };
+
+        let hashes = [
+            tx_hash(&make_tx(None)),
+            tx_hash(&make_tx(Some(crate::types::SetCondition::MustNotExist))),
+            tx_hash(&make_tx(Some(crate::types::SetCondition::MustExist))),
+            tx_hash(&make_tx(Some(crate::types::SetCondition::VersionEquals(42)))),
+            tx_hash(&make_tx(Some(crate::types::SetCondition::ValueEquals(b"expected".to_vec())))),
+        ];
+
+        // All condition types should produce distinct hashes
+        for i in 0..hashes.len() {
+            for j in (i + 1)..hashes.len() {
+                assert_ne!(hashes[i], hashes[j], "conditions {i} and {j} collided");
+            }
+        }
+    }
+
+    #[test]
+    fn test_tx_hash_with_relationship_operations() {
+        let tx = Transaction {
+            id: [1u8; 16],
+            client_id: "c".into(),
+            sequence: 1,
+            operations: vec![
+                crate::types::Operation::CreateRelationship {
+                    resource: "doc:1".to_string(),
+                    relation: "viewer".to_string(),
+                    subject: "user:a".to_string(),
+                },
+                crate::types::Operation::DeleteRelationship {
+                    resource: "doc:1".to_string(),
+                    relation: "viewer".to_string(),
+                    subject: "user:a".to_string(),
+                },
+            ],
+            timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+        };
+
+        let hash = tx_hash(&tx);
+        assert_ne!(hash, ZERO_HASH);
+    }
+
+    #[test]
+    fn test_tx_hash_with_delete_and_expire_operations() {
+        let tx_delete = Transaction {
+            id: [1u8; 16],
+            client_id: "c".into(),
+            sequence: 1,
+            operations: vec![crate::types::Operation::DeleteEntity { key: "k".to_string() }],
+            timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+        };
+
+        let tx_expire = Transaction {
+            id: [1u8; 16],
+            client_id: "c".into(),
+            sequence: 1,
+            operations: vec![crate::types::Operation::ExpireEntity {
+                key: "k".to_string(),
+                expired_at: 9999,
+            }],
+            timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+        };
+
+        let h_delete = tx_hash(&tx_delete);
+        let h_expire = tx_hash(&tx_expire);
+        assert_ne!(h_delete, h_expire);
+        assert_ne!(h_delete, ZERO_HASH);
+        assert_ne!(h_expire, ZERO_HASH);
+    }
+
+    #[test]
+    fn test_bucket_hasher_multiple_entities() {
+        let mut hasher = BucketHasher::new();
+        hasher.add_entity(&Entity {
+            key: b"key1".to_vec(),
+            value: b"val1".to_vec(),
+            expires_at: 0,
+            version: 1,
+        });
+        hasher.add_entity(&Entity {
+            key: b"key2".to_vec(),
+            value: b"val2".to_vec(),
+            expires_at: 1000,
+            version: 2,
+        });
+
+        let hash = hasher.finalize();
+        assert_ne!(hash, EMPTY_HASH);
+
+        // Order matters: swapping order should produce different hash
+        let mut hasher2 = BucketHasher::new();
+        hasher2.add_entity(&Entity {
+            key: b"key2".to_vec(),
+            value: b"val2".to_vec(),
+            expires_at: 1000,
+            version: 2,
+        });
+        hasher2.add_entity(&Entity {
+            key: b"key1".to_vec(),
+            value: b"val1".to_vec(),
+            expires_at: 0,
+            version: 1,
+        });
+
+        assert_ne!(hasher2.finalize(), hash);
+    }
+
+    #[test]
+    fn test_bucket_hasher_default() {
+        let hasher = BucketHasher::default();
+        assert_eq!(hasher.finalize(), EMPTY_HASH);
+    }
+
+    #[test]
+    fn test_block_hash_differs_on_field_changes() {
+        let base = BlockHeader {
+            height: 100,
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(2),
+            previous_hash: ZERO_HASH,
+            tx_merkle_root: sha256(b"tx"),
+            state_root: sha256(b"state"),
+            timestamp: Utc.timestamp_opt(1704067200, 0).unwrap(),
+            term: 5,
+            committed_index: 42,
+        };
+
+        let base_hash = block_hash(&base);
+
+        // Changing height should change hash
+        let mut h = base.clone();
+        h.height = 101;
+        assert_ne!(block_hash(&h), base_hash);
+
+        // Changing term should change hash
+        let mut h = base.clone();
+        h.term = 6;
+        assert_ne!(block_hash(&h), base_hash);
+
+        // Changing committed_index should change hash
+        let mut h = base;
+        h.committed_index = 43;
+        assert_ne!(block_hash(&h), base_hash);
+    }
+
+    #[test]
+    fn test_sha256_concat_empty() {
+        let result = sha256_concat(&[]);
+        // SHA-256 of empty input
+        assert_eq!(result, EMPTY_HASH);
+    }
+
+    #[test]
+    fn test_sha256_concat_single() {
+        let h = sha256(b"test");
+        let result = sha256_concat(&[h]);
+        // SHA-256(h) should differ from h itself
+        assert_ne!(result, h);
+    }
 }
 
 /// Hex encoding helper for test assertions. Avoids adding a dev-dependency on the `hex` crate.

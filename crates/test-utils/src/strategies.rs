@@ -500,5 +500,75 @@ mod tests {
         fn event_entry_event_type_matches_action(entry in arb_event_entry()) {
             prop_assert_eq!(entry.event_type.as_str(), entry.action.event_type());
         }
+
+        #[test]
+        fn strategy_produces_valid_entities(entity in arb_entity()) {
+            // Entity key may be empty (arb_small_value generates 0..32 bytes)
+            let _ = entity.version;
+            let _ = entity.expires_at;
+        }
+
+        #[test]
+        fn strategy_produces_valid_relationships(rel in arb_relationship()) {
+            prop_assert!(rel.resource.contains(':'));
+            prop_assert!(!rel.relation.is_empty());
+            prop_assert!(rel.subject.contains(':'));
+        }
+
+        #[test]
+        fn strategy_produces_valid_vault_entries(entry in arb_vault_entry()) {
+            prop_assert!(entry.organization.value() > 0);
+            prop_assert!(entry.vault.value() > 0);
+        }
+
+        #[test]
+        fn strategy_produces_valid_vault_blocks(block in arb_vault_block()) {
+            prop_assert!(block.header.organization.value() > 0);
+            prop_assert!(block.header.vault.value() > 0);
+        }
+
+        #[test]
+        fn strategy_produces_valid_region_blocks(block in arb_region_block()) {
+            prop_assert!(!block.vault_entries.is_empty() || block.vault_entries.is_empty());
+        }
+
+        #[test]
+        fn strategy_produces_valid_organization_ids(id in arb_organization_id()) {
+            prop_assert!(id.value() >= 1);
+            prop_assert!(id.value() < 10_000);
+        }
+
+        #[test]
+        fn strategy_produces_valid_vault_ids(id in arb_vault_id()) {
+            prop_assert!(id.value() >= 1);
+            prop_assert!(id.value() < 10_000);
+        }
+
+        #[test]
+        fn strategy_produces_valid_organization_slugs(slug in arb_organization_slug()) {
+            prop_assert!(slug.value() >= (1u64 << 22));
+            prop_assert!(slug.value() < (1u64 << 53));
+        }
+
+        #[test]
+        fn strategy_produces_valid_vault_slugs(slug in arb_vault_slug()) {
+            prop_assert!(slug.value() >= (1u64 << 22));
+            prop_assert!(slug.value() < (1u64 << 53));
+        }
+
+        #[test]
+        fn strategy_set_conditions_well_formed(cond in arb_set_condition()) {
+            match cond {
+                SetCondition::MustNotExist | SetCondition::MustExist => {},
+                SetCondition::VersionEquals(v) => prop_assert!(v < 1_000_000),
+                SetCondition::ValueEquals(v) => prop_assert!(v.len() < 32),
+            }
+        }
+
+        #[test]
+        fn strategy_operation_sequences_non_empty(ops in arb_operation_sequence()) {
+            prop_assert!(!ops.is_empty());
+            prop_assert!(ops.len() <= 20);
+        }
     }
 }

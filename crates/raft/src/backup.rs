@@ -1868,4 +1868,174 @@ mod tests {
         let manager = BackupManager::new(&config).expect("create manager");
         assert_eq!(manager.backup_dir(), temp.path());
     }
+
+    // ── decode_page_backup error cases ──
+
+    #[test]
+    fn test_decode_page_backup_empty_data() {
+        let result = BackupManager::decode_page_backup(&[]);
+        assert!(matches!(result, Err(BackupError::Invalid { .. })));
+    }
+
+    #[test]
+    fn test_decode_page_backup_wrong_magic() {
+        let data = b"XXXX";
+        let result = BackupManager::decode_page_backup(data);
+        assert!(matches!(result, Err(BackupError::Invalid { .. })));
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("magic"));
+    }
+
+    #[test]
+    fn test_decode_page_backup_unsupported_version() {
+        let mut data = Vec::new();
+        data.extend_from_slice(PAGE_BACKUP_MAGIC);
+        data.extend_from_slice(&99u32.to_le_bytes()); // unsupported version
+        let result = BackupManager::decode_page_backup(&data);
+        assert!(matches!(result, Err(BackupError::Invalid { .. })));
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("version"));
+    }
+
+    #[test]
+    fn test_decode_page_backup_short_data_no_magic() {
+        // Only 3 bytes — not enough for magic, should fail at magic check
+        let result = BackupManager::decode_page_backup(&[0x4C, 0x50, 0x42]);
+        assert!(matches!(result, Err(BackupError::Invalid { .. })));
+    }
+
+    // ── BackupMetadata serde roundtrip ──
+
+    #[test]
+    fn test_backup_metadata_serde_roundtrip() {
+        let meta = BackupMetadata {
+            backup_id: "test-001".to_string(),
+            region: Region::US_EAST_VA,
+            region_height: 42,
+            backup_path: "/tmp/test.backup".to_string(),
+            size_bytes: 1024,
+            created_at: Utc::now(),
+            checksum: [1u8; 32],
+            chain_commitment_hash: [2u8; 32],
+            schema_version: 2,
+            tag: "nightly".to_string(),
+            backup_type: BackupType::Full,
+            base_backup_id: None,
+            page_count: Some(10),
+        };
+
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let deserialized: BackupMetadata = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(deserialized.backup_id, "test-001");
+        assert_eq!(deserialized.region, Region::US_EAST_VA);
+        assert_eq!(deserialized.region_height, 42);
+        assert_eq!(deserialized.size_bytes, 1024);
+        assert_eq!(deserialized.tag, "nightly");
+        assert_eq!(deserialized.backup_type, BackupType::Full);
+        assert!(deserialized.base_backup_id.is_none());
+        assert_eq!(deserialized.page_count, Some(10));
+    }
+
+    #[test]
+    fn test_backup_metadata_serde_incremental() {
+        let meta = BackupMetadata {
+            backup_id: "inc-001".to_string(),
+            region: Region::GLOBAL,
+            region_height: 100,
+            backup_path: "/tmp/inc.pagebackup".to_string(),
+            size_bytes: 512,
+            created_at: Utc::now(),
+            checksum: [0u8; 32],
+            chain_commitment_hash: [0u8; 32],
+            schema_version: 1,
+            tag: String::new(),
+            backup_type: BackupType::Incremental,
+            base_backup_id: Some("full-001".to_string()),
+            page_count: Some(3),
+        };
+
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let deserialized: BackupMetadata = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(deserialized.backup_type, BackupType::Incremental);
+        assert_eq!(deserialized.base_backup_id.as_deref(), Some("full-001"));
+    }
+
+    #[test]
+    fn test_backup_metadata_deserialize_missing_optional_fields() {
+        // Simulates older metadata without backup_type/base_backup_id/page_count
+        let json = r#"{
+            "backup_id": "old-001",
+            "region": "global",
+            "region_height": 50,
+            "backup_path": "/tmp/old.backup",
+            "size_bytes": 256,
+            "created_at": "2025-01-01T00:00:00Z",
+            "checksum": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "chain_commitment_hash": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "schema_version": 2,
+            "tag": ""
+        }"#;
+
+        let meta: BackupMetadata = serde_json::from_str(json).expect("deserialize old format");
+        assert_eq!(meta.backup_type, BackupType::Full); // default
+        assert!(meta.base_backup_id.is_none()); // default
+        assert!(meta.page_count.is_none()); // default
+    }
+
+    // ── PageBackupData debug ──
+
+    #[test]
+    fn test_page_backup_data_debug() {
+        let data = PageBackupData {
+            region_height: 100,
+            page_size: 4096,
+            table_roots: [0; TableId::COUNT],
+            base_backup_id: None,
+            pages: vec![],
+        };
+        let debug = format!("{:?}", data);
+        assert!(debug.contains("region_height: 100"));
+        assert!(debug.contains("page_size: 4096"));
+    }
+
+    // ── Validate backup ID edge cases ──
+
+    #[test]
+    fn test_validate_backup_id_with_dots_but_not_dotdot() {
+        // Single dots should be fine
+        assert!(validate_backup_id("backup.v1").is_ok());
+        assert!(validate_backup_id("2025.01.01-snapshot").is_ok());
+    }
+
+    #[test]
+    fn test_validate_backup_id_dotdot_in_middle() {
+        let err = validate_backup_id("backup..sneaky").unwrap_err();
+        assert!(matches!(err, BackupError::InvalidBackupId { .. }));
+    }
+
+    // ── Constants ──
+
+    #[test]
+    fn test_backup_constants() {
+        assert_eq!(BACKUP_EXT, ".backup");
+        assert_eq!(META_EXT, ".meta.json");
+        assert_eq!(PAGE_BACKUP_MAGIC, b"LPBK");
+        assert_eq!(PAGE_BACKUP_VERSION, 1);
+        assert_eq!(PAGE_BACKUP_EXT, ".pagebackup");
+    }
+
+    // ── encode_page_backup with empty pages ──
+
+    #[test]
+    fn test_encode_page_backup_empty_pages() {
+        let table_roots = [0u64; TableId::COUNT];
+        let encoded = BackupManager::encode_page_backup(0, 4096, &table_roots, &[], None);
+        let decoded = BackupManager::decode_page_backup(&encoded).expect("decode empty");
+        assert_eq!(decoded.region_height, 0);
+        assert_eq!(decoded.page_size, 4096);
+        assert!(decoded.pages.is_empty());
+        assert!(decoded.base_backup_id.is_none());
+    }
 }

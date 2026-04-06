@@ -11175,4 +11175,1433 @@ mod tests {
             other => panic!("expected FailedPrecondition error, got {other}"),
         }
     }
+
+    // ========================================================================
+    // WriteTeam (REGIONAL SystemRequest)
+    // ========================================================================
+
+    #[test]
+    fn test_write_team_creates_new_team() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(200),
+            Region::US_EAST_VA,
+        );
+        let team_id = TeamId::new(1);
+        let team_slug = TeamSlug::new(5001);
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: team_id,
+                slug: team_slug,
+                name: "Engineering".to_string(),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationUpdated { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected OrganizationUpdated, got {other:?}"),
+        }
+
+        // Verify name index is populated
+        assert_eq!(state.team_name_index.get(&(org_id, "Engineering".to_string())), Some(&team_id),);
+    }
+
+    #[test]
+    fn test_write_team_rename_updates_index() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(201),
+            Region::US_EAST_VA,
+        );
+        let team_id = TeamId::new(1);
+        let team_slug = TeamSlug::new(5002);
+
+        // Create team
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: team_id,
+                slug: team_slug,
+                name: "Old Name".to_string(),
+            }),
+            &mut state,
+        );
+
+        // Rename team
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: team_id,
+                slug: team_slug,
+                name: "New Name".to_string(),
+            }),
+            &mut state,
+        );
+
+        // Old name removed, new name present
+        assert!(!state.team_name_index.contains_key(&(org_id, "Old Name".to_string())));
+        assert_eq!(state.team_name_index.get(&(org_id, "New Name".to_string())), Some(&team_id),);
+    }
+
+    #[test]
+    fn test_write_team_duplicate_name_rejected() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(202),
+            Region::US_EAST_VA,
+        );
+
+        // Create first team
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: TeamId::new(1),
+                slug: TeamSlug::new(5003),
+                name: "Duplicate".to_string(),
+            }),
+            &mut state,
+        );
+
+        // Second team with same name
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: TeamId::new(2),
+                slug: TeamSlug::new(5004),
+                name: "Duplicate".to_string(),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::AlreadyExists);
+            },
+            other => panic!("expected AlreadyExists error, got {other:?}"),
+        }
+    }
+
+    // ========================================================================
+    // AddTeamMember / RemoveTeamMember / UpdateTeamMemberRole (REGIONAL)
+    // ========================================================================
+
+    #[test]
+    fn test_add_team_member_success() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(210),
+            Region::US_EAST_VA,
+        );
+        let team_id = TeamId::new(1);
+
+        // Create team first
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: team_id,
+                slug: TeamSlug::new(5010),
+                name: "Dev Team".to_string(),
+            }),
+            &mut state,
+        );
+
+        // Add member
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::AddTeamMember {
+                organization: org_id,
+                team: team_id,
+                user_id: UserId::new(42),
+                role: inferadb_ledger_state::system::TeamMemberRole::Member,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationUpdated { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected OrganizationUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_add_team_member_duplicate_rejected() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(211),
+            Region::US_EAST_VA,
+        );
+        let team_id = TeamId::new(1);
+
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: team_id,
+                slug: TeamSlug::new(5011),
+                name: "Dev Team".to_string(),
+            }),
+            &mut state,
+        );
+
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::AddTeamMember {
+                organization: org_id,
+                team: team_id,
+                user_id: UserId::new(42),
+                role: inferadb_ledger_state::system::TeamMemberRole::Member,
+            }),
+            &mut state,
+        );
+
+        // Duplicate add
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::AddTeamMember {
+                organization: org_id,
+                team: team_id,
+                user_id: UserId::new(42),
+                role: inferadb_ledger_state::system::TeamMemberRole::Member,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::AlreadyExists);
+            },
+            other => panic!("expected AlreadyExists error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_remove_team_member_success() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(212),
+            Region::US_EAST_VA,
+        );
+        let team_id = TeamId::new(1);
+
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: team_id,
+                slug: TeamSlug::new(5012),
+                name: "Dev Team".to_string(),
+            }),
+            &mut state,
+        );
+
+        // Add two members: one Manager, one Member
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::AddTeamMember {
+                organization: org_id,
+                team: team_id,
+                user_id: UserId::new(10),
+                role: inferadb_ledger_state::system::TeamMemberRole::Manager,
+            }),
+            &mut state,
+        );
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::AddTeamMember {
+                organization: org_id,
+                team: team_id,
+                user_id: UserId::new(11),
+                role: inferadb_ledger_state::system::TeamMemberRole::Member,
+            }),
+            &mut state,
+        );
+
+        // Remove the regular member
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::RemoveTeamMember {
+                organization: org_id,
+                team: team_id,
+                user_id: UserId::new(11),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationUpdated { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected OrganizationUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_remove_last_team_manager_blocked() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(213),
+            Region::US_EAST_VA,
+        );
+        let team_id = TeamId::new(1);
+
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: team_id,
+                slug: TeamSlug::new(5013),
+                name: "Dev Team".to_string(),
+            }),
+            &mut state,
+        );
+
+        // Add single manager
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::AddTeamMember {
+                organization: org_id,
+                team: team_id,
+                user_id: UserId::new(10),
+                role: inferadb_ledger_state::system::TeamMemberRole::Manager,
+            }),
+            &mut state,
+        );
+
+        // Try to remove the only manager
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::RemoveTeamMember {
+                organization: org_id,
+                team: team_id,
+                user_id: UserId::new(10),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::FailedPrecondition);
+            },
+            other => panic!("expected FailedPrecondition error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_remove_team_member_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(214),
+            Region::US_EAST_VA,
+        );
+        let team_id = TeamId::new(1);
+
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: team_id,
+                slug: TeamSlug::new(5014),
+                name: "Dev Team".to_string(),
+            }),
+            &mut state,
+        );
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::RemoveTeamMember {
+                organization: org_id,
+                team: team_id,
+                user_id: UserId::new(999),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::NotFound);
+            },
+            other => panic!("expected NotFound error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_update_team_member_role() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(215),
+            Region::US_EAST_VA,
+        );
+        let team_id = TeamId::new(1);
+
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: team_id,
+                slug: TeamSlug::new(5015),
+                name: "Dev Team".to_string(),
+            }),
+            &mut state,
+        );
+
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::AddTeamMember {
+                organization: org_id,
+                team: team_id,
+                user_id: UserId::new(42),
+                role: inferadb_ledger_state::system::TeamMemberRole::Member,
+            }),
+            &mut state,
+        );
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::UpdateTeamMemberRole {
+                organization: org_id,
+                team: team_id,
+                user_id: UserId::new(42),
+                role: inferadb_ledger_state::system::TeamMemberRole::Manager,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationUpdated { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected OrganizationUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_update_team_member_role_not_found() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(216),
+            Region::US_EAST_VA,
+        );
+        let team_id = TeamId::new(1);
+
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: team_id,
+                slug: TeamSlug::new(5016),
+                name: "Dev Team".to_string(),
+            }),
+            &mut state,
+        );
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::UpdateTeamMemberRole {
+                organization: org_id,
+                team: team_id,
+                user_id: UserId::new(999),
+                role: inferadb_ledger_state::system::TeamMemberRole::Manager,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::NotFound);
+            },
+            other => panic!("expected NotFound error, got {other:?}"),
+        }
+    }
+
+    // ========================================================================
+    // WriteAppProfile / DeleteAppProfile (REGIONAL)
+    // ========================================================================
+
+    #[test]
+    fn test_write_app_profile_creates_new() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(220),
+            Region::US_EAST_VA,
+        );
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteAppProfile {
+                organization: org_id,
+                app: inferadb_ledger_types::AppId::new(1),
+                name: "My App".to_string(),
+                description: Some("A test app".to_string()),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationUpdated { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected OrganizationUpdated, got {other:?}"),
+        }
+
+        assert_eq!(
+            state.app_name_index.get(&(org_id, "My App".to_string())),
+            Some(&inferadb_ledger_types::AppId::new(1)),
+        );
+    }
+
+    #[test]
+    fn test_write_app_profile_duplicate_name_rejected() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(221),
+            Region::US_EAST_VA,
+        );
+
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteAppProfile {
+                organization: org_id,
+                app: inferadb_ledger_types::AppId::new(1),
+                name: "Same Name".to_string(),
+                description: Some(String::new()),
+            }),
+            &mut state,
+        );
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteAppProfile {
+                organization: org_id,
+                app: inferadb_ledger_types::AppId::new(2),
+                name: "Same Name".to_string(),
+                description: Some(String::new()),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::AlreadyExists);
+            },
+            other => panic!("expected AlreadyExists error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_delete_app_profile_success() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(222),
+            Region::US_EAST_VA,
+        );
+        let app_id = inferadb_ledger_types::AppId::new(1);
+
+        // Create profile first
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteAppProfile {
+                organization: org_id,
+                app: app_id,
+                name: "Deletable App".to_string(),
+                description: Some(String::new()),
+            }),
+            &mut state,
+        );
+
+        // Delete it
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::DeleteAppProfile {
+                organization: org_id,
+                app: app_id,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::AppDeleted { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected AppDeleted, got {other:?}"),
+        }
+
+        // Name index cleaned up
+        assert!(!state.app_name_index.contains_key(&(org_id, "Deletable App".to_string())));
+    }
+
+    // ========================================================================
+    // WriteClientAssertionName / DeleteClientAssertionName (REGIONAL)
+    // ========================================================================
+
+    #[test]
+    fn test_write_client_assertion_name() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteClientAssertionName {
+                organization: OrganizationId::new(1),
+                app: inferadb_ledger_types::AppId::new(1),
+                assertion: inferadb_ledger_types::ClientAssertionId::new(1),
+                name: "My Assertion".to_string(),
+            }),
+            &mut state,
+        );
+
+        assert!(matches!(response, LedgerResponse::Empty), "expected Empty, got {response:?}");
+    }
+
+    #[test]
+    fn test_delete_client_assertion_name() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        // Write first
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteClientAssertionName {
+                organization: OrganizationId::new(1),
+                app: inferadb_ledger_types::AppId::new(1),
+                assertion: inferadb_ledger_types::ClientAssertionId::new(1),
+                name: "My Assertion".to_string(),
+            }),
+            &mut state,
+        );
+
+        // Delete
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::DeleteClientAssertionName {
+                organization: OrganizationId::new(1),
+                app: inferadb_ledger_types::AppId::new(1),
+                assertion: inferadb_ledger_types::ClientAssertionId::new(1),
+            }),
+            &mut state,
+        );
+
+        assert!(matches!(response, LedgerResponse::Empty), "expected Empty, got {response:?}");
+    }
+
+    // ========================================================================
+    // DeleteTeam (REGIONAL)
+    // ========================================================================
+
+    #[test]
+    fn test_delete_team_success() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(230),
+            Region::US_EAST_VA,
+        );
+        let team_id = TeamId::new(1);
+
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: team_id,
+                slug: TeamSlug::new(5030),
+                name: "Deletable Team".to_string(),
+            }),
+            &mut state,
+        );
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::DeleteTeam {
+                organization: org_id,
+                team: team_id,
+                move_members_to: None,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationTeamDeleted { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected OrganizationTeamDeleted, got {other:?}"),
+        }
+
+        // Name index cleaned up
+        assert!(!state.team_name_index.contains_key(&(org_id, "Deletable Team".to_string())));
+    }
+
+    #[test]
+    fn test_delete_team_not_found_idempotent() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(231),
+            Region::US_EAST_VA,
+        );
+
+        // Delete nonexistent team should succeed idempotently
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::DeleteTeam {
+                organization: org_id,
+                team: TeamId::new(999),
+                move_members_to: None,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationTeamDeleted { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected OrganizationTeamDeleted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_delete_team_move_to_same_team_rejected() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(232),
+            Region::US_EAST_VA,
+        );
+        let team_id = TeamId::new(1);
+
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: team_id,
+                slug: TeamSlug::new(5032),
+                name: "Self Move".to_string(),
+            }),
+            &mut state,
+        );
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::DeleteTeam {
+                organization: org_id,
+                team: team_id,
+                move_members_to: Some(team_id),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::FailedPrecondition);
+            },
+            other => panic!("expected FailedPrecondition error, got {other:?}"),
+        }
+    }
+
+    // ========================================================================
+    // PurgeOrganizationRegional (REGIONAL)
+    // ========================================================================
+
+    #[test]
+    fn test_purge_organization_regional() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(240),
+            Region::US_EAST_VA,
+        );
+
+        // Create team + app profile to be purged
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteTeam {
+                organization: org_id,
+                team: TeamId::new(1),
+                slug: TeamSlug::new(5040),
+                name: "Team To Purge".to_string(),
+            }),
+            &mut state,
+        );
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteAppProfile {
+                organization: org_id,
+                app: inferadb_ledger_types::AppId::new(1),
+                name: "App To Purge".to_string(),
+                description: Some(String::new()),
+            }),
+            &mut state,
+        );
+
+        assert!(!state.team_name_index.is_empty());
+        assert!(!state.app_name_index.is_empty());
+
+        // Purge
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::PurgeOrganizationRegional {
+                organization: org_id,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationPurged { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected OrganizationPurged, got {other:?}"),
+        }
+
+        // Indices cleaned
+        assert!(
+            state.team_name_index.iter().all(|((oid, _), _)| *oid != org_id),
+            "team indices should be purged",
+        );
+        assert!(
+            state.app_name_index.iter().all(|((oid, _), _)| *oid != org_id),
+            "app indices should be purged",
+        );
+    }
+
+    // ========================================================================
+    // WriteOrganizationInvite / UpdateOrganizationInviteStatus /
+    // DeleteOrganizationInvite / RehashInvitationEmailHmac (REGIONAL)
+    // ========================================================================
+
+    #[test]
+    fn test_write_organization_invite_success() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(250),
+            Region::US_EAST_VA,
+        );
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteOrganizationInvite {
+                organization: org_id,
+                invite: InviteId::new(1),
+                slug: InviteSlug::new(9001),
+                token_hash: [0u8; 32],
+                inviter: UserId::new(1),
+                invitee_email_hmac: "hmac-invite-1".to_string(),
+                invitee_email: "user@example.com".to_string(),
+                role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
+                team: None,
+                expires_at: fixed_timestamp() + Duration::days(7),
+            }),
+            &mut state,
+        );
+
+        assert!(matches!(response, LedgerResponse::Empty), "expected Empty, got {response:?}");
+    }
+
+    #[test]
+    fn test_update_organization_invite_status() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(251),
+            Region::US_EAST_VA,
+        );
+        let invite_id = InviteId::new(1);
+
+        // Write invite first
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteOrganizationInvite {
+                organization: org_id,
+                invite: invite_id,
+                slug: InviteSlug::new(9002),
+                token_hash: [0u8; 32],
+                inviter: UserId::new(1),
+                invitee_email_hmac: "hmac-invite-2".to_string(),
+                invitee_email: "user@example.com".to_string(),
+                role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
+                team: None,
+                expires_at: fixed_timestamp() + Duration::days(7),
+            }),
+            &mut state,
+        );
+
+        // Accept invite
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::UpdateOrganizationInviteStatus {
+                organization: org_id,
+                invite: invite_id,
+                status: InvitationStatus::Accepted,
+            }),
+            &mut state,
+        );
+
+        assert!(matches!(response, LedgerResponse::Empty), "expected Empty, got {response:?}");
+    }
+
+    #[test]
+    fn test_delete_organization_invite() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(252),
+            Region::US_EAST_VA,
+        );
+        let invite_id = InviteId::new(1);
+
+        // Write invite first
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteOrganizationInvite {
+                organization: org_id,
+                invite: invite_id,
+                slug: InviteSlug::new(9003),
+                token_hash: [0u8; 32],
+                inviter: UserId::new(1),
+                invitee_email_hmac: "hmac-invite-3".to_string(),
+                invitee_email: "user@example.com".to_string(),
+                role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
+                team: None,
+                expires_at: fixed_timestamp() + Duration::days(7),
+            }),
+            &mut state,
+        );
+
+        // Delete
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::DeleteOrganizationInvite {
+                organization: org_id,
+                invite: invite_id,
+            }),
+            &mut state,
+        );
+
+        assert!(matches!(response, LedgerResponse::Empty), "expected Empty, got {response:?}");
+    }
+
+    #[test]
+    fn test_rehash_invitation_email_hmac() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(253),
+            Region::US_EAST_VA,
+        );
+        let invite_id = InviteId::new(1);
+
+        // Write invite first
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::WriteOrganizationInvite {
+                organization: org_id,
+                invite: invite_id,
+                slug: InviteSlug::new(9004),
+                token_hash: [0u8; 32],
+                inviter: UserId::new(1),
+                invitee_email_hmac: "old-hmac".to_string(),
+                invitee_email: "user@example.com".to_string(),
+                role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
+                team: None,
+                expires_at: fixed_timestamp() + Duration::days(7),
+            }),
+            &mut state,
+        );
+
+        // Rehash
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::RehashInvitationEmailHmac {
+                organization: org_id,
+                invite: invite_id,
+                new_hmac: "new-hmac".to_string(),
+            }),
+            &mut state,
+        );
+
+        assert!(matches!(response, LedgerResponse::Empty), "expected Empty, got {response:?}");
+    }
+
+    // ========================================================================
+    // WriteOrganizationProfile / UpdateOrganizationProfile (REGIONAL)
+    // ========================================================================
+
+    #[test]
+    fn test_update_organization_profile() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(260),
+            Region::US_EAST_VA,
+        );
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::UpdateOrganizationProfile {
+                organization: org_id,
+                name: "Updated Org Name".to_string(),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::OrganizationUpdated { organization_id } => {
+                assert_eq!(organization_id, org_id);
+            },
+            other => panic!("expected OrganizationUpdated, got {other:?}"),
+        }
+    }
+
+    // ========================================================================
+    // EraseUser (GLOBAL SystemRequest)
+    // ========================================================================
+
+    #[test]
+    fn test_erase_user_without_state_layer_returns_empty() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::EraseUser {
+                user_id: UserId::new(1),
+                region: Region::US_EAST_VA,
+            }),
+            &mut state,
+        );
+
+        assert!(matches!(response, LedgerResponse::Empty), "expected Empty, got {response:?}");
+    }
+
+    // ========================================================================
+    // MigrateExistingUsers (GLOBAL SystemRequest)
+    // ========================================================================
+
+    #[test]
+    fn test_migrate_existing_users_without_state_layer_returns_empty() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::MigrateExistingUsers { entries: vec![] }),
+            &mut state,
+        );
+
+        assert!(matches!(response, LedgerResponse::Empty), "expected Empty, got {response:?}");
+    }
+
+    // ========================================================================
+    // CreateOnboardingUser (GLOBAL SystemRequest)
+    // ========================================================================
+
+    #[test]
+    fn test_create_onboarding_user_without_state_layer_returns_error() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::CreateOnboardingUser {
+                email_hmac: "test-hmac".to_string(),
+                user_slug: UserSlug::new(1),
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(1),
+                region: Region::US_EAST_VA,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::Internal);
+            },
+            other => panic!("expected Internal error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_create_onboarding_user_email_already_active() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        // Register an active email hash
+        apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::RegisterEmailHash {
+                hmac_hex: "occupied-hmac".to_string(),
+                user_id: UserId::new(42),
+            }),
+            &mut state,
+        );
+
+        // Try to onboard with same HMAC
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::CreateOnboardingUser {
+                email_hmac: "occupied-hmac".to_string(),
+                user_slug: UserSlug::new(1),
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(1),
+                region: Region::US_EAST_VA,
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::AlreadyExists);
+            },
+            other => panic!("expected AlreadyExists error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_create_onboarding_user_idempotent_retry() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let user_slug = UserSlug::new(7001);
+        let org_slug = inferadb_ledger_types::OrganizationSlug::new(7001);
+
+        // First call
+        let response1 = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::CreateOnboardingUser {
+                email_hmac: "idempotent-hmac".to_string(),
+                user_slug,
+                organization_slug: org_slug,
+                region: Region::US_EAST_VA,
+            }),
+            &mut state,
+        );
+
+        let (user_id1, org_id1) = match response1 {
+            LedgerResponse::OnboardingUserCreated { user_id, organization_id } => {
+                (user_id, organization_id)
+            },
+            other => panic!("expected OnboardingUserCreated, got {other:?}"),
+        };
+
+        // Retry with same parameters (idempotent)
+        let response2 = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::CreateOnboardingUser {
+                email_hmac: "idempotent-hmac".to_string(),
+                user_slug,
+                organization_slug: org_slug,
+                region: Region::US_EAST_VA,
+            }),
+            &mut state,
+        );
+
+        match response2 {
+            LedgerResponse::OnboardingUserCreated { user_id, organization_id } => {
+                assert_eq!(user_id, user_id1);
+                assert_eq!(organization_id, org_id1);
+            },
+            other => panic!("expected idempotent OnboardingUserCreated, got {other:?}"),
+        }
+    }
+
+    // ========================================================================
+    // ActivateOnboardingUser — no state layer
+    // ========================================================================
+
+    #[test]
+    fn test_activate_onboarding_without_state_layer_returns_error() {
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        let mut state = store.applied_state.write();
+
+        let response = apply_at_fixed_time(
+            &store,
+            &LedgerRequest::System(SystemRequest::ActivateOnboardingUser {
+                user_id: UserId::new(1),
+                user_slug: UserSlug::new(1),
+                organization_id: OrganizationId::new(1),
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(1),
+                email_hmac: "hmac".to_string(),
+            }),
+            &mut state,
+        );
+
+        match response {
+            LedgerResponse::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::Internal);
+            },
+            other => panic!("expected Internal error, got {other:?}"),
+        }
+    }
+
+    // ========================================================================
+    // BatchWrite containing system requests
+    // ========================================================================
+
+    #[test]
+    fn test_batch_write_with_system_requests() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state(dir.path());
+        let mut state = store.applied_state.write();
+
+        let requests = vec![
+            LedgerRequest::System(SystemRequest::CreateUser {
+                user: UserId::new(0),
+                admin: false,
+                slug: UserSlug::new(8001),
+                region: Region::US_EAST_VA,
+            }),
+            LedgerRequest::System(SystemRequest::CreateUser {
+                user: UserId::new(0),
+                admin: false,
+                slug: UserSlug::new(8002),
+                region: Region::US_EAST_VA,
+            }),
+        ];
+
+        let response =
+            apply_at_fixed_time(&store, &LedgerRequest::BatchWrite { requests }, &mut state);
+
+        match response {
+            LedgerResponse::BatchWrite { responses } => {
+                assert_eq!(responses.len(), 2);
+                assert!(
+                    matches!(responses[0], LedgerResponse::UserCreated { .. }),
+                    "first should be UserCreated",
+                );
+                assert!(
+                    matches!(responses[1], LedgerResponse::UserCreated { .. }),
+                    "second should be UserCreated",
+                );
+            },
+            other => panic!("expected BatchWrite, got {other:?}"),
+        }
+    }
+
+    // ========================================================================
+    // Raft log append, purge, delete conflict, and get_log_state
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_purge_logs_and_get_log_state() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+
+        // Append some entries
+        let entries = vec![
+            Entry::<LedgerTypeConfig> { log_id: make_log_id(1, 1), payload: EntryPayload::Blank },
+            Entry::<LedgerTypeConfig> { log_id: make_log_id(1, 2), payload: EntryPayload::Blank },
+            Entry::<LedgerTypeConfig> { log_id: make_log_id(1, 3), payload: EntryPayload::Blank },
+        ];
+        store.append_to_log(entries).await.expect("append");
+
+        // Purge up to index 2
+        store.purge_logs_upto(make_log_id(1, 2)).await.expect("purge");
+
+        // Check log state
+        let log_state = store.get_log_state().await.expect("get log state");
+        assert_eq!(log_state.last_purged_log_id, Some(make_log_id(1, 2)));
+        assert_eq!(log_state.last_log_id, Some(make_log_id(1, 3)));
+
+        // Only entry 3 should remain
+        let remaining = store.try_get_log_entries(1u64..4u64).await.expect("read logs");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].log_id.index, 3);
+    }
+
+    #[tokio::test]
+    async fn test_delete_conflict_logs_since() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+
+        // Append entries 1-5
+        let entries: Vec<_> = (1..=5)
+            .map(|i| Entry::<LedgerTypeConfig> {
+                log_id: make_log_id(1, i),
+                payload: EntryPayload::Blank,
+            })
+            .collect();
+        store.append_to_log(entries).await.expect("append");
+
+        // Delete from index 3 onward
+        store.delete_conflict_logs_since(make_log_id(1, 3)).await.expect("delete conflict");
+
+        // Only entries 1 and 2 should remain
+        let remaining = store.try_get_log_entries(1u64..6u64).await.expect("read logs");
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].log_id.index, 1);
+        assert_eq!(remaining[1].log_id.index, 2);
+    }
+
+    #[tokio::test]
+    async fn test_append_empty_entries_is_noop() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+
+        // Appending empty entries should succeed without error
+        store.append_to_log(Vec::<Entry<LedgerTypeConfig>>::new()).await.expect("append empty");
+
+        let log_state = store.get_log_state().await.expect("get log state");
+        assert!(log_state.last_log_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_last_applied_state_initial() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+
+        let (last_applied, _membership) = store.last_applied_state().await.expect("last applied");
+        assert!(last_applied.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_current_snapshot_empty_returns_none() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+
+        let snapshot = store.get_current_snapshot().await.expect("get snapshot");
+        assert!(snapshot.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_vote_round_trip_overwrites() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+
+        let vote1 = Vote::new(1, 42);
+        store.save_vote(&vote1).await.expect("save vote1");
+        assert_eq!(store.read_vote().await.expect("read"), Some(vote1));
+
+        // Overwrite with new vote
+        let vote2 = Vote::new(2, 42);
+        store.save_vote(&vote2).await.expect("save vote2");
+        assert_eq!(store.read_vote().await.expect("read"), Some(vote2));
+    }
 }

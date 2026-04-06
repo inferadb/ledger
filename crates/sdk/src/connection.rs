@@ -623,4 +623,84 @@ mod tests {
         // Pool should use the pre-configured selector
         assert!(pool.selector().latency_ms("10.0.0.1:50051").is_some());
     }
+
+    #[test]
+    fn circuit_breaker_none_when_not_configured() {
+        let config = test_config();
+        let pool = ConnectionPool::new(config);
+        assert!(pool.circuit_breaker().is_none());
+    }
+
+    #[test]
+    fn record_failure_noop_without_circuit_breaker() {
+        let config = test_config();
+        let pool = ConnectionPool::new(config);
+        // Should not panic when circuit breaker is not configured
+        pool.record_failure();
+    }
+
+    #[test]
+    fn record_success_noop_without_circuit_breaker() {
+        let config = test_config();
+        let pool = ConnectionPool::new(config);
+        // Should not panic when circuit breaker is not configured
+        pool.record_success();
+    }
+
+    #[test]
+    fn metrics_accessor_returns_metrics() {
+        let config = test_config();
+        let pool = ConnectionPool::new(config);
+        // Should return the NoopSdkMetrics by default
+        let _metrics = pool.metrics();
+    }
+
+    #[test]
+    fn update_endpoints_then_reset_clears_channel() {
+        let config = test_config();
+        let pool = ConnectionPool::new(config);
+
+        pool.update_endpoints(vec!["http://10.0.0.1:5000".to_string()]);
+        assert_eq!(pool.active_endpoints(), vec!["http://10.0.0.1:5000".to_string()]);
+
+        // Reset clears the channel but keeps dynamic endpoints
+        pool.reset();
+        assert!(pool.channel.read().is_none());
+        // Dynamic endpoints are still set
+        assert_eq!(pool.active_endpoints(), vec!["http://10.0.0.1:5000".to_string()]);
+    }
+
+    #[test]
+    fn pool_clone_shares_state() {
+        let config = test_config();
+        let pool = ConnectionPool::new(config);
+
+        let pool2 = pool.clone();
+        pool.update_endpoints(vec!["http://10.0.0.1:5000".to_string()]);
+        // Cloned pool should see the same dynamic endpoints (Arc shared)
+        assert_eq!(pool2.active_endpoints(), vec!["http://10.0.0.1:5000".to_string()]);
+    }
+
+    #[test]
+    fn multiple_reset_calls_are_safe() {
+        let config = test_config();
+        let pool = ConnectionPool::new(config);
+
+        // Multiple resets should be safe even with no channel
+        pool.reset();
+        pool.reset();
+        pool.reset();
+        assert!(pool.channel.read().is_none());
+    }
+
+    #[test]
+    fn update_empty_endpoints_list() {
+        let config = test_config();
+        let pool = ConnectionPool::new(config);
+
+        pool.update_endpoints(vec![]);
+        // Dynamic endpoints are set but empty
+        let dynamic = pool.dynamic_endpoints.read();
+        assert!(dynamic.as_ref().unwrap().is_empty());
+    }
 }

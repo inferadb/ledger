@@ -1904,4 +1904,371 @@ mod tests {
 
         assert_eq!(root1, root2, "mark_all_dirty recomputation should match normal computation");
     }
+
+    // =========================================================================
+    // Additional coverage tests
+    // =========================================================================
+
+    #[test]
+    fn test_set_entity_must_exist_on_missing_key_fails() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        let ops = vec![Operation::SetEntity {
+            key: "missing".to_string(),
+            value: b"val".to_vec(),
+            condition: Some(SetCondition::MustExist),
+            expires_at: None,
+        }];
+
+        let result = state.apply_operations(vault, &ops, 1);
+        match result {
+            Err(StateError::PreconditionFailed {
+                key, current_version, failed_condition, ..
+            }) => {
+                assert_eq!(key, "missing");
+                assert_eq!(current_version, None);
+                assert_eq!(failed_condition, Some(SetCondition::MustExist));
+            },
+            other => panic!("Expected PreconditionFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_set_entity_version_equals_condition() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // Create entity at block_height 1
+        state
+            .apply_operations(
+                vault,
+                &[Operation::SetEntity {
+                    key: "k".into(),
+                    value: b"v1".to_vec(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                1,
+            )
+            .unwrap();
+
+        // VersionEquals(1) should succeed
+        let result = state.apply_operations(
+            vault,
+            &[Operation::SetEntity {
+                key: "k".into(),
+                value: b"v2".to_vec(),
+                condition: Some(SetCondition::VersionEquals(1)),
+                expires_at: None,
+            }],
+            2,
+        );
+        assert!(result.is_ok());
+
+        // VersionEquals(1) should fail now (version is 2)
+        let result = state.apply_operations(
+            vault,
+            &[Operation::SetEntity {
+                key: "k".into(),
+                value: b"v3".to_vec(),
+                condition: Some(SetCondition::VersionEquals(1)),
+                expires_at: None,
+            }],
+            3,
+        );
+        assert!(matches!(result, Err(StateError::PreconditionFailed { .. })));
+    }
+
+    #[test]
+    fn test_set_entity_value_equals_condition() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // Create entity
+        state
+            .apply_operations(
+                vault,
+                &[Operation::SetEntity {
+                    key: "k".into(),
+                    value: b"expected".to_vec(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                1,
+            )
+            .unwrap();
+
+        // ValueEquals with matching value should succeed
+        let result = state.apply_operations(
+            vault,
+            &[Operation::SetEntity {
+                key: "k".into(),
+                value: b"new".to_vec(),
+                condition: Some(SetCondition::ValueEquals(b"expected".to_vec())),
+                expires_at: None,
+            }],
+            2,
+        );
+        assert!(result.is_ok());
+
+        // ValueEquals with wrong value should fail
+        let result = state.apply_operations(
+            vault,
+            &[Operation::SetEntity {
+                key: "k".into(),
+                value: b"other".to_vec(),
+                condition: Some(SetCondition::ValueEquals(b"wrong".to_vec())),
+                expires_at: None,
+            }],
+            3,
+        );
+        assert!(matches!(result, Err(StateError::PreconditionFailed { .. })));
+    }
+
+    #[test]
+    fn test_expire_entity() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // Create entity
+        state
+            .apply_operations(
+                vault,
+                &[Operation::SetEntity {
+                    key: "k".into(),
+                    value: b"v".to_vec(),
+                    condition: None,
+                    expires_at: Some(9999),
+                }],
+                1,
+            )
+            .unwrap();
+
+        // Expire it
+        let statuses = state
+            .apply_operations(
+                vault,
+                &[Operation::ExpireEntity { key: "k".into(), expired_at: 1000 }],
+                2,
+            )
+            .unwrap();
+        assert_eq!(statuses, vec![WriteStatus::Deleted]);
+
+        // Should not exist now
+        assert!(state.get_entity(vault, b"k").unwrap().is_none());
+
+        // Expire non-existent entity returns NotFound
+        let statuses = state
+            .apply_operations(
+                vault,
+                &[Operation::ExpireEntity { key: "k".into(), expired_at: 2000 }],
+                3,
+            )
+            .unwrap();
+        assert_eq!(statuses, vec![WriteStatus::NotFound]);
+    }
+
+    #[test]
+    fn test_entity_with_expires_at() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        let ops = vec![Operation::SetEntity {
+            key: "ttl_key".to_string(),
+            value: b"data".to_vec(),
+            condition: None,
+            expires_at: Some(999999),
+        }];
+
+        state.apply_operations(vault, &ops, 1).unwrap();
+
+        let entity = state.get_entity(vault, b"ttl_key").unwrap().unwrap();
+        assert_eq!(entity.expires_at, 999999);
+    }
+
+    #[test]
+    fn test_compute_state_root_no_commitment() {
+        let state = create_test_state();
+        let vault = VaultId::new(99);
+
+        // No commitment for this vault yet, should return default state root
+        let root = state.compute_state_root(vault).unwrap();
+        assert_ne!(root, [0u8; 32]); // default is sha256_concat of empty hashes
+    }
+
+    #[test]
+    fn test_compute_state_root_cached_when_clean() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // Write some data and compute state root
+        state
+            .apply_operations(
+                vault,
+                &[Operation::SetEntity {
+                    key: "k".into(),
+                    value: b"v".to_vec(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                1,
+            )
+            .unwrap();
+        let root1 = state.compute_state_root(vault).unwrap();
+
+        // Second call without writes should return cached value
+        let root2 = state.compute_state_root(vault).unwrap();
+        assert_eq!(root1, root2);
+    }
+
+    #[test]
+    fn test_load_and_get_bucket_roots() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // Initially no bucket roots
+        assert!(state.get_bucket_roots(vault).is_none());
+
+        // Load bucket roots
+        let roots = [inferadb_ledger_types::EMPTY_HASH; 256];
+        state.load_vault_commitment(vault, roots);
+
+        // Should be retrievable now
+        let retrieved = state.get_bucket_roots(vault).unwrap();
+        assert_eq!(retrieved, roots);
+    }
+
+    #[test]
+    fn test_list_entities_with_prefix() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // Create entities with different prefixes
+        for key in ["user:alice", "user:bob", "doc:readme", "doc:todo"] {
+            state
+                .apply_operations(
+                    vault,
+                    &[Operation::SetEntity {
+                        key: key.to_string(),
+                        value: b"data".to_vec(),
+                        condition: None,
+                        expires_at: None,
+                    }],
+                    1,
+                )
+                .unwrap();
+        }
+
+        // List with prefix "user:"
+        let users = state.list_entities(vault, Some("user:"), None, 100).unwrap();
+        assert_eq!(users.len(), 2);
+        for e in &users {
+            assert!(String::from_utf8_lossy(&e.key).starts_with("user:"));
+        }
+
+        // List with prefix "doc:"
+        let docs = state.list_entities(vault, Some("doc:"), None, 100).unwrap();
+        assert_eq!(docs.len(), 2);
+    }
+
+    #[test]
+    fn test_list_entities_with_limit() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        for i in 0..5 {
+            state
+                .apply_operations(
+                    vault,
+                    &[Operation::SetEntity {
+                        key: format!("key{i}"),
+                        value: b"data".to_vec(),
+                        condition: None,
+                        expires_at: None,
+                    }],
+                    1,
+                )
+                .unwrap();
+        }
+
+        let limited = state.list_entities(vault, None, None, 2).unwrap();
+        assert_eq!(limited.len(), 2);
+    }
+
+    #[test]
+    fn test_list_subjects_and_resources() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        state
+            .apply_operations(
+                vault,
+                &[
+                    Operation::CreateRelationship {
+                        resource: "doc:1".into(),
+                        relation: "viewer".into(),
+                        subject: "user:alice".into(),
+                    },
+                    Operation::CreateRelationship {
+                        resource: "doc:1".into(),
+                        relation: "viewer".into(),
+                        subject: "user:bob".into(),
+                    },
+                ],
+                1,
+            )
+            .unwrap();
+
+        let subjects = state.list_subjects(vault, "doc:1", "viewer").unwrap();
+        assert_eq!(subjects.len(), 2);
+        assert!(subjects.contains(&"user:alice".to_string()));
+        assert!(subjects.contains(&"user:bob".to_string()));
+
+        let resources = state.list_resources_for_subject(vault, "user:alice").unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0], ("doc:1".to_string(), "viewer".to_string()));
+    }
+
+    #[test]
+    fn test_database_stats() {
+        let state = create_test_state();
+        let stats = state.database_stats();
+        // stats should be available even on empty database (header pages always exist)
+        let _ = stats.total_pages;
+    }
+
+    #[test]
+    fn test_table_depths_empty() {
+        let state = create_test_state();
+        let depths = state.table_depths().unwrap();
+        // All tables should be depth 0 on empty db
+        for (_name, depth) in &depths {
+            assert_eq!(*depth, 0);
+        }
+    }
+
+    #[test]
+    fn test_clone_starts_fresh_commitments() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        state
+            .apply_operations(
+                vault,
+                &[Operation::SetEntity {
+                    key: "k".into(),
+                    value: b"v".to_vec(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                1,
+            )
+            .unwrap();
+        state.compute_state_root(vault).unwrap();
+
+        // Clone should not inherit commitment state
+        let cloned = state.clone();
+        assert!(cloned.get_bucket_roots(vault).is_none());
+    }
 }

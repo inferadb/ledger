@@ -323,3 +323,117 @@ impl RaftNetwork<LedgerTypeConfig> for GrpcRaftNetworkConnection {
         Chunked::send_snapshot(self, vote, snapshot, cancel, option).await
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_network_error_display() {
+        let err = NetworkError("connection refused".to_string());
+        let display = format!("{}", err);
+        assert_eq!(display, "NetworkError: connection refused");
+    }
+
+    #[test]
+    fn test_network_error_debug() {
+        let err = NetworkError("timeout".to_string());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("NetworkError"));
+        assert!(debug.contains("timeout"));
+    }
+
+    #[test]
+    fn test_network_error_implements_std_error() {
+        let err = NetworkError("test".to_string());
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn test_network_error_clone() {
+        let err = NetworkError("original".to_string());
+        let cloned = err.clone();
+        assert_eq!(format!("{}", err), format!("{}", cloned));
+    }
+
+    #[test]
+    fn test_grpc_raft_network_new() {
+        let network = GrpcRaftNetwork::new();
+        assert!(network.clients.read().is_empty());
+    }
+
+    #[test]
+    fn test_grpc_raft_network_default() {
+        let network = GrpcRaftNetwork::default();
+        assert!(network.clients.read().is_empty());
+    }
+
+    #[test]
+    fn test_grpc_raft_network_clone_shares_clients() {
+        let network = GrpcRaftNetwork::new();
+        let cloned = network.clone();
+        // Both should share the same Arc
+        assert!(Arc::ptr_eq(&network.clients, &cloned.clients));
+    }
+
+    #[test]
+    fn test_grpc_raft_network_factory_new() {
+        let factory = GrpcRaftNetworkFactory::new();
+        assert!(factory.trace_raft_rpcs);
+        assert!(factory.region.is_none());
+    }
+
+    #[test]
+    fn test_grpc_raft_network_factory_default() {
+        let factory = GrpcRaftNetworkFactory::default();
+        assert!(factory.trace_raft_rpcs);
+        assert!(factory.region.is_none());
+    }
+
+    #[test]
+    fn test_grpc_raft_network_factory_with_trace_config() {
+        let factory_enabled = GrpcRaftNetworkFactory::with_trace_config(true);
+        assert!(factory_enabled.trace_raft_rpcs);
+        assert!(factory_enabled.region.is_none());
+
+        let factory_disabled = GrpcRaftNetworkFactory::with_trace_config(false);
+        assert!(!factory_disabled.trace_raft_rpcs);
+        assert!(factory_disabled.region.is_none());
+    }
+
+    #[test]
+    fn test_grpc_raft_network_factory_for_region() {
+        let factory =
+            GrpcRaftNetworkFactory::for_region(inferadb_ledger_types::Region::US_EAST_VA, true);
+        assert!(factory.trace_raft_rpcs);
+        assert_eq!(factory.region, Some(inferadb_ledger_types::Region::US_EAST_VA));
+
+        let factory_no_trace =
+            GrpcRaftNetworkFactory::for_region(inferadb_ledger_types::Region::GLOBAL, false);
+        assert!(!factory_no_trace.trace_raft_rpcs);
+        assert_eq!(factory_no_trace.region, Some(inferadb_ledger_types::Region::GLOBAL));
+    }
+
+    #[test]
+    fn test_endpoint_format() {
+        // Reproduces the endpoint formatting used in get_client and transfer code
+        let addr = "127.0.0.1:50051";
+        let endpoint = format!("http://{}", addr);
+        assert_eq!(endpoint, "http://127.0.0.1:50051");
+    }
+
+    #[test]
+    fn test_endpoint_format_ipv6() {
+        let addr = "[::1]:50051";
+        let endpoint = format!("http://{}", addr);
+        assert_eq!(endpoint, "http://[::1]:50051");
+    }
+
+    #[test]
+    fn test_endpoint_format_hostname() {
+        let addr = "node1.example.com:50051";
+        let endpoint = format!("http://{}", addr);
+        assert_eq!(endpoint, "http://node1.example.com:50051");
+    }
+}

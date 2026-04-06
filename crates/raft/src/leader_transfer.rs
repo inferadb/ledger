@@ -471,4 +471,63 @@ mod tests {
         let clamped = config.replication_timeout.min(config.timeout);
         assert_eq!(clamped, Duration::from_secs(3));
     }
+
+    #[test]
+    fn test_error_is_display_and_debug() {
+        let err = LeaderTransferError::NotLeader;
+        // Verify both Display and Debug are implemented
+        let display = format!("{}", err);
+        let debug = format!("{:?}", err);
+        assert!(!display.is_empty());
+        assert!(!debug.is_empty());
+    }
+
+    #[test]
+    fn test_transfer_guard_set_false_even_when_already_false() {
+        let flag = AtomicBool::new(false);
+        {
+            let _guard = TransferGuard(&flag);
+        }
+        // Still false after drop
+        assert!(!flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_compare_exchange_semantics() {
+        let lock = AtomicBool::new(false);
+
+        // First attempt: success (false -> true)
+        let result = lock.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire);
+        assert_eq!(result, Ok(false));
+
+        // Second attempt: failure (expected false, found true)
+        let result = lock.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire);
+        assert_eq!(result, Err(true));
+    }
+
+    #[test]
+    fn test_config_all_defaults_reasonable() {
+        let config = LeaderTransferConfig::builder().build();
+        // Timeout should be reasonable for production use
+        assert!(config.timeout >= Duration::from_secs(1));
+        assert!(config.timeout <= Duration::from_secs(60));
+        // Poll interval should be sub-second
+        assert!(config.poll_interval < Duration::from_secs(1));
+        // Replication timeout should be less than overall timeout
+        assert!(config.replication_timeout <= config.timeout);
+    }
+
+    #[test]
+    fn test_error_timeout_formatting_subsecond() {
+        let err = LeaderTransferError::Timeout { timeout: Duration::from_millis(100) };
+        let msg = err.to_string();
+        assert!(msg.contains("100ms"));
+    }
+
+    #[test]
+    fn test_error_target_rejected_with_empty_message() {
+        let err = LeaderTransferError::TargetRejected { message: String::new() };
+        let msg = err.to_string();
+        assert_eq!(msg, "Target rejected election trigger: ");
+    }
 }

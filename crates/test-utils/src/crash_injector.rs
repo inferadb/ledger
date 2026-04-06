@@ -307,4 +307,113 @@ mod tests {
         assert!(!injector.on_sync());
         assert!(!injector.has_crashed());
     }
+
+    #[test]
+    fn test_crash_after_second_sync() {
+        let injector = CrashInjector::new(CrashPoint::AfterSecondSync);
+        injector.arm();
+
+        // First two syncs succeed
+        assert!(!injector.on_sync());
+        assert!(!injector.on_sync());
+        // Third sync crashes
+        assert!(injector.on_sync());
+        assert!(injector.has_crashed());
+    }
+
+    #[test]
+    fn test_crash_point_accessor() {
+        let injector = CrashInjector::new(CrashPoint::DuringGodByteFlip);
+        assert_eq!(injector.crash_point(), CrashPoint::DuringGodByteFlip);
+    }
+
+    #[test]
+    fn test_sync_count_increments() {
+        let injector = CrashInjector::new(CrashPoint::AfterSecondSync);
+        injector.arm();
+
+        assert_eq!(injector.sync_count(), 0);
+        injector.on_sync();
+        assert_eq!(injector.sync_count(), 1);
+        injector.on_sync();
+        assert_eq!(injector.sync_count(), 2);
+    }
+
+    #[test]
+    fn test_header_write_count_increments() {
+        let injector = CrashInjector::new(CrashPoint::AfterSecondSync);
+        injector.arm();
+
+        assert_eq!(injector.header_write_count(), 0);
+        injector.on_header_write();
+        assert_eq!(injector.header_write_count(), 1);
+    }
+
+    #[test]
+    fn test_on_header_write_disarmed_noop() {
+        let injector = CrashInjector::new(CrashPoint::AfterFirstSync);
+        // Not armed
+        assert!(!injector.on_header_write());
+        assert!(!injector.has_crashed());
+    }
+
+    #[test]
+    fn test_on_page_write_disarmed_noop() {
+        let injector = CrashInjector::new(CrashPoint::DuringPageWrite);
+        // Not armed
+        assert!(!injector.on_page_write(0));
+        assert!(!injector.has_crashed());
+    }
+
+    #[test]
+    fn test_on_sync_non_sync_crash_points() {
+        // AfterFirstSync crashes on header_write, not on sync
+        let injector = CrashInjector::new(CrashPoint::AfterFirstSync);
+        injector.arm();
+        assert!(!injector.on_sync());
+        assert!(!injector.on_sync());
+        assert!(!injector.on_sync());
+        assert!(!injector.has_crashed());
+    }
+
+    #[test]
+    fn test_on_header_write_non_header_crash_points() {
+        // BeforeFirstSync crashes on sync, not header_write
+        let injector = CrashInjector::new(CrashPoint::BeforeFirstSync);
+        injector.arm();
+        assert!(!injector.on_header_write());
+        assert!(!injector.on_header_write());
+        assert!(!injector.has_crashed());
+    }
+
+    #[test]
+    fn test_on_page_write_non_page_crash_points() {
+        // BeforeFirstSync crashes on sync, not page_write
+        let injector = CrashInjector::new(CrashPoint::BeforeFirstSync);
+        injector.arm();
+        assert!(!injector.on_page_write(0));
+        assert!(!injector.has_crashed());
+    }
+
+    #[test]
+    fn test_crash_point_equality() {
+        assert_eq!(CrashPoint::BeforeFirstSync, CrashPoint::BeforeFirstSync);
+        assert_ne!(CrashPoint::BeforeFirstSync, CrashPoint::AfterFirstSync);
+        assert_ne!(CrashPoint::DuringGodByteFlip, CrashPoint::DuringPageWrite);
+    }
+
+    #[test]
+    fn test_crash_point_debug() {
+        let point = CrashPoint::AfterSecondSync;
+        let debug = format!("{point:?}");
+        assert!(debug.contains("AfterSecondSync"));
+    }
+
+    #[test]
+    fn test_page_write_threshold_zero_crashes_immediately() {
+        let injector = CrashInjector::new(CrashPoint::DuringPageWrite);
+        injector.arm();
+        assert!(injector.on_page_write(0));
+        assert!(injector.has_crashed());
+    }
 }

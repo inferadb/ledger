@@ -405,4 +405,79 @@ mod tests {
             assert!(slugs.insert(slug.value()), "vault slugs should be unique");
         }
     }
+
+    #[test]
+    fn test_generate_user_slug() {
+        let slug = generate_user_slug().unwrap();
+        assert!(slug.value() > 0, "user slug should be non-zero");
+
+        let timestamp = extract_timestamp(slug.value());
+        assert!(timestamp > 0, "slug timestamp should be positive");
+    }
+
+    #[test]
+    fn test_generate_team_slug() {
+        let slug = generate_team_slug().unwrap();
+        assert!(slug.value() > 0, "team slug should be non-zero");
+
+        let timestamp = extract_timestamp(slug.value());
+        assert!(timestamp > 0, "slug timestamp should be positive");
+    }
+
+    #[test]
+    fn test_generate_app_slug() {
+        let slug = generate_app_slug().unwrap();
+        assert!(slug.value() > 0, "app slug should be non-zero");
+
+        let timestamp = extract_timestamp(slug.value());
+        assert!(timestamp > 0, "slug timestamp should be positive");
+    }
+
+    #[test]
+    fn test_extract_components_from_known_value() {
+        // Construct a known ID manually
+        let timestamp: u64 = 12345;
+        let worker: u64 = 42;
+        let sequence: u64 = 7;
+        let id =
+            (timestamp << (WORKER_BITS + SEQUENCE_BITS)) | (worker << SEQUENCE_BITS) | sequence;
+
+        assert_eq!(extract_timestamp(id), timestamp);
+        assert_eq!(extract_worker(id), worker);
+        assert_eq!(extract_sequence(id), sequence);
+    }
+
+    #[test]
+    fn test_extract_timestamp_zero() {
+        assert_eq!(extract_timestamp(0), 0);
+    }
+
+    #[test]
+    fn test_extract_worker_zero() {
+        assert_eq!(extract_worker(0), 0);
+    }
+
+    #[test]
+    fn test_extract_sequence_zero() {
+        assert_eq!(extract_sequence(0), 0);
+    }
+
+    #[test]
+    fn test_snowflake_error_display() {
+        let err = SnowflakeError::SystemClock;
+        let msg = err.to_string();
+        assert!(msg.contains("before Unix epoch"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_slug_types_are_distinct() {
+        // Generate one of each slug type and verify they're independent
+        let org = generate_organization_slug().unwrap();
+        let vault = generate_vault_slug().unwrap();
+        let user = generate_user_slug().unwrap();
+
+        // They should all be different (extremely unlikely to collide)
+        assert_ne!(org.value(), vault.value());
+        assert_ne!(vault.value(), user.value());
+    }
 }

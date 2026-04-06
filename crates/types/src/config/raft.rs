@@ -473,3 +473,272 @@ fn default_eviction_interval() -> u64 {
 fn default_ttl_seconds() -> i64 {
     86_400 // 24 hours
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    // =========================================================================
+    // RaftConfig tests
+    // =========================================================================
+
+    #[test]
+    fn raft_config_default_is_valid() {
+        let config = RaftConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn raft_config_builder_defaults_are_valid() {
+        let config = RaftConfig::builder().build().unwrap();
+        assert_eq!(config.heartbeat_interval, Duration::from_millis(100));
+        assert_eq!(config.election_timeout_min, Duration::from_millis(300));
+        assert_eq!(config.election_timeout_max, Duration::from_millis(500));
+        assert_eq!(config.max_entries_per_rpc, 100);
+        assert_eq!(config.snapshot_threshold, 10_000);
+        assert_eq!(config.proposal_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn raft_config_custom_values() {
+        let config = RaftConfig::builder()
+            .heartbeat_interval(Duration::from_millis(50))
+            .election_timeout_min(Duration::from_millis(200))
+            .election_timeout_max(Duration::from_millis(400))
+            .max_entries_per_rpc(50)
+            .snapshot_threshold(5000)
+            .proposal_timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+
+        assert_eq!(config.heartbeat_interval, Duration::from_millis(50));
+        assert_eq!(config.max_entries_per_rpc, 50);
+    }
+
+    #[test]
+    fn raft_config_election_timeout_min_gte_max_fails() {
+        let result = RaftConfig::builder()
+            .election_timeout_min(Duration::from_millis(500))
+            .election_timeout_max(Duration::from_millis(500))
+            .build();
+        assert!(result.is_err());
+
+        let result = RaftConfig::builder()
+            .election_timeout_min(Duration::from_millis(600))
+            .election_timeout_max(Duration::from_millis(500))
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn raft_config_heartbeat_too_large_fails() {
+        // heartbeat must be < election_timeout_min / 2
+        // min=300ms, so heartbeat must be < 150ms
+        let result = RaftConfig::builder()
+            .heartbeat_interval(Duration::from_millis(150))
+            .election_timeout_min(Duration::from_millis(300))
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn raft_config_zero_max_entries_per_rpc_fails() {
+        let result = RaftConfig::builder().max_entries_per_rpc(0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn raft_config_zero_snapshot_threshold_fails() {
+        let result = RaftConfig::builder().snapshot_threshold(0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn raft_config_proposal_timeout_below_1s_fails() {
+        let result = RaftConfig::builder().proposal_timeout(Duration::from_millis(999)).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn raft_config_proposal_timeout_exactly_1s_succeeds() {
+        let result = RaftConfig::builder().proposal_timeout(Duration::from_secs(1)).build();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn raft_config_serde_roundtrip() {
+        let config = RaftConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: RaftConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn raft_config_serde_with_defaults() {
+        // Empty JSON should deserialize to defaults
+        let config: RaftConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config, RaftConfig::default());
+    }
+
+    // =========================================================================
+    // PostErasureCompactionConfig tests
+    // =========================================================================
+
+    #[test]
+    fn post_erasure_compaction_config_default_is_valid() {
+        let config = PostErasureCompactionConfig::default();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.max_log_retention_secs, 3600);
+        assert_eq!(config.check_interval_secs, 300);
+    }
+
+    #[test]
+    fn post_erasure_compaction_config_builder_defaults() {
+        let config = PostErasureCompactionConfig::builder().build().unwrap();
+        assert_eq!(config, PostErasureCompactionConfig::default());
+    }
+
+    #[test]
+    fn post_erasure_compaction_config_retention_below_300_fails() {
+        let result = PostErasureCompactionConfig::builder().max_log_retention_secs(299).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn post_erasure_compaction_config_retention_exactly_300_succeeds() {
+        let result = PostErasureCompactionConfig::builder().max_log_retention_secs(300).build();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn post_erasure_compaction_config_interval_below_60_fails() {
+        let result = PostErasureCompactionConfig::builder().check_interval_secs(59).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn post_erasure_compaction_config_interval_exactly_60_succeeds() {
+        let result = PostErasureCompactionConfig::builder().check_interval_secs(60).build();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn post_erasure_compaction_config_serde_roundtrip() {
+        let config = PostErasureCompactionConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: PostErasureCompactionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    // =========================================================================
+    // BatchConfig tests
+    // =========================================================================
+
+    #[test]
+    fn batch_config_default_is_valid() {
+        let config = BatchConfig::default();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.max_batch_size, 100);
+        assert_eq!(config.batch_timeout, Duration::from_millis(5));
+        assert!(config.coalesce_enabled);
+    }
+
+    #[test]
+    fn batch_config_builder_defaults() {
+        let config = BatchConfig::builder().build().unwrap();
+        assert_eq!(config, BatchConfig::default());
+    }
+
+    #[test]
+    fn batch_config_zero_batch_size_fails() {
+        let result = BatchConfig::builder().max_batch_size(0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn batch_config_custom_values() {
+        let config = BatchConfig::builder()
+            .max_batch_size(50)
+            .batch_timeout(Duration::from_millis(10))
+            .coalesce_enabled(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.max_batch_size, 50);
+        assert_eq!(config.batch_timeout, Duration::from_millis(10));
+        assert!(!config.coalesce_enabled);
+    }
+
+    #[test]
+    fn batch_config_serde_roundtrip() {
+        let config = BatchConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: BatchConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    // =========================================================================
+    // ClientSequenceEvictionConfig tests
+    // =========================================================================
+
+    #[test]
+    fn eviction_config_default_is_valid() {
+        let config = ClientSequenceEvictionConfig::default();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.eviction_interval, 1_000);
+        assert_eq!(config.ttl_seconds, 86_400);
+    }
+
+    #[test]
+    fn eviction_config_builder_defaults() {
+        let config = ClientSequenceEvictionConfig::builder().build().unwrap();
+        assert_eq!(config, ClientSequenceEvictionConfig::default());
+    }
+
+    #[test]
+    fn eviction_config_zero_interval_fails() {
+        let result = ClientSequenceEvictionConfig::builder().eviction_interval(0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn eviction_config_zero_ttl_fails() {
+        let result = ClientSequenceEvictionConfig::builder().ttl_seconds(0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn eviction_config_negative_ttl_fails() {
+        let result = ClientSequenceEvictionConfig::builder().ttl_seconds(-1).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn eviction_config_custom_values() {
+        let config = ClientSequenceEvictionConfig::builder()
+            .eviction_interval(500)
+            .ttl_seconds(3600)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.eviction_interval, 500);
+        assert_eq!(config.ttl_seconds, 3600);
+    }
+
+    #[test]
+    fn eviction_config_serde_roundtrip() {
+        let config = ClientSequenceEvictionConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: ClientSequenceEvictionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn eviction_config_serde_defaults_from_empty() {
+        let config: ClientSequenceEvictionConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config, ClientSequenceEvictionConfig::default());
+    }
+}

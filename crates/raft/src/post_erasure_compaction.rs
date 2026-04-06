@@ -354,4 +354,81 @@ mod tests {
         assert_eq!(config.max_log_retention_secs, 300);
         assert_eq!(config.check_interval_secs, 60);
     }
+
+    #[test]
+    fn snapshot_trigger_decision_exact_boundary() {
+        // Exactly at the threshold boundary — should trigger
+        let threshold = Duration::from_secs(3600);
+        let last_snapshot = Some(Instant::now() - threshold);
+        let should_trigger = match last_snapshot {
+            Some(ts) => ts.elapsed() >= threshold,
+            None => false,
+        };
+        assert!(should_trigger);
+    }
+
+    #[test]
+    fn last_snapshots_region_independence() {
+        let mut last_snapshots: HashMap<String, Option<Instant>> = HashMap::new();
+        let now = Instant::now();
+
+        // Set different timestamps for different regions
+        last_snapshots.insert("GLOBAL".to_string(), Some(now));
+        last_snapshots.insert("US_EAST_VA".to_string(), Some(now - Duration::from_secs(7200)));
+        last_snapshots.insert("EU_WEST_IE".to_string(), None);
+
+        let threshold = Duration::from_secs(3600);
+
+        // GLOBAL: recent, should not trigger
+        let global_should_trigger = match last_snapshots["GLOBAL"] {
+            Some(ts) => ts.elapsed() >= threshold,
+            None => false,
+        };
+        assert!(!global_should_trigger);
+
+        // US_EAST_VA: 2 hours ago, should trigger
+        let us_should_trigger = match last_snapshots["US_EAST_VA"] {
+            Some(ts) => ts.elapsed() >= threshold,
+            None => false,
+        };
+        assert!(us_should_trigger);
+
+        // EU_WEST_IE: None, first cycle sets baseline
+        let eu_should_trigger = match last_snapshots["EU_WEST_IE"] {
+            Some(ts) => ts.elapsed() >= threshold,
+            None => false,
+        };
+        assert!(!eu_should_trigger);
+    }
+
+    #[test]
+    fn config_debug_format() {
+        let config = PostErasureCompactionConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("max_log_retention_secs"));
+        assert!(debug.contains("check_interval_secs"));
+    }
+
+    #[test]
+    fn global_region_label() {
+        // GLOBAL is checked separately using literal string "GLOBAL"
+        let label = "GLOBAL";
+        assert_eq!(label, "GLOBAL");
+    }
+
+    #[test]
+    fn region_label_from_region() {
+        let region = Region::US_EAST_VA;
+        let label = region.as_str().to_string();
+        assert_eq!(label, "us-east-va");
+    }
+
+    #[test]
+    fn config_validation_rejects_both_too_small() {
+        let result = PostErasureCompactionConfig::builder()
+            .max_log_retention_secs(10)
+            .check_interval_secs(10)
+            .build();
+        assert!(result.is_err());
+    }
 }

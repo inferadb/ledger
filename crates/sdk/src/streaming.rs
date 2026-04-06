@@ -549,7 +549,84 @@ mod tests {
         assert_eq!(tracker.position(), 1);
     }
 
-    // Note: Integration tests for reconnection behavior will require
-    // a mock tonic::Streaming, which is challenging to create directly.
-    // These tests require a mock tonic::Streaming or integration test harness.
+    // =========================================================================
+    // HeightTracker edge case tests
+    // =========================================================================
+
+    #[test]
+    fn test_height_tracker_default() {
+        let tracker = HeightTracker::default();
+        assert_eq!(tracker.last_height(), 0);
+        assert_eq!(tracker.position(), 1);
+    }
+
+    #[test]
+    fn test_height_tracker_large_height() {
+        let mut tracker = HeightTracker::new(1);
+        let announcement = proto::BlockAnnouncement {
+            organization: Some(proto::OrganizationSlug { slug: 1 }),
+            vault: Some(proto::VaultSlug { slug: 0 }),
+            height: u64::MAX,
+            block_hash: None,
+            state_root: None,
+            timestamp: None,
+        };
+
+        tracker.update(&announcement);
+        assert_eq!(tracker.last_height(), u64::MAX);
+        // position uses saturating_add, so u64::MAX + 1 = u64::MAX
+        assert_eq!(tracker.position(), u64::MAX);
+    }
+
+    #[test]
+    fn test_height_tracker_clone() {
+        let mut tracker = HeightTracker::new(5);
+        let announcement = proto::BlockAnnouncement {
+            organization: Some(proto::OrganizationSlug { slug: 1 }),
+            vault: Some(proto::VaultSlug { slug: 0 }),
+            height: 10,
+            block_hash: None,
+            state_root: None,
+            timestamp: None,
+        };
+        tracker.update(&announcement);
+
+        let cloned = tracker.clone();
+        assert_eq!(cloned.last_height(), 10);
+        assert_eq!(cloned.position(), 11);
+    }
+
+    // =========================================================================
+    // apply_jitter edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_apply_jitter_zero_duration() {
+        let dur = Duration::from_secs(0);
+        let result = apply_jitter(dur, 0.5);
+        assert_eq!(result, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_apply_jitter_negative_factor() {
+        let dur = Duration::from_millis(100);
+        // Negative factor should be clamped to 0
+        let result = apply_jitter(dur, -0.5);
+        assert_eq!(result, dur);
+    }
+
+    // =========================================================================
+    // CountTracker tests
+    // =========================================================================
+
+    #[test]
+    fn test_count_tracker_clone() {
+        let mut tracker = CountTracker::new();
+        tracker.update(&1);
+        tracker.update(&2);
+
+        let cloned = tracker.clone();
+        assert_eq!(cloned.count(), 2);
+        assert_eq!(cloned.position(), 2);
+    }
 }

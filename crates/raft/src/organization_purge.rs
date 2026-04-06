@@ -481,4 +481,83 @@ mod tests {
         assert_eq!(cloned.interval_secs, config.interval_secs);
         assert_eq!(cloned.batch_size, config.batch_size);
     }
+
+    #[test]
+    fn test_retention_window_calculation() {
+        use inferadb_ledger_types::Region;
+
+        // GLOBAL has 90-day retention
+        let retention_global = chrono::Duration::days(i64::from(Region::GLOBAL.retention_days()));
+        assert_eq!(retention_global.num_days(), 90);
+
+        let now = Utc::now();
+
+        // Deleted 100 days ago: past retention
+        let deleted_long_ago = now - chrono::Duration::days(100);
+        assert!(now >= deleted_long_ago + retention_global);
+
+        // Deleted 10 days ago: within retention
+        let deleted_recently = now - chrono::Duration::days(10);
+        assert!(now < deleted_recently + retention_global);
+    }
+
+    #[test]
+    fn test_priority_set_dedup() {
+        let mut priority: HashSet<OrganizationId> = HashSet::new();
+        let org = OrganizationId::new(5);
+        priority.insert(org);
+        priority.insert(org);
+        assert_eq!(priority.len(), 1);
+    }
+
+    #[test]
+    fn test_priority_snapshot_independence() {
+        // Verify snapshot is independent from the live set
+        let mut priority: HashSet<OrganizationId> = HashSet::new();
+        priority.insert(OrganizationId::new(1));
+        priority.insert(OrganizationId::new(2));
+
+        let snapshot: Vec<OrganizationId> = priority.iter().copied().collect();
+        priority.remove(&OrganizationId::new(1));
+
+        // Snapshot should still have both
+        assert_eq!(snapshot.len(), 2);
+        // Live set has only one
+        assert_eq!(priority.len(), 1);
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = OrganizationPurgeConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("interval_secs"));
+        assert!(debug.contains("batch_size"));
+    }
+
+    #[test]
+    fn test_backoff_no_overflow_at_max_retries() {
+        // Verify the last retry attempt doesn't overflow
+        let last_attempt = MAX_RETRIES - 1;
+        let delay = BACKOFF_BASE * BACKOFF_MULTIPLIER.pow(last_attempt);
+        assert_eq!(delay, Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn test_remaining_retries_calculation() {
+        for attempt in 0..MAX_RETRIES {
+            let remaining = MAX_RETRIES - attempt - 1;
+            if attempt == MAX_RETRIES - 1 {
+                assert_eq!(remaining, 0);
+            } else {
+                assert!(remaining > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_tick_interval_from_config() {
+        let config = OrganizationPurgeConfig { interval_secs: 7200, batch_size: 10 };
+        let tick = std::time::Duration::from_secs(config.interval_secs);
+        assert_eq!(tick, std::time::Duration::from_secs(7200));
+    }
 }

@@ -2800,4 +2800,127 @@ mod tests {
         tree.set_root_page(42);
         assert_eq!(tree.root_page(), 42);
     }
+
+    #[test]
+    fn test_delete_nonexistent_from_populated_tree() {
+        let mut tree = make_tree();
+        tree.insert(b"existing", b"value").unwrap();
+        assert_eq!(tree.delete(b"nonexistent").unwrap(), None);
+        // Original key should still exist
+        assert_eq!(tree.get(b"existing").unwrap(), Some(b"value".to_vec()));
+    }
+
+    #[test]
+    fn test_insert_returns_previous_value() {
+        let mut tree = make_tree();
+        assert_eq!(tree.insert(b"key", b"v1").unwrap(), None);
+        assert_eq!(tree.insert(b"key", b"v2").unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(tree.get(b"key").unwrap(), Some(b"v2".to_vec()));
+    }
+
+    #[test]
+    fn test_first_last_after_deletions() {
+        let mut tree = make_tree();
+        tree.insert(b"aaa", b"1").unwrap();
+        tree.insert(b"bbb", b"2").unwrap();
+        tree.insert(b"ccc", b"3").unwrap();
+
+        // Delete first
+        tree.delete(b"aaa").unwrap();
+        let (first_key, _) = tree.first().unwrap().unwrap();
+        assert_eq!(first_key, b"bbb");
+
+        // Delete last
+        tree.delete(b"ccc").unwrap();
+        let (last_key, _) = tree.last().unwrap().unwrap();
+        assert_eq!(last_key, b"bbb");
+    }
+
+    #[test]
+    fn test_iter_large_tree_ordered() {
+        let mut tree = make_tree();
+        // Insert 500 entries in reverse order
+        for i in (0..500u32).rev() {
+            let key = format!("{:08}", i);
+            tree.insert(key.as_bytes(), b"v").unwrap();
+        }
+
+        // Verify iteration produces sorted order
+        let mut iter = tree.iter().unwrap();
+        let mut prev_key: Option<Vec<u8>> = None;
+        let mut count = 0;
+        while let Some((key, _)) = iter.next_entry().unwrap() {
+            if let Some(ref p) = prev_key {
+                assert!(key > *p, "keys must be sorted");
+            }
+            prev_key = Some(key);
+            count += 1;
+        }
+        assert_eq!(count, 500);
+    }
+
+    #[test]
+    fn test_compact_stats_default() {
+        let stats = CompactionStats::default();
+        assert_eq!(stats.pages_merged, 0);
+        assert_eq!(stats.pages_freed, 0);
+    }
+
+    #[test]
+    fn test_value_update_same_size() {
+        let mut tree = make_tree();
+        tree.insert(b"key", b"aaaa").unwrap();
+        tree.insert(b"key", b"bbbb").unwrap();
+        assert_eq!(tree.get(b"key").unwrap(), Some(b"bbbb".to_vec()));
+    }
+
+    #[test]
+    fn test_value_update_to_larger() {
+        let mut tree = make_tree();
+        tree.insert(b"key", b"x").unwrap();
+        let large_value = vec![0x42; 200];
+        tree.insert(b"key", &large_value).unwrap();
+        assert_eq!(tree.get(b"key").unwrap(), Some(large_value));
+    }
+
+    #[test]
+    fn test_value_update_to_smaller() {
+        let mut tree = make_tree();
+        let large_value = vec![0x42; 200];
+        tree.insert(b"key", &large_value).unwrap();
+        tree.insert(b"key", b"x").unwrap();
+        assert_eq!(tree.get(b"key").unwrap(), Some(b"x".to_vec()));
+    }
+
+    #[test]
+    fn test_delete_all_entries_empties_tree() {
+        let mut tree = make_tree();
+        tree.insert(b"a", b"1").unwrap();
+        tree.insert(b"b", b"2").unwrap();
+        tree.insert(b"c", b"3").unwrap();
+
+        tree.delete(b"a").unwrap();
+        tree.delete(b"b").unwrap();
+        tree.delete(b"c").unwrap();
+
+        // After deleting all entries from root leaf, tree should be empty
+        assert!(tree.is_empty());
+        assert_eq!(tree.get(b"a").unwrap(), None);
+        assert_eq!(tree.first().unwrap(), None);
+        assert_eq!(tree.last().unwrap(), None);
+    }
+
+    #[test]
+    fn test_depth_after_splits() {
+        let mut tree = make_tree();
+        // Insert enough to cause at least one split
+        for i in 0..200u32 {
+            let key = format!("{:08}", i);
+            tree.insert(key.as_bytes(), &[0x42; 50]).unwrap();
+        }
+
+        let depth = tree.depth().unwrap();
+        assert!(depth >= 2, "tree should have depth >= 2 after many inserts, got {depth}");
+        assert!(tree.split_count() > 0, "splits should have occurred");
+    }
 }

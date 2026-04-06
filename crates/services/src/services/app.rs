@@ -1448,4 +1448,105 @@ mod tests {
         let err = map_credential_type(999).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
+
+    // =========================================================================
+    // vault_connection_to_proto
+    // =========================================================================
+
+    #[test]
+    fn vault_connection_to_proto_maps_all_fields() {
+        let conn = AppVaultConnection {
+            vault_id: inferadb_ledger_types::VaultId::new(5),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(500),
+            allowed_scopes: vec!["read".to_string(), "write".to_string()],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let proto_conn = AppService::vault_connection_to_proto(&conn);
+        assert!(proto_conn.vault.is_some());
+        assert_eq!(proto_conn.vault.unwrap().slug, 500);
+        assert_eq!(proto_conn.allowed_scopes, vec!["read", "write"]);
+        assert!(proto_conn.created_at.is_some());
+        assert!(proto_conn.updated_at.is_some());
+    }
+
+    #[test]
+    fn vault_connection_to_proto_empty_scopes() {
+        let conn = AppVaultConnection {
+            vault_id: inferadb_ledger_types::VaultId::new(1),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(100),
+            allowed_scopes: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let proto_conn = AppService::vault_connection_to_proto(&conn);
+        assert!(proto_conn.allowed_scopes.is_empty());
+    }
+
+    // =========================================================================
+    // assertion_to_proto
+    // =========================================================================
+
+    #[test]
+    fn assertion_to_proto_maps_all_fields() {
+        let entry = ClientAssertionEntry {
+            id: DomainClientAssertionId::new(42),
+            public_key_bytes: vec![1, 2, 3],
+            enabled: true,
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+            created_at: chrono::Utc::now(),
+        };
+        let proto_assertion = AppService::assertion_to_proto(&entry, "my-assertion".to_string());
+        assert!(proto_assertion.id.is_some());
+        assert_eq!(proto_assertion.id.unwrap().id, 42);
+        assert_eq!(proto_assertion.name, "my-assertion");
+        assert!(proto_assertion.enabled);
+        assert!(proto_assertion.expires_at.is_some());
+        assert!(proto_assertion.created_at.is_some());
+    }
+
+    #[test]
+    fn assertion_to_proto_disabled_entry() {
+        let entry = ClientAssertionEntry {
+            id: DomainClientAssertionId::new(1),
+            public_key_bytes: vec![],
+            enabled: false,
+            expires_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+        };
+        let proto_assertion = AppService::assertion_to_proto(&entry, String::new());
+        assert!(!proto_assertion.enabled);
+        assert!(proto_assertion.name.is_empty());
+    }
+
+    // =========================================================================
+    // parse_idempotency_key edge cases
+    // =========================================================================
+
+    #[test]
+    fn parse_idempotency_key_all_zeros() {
+        let bytes = [0u8; 16];
+        let result = parse_idempotency_key(&bytes).unwrap();
+        assert_eq!(result, Some([0u8; 16]));
+    }
+
+    #[test]
+    fn parse_idempotency_key_one_byte_returns_error() {
+        let err = parse_idempotency_key(&[42]).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn parse_idempotency_key_fifteen_bytes_returns_error() {
+        let bytes = [1u8; 15];
+        let err = parse_idempotency_key(&bytes).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn parse_idempotency_key_seventeen_bytes_returns_error() {
+        let bytes = [1u8; 17];
+        let err = parse_idempotency_key(&bytes).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
 }

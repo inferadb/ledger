@@ -392,4 +392,67 @@ mod tests {
         let status = if had_errors { "failure" } else { "success" };
         assert_eq!(status, "failure");
     }
+
+    #[test]
+    fn maintenance_result_u16_to_u64_conversion() {
+        // The run_cycle code converts u16 → u64 via u64::from()
+        let verification_codes_deleted: u16 = 500;
+        let onboarding_accounts_deleted: u16 = 200;
+        let totp_challenges_deleted: u16 = 100;
+
+        let codes = u64::from(verification_codes_deleted);
+        let accounts = u64::from(onboarding_accounts_deleted);
+        let totp = u64::from(totp_challenges_deleted);
+
+        assert_eq!(codes, 500);
+        assert_eq!(accounts, 200);
+        assert_eq!(totp, 100);
+    }
+
+    #[test]
+    fn maintenance_result_total_items_all_fields() {
+        let result = MaintenanceResult {
+            expired_tokens_deleted: 1,
+            signing_keys_revoked: 2,
+            onboarding_codes_deleted: 3,
+            onboarding_accounts_deleted: 4,
+            totp_challenges_deleted: 5,
+        };
+        let total = result.expired_tokens_deleted
+            + result.signing_keys_revoked
+            + result.onboarding_codes_deleted
+            + result.onboarding_accounts_deleted
+            + result.totp_challenges_deleted;
+        assert_eq!(total, 15);
+    }
+
+    #[test]
+    fn maintenance_result_debug_includes_all_fields() {
+        let result = MaintenanceResult {
+            expired_tokens_deleted: 1,
+            signing_keys_revoked: 2,
+            onboarding_codes_deleted: 3,
+            onboarding_accounts_deleted: 4,
+            totp_challenges_deleted: 5,
+        };
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("expired_tokens_deleted: 1"));
+        assert!(debug.contains("signing_keys_revoked: 2"));
+        assert!(debug.contains("onboarding_codes_deleted: 3"));
+        assert!(debug.contains("onboarding_accounts_deleted: 4"));
+        assert!(debug.contains("totp_challenges_deleted: 5"));
+    }
+
+    #[test]
+    fn global_region_skipped_for_onboarding_cleanup() {
+        // The run_cycle skips GLOBAL for onboarding cleanup
+        let regions = [
+            inferadb_ledger_types::Region::GLOBAL,
+            inferadb_ledger_types::Region::US_EAST_VA,
+            inferadb_ledger_types::Region::US_WEST_OR,
+        ];
+        let non_global: Vec<_> =
+            regions.iter().filter(|r| **r != inferadb_ledger_types::Region::GLOBAL).collect();
+        assert_eq!(non_global.len(), 2);
+    }
 }

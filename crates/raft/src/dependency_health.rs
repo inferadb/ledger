@@ -631,4 +631,105 @@ mod tests {
         let detail = format!("data directory missing or not a directory: {}", path.display());
         assert!(detail.contains("/nonexistent/startup/path"));
     }
+
+    // ─── Disk Check Idempotency ──────────────────────────────────
+
+    #[test]
+    fn test_disk_check_idempotent() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        // Running multiple times should always succeed
+        for _ in 0..5 {
+            let result = check_disk(temp_dir.path());
+            assert!(result.healthy);
+        }
+    }
+
+    // ─── Cache Freshness Boundary Tests ──────────────────────────
+
+    #[test]
+    fn test_cache_ttl_just_expired() {
+        let cached = CachedResult {
+            results: HashMap::new(),
+            timestamp: Instant::now() - Duration::from_millis(5001),
+        };
+        let ttl = Duration::from_secs(5);
+        assert!(cached.timestamp.elapsed() >= ttl);
+    }
+
+    #[test]
+    fn test_cache_ttl_just_fresh() {
+        let cached = CachedResult { results: HashMap::new(), timestamp: Instant::now() };
+        let ttl = Duration::from_secs(5);
+        assert!(cached.timestamp.elapsed() < ttl);
+    }
+
+    // ─── DependencyHealth Multiple Unhealthy ──────────────────────
+
+    #[test]
+    fn test_dependency_health_multiple_unhealthy() {
+        let mut details = HashMap::new();
+        details.insert(
+            "disk".to_string(),
+            DependencyCheckResult { healthy: false, detail: "readonly".to_string() },
+        );
+        details.insert(
+            "peer".to_string(),
+            DependencyCheckResult { healthy: false, detail: "unreachable".to_string() },
+        );
+        details.insert(
+            "raft".to_string(),
+            DependencyCheckResult { healthy: false, detail: "lagging".to_string() },
+        );
+        let all_healthy = details.values().all(|r| r.healthy);
+        assert!(!all_healthy);
+    }
+
+    // ─── DependencyCheckResult Accessors ─────────────────────────
+
+    #[test]
+    fn test_dependency_check_result_detail_message() {
+        let result = DependencyCheckResult {
+            healthy: true,
+            detail: "raft log lag: 50 (max: 1000)".to_string(),
+        };
+        assert!(result.detail.contains("lag: 50"));
+        assert!(result.detail.contains("max: 1000"));
+    }
+
+    // ─── Config Boundary Tests ───────────────────────────────────
+
+    #[test]
+    fn test_health_check_config_boundary_values() {
+        let config = HealthCheckConfig {
+            dependency_check_timeout_secs: 1,
+            health_cache_ttl_secs: 1,
+            max_raft_lag: 1,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_health_check_config_large_values() {
+        let config = HealthCheckConfig {
+            dependency_check_timeout_secs: 60,
+            health_cache_ttl_secs: 300,
+            max_raft_lag: 100_000,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    // ─── Disk Check with Files Present ───────────────────────────
+
+    #[test]
+    fn test_disk_check_existing_probe_overwritten() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let probe_path = temp_dir.path().join(".health_probe");
+        // Write something to the probe file location
+        std::fs::write(&probe_path, b"old data").expect("write existing probe");
+
+        let result = check_disk(temp_dir.path());
+        assert!(result.healthy);
+        // Probe file should be cleaned up
+        assert!(!probe_path.exists());
+    }
 }

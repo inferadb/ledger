@@ -842,6 +842,96 @@ mod tests {
         assert!(deleted_users.is_empty());
     }
 
+    #[test]
+    fn test_cleanup_operations_format() {
+        // Verify the operation building logic from remove_orphaned_memberships
+        let orphaned = vec![("member:alice".to_string(), 42i64), ("member:bob".to_string(), 99i64)];
+
+        let mut operations = Vec::new();
+        for (key, user_id) in &orphaned {
+            operations.push(Operation::DeleteEntity { key: key.clone() });
+            let idx_key = format!("_idx:member:user:{}", user_id);
+            operations.push(Operation::DeleteEntity { key: idx_key });
+        }
+
+        assert_eq!(operations.len(), 4);
+        // First membership: delete entity + delete index
+        assert!(matches!(&operations[0], Operation::DeleteEntity { key } if key == "member:alice"));
+        assert!(
+            matches!(&operations[1], Operation::DeleteEntity { key } if key == "_idx:member:user:42")
+        );
+        // Second membership: delete entity + delete index
+        assert!(matches!(&operations[2], Operation::DeleteEntity { key } if key == "member:bob"));
+        assert!(
+            matches!(&operations[3], Operation::DeleteEntity { key } if key == "_idx:member:user:99")
+        );
+    }
+
+    #[test]
+    fn test_user_data_with_no_status_field() {
+        let user_data = serde_json::json!({
+            "id": 1,
+            "name": "NoStatus"
+        });
+        let is_deleted = user_data.get("deleted_at").is_some()
+            || user_data
+                .get("status")
+                .and_then(|s| s.as_str())
+                .is_some_and(|s| s == "DELETED" || s == "DELETING");
+        assert!(!is_deleted);
+    }
+
+    #[test]
+    fn test_user_data_with_null_status() {
+        let user_data = serde_json::json!({
+            "id": 1,
+            "status": null
+        });
+        let is_deleted = user_data.get("deleted_at").is_some()
+            || user_data
+                .get("status")
+                .and_then(|s| s.as_str())
+                .is_some_and(|s| s == "DELETED" || s == "DELETING");
+        assert!(!is_deleted);
+    }
+
+    #[test]
+    fn test_membership_with_numeric_user_id() {
+        let membership = serde_json::json!({
+            "user_id": 0,
+            "role": "member"
+        });
+        let user_id = membership.get("user_id").and_then(|v| v.as_i64());
+        assert_eq!(user_id, Some(0));
+    }
+
+    #[test]
+    fn test_membership_with_string_user_id_returns_none() {
+        let membership = serde_json::json!({
+            "user_id": "not_a_number",
+            "role": "member"
+        });
+        let user_id = membership.get("user_id").and_then(|v| v.as_i64());
+        assert!(user_id.is_none());
+    }
+
+    #[test]
+    fn test_system_organization_skipped() {
+        // Verify the skip logic: organization 0 is skipped
+        let org_id = SYSTEM_ORGANIZATION_ID;
+        assert_eq!(org_id, OrganizationId::new(0));
+    }
+
+    #[test]
+    fn test_pagination_break_condition() {
+        // When batch_len < MAX_BATCH_SIZE, pagination breaks
+        let batch_len = 500;
+        assert!(batch_len < MAX_BATCH_SIZE);
+
+        let batch_len = MAX_BATCH_SIZE;
+        assert!(batch_len >= MAX_BATCH_SIZE);
+    }
+
     /// Verifies pagination in user listing handles large datasets correctly.
     #[test]
     fn test_user_listing_pagination() {

@@ -2356,4 +2356,418 @@ mod tests {
             assert!(!saga.is_terminal(), "pending saga should not be terminal for {label}");
         }
     }
+
+    #[test]
+    fn pending_saga_is_ready_for_retry() {
+        for (label, saga) in all_pending_sagas() {
+            assert!(
+                saga.is_ready_for_retry(),
+                "pending saga should be ready for retry for {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_saga_current_step_is_zero() {
+        for (label, saga) in all_pending_sagas() {
+            assert_eq!(saga.current_step(), 0, "pending saga step should be 0 for {label}");
+        }
+    }
+
+    #[test]
+    fn pending_saga_retries_is_zero() {
+        for (label, saga) in all_pending_sagas() {
+            assert_eq!(saga.retries(), 0, "pending saga retries should be 0 for {label}");
+        }
+    }
+
+    #[test]
+    fn saga_created_at_is_recent() {
+        for (label, saga) in all_pending_sagas() {
+            let age = chrono::Utc::now() - saga.created_at();
+            assert!(age.num_seconds() < 5, "saga {label} created_at should be recent (age: {age})");
+        }
+    }
+
+    #[test]
+    fn saga_updated_at_equals_created_at_initially() {
+        for (label, saga) in all_pending_sagas() {
+            assert_eq!(
+                saga.created_at(),
+                saga.updated_at(),
+                "saga {label} updated_at should match created_at initially"
+            );
+        }
+    }
+
+    #[test]
+    fn saga_type_matches_variant() {
+        use inferadb_ledger_state::system::SagaType;
+        let sagas = all_pending_sagas();
+        let expected_types = [
+            SagaType::DeleteUser,
+            SagaType::MigrateOrg,
+            SagaType::MigrateUser,
+            SagaType::CreateUser,
+            SagaType::CreateOrganization,
+            SagaType::CreateSigningKey,
+        ];
+        for ((label, saga), expected_type) in sagas.iter().zip(expected_types.iter()) {
+            assert_eq!(saga.saga_type(), *expected_type, "saga type mismatch for {label}");
+        }
+    }
+
+    #[test]
+    fn saga_fail_increments_retries_and_becomes_terminal() {
+        use inferadb_ledger_state::system::{DeleteUserInput, MAX_RETRIES};
+
+        let mut saga = Saga::DeleteUser(DeleteUserSaga::new(
+            SagaId::new("fail-test"),
+            DeleteUserInput { user: UserId::new(1), organization_ids: vec![] },
+        ));
+
+        // Fail below max retries — should not be terminal
+        saga.fail("step 0 error".to_string());
+        assert_eq!(saga.retries(), 1);
+        assert!(!saga.is_terminal());
+
+        // Fail until max retries reached
+        for _ in 1..MAX_RETRIES {
+            saga.fail("repeated error".to_string());
+        }
+        assert_eq!(saga.retries(), MAX_RETRIES);
+        assert!(saga.is_terminal(), "saga should be terminal after MAX_RETRIES failures");
+    }
+
+    #[test]
+    fn saga_lock_keys_delete_user() {
+        use inferadb_ledger_state::system::{DeleteUserInput, SagaLockKey};
+
+        let saga = Saga::DeleteUser(DeleteUserSaga::new(
+            SagaId::new("lock-test"),
+            DeleteUserInput { user: UserId::new(42), organization_ids: vec![] },
+        ));
+        let keys = saga.lock_keys();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0], SagaLockKey::User(UserId::new(42)));
+    }
+
+    #[test]
+    fn saga_lock_keys_migrate_org() {
+        use inferadb_ledger_state::system::{MigrateOrgInput, SagaLockKey};
+
+        let saga = Saga::MigrateOrg(MigrateOrgSaga::new(
+            SagaId::new("lock-migrate"),
+            MigrateOrgInput {
+                organization_id: OrganizationId::new(7),
+                organization_slug: OrganizationSlug::new(700),
+                source_region: Region::US_EAST_VA,
+                target_region: Region::IE_EAST_DUBLIN,
+                acknowledge_residency_downgrade: false,
+                metadata_only: false,
+            },
+        ));
+        let keys = saga.lock_keys();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0], SagaLockKey::Organization(OrganizationId::new(7)));
+    }
+
+    #[test]
+    fn saga_lock_keys_signing_key() {
+        use inferadb_ledger_state::system::SagaLockKey;
+
+        let saga = Saga::CreateSigningKey(CreateSigningKeySaga::new(
+            SagaId::new("lock-key"),
+            CreateSigningKeyInput { scope: SigningKeyScope::Global },
+        ));
+        let keys = saga.lock_keys();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0], SagaLockKey::SigningKeyScope(SigningKeyScope::Global));
+    }
+
+    #[test]
+    fn saga_to_bytes_from_bytes_round_trip() {
+        for (label, saga) in all_pending_sagas() {
+            let bytes = saga.to_bytes().unwrap_or_else(|e| panic!("{label}: to_bytes: {e}"));
+            let restored =
+                Saga::from_bytes(&bytes).unwrap_or_else(|e| panic!("{label}: from_bytes: {e}"));
+            assert_eq!(saga.id().value(), restored.id().value(), "round-trip failed for {label}");
+        }
+    }
+
+    #[test]
+    fn delete_user_saga_state_transitions() {
+        use inferadb_ledger_state::system::DeleteUserInput;
+
+        let mut saga = DeleteUserSaga::new(
+            SagaId::new("transition-test"),
+            DeleteUserInput {
+                user: UserId::new(5),
+                organization_ids: vec![OrganizationId::new(10), OrganizationId::new(20)],
+            },
+        );
+
+        assert_eq!(saga.current_step(), 0);
+
+        // Pending -> MarkingDeleted
+        saga.transition(inferadb_ledger_state::system::DeleteUserSagaState::MarkingDeleted {
+            user_id: UserId::new(5),
+            remaining_organizations: vec![OrganizationId::new(10), OrganizationId::new(20)],
+        });
+        assert_eq!(saga.current_step(), 1);
+        assert!(!saga.is_terminal());
+
+        // MarkingDeleted -> MembershipsRemoved
+        saga.transition(inferadb_ledger_state::system::DeleteUserSagaState::MembershipsRemoved {
+            user_id: UserId::new(5),
+        });
+        assert_eq!(saga.current_step(), 2);
+        assert!(!saga.is_terminal());
+
+        // MembershipsRemoved -> Completed
+        saga.transition(inferadb_ledger_state::system::DeleteUserSagaState::Completed {
+            user_id: UserId::new(5),
+        });
+        assert!(saga.is_terminal());
+        assert!(!saga.is_ready_for_retry());
+    }
+
+    #[test]
+    fn migrate_org_saga_state_transitions() {
+        use inferadb_ledger_state::system::MigrateOrgInput;
+
+        let mut saga = MigrateOrgSaga::new(
+            SagaId::new("migrate-transition"),
+            MigrateOrgInput {
+                organization_id: OrganizationId::new(1),
+                organization_slug: OrganizationSlug::new(100),
+                source_region: Region::US_EAST_VA,
+                target_region: Region::IE_EAST_DUBLIN,
+                acknowledge_residency_downgrade: false,
+                metadata_only: true,
+            },
+        );
+
+        assert_eq!(saga.current_step(), 0);
+
+        saga.transition(inferadb_ledger_state::system::MigrateOrgSagaState::MigrationStarted);
+        assert_eq!(saga.current_step(), 1);
+
+        // metadata_only skips data movement
+        saga.transition(inferadb_ledger_state::system::MigrateOrgSagaState::IntegrityVerified);
+
+        saga.transition(inferadb_ledger_state::system::MigrateOrgSagaState::RoutingUpdated);
+
+        saga.transition(inferadb_ledger_state::system::MigrateOrgSagaState::Completed);
+        assert!(saga.is_terminal());
+    }
+
+    #[test]
+    fn migrate_org_saga_timeout_is_terminal() {
+        use inferadb_ledger_state::system::MigrateOrgInput;
+
+        let mut saga = MigrateOrgSaga::new(
+            SagaId::new("timeout-test"),
+            MigrateOrgInput {
+                organization_id: OrganizationId::new(1),
+                organization_slug: OrganizationSlug::new(100),
+                source_region: Region::US_EAST_VA,
+                target_region: Region::IE_EAST_DUBLIN,
+                acknowledge_residency_downgrade: false,
+                metadata_only: false,
+            },
+        );
+
+        saga.transition(inferadb_ledger_state::system::MigrateOrgSagaState::TimedOut);
+        assert!(saga.is_terminal());
+    }
+
+    #[test]
+    fn delete_user_saga_backoff_caps_at_max() {
+        use inferadb_ledger_state::system::DeleteUserInput;
+
+        let mut saga = DeleteUserSaga::new(
+            SagaId::new("backoff-test"),
+            DeleteUserInput { user: UserId::new(1), organization_ids: vec![] },
+        );
+
+        // Verify initial backoff is 1 second
+        assert_eq!(saga.next_backoff(), std::time::Duration::from_secs(1));
+
+        // After scheduling retries, backoff grows but caps at max (5 minutes)
+        for _ in 0..20 {
+            saga.schedule_retry();
+        }
+        assert!(saga.next_backoff() <= std::time::Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn onboarding_pii_debug_redacts_fields() {
+        let pii = OnboardingPii {
+            email: "secret@example.com".to_string(),
+            name: "Secret Name".to_string(),
+            organization_name: "Secret Org".to_string(),
+        };
+        let debug = format!("{pii:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("secret@example.com"));
+        assert!(!debug.contains("Secret Name"));
+        assert!(!debug.contains("Secret Org"));
+    }
+
+    #[test]
+    fn org_pii_debug_redacts_name() {
+        let pii = OrgPii { name: "Secret Org".to_string() };
+        let debug = format!("{pii:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("Secret Org"));
+    }
+
+    #[test]
+    fn onboarding_crypto_debug_redacts_secrets() {
+        let crypto = OnboardingCrypto {
+            kid: "kid-123".to_string(),
+            refresh_token: "super-secret-token".to_string(),
+            refresh_family_id: [1; 16],
+            refresh_expires_at: chrono::Utc::now(),
+            user_slug: UserSlug::new(1),
+            organization_slug: OrganizationSlug::new(1),
+        };
+        let debug = format!("{crypto:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("super-secret-token"));
+        // kid is NOT redacted (it's a public identifier)
+        assert!(debug.contains("kid-123"));
+    }
+
+    #[test]
+    fn saga_output_debug_redacts_secrets() {
+        let output = SagaOutput {
+            user_id: UserId::new(1),
+            user_slug: UserSlug::new(1),
+            organization_id: OrganizationId::new(1),
+            organization_slug: OrganizationSlug::new(1),
+            refresh_token_id: RefreshTokenId::new(1),
+            kid: "kid-456".to_string(),
+            refresh_family_id: [2; 16],
+            refresh_expires_at: chrono::Utc::now(),
+            refresh_token: "raw-token-value".to_string(),
+        };
+        let debug = format!("{output:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("raw-token-value"));
+        // Public fields should be visible
+        assert!(debug.contains("kid-456"));
+    }
+
+    #[test]
+    fn saga_handle_submit_fails_on_closed_channel() {
+        let (tx, rx) = mpsc::channel(1);
+        let handle = SagaOrchestratorHandle { tx };
+        // Drop the receiver to close the channel
+        drop(rx);
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let submission = SagaSubmission {
+                record: Saga::DeleteUser(DeleteUserSaga::new(
+                    SagaId::new("closed-channel"),
+                    inferadb_ledger_state::system::DeleteUserInput {
+                        user: UserId::new(1),
+                        organization_ids: vec![],
+                    },
+                )),
+                pii: None,
+                org_pii: None,
+                notify: None,
+            };
+            let result = handle.submit_saga(submission).await;
+            assert!(result.is_err(), "submit should fail when channel is closed");
+        });
+    }
+
+    #[test]
+    fn saga_key_prefix_format() {
+        assert_eq!(SAGA_KEY_PREFIX, "_meta:saga:");
+        assert_eq!(SAGA_CLIENT_ID, "system:saga");
+    }
+
+    #[test]
+    fn create_signing_key_saga_transitions() {
+        let mut saga = CreateSigningKeySaga::new(
+            SagaId::new("signing-key-transition"),
+            CreateSigningKeyInput { scope: SigningKeyScope::Global },
+        );
+
+        assert_eq!(saga.current_step(), 0);
+        assert!(!saga.is_terminal());
+
+        saga.transition(inferadb_ledger_state::system::CreateSigningKeySagaState::KeyGenerated {
+            kid: "kid-001".to_string(),
+            public_key_bytes: vec![0x01; 32],
+            encrypted_private_key: vec![0x02; 100],
+            rmk_version: 1,
+        });
+        assert_eq!(saga.current_step(), 1);
+
+        saga.transition(inferadb_ledger_state::system::CreateSigningKeySagaState::Completed {
+            kid: "kid-001".to_string(),
+        });
+        assert!(saga.is_terminal());
+        assert!(!saga.is_ready_for_retry());
+    }
+
+    #[test]
+    fn create_signing_key_saga_fail_to_terminal() {
+        let mut saga = CreateSigningKeySaga::new(
+            SagaId::new("signing-key-fail"),
+            CreateSigningKeyInput { scope: SigningKeyScope::Global },
+        );
+
+        // Fail MAX_RETRIES times
+        for _ in 0..inferadb_ledger_state::system::MAX_RETRIES {
+            saga.fail(0, "test error".to_string());
+        }
+        assert!(saga.is_terminal());
+    }
+
+    #[test]
+    fn migrate_user_saga_state_transitions_full_path() {
+        use inferadb_ledger_state::system::{MigrateUserInput, MigrateUserSagaState};
+
+        let mut saga = MigrateUserSaga::new(
+            SagaId::new("migrate-user-full"),
+            MigrateUserInput {
+                user: UserId::new(5),
+                source_region: Region::US_EAST_VA,
+                target_region: Region::IE_EAST_DUBLIN,
+            },
+        );
+
+        assert!(!saga.is_terminal());
+        saga.transition(MigrateUserSagaState::DirectoryMarkedMigrating);
+        saga.transition(MigrateUserSagaState::UserDataRead);
+        saga.transition(MigrateUserSagaState::UserDataWritten);
+        saga.transition(MigrateUserSagaState::DirectoryUpdated);
+        saga.transition(MigrateUserSagaState::SourceDeleted);
+        saga.transition(MigrateUserSagaState::Completed);
+        assert!(saga.is_terminal());
+    }
+
+    #[test]
+    fn migrate_user_saga_compensated_is_terminal() {
+        use inferadb_ledger_state::system::{MigrateUserInput, MigrateUserSagaState};
+
+        let mut saga = MigrateUserSaga::new(
+            SagaId::new("migrate-user-compensate"),
+            MigrateUserInput {
+                user: UserId::new(5),
+                source_region: Region::US_EAST_VA,
+                target_region: Region::IE_EAST_DUBLIN,
+            },
+        );
+
+        saga.transition(MigrateUserSagaState::TimedOut);
+        assert!(saga.is_terminal());
+    }
 }

@@ -1572,12 +1572,12 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
-    use inferadb_ledger_proto::proto;
+    use inferadb_ledger_proto::proto::{self, WriteErrorCode};
     use inferadb_ledger_raft::batching::BatchError;
     use inferadb_ledger_types::{config::ValidationConfig, validation};
     use tonic::Status;
 
-    use super::classify_batch_error;
+    use super::{WriteService, classify_batch_error};
 
     // =========================================================================
     // classify_batch_error
@@ -1840,5 +1840,218 @@ mod tests {
         let config = ValidationConfig::builder().max_operations_per_write(2).build().unwrap();
         let ops = vec![make_set_entity("a", b"1"), make_set_entity("b", b"2")];
         assert!(validate_proto_operations(&ops, &config).is_ok());
+    }
+
+    // =========================================================================
+    // map_condition_to_error_code
+    // =========================================================================
+
+    #[test]
+    fn map_condition_must_not_exist_failed_returns_key_exists() {
+        let code = WriteService::map_condition_to_error_code(
+            Some(&inferadb_ledger_types::SetCondition::MustNotExist),
+            true,
+        );
+        assert_eq!(code, WriteErrorCode::KeyExists);
+    }
+
+    #[test]
+    fn map_condition_must_exist_failed_returns_key_not_found() {
+        let code = WriteService::map_condition_to_error_code(
+            Some(&inferadb_ledger_types::SetCondition::MustExist),
+            false,
+        );
+        assert_eq!(code, WriteErrorCode::KeyNotFound);
+    }
+
+    #[test]
+    fn map_condition_version_equals_key_exists_returns_version_mismatch() {
+        let code = WriteService::map_condition_to_error_code(
+            Some(&inferadb_ledger_types::SetCondition::VersionEquals(42)),
+            true,
+        );
+        assert_eq!(code, WriteErrorCode::VersionMismatch);
+    }
+
+    #[test]
+    fn map_condition_version_equals_key_missing_returns_key_not_found() {
+        let code = WriteService::map_condition_to_error_code(
+            Some(&inferadb_ledger_types::SetCondition::VersionEquals(42)),
+            false,
+        );
+        assert_eq!(code, WriteErrorCode::KeyNotFound);
+    }
+
+    #[test]
+    fn map_condition_value_equals_key_exists_returns_value_mismatch() {
+        let code = WriteService::map_condition_to_error_code(
+            Some(&inferadb_ledger_types::SetCondition::ValueEquals(b"expected".to_vec())),
+            true,
+        );
+        assert_eq!(code, WriteErrorCode::ValueMismatch);
+    }
+
+    #[test]
+    fn map_condition_value_equals_key_missing_returns_key_not_found() {
+        let code = WriteService::map_condition_to_error_code(
+            Some(&inferadb_ledger_types::SetCondition::ValueEquals(b"expected".to_vec())),
+            false,
+        );
+        assert_eq!(code, WriteErrorCode::KeyNotFound);
+    }
+
+    #[test]
+    fn map_condition_none_returns_unspecified() {
+        let code = WriteService::map_condition_to_error_code(None, true);
+        assert_eq!(code, WriteErrorCode::Unspecified);
+    }
+
+    // =========================================================================
+    // bytes_to_hex
+    // =========================================================================
+
+    #[test]
+    fn bytes_to_hex_empty() {
+        assert_eq!(WriteService::bytes_to_hex(&[]), "");
+    }
+
+    #[test]
+    fn bytes_to_hex_single_byte() {
+        assert_eq!(WriteService::bytes_to_hex(&[0xff]), "ff");
+    }
+
+    #[test]
+    fn bytes_to_hex_zero_padded() {
+        assert_eq!(WriteService::bytes_to_hex(&[0x0a]), "0a");
+    }
+
+    #[test]
+    fn bytes_to_hex_multiple_bytes() {
+        assert_eq!(WriteService::bytes_to_hex(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+    }
+
+    #[test]
+    fn bytes_to_hex_all_zeros() {
+        assert_eq!(WriteService::bytes_to_hex(&[0, 0, 0]), "000000");
+    }
+
+    // =========================================================================
+    // extract_operation_types
+    // =========================================================================
+
+    #[test]
+    fn extract_operation_types_empty() {
+        let ops: Vec<proto::Operation> = vec![];
+        let types = WriteService::extract_operation_types(&ops);
+        assert!(types.is_empty());
+    }
+
+    #[test]
+    fn extract_operation_types_all_variants() {
+        let ops = vec![
+            make_set_entity("k", b"v"),
+            make_delete_entity("k"),
+            proto::Operation {
+                op: Some(proto::operation::Op::ExpireEntity(proto::ExpireEntity {
+                    key: "k".to_string(),
+                    expired_at: 100,
+                })),
+            },
+            make_create_relationship("r", "rel", "s"),
+            proto::Operation {
+                op: Some(proto::operation::Op::DeleteRelationship(proto::DeleteRelationship {
+                    resource: "r".to_string(),
+                    relation: "rel".to_string(),
+                    subject: "s".to_string(),
+                })),
+            },
+        ];
+        let types = WriteService::extract_operation_types(&ops);
+        assert_eq!(
+            types,
+            vec![
+                "set_entity",
+                "delete_entity",
+                "expire_entity",
+                "create_relationship",
+                "delete_relationship",
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_operation_types_skips_none_op() {
+        let ops = vec![proto::Operation { op: None }, make_set_entity("k", b"v")];
+        let types = WriteService::extract_operation_types(&ops);
+        assert_eq!(types, vec!["set_entity"]);
+    }
+
+    // =========================================================================
+    // estimate_operations_bytes
+    // =========================================================================
+
+    #[test]
+    fn estimate_operations_bytes_empty() {
+        let ops: Vec<proto::Operation> = vec![];
+        assert_eq!(WriteService::estimate_operations_bytes(&ops), 0);
+    }
+
+    #[test]
+    fn estimate_operations_bytes_set_entity() {
+        let ops = vec![make_set_entity("key", b"value")];
+        // "key" = 3 bytes, "value" = 5 bytes
+        assert_eq!(WriteService::estimate_operations_bytes(&ops), 8);
+    }
+
+    #[test]
+    fn estimate_operations_bytes_delete_entity() {
+        let ops = vec![make_delete_entity("entity:1")];
+        assert_eq!(WriteService::estimate_operations_bytes(&ops), 8);
+    }
+
+    #[test]
+    fn estimate_operations_bytes_expire_entity() {
+        let ops = vec![proto::Operation {
+            op: Some(proto::operation::Op::ExpireEntity(proto::ExpireEntity {
+                key: "abc".to_string(),
+                expired_at: 100,
+            })),
+        }];
+        assert_eq!(WriteService::estimate_operations_bytes(&ops), 3);
+    }
+
+    #[test]
+    fn estimate_operations_bytes_create_relationship() {
+        let ops = vec![make_create_relationship("doc:1", "viewer", "user:1")];
+        // "doc:1" = 5, "viewer" = 6, "user:1" = 6
+        assert_eq!(WriteService::estimate_operations_bytes(&ops), 17);
+    }
+
+    #[test]
+    fn estimate_operations_bytes_delete_relationship() {
+        let ops = vec![proto::Operation {
+            op: Some(proto::operation::Op::DeleteRelationship(proto::DeleteRelationship {
+                resource: "doc:1".to_string(),
+                relation: "viewer".to_string(),
+                subject: "user:1".to_string(),
+            })),
+        }];
+        assert_eq!(WriteService::estimate_operations_bytes(&ops), 17);
+    }
+
+    #[test]
+    fn estimate_operations_bytes_mixed_operations() {
+        let ops = vec![
+            make_set_entity("k", b"v"),              // 1 + 1 = 2
+            make_delete_entity("dk"),                // 2
+            make_create_relationship("r", "x", "s"), // 1 + 1 + 1 = 3
+        ];
+        assert_eq!(WriteService::estimate_operations_bytes(&ops), 7);
+    }
+
+    #[test]
+    fn estimate_operations_bytes_skips_none_op() {
+        let ops = vec![proto::Operation { op: None }, make_set_entity("k", b"v")];
+        assert_eq!(WriteService::estimate_operations_bytes(&ops), 2);
     }
 }

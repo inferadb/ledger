@@ -1742,4 +1742,127 @@ mod tests {
         let expected: [u8; 32] = Sha256::digest(b"").into();
         assert_eq!(hash, expected);
     }
+
+    // =========================================================================
+    // jwt_error_to_status — StateLookup variant
+    // =========================================================================
+
+    #[test]
+    fn jwt_error_to_status_state_lookup() {
+        let err = crate::jwt::JwtError::StateLookup {
+            source: inferadb_ledger_state::system::SystemError::NotFound {
+                entity: "signing key scope region".to_string(),
+            },
+            location: snafu::location!(),
+        };
+        let status = TokenServiceImpl::jwt_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::Internal);
+    }
+
+    // =========================================================================
+    // signing_key_to_public_info — edge cases
+    // =========================================================================
+
+    #[test]
+    fn signing_key_to_public_info_has_valid_from_timestamp() {
+        let now = Utc::now();
+        let key = SigningKey {
+            id: inferadb_ledger_types::SigningKeyId::new(1),
+            kid: "time-kid".to_string(),
+            public_key_bytes: vec![],
+            encrypted_private_key: vec![],
+            rmk_version: 1,
+            scope: SigningKeyScope::Global,
+            status: SigningKeyStatus::Active,
+            valid_from: now,
+            valid_until: None,
+            created_at: now,
+            rotated_at: None,
+            revoked_at: None,
+        };
+        let info = TokenServiceImpl::signing_key_to_public_info(&key);
+        assert!(info.valid_from.is_some());
+        assert_eq!(info.valid_from.unwrap().seconds, now.timestamp());
+        assert!(info.created_at.is_some());
+        assert_eq!(info.created_at.unwrap().seconds, now.timestamp());
+    }
+
+    // =========================================================================
+    // parse_assertion_header — additional edge cases
+    // =========================================================================
+
+    #[test]
+    fn parse_assertion_header_rejects_empty_string() {
+        let status = TokenServiceImpl::parse_assertion_header("").unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn parse_assertion_header_valid_large_kid() {
+        let header = serde_json::json!({ "alg": "EdDSA", "kid": "9999999999" });
+        let token = format!("{}.payload.signature", encode_jwt_part(&header));
+        let (kid, assertion_id) = TokenServiceImpl::parse_assertion_header(&token).unwrap();
+        assert_eq!(kid, "9999999999");
+        assert_eq!(assertion_id.value(), 9_999_999_999);
+    }
+
+    #[test]
+    fn parse_assertion_header_negative_kid_parses_as_i64() {
+        // Negative kid values parse as negative i64 — the downstream lookup will
+        // simply fail to find a matching assertion entry.
+        let header = serde_json::json!({ "alg": "EdDSA", "kid": "-1" });
+        let token = format!("{}.payload.signature", encode_jwt_part(&header));
+        let (kid, assertion_id) = TokenServiceImpl::parse_assertion_header(&token).unwrap();
+        assert_eq!(kid, "-1");
+        assert_eq!(assertion_id.value(), -1);
+    }
+
+    // =========================================================================
+    // extract_issuer_from_jwt — additional edge cases
+    // =========================================================================
+
+    #[test]
+    fn extract_issuer_zero_iss() {
+        let header = serde_json::json!({ "alg": "EdDSA" });
+        let payload = serde_json::json!({ "iss": "0" });
+        let token = format!("{}.{}.signature", encode_jwt_part(&header), encode_jwt_part(&payload));
+        let slug = TokenServiceImpl::extract_issuer_from_jwt(&token).unwrap();
+        assert_eq!(slug.value(), 0);
+    }
+
+    #[test]
+    fn extract_issuer_large_numeric_iss() {
+        let header = serde_json::json!({ "alg": "EdDSA" });
+        let payload = serde_json::json!({ "iss": "18446744073709551615" });
+        let token = format!("{}.{}.signature", encode_jwt_part(&header), encode_jwt_part(&payload));
+        let slug = TokenServiceImpl::extract_issuer_from_jwt(&token).unwrap();
+        assert_eq!(slug.value(), u64::MAX);
+    }
+
+    #[test]
+    fn extract_issuer_empty_iss_string() {
+        let header = serde_json::json!({ "alg": "EdDSA" });
+        let payload = serde_json::json!({ "iss": "" });
+        let token = format!("{}.{}.signature", encode_jwt_part(&header), encode_jwt_part(&payload));
+        let status = TokenServiceImpl::extract_issuer_from_jwt(&token).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    // =========================================================================
+    // hash_refresh_token — additional edge cases
+    // =========================================================================
+
+    #[test]
+    fn hash_refresh_token_long_input() {
+        let long_token = "ilrt_".to_string() + &"a".repeat(1000);
+        let hash = TokenServiceImpl::hash_refresh_token(&long_token);
+        assert_eq!(hash.len(), 32);
+    }
+
+    #[test]
+    fn hash_refresh_token_special_chars() {
+        let hash1 = TokenServiceImpl::hash_refresh_token("ilrt_abc+def/ghi=");
+        let hash2 = TokenServiceImpl::hash_refresh_token("ilrt_abc+def/ghi=");
+        assert_eq!(hash1, hash2);
+    }
 }

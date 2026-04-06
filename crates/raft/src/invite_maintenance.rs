@@ -697,4 +697,103 @@ mod tests {
         assert!(debug.contains("invitations_expired: 10"));
         assert!(debug.contains("invitations_reaped: 5"));
     }
+
+    #[test]
+    fn retention_window_calculation() {
+        let retention = chrono::Duration::days(RETENTION_DAYS);
+        let now = Utc::now();
+        let created_recently = now - chrono::Duration::days(10);
+        let created_long_ago = now - chrono::Duration::days(100);
+
+        // Recently created: within retention window
+        assert!(now < created_recently + retention);
+
+        // Created long ago: past retention window
+        assert!(now >= created_long_ago + retention);
+    }
+
+    #[test]
+    fn pending_entries_count_within_max() {
+        let entries: Vec<u32> = (0..150).collect();
+        let pending: Vec<&u32> = entries.iter().take(MAX_EXPIRATIONS_PER_CYCLE).collect();
+        // 150 < 200, so we get all 150
+        assert_eq!(pending.len(), 150);
+    }
+
+    #[test]
+    fn terminal_entries_count_within_max() {
+        let entries: Vec<u32> = (0..50).collect();
+        let capped: Vec<&u32> = entries.iter().take(MAX_DELETIONS_PER_CYCLE).collect();
+        // 50 < 100, so we get all 50
+        assert_eq!(capped.len(), 50);
+    }
+
+    #[test]
+    fn key_parsing_negative_id() {
+        let key = "_idx:invite:email_hash:abc:-5";
+        let without_prefix = key.strip_prefix(EMAIL_HASH_INDEX_PREFIX).unwrap();
+        let (hmac, id_str) = without_prefix.rsplit_once(':').unwrap();
+        let id_val: i64 = id_str.parse().unwrap();
+        assert_eq!(hmac, "abc");
+        assert_eq!(id_val, -5);
+    }
+
+    #[test]
+    fn key_parsing_large_id() {
+        let key = "_idx:invite:email_hash:deadbeef:9999999999";
+        let without_prefix = key.strip_prefix(EMAIL_HASH_INDEX_PREFIX).unwrap();
+        let (_, id_str) = without_prefix.rsplit_once(':').unwrap();
+        let id_val: i64 = id_str.parse().unwrap();
+        assert_eq!(id_val, 9_999_999_999);
+    }
+
+    #[test]
+    fn key_parsing_empty_hmac() {
+        // rsplit_once on ":42" produces ("", "42")
+        let key = "_idx:invite:email_hash::42";
+        let without_prefix = key.strip_prefix(EMAIL_HASH_INDEX_PREFIX).unwrap();
+        let (hmac, id_str) = without_prefix.rsplit_once(':').unwrap();
+        assert_eq!(hmac, "");
+        assert_eq!(id_str.parse::<i64>().unwrap(), 42);
+    }
+
+    #[test]
+    fn scanned_entry_organization_id() {
+        let entry = ScannedEntry {
+            invite_id: InviteId::new(1),
+            email_hmac: "test".to_string(),
+            entry: InviteEmailEntry {
+                organization: OrganizationId::new(42),
+                status: InvitationStatus::Accepted,
+            },
+        };
+        assert_eq!(entry.entry.organization.value(), 42);
+        assert!(entry.entry.status.is_terminal());
+    }
+
+    #[test]
+    fn invitation_status_terminal_check() {
+        // Verify which statuses are terminal
+        assert!(!InvitationStatus::Pending.is_terminal());
+        assert!(InvitationStatus::Accepted.is_terminal());
+        assert!(InvitationStatus::Declined.is_terminal());
+        assert!(InvitationStatus::Expired.is_terminal());
+        assert!(InvitationStatus::Revoked.is_terminal());
+    }
+
+    #[test]
+    fn had_errors_accumulation() {
+        // Simulates the had_errors logic from run_cycle
+        let mut had_errors = false;
+
+        // Phase 1 returns (count, errors)
+        let (_, phase1_errors) = (5u64, false);
+        had_errors |= phase1_errors;
+        assert!(!had_errors);
+
+        // Phase 2 returns (count, errors)
+        let (_, phase2_errors) = (3u64, true);
+        had_errors |= phase2_errors;
+        assert!(had_errors);
+    }
 }

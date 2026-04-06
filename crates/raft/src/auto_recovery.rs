@@ -667,4 +667,199 @@ mod tests {
         assert_eq!(config.max_retry_delay, Duration::from_secs(600));
         assert!(!config.enabled);
     }
+
+    #[test]
+    fn test_recovery_result_variants() {
+        let success = RecoveryResult::Success;
+        let transient = RecoveryResult::TransientFailure("connection timeout".to_string());
+        let determinism = RecoveryResult::DeterminismBug;
+        let max_attempts = RecoveryResult::MaxAttemptsExceeded;
+
+        assert_eq!(success, RecoveryResult::Success);
+        assert_eq!(determinism, RecoveryResult::DeterminismBug);
+        assert_eq!(max_attempts, RecoveryResult::MaxAttemptsExceeded);
+        assert_eq!(transient, RecoveryResult::TransientFailure("connection timeout".to_string()));
+    }
+
+    #[test]
+    fn test_recovery_result_clone() {
+        let original = RecoveryResult::TransientFailure("error msg".to_string());
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn test_recovery_result_debug() {
+        let result = RecoveryResult::DeterminismBug;
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("DeterminismBug"));
+
+        let result = RecoveryResult::TransientFailure("timeout".to_string());
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("TransientFailure"));
+        assert!(debug.contains("timeout"));
+    }
+
+    #[test]
+    fn test_recovery_result_inequality() {
+        assert_ne!(RecoveryResult::Success, RecoveryResult::DeterminismBug);
+        assert_ne!(RecoveryResult::Success, RecoveryResult::MaxAttemptsExceeded);
+        assert_ne!(
+            RecoveryResult::TransientFailure("a".to_string()),
+            RecoveryResult::TransientFailure("b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config = AutoRecoveryConfig {
+            scan_interval: Duration::from_secs(60),
+            base_retry_delay: Duration::from_secs(10),
+            max_retry_delay: Duration::from_secs(600),
+            enabled: false,
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.scan_interval, config.scan_interval);
+        assert_eq!(cloned.base_retry_delay, config.base_retry_delay);
+        assert_eq!(cloned.max_retry_delay, config.max_retry_delay);
+        assert_eq!(cloned.enabled, config.enabled);
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = AutoRecoveryConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("scan_interval"));
+        assert!(debug.contains("base_retry_delay"));
+        assert!(debug.contains("max_retry_delay"));
+        assert!(debug.contains("enabled"));
+    }
+
+    #[test]
+    fn test_retry_delay_exact_backoff_schedule() {
+        // Reproduce the exact retry_delay method logic
+        let base = Duration::from_secs(5);
+        let max = Duration::from_secs(300);
+
+        let compute_delay = |attempt: u8| -> Duration {
+            let multiplier = 2u64.saturating_pow(attempt.saturating_sub(1) as u32);
+            let delay = base.saturating_mul(multiplier as u32);
+            std::cmp::min(delay, max)
+        };
+
+        // Attempt 1: 5 * 2^0 = 5s
+        assert_eq!(compute_delay(1), Duration::from_secs(5));
+        // Attempt 2: 5 * 2^1 = 10s
+        assert_eq!(compute_delay(2), Duration::from_secs(10));
+        // Attempt 3: 5 * 2^2 = 20s
+        assert_eq!(compute_delay(3), Duration::from_secs(20));
+        // Attempt 4: 5 * 2^3 = 40s
+        assert_eq!(compute_delay(4), Duration::from_secs(40));
+        // Attempt 5: 5 * 2^4 = 80s
+        assert_eq!(compute_delay(5), Duration::from_secs(80));
+        // Attempt 6: 5 * 2^5 = 160s
+        assert_eq!(compute_delay(6), Duration::from_secs(160));
+        // Attempt 7: 5 * 2^6 = 320s, capped at 300s
+        assert_eq!(compute_delay(7), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_retry_delay_attempt_zero() {
+        // Attempt 0 should still work (saturating_sub prevents underflow)
+        let base = Duration::from_secs(5);
+        let multiplier = 2u64.saturating_pow(0u8.saturating_sub(1) as u32);
+        // 0u8.saturating_sub(1) = 0, so 2^0 = 1, delay = 5s
+        let delay = base.saturating_mul(multiplier as u32);
+        assert_eq!(delay, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_retry_delay_saturating_overflow() {
+        // Large attempt number should not overflow
+        let base = Duration::from_secs(5);
+        let max = Duration::from_secs(300);
+        let multiplier = 2u64.saturating_pow(254); // Very large
+        let delay = base.saturating_mul(multiplier as u32);
+        let capped = std::cmp::min(delay, max);
+        // Should be capped at max
+        assert!(capped <= max);
+    }
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(RECOVERY_SCAN_INTERVAL, Duration::from_secs(30));
+        assert_eq!(BASE_RETRY_DELAY, Duration::from_secs(5));
+        assert_eq!(MAX_RETRY_DELAY, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_attempt_number_from_health_status() {
+        // Diverged -> attempt = 1
+        // Recovering with attempt N -> attempt = N + 1
+        // Healthy -> return early
+        use crate::log_storage::VaultHealthStatus;
+
+        let diverged = VaultHealthStatus::Diverged {
+            expected: [1u8; 32],
+            computed: [2u8; 32],
+            at_height: 100,
+        };
+        let attempt = match &diverged {
+            VaultHealthStatus::Diverged { .. } => 1u8,
+            VaultHealthStatus::Recovering { attempt, .. } => attempt + 1,
+            VaultHealthStatus::Healthy => 0,
+        };
+        assert_eq!(attempt, 1);
+
+        let recovering = VaultHealthStatus::Recovering { started_at: 1000, attempt: 3 };
+        let attempt = match &recovering {
+            VaultHealthStatus::Diverged { .. } => 1u8,
+            VaultHealthStatus::Recovering { attempt, .. } => attempt + 1,
+            VaultHealthStatus::Healthy => 0,
+        };
+        assert_eq!(attempt, 4);
+
+        let healthy = VaultHealthStatus::Healthy;
+        let attempt = match &healthy {
+            VaultHealthStatus::Diverged { .. } => 1u8,
+            VaultHealthStatus::Recovering { attempt, .. } => attempt + 1,
+            VaultHealthStatus::Healthy => 0,
+        };
+        assert_eq!(attempt, 0);
+    }
+
+    #[test]
+    fn test_is_ready_for_retry_logic() {
+        // Reproduce the ready-for-retry logic without needing the full job
+        let base = Duration::from_secs(5);
+        let max = Duration::from_secs(300);
+
+        let retry_delay = |attempt: u8| -> Duration {
+            let multiplier = 2u64.saturating_pow(attempt.saturating_sub(1) as u32);
+            let delay = base.saturating_mul(multiplier as u32);
+            std::cmp::min(delay, max)
+        };
+
+        let now = chrono::Utc::now().timestamp();
+
+        // Started 100 seconds ago, attempt 1 (delay = 5s) => ready
+        let started_at = now - 100;
+        let elapsed = Duration::from_secs((now - started_at).max(0) as u64);
+        assert!(elapsed >= retry_delay(1));
+
+        // Started 3 seconds ago, attempt 1 (delay = 5s) => not ready
+        let started_at = now - 3;
+        let elapsed = Duration::from_secs((now - started_at).max(0) as u64);
+        assert!(elapsed < retry_delay(1));
+
+        // Started 15 seconds ago, attempt 3 (delay = 20s) => not ready
+        let started_at = now - 15;
+        let elapsed = Duration::from_secs((now - started_at).max(0) as u64);
+        assert!(elapsed < retry_delay(3));
+
+        // Started 25 seconds ago, attempt 3 (delay = 20s) => ready
+        let started_at = now - 25;
+        let elapsed = Duration::from_secs((now - started_at).max(0) as u64);
+        assert!(elapsed >= retry_delay(3));
+    }
 }

@@ -507,4 +507,92 @@ mod tests {
         assert!(voter_version_same <= cache_version);
         assert!(voter_version_older <= cache_version);
     }
+
+    #[test]
+    fn test_cache_update_simulation() {
+        // Simulate the full cache update logic from refresh_from_voter
+        let cache = Arc::new(RwLock::new(CachedSystemState::default()));
+
+        // Initial state
+        assert_eq!(cache.read().version, 0);
+
+        // Voter with higher version updates cache
+        {
+            let mut c = cache.write();
+            let voter_version = 5u64;
+            if voter_version > c.version {
+                c.version = voter_version;
+                c.organization_count = 10;
+                c.vault_count = 10;
+                c.last_updated = std::time::Instant::now();
+            }
+        }
+        assert_eq!(cache.read().version, 5);
+        assert_eq!(cache.read().organization_count, 10);
+
+        // Voter with same version only refreshes TTL
+        {
+            let mut c = cache.write();
+            let voter_version = 5u64;
+            if voter_version > c.version {
+                c.version = voter_version;
+            } else {
+                c.last_updated = std::time::Instant::now();
+            }
+        }
+        // Version unchanged
+        assert_eq!(cache.read().version, 5);
+    }
+
+    #[test]
+    fn test_cached_state_is_fresh_zero_ttl() {
+        let state = CachedSystemState::default();
+        // Zero TTL should never be fresh (unless exactly now)
+        assert!(!state.is_fresh(Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn test_cached_state_is_fresh_very_large_ttl() {
+        let state = CachedSystemState::default();
+        // Very large TTL should always be fresh
+        assert!(state.is_fresh(Duration::from_secs(86400 * 365)));
+    }
+
+    #[test]
+    fn test_endpoint_formatting() {
+        // Simulates endpoint formatting from refresh_from_voter
+        let voter_addr = "10.0.0.1:50051";
+        let endpoint = format!("http://{}", voter_addr);
+        assert_eq!(endpoint, "http://10.0.0.1:50051");
+    }
+
+    #[test]
+    fn test_error_classification_edge_cases() {
+        let classify = |e: &str| -> &str {
+            if e.contains("connect") {
+                "connection"
+            } else if e.contains("RPC") {
+                "rpc"
+            } else {
+                "other"
+            }
+        };
+
+        // Edge: contains both "connect" and "RPC" — "connect" wins (checked first)
+        assert_eq!(classify("RPC connect failure"), "connection");
+        // Case-sensitive: "rpc" lowercase doesn't match
+        assert_eq!(classify("rpc failed"), "other");
+        // Empty string
+        assert_eq!(classify(""), "other");
+    }
+
+    #[test]
+    fn test_config_disabled() {
+        let config = LearnerRefreshConfig {
+            refresh_interval: Duration::from_secs(5),
+            rpc_timeout: Duration::from_secs(10),
+            enabled: false,
+        };
+        assert!(!config.enabled);
+    }
 }
