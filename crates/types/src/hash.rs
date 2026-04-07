@@ -6,6 +6,7 @@
 //! - Transaction hashing (canonical binary encoding)
 //! - Bucket/state root hashing (streaming with length-prefixed encoding)
 
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -304,7 +305,7 @@ pub fn compute_tx_merkle_root(transactions: &[Transaction]) -> Hash {
         return EMPTY_HASH;
     }
 
-    let leaves: Vec<Hash> = transactions.iter().map(tx_hash).collect();
+    let leaves: Vec<Hash> = transactions.par_iter().map(tx_hash).collect();
     crate::merkle::merkle_root(&leaves)
 }
 
@@ -971,6 +972,28 @@ mod tests {
         let result = sha256_concat(&[h]);
         // SHA-256(h) should differ from h itself
         assert_ne!(result, h);
+    }
+
+    #[test]
+    fn parallel_merkle_root_matches_sequential() {
+        let transactions: Vec<Transaction> = (0u32..100)
+            .map(|i| Transaction {
+                id: [i as u8; 16],
+                client_id: format!("client-{i}").into(),
+                sequence: u64::from(i),
+                operations: vec![],
+                timestamp: Utc.timestamp_opt(1_704_067_200 + i64::from(i), 0).unwrap(),
+            })
+            .collect();
+
+        // Sequential leaf hashing
+        let leaves_seq: Vec<Hash> = transactions.iter().map(tx_hash).collect();
+        let root_seq = crate::merkle::merkle_root(&leaves_seq);
+
+        // Parallel computation (the production function)
+        let root_par = compute_tx_merkle_root(&transactions);
+
+        assert_eq!(root_seq, root_par, "parallel and sequential must produce identical roots");
     }
 }
 

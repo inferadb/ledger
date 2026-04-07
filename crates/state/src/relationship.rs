@@ -134,7 +134,7 @@ impl RelationshipStore {
 
         let storage_key = build_storage_key(vault, res_type, &res_id, rel_id, subj_type, &subj_id);
 
-        if txn.get::<tables::Relationships>(&storage_key).context(StorageSnafu)?.is_some() {
+        if txn.get_raw(TableId::Relationships, &storage_key).context(StorageSnafu)?.is_some() {
             return Ok(false);
         }
 
@@ -164,7 +164,7 @@ impl RelationshipStore {
         };
 
         let storage_key = build_storage_key(vault, res_type, &res_id, rel_id, subj_type, &subj_id);
-        Ok(txn.get::<tables::Relationships>(&storage_key).context(StorageSnafu)?.is_some())
+        Ok(txn.get_raw(TableId::Relationships, &storage_key).context(StorageSnafu)?.is_some())
     }
 
     /// Checks if a relationship exists within a write transaction.
@@ -187,7 +187,7 @@ impl RelationshipStore {
         };
 
         let storage_key = build_storage_key(vault, res_type, &res_id, rel_id, subj_type, &subj_id);
-        Ok(txn.get::<tables::Relationships>(&storage_key).context(StorageSnafu)?.is_some())
+        Ok(txn.get_raw(TableId::Relationships, &storage_key).context(StorageSnafu)?.is_some())
     }
 
     /// Returns a relationship by its components, or `None` if not found.
@@ -211,7 +211,7 @@ impl RelationshipStore {
 
         let storage_key = build_storage_key(vault, res_type, &res_id, rel_id, subj_type, &subj_id);
 
-        if txn.get::<tables::Relationships>(&storage_key).context(StorageSnafu)?.is_some() {
+        if txn.get_raw(TableId::Relationships, &storage_key).context(StorageSnafu)?.is_some() {
             Ok(Some(Relationship::new(resource, relation, subject)))
         } else {
             Ok(None)
@@ -243,7 +243,7 @@ impl RelationshipStore {
         };
 
         let storage_key = build_storage_key(vault, res_type, &res_id, rel_id, subj_type, &subj_id);
-        let existed = txn.delete::<tables::Relationships>(&storage_key).context(StorageSnafu)?;
+        let existed = txn.delete_raw(TableId::Relationships, &storage_key).context(StorageSnafu)?;
         Ok(existed)
     }
 

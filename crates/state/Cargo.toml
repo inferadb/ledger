@@ -29,6 +29,9 @@ zstd.workspace = true
 # Concurrency
 parking_lot.workspace = true
 
+# Caching
+moka.workspace = true
+
 # Serialization
 serde.workspace = true
 serde_json.workspace = true

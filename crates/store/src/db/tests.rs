@@ -1651,4 +1651,167 @@ mod tests {
         let stats = db.stats();
         assert!(stats.page_splits > 0, "Expected page splits with 500 entries");
     }
+
+    // -----------------------------------------------------------------------
+    // Raw get / contains / delete API
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn get_raw_returns_inserted_value() {
+        use crate::tables::TableId;
+
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert_raw(TableId::Entities, b"raw_key", b"raw_value").unwrap();
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        let value = txn.get_raw(TableId::Entities, b"raw_key").unwrap();
+        assert_eq!(value, Some(b"raw_value".to_vec()));
+    }
+
+    #[test]
+    fn get_raw_returns_none_for_missing() {
+        use crate::tables::TableId;
+
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        let txn = db.read().unwrap();
+        let value = txn.get_raw(TableId::Entities, b"no_such_key").unwrap();
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn contains_raw_true_when_present() {
+        use crate::tables::TableId;
+
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert_raw(TableId::Entities, b"exists_key", b"v").unwrap();
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        assert!(txn.contains_raw(TableId::Entities, b"exists_key").unwrap());
+        assert!(!txn.contains_raw(TableId::Entities, b"missing_key").unwrap());
+    }
+
+    #[test]
+    fn delete_raw_removes_entry() {
+        use crate::tables::TableId;
+
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert_raw(TableId::Entities, b"del_key", b"del_val").unwrap();
+            txn.commit().unwrap();
+        }
+
+        {
+            let mut txn = db.write().unwrap();
+            let existed = txn.delete_raw(TableId::Entities, b"del_key").unwrap();
+            assert!(existed);
+            let not_existed = txn.delete_raw(TableId::Entities, b"del_key").unwrap();
+            assert!(!not_existed);
+            txn.commit().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        assert!(txn.get_raw(TableId::Entities, b"del_key").unwrap().is_none());
+    }
+
+    #[test]
+    fn write_txn_get_raw_sees_uncommitted() {
+        use crate::tables::TableId;
+
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        let mut txn = db.write().unwrap();
+        txn.insert_raw(TableId::Entities, b"uncommitted", b"data").unwrap();
+
+        // get_raw on the same write transaction should see the uncommitted insert
+        let value = txn.get_raw(TableId::Entities, b"uncommitted").unwrap();
+        assert_eq!(value, Some(b"data".to_vec()));
+
+        // Not yet committed — a read transaction should not see it
+        txn.abort();
+    }
+
+    // -----------------------------------------------------------------------
+    // Generation tracking
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn generation_increments_on_commit() {
+        use crate::tables::TableId;
+
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        assert_eq!(db.current_generation(), 0);
+
+        let mut txn = db.write().unwrap();
+        txn.insert_raw(TableId::Entities, b"k", b"v").unwrap();
+        txn.commit().unwrap();
+        assert_eq!(db.current_generation(), 1);
+
+        let mut txn = db.write().unwrap();
+        txn.insert_raw(TableId::Entities, b"k2", b"v2").unwrap();
+        txn.commit().unwrap();
+        assert_eq!(db.current_generation(), 2);
+    }
+
+    #[test]
+    fn pages_modified_since_tracks_changes() {
+        use crate::tables::TableId;
+
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        let mut txn = db.write().unwrap();
+        txn.insert_raw(TableId::Entities, b"k1", b"v1").unwrap();
+        txn.commit().unwrap();
+        let gen1 = db.current_generation();
+
+        let mut txn = db.write().unwrap();
+        txn.insert_raw(TableId::Entities, b"k2", b"v2").unwrap();
+        txn.commit().unwrap();
+
+        let modified = db.pages_modified_since(gen1);
+        assert!(!modified.is_empty(), "should have pages modified after gen1");
+
+        let none_modified = db.pages_modified_since(db.current_generation());
+        assert!(none_modified.is_empty(), "nothing modified after current gen");
+    }
+
+    #[test]
+    fn generation_zero_returns_all_modified() {
+        use crate::tables::TableId;
+
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        let mut txn = db.write().unwrap();
+        txn.insert_raw(TableId::Entities, b"k1", b"v1").unwrap();
+        txn.commit().unwrap();
+
+        let all = db.pages_modified_since(0);
+        assert!(!all.is_empty());
+    }
+
+    #[test]
+    fn tracked_page_count_grows_with_commits() {
+        use crate::tables::TableId;
+
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        assert_eq!(db.tracked_page_count(), 0);
+
+        let mut txn = db.write().unwrap();
+        txn.insert_raw(TableId::Entities, b"k1", b"v1").unwrap();
+        txn.commit().unwrap();
+
+        assert!(db.tracked_page_count() > 0);
+    }
 }

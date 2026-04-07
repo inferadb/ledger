@@ -133,7 +133,7 @@ impl IndexManager {
         let local_key = encode_obj_index_local_key(res_type, &res_id, rel_id, subj_type, &subj_id);
         let storage_key = encode_index_key(vault, &local_key);
 
-        let _ = txn.delete::<tables::ObjIndex>(&storage_key);
+        let _ = txn.delete_raw(TableId::ObjIndex, &storage_key);
 
         Ok(())
     }
@@ -205,7 +205,7 @@ impl IndexManager {
         let local_key = encode_subj_index_local_key(subj_type, &subj_id, res_type, &res_id, rel_id);
         let storage_key = encode_index_key(vault, &local_key);
 
-        let _ = txn.delete::<tables::SubjIndex>(&storage_key);
+        let _ = txn.delete_raw(TableId::SubjIndex, &storage_key);
 
         Ok(())
     }

@@ -126,6 +126,10 @@ pub struct Database<B: StorageBackend> {
     /// Used by incremental backup to track which pages need to be included
     /// in the delta. Reset when a backup completes successfully.
     pub(super) dirty_bitmap: Mutex<DirtyBitmap>,
+    /// Monotonically increasing generation counter, incremented on each commit.
+    pub(super) generation: AtomicU64,
+    /// Tracks which generation each page was last written in.
+    pub(super) page_generations: Mutex<HashMap<PageId, u64>>,
 }
 
 impl Database<FileBackend> {
@@ -276,6 +280,8 @@ impl<B: StorageBackend> Database<B> {
             write_lock: std::sync::Mutex::new(()),
             page_splits: AtomicU64::new(0),
             dirty_bitmap: Mutex::new(DirtyBitmap::new()),
+            generation: AtomicU64::new(0),
+            page_generations: Mutex::new(HashMap::new()),
         };
 
         // Restore free list: use persisted list if available, otherwise rebuild
@@ -674,6 +680,26 @@ impl<B: StorageBackend> Database<B> {
             cache_misses: cache_stats.misses,
             page_splits: self.page_splits.load(Ordering::Relaxed),
         }
+    }
+
+    /// Returns the current generation counter.
+    pub fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    /// Returns page IDs modified since the given generation.
+    pub fn pages_modified_since(&self, since_generation: u64) -> Vec<PageId> {
+        let page_gens = self.page_generations.lock();
+        page_gens
+            .iter()
+            .filter(|&(_, &page_gen)| page_gen > since_generation)
+            .map(|(&pid, _)| pid)
+            .collect()
+    }
+
+    /// Returns the total number of tracked pages.
+    pub fn tracked_page_count(&self) -> usize {
+        self.page_generations.lock().len()
     }
 
     /// Records a B-tree page split event.

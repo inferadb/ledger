@@ -695,6 +695,252 @@ async fn read_exact_or_truncated<R: AsyncRead + Unpin>(
     })
 }
 
+// ============================================================================
+// Incremental snapshot format
+// ============================================================================
+
+/// Incremental snapshot magic bytes (distinguishes from full snapshots).
+pub const INCREMENTAL_MAGIC: &[u8; 4] = b"LSNI";
+
+/// Incremental snapshot format version.
+pub const SNAPSHOT_TYPE_INCREMENTAL: u8 = 1;
+
+/// Maximum allowed page data size in an incremental snapshot (16 MiB).
+///
+/// Pages larger than this are rejected during read to prevent OOM.
+const INCREMENTAL_MAX_PAGE_SIZE: u32 = 16 * 1024 * 1024;
+
+/// Writes an incremental (delta) snapshot containing only pages modified
+/// since a base generation.
+///
+/// The file format (all inside a zstd-compressed stream):
+///
+/// ```text
+/// [magic: 4 bytes "LSNI"]
+/// [version: 1 byte]
+/// [base_generation: u64 LE]
+/// [current_generation: u64 LE]
+/// [page_count: u64 LE]
+/// For each page:
+///   [page_id: u64 LE]
+///   [page_data_len: u32 LE]
+///   [page_data: variable]
+/// ```
+///
+/// After the compressed stream, a 32-byte SHA-256 checksum is appended
+/// (same scheme as the full snapshot format).
+pub struct IncrementalSnapshotWriter<W: AsyncWrite + Unpin> {
+    encoder: ZstdEncoder<HashingWriter<W>>,
+}
+
+impl<W: AsyncWrite + Unpin> IncrementalSnapshotWriter<W> {
+    /// Creates a new incremental snapshot writer wrapping the given writer.
+    pub fn new(writer: W) -> Self {
+        let hashing = HashingWriter::new(writer);
+        let encoder =
+            ZstdEncoder::with_quality(hashing, async_compression::Level::Precise(ZSTD_LEVEL));
+        Self { encoder }
+    }
+
+    /// Writes the incremental snapshot header.
+    pub async fn write_header(
+        &mut self,
+        base_generation: u64,
+        current_generation: u64,
+    ) -> Result<(), SnapshotError> {
+        self.encoder.write_all(INCREMENTAL_MAGIC).await.context(IoSnafu)?;
+        self.encoder.write_all(&[SNAPSHOT_TYPE_INCREMENTAL]).await.context(IoSnafu)?;
+        self.encoder.write_all(&base_generation.to_le_bytes()).await.context(IoSnafu)?;
+        self.encoder.write_all(&current_generation.to_le_bytes()).await.context(IoSnafu)?;
+        Ok(())
+    }
+
+    /// Writes the page count.
+    pub async fn write_page_count(&mut self, count: u64) -> Result<(), SnapshotError> {
+        self.encoder.write_all(&count.to_le_bytes()).await.context(IoSnafu)?;
+        Ok(())
+    }
+
+    /// Writes a single page entry (page_id + raw page data).
+    pub async fn write_page(
+        &mut self,
+        page_id: u64,
+        page_data: &[u8],
+    ) -> Result<(), SnapshotError> {
+        let data_len = u32::try_from(page_data.len()).map_err(|_| SnapshotError::InvalidEntry {
+            reason: format!("Page data too large: {} bytes", page_data.len()),
+        })?;
+        self.encoder.write_all(&page_id.to_le_bytes()).await.context(IoSnafu)?;
+        self.encoder.write_all(&data_len.to_le_bytes()).await.context(IoSnafu)?;
+        self.encoder.write_all(page_data).await.context(IoSnafu)?;
+        Ok(())
+    }
+
+    /// Finalizes the zstd stream and writes the SHA-256 checksum footer.
+    pub async fn finish(mut self) -> Result<W, SnapshotError> {
+        self.encoder.shutdown().await.context(IoSnafu)?;
+        let hashing_writer = self.encoder.into_inner();
+        let (mut inner, checksum) = hashing_writer.finalize();
+        inner.write_all(&checksum).await.context(IoSnafu)?;
+        inner.flush().await.context(IoSnafu)?;
+        Ok(inner)
+    }
+}
+
+/// Header data parsed from an incremental snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncrementalSnapshotHeader {
+    /// The generation the delta is computed relative to.
+    pub base_generation: u64,
+    /// The generation this snapshot captures up to.
+    pub current_generation: u64,
+}
+
+/// Reads an incremental (delta) snapshot, verifying integrity.
+pub struct IncrementalSnapshotReader;
+
+impl IncrementalSnapshotReader {
+    /// Reads and validates the incremental snapshot header from a
+    /// decompressed stream. Returns the header metadata.
+    pub async fn read_header<R: AsyncRead + Unpin>(
+        reader: &mut R,
+    ) -> Result<IncrementalSnapshotHeader, SnapshotError> {
+        let mut magic = [0u8; 4];
+        read_exact_or_truncated(reader, &mut magic, "incremental magic").await?;
+        if &magic != INCREMENTAL_MAGIC {
+            return Err(SnapshotError::BadMagic { found: magic });
+        }
+
+        let mut version_buf = [0u8; 1];
+        reader.read_exact(&mut version_buf).await.context(IoSnafu)?;
+        if version_buf[0] > SNAPSHOT_TYPE_INCREMENTAL {
+            return Err(SnapshotError::UnsupportedVersion { version: version_buf[0] });
+        }
+
+        let mut buf = [0u8; 8];
+        reader.read_exact(&mut buf).await.context(IoSnafu)?;
+        let base_generation = u64::from_le_bytes(buf);
+
+        reader.read_exact(&mut buf).await.context(IoSnafu)?;
+        let current_generation = u64::from_le_bytes(buf);
+
+        Ok(IncrementalSnapshotHeader { base_generation, current_generation })
+    }
+
+    /// Reads the page count (u64 LE) from the decompressed stream.
+    pub async fn read_page_count<R: AsyncRead + Unpin>(
+        reader: &mut R,
+    ) -> Result<u64, SnapshotError> {
+        let mut buf = [0u8; 8];
+        reader.read_exact(&mut buf).await.context(IoSnafu)?;
+        Ok(u64::from_le_bytes(buf))
+    }
+
+    /// Reads a single page entry (page_id, page_data).
+    pub async fn read_page<R: AsyncRead + Unpin>(
+        reader: &mut R,
+    ) -> Result<(u64, Vec<u8>), SnapshotError> {
+        let mut id_buf = [0u8; 8];
+        read_exact_or_truncated(reader, &mut id_buf, "page_id").await?;
+        let page_id = u64::from_le_bytes(id_buf);
+
+        let mut len_buf = [0u8; 4];
+        read_exact_or_truncated(reader, &mut len_buf, "page_data_len").await?;
+        let data_len = u32::from_le_bytes(len_buf);
+
+        if data_len > INCREMENTAL_MAX_PAGE_SIZE {
+            return Err(SnapshotError::InvalidEntry {
+                reason: format!(
+                    "page_data_len={data_len} exceeds {} byte limit",
+                    INCREMENTAL_MAX_PAGE_SIZE
+                ),
+            });
+        }
+
+        let mut data = vec![0u8; data_len as usize];
+        read_exact_or_truncated(reader, &mut data, "page_data").await?;
+
+        Ok((page_id, data))
+    }
+
+    /// Creates a zstd decompression reader from a buffered reader.
+    pub fn decompressor<R: AsyncRead + Unpin>(reader: BufReader<R>) -> ZstdDecoder<BufReader<R>> {
+        ZstdDecoder::new(reader)
+    }
+}
+
+/// Synchronous reader for incremental snapshots, for use inside
+/// `tokio::task::block_in_place()` during snapshot installation.
+pub struct SyncIncrementalSnapshotReader;
+
+impl SyncIncrementalSnapshotReader {
+    /// Reads and validates the incremental snapshot header.
+    pub fn read_header<R: std::io::Read>(
+        reader: &mut R,
+    ) -> Result<IncrementalSnapshotHeader, SnapshotError> {
+        let mut magic = [0u8; 4];
+        sync_read_exact_or_truncated(reader, &mut magic, "incremental magic")?;
+        if &magic != INCREMENTAL_MAGIC {
+            return Err(SnapshotError::BadMagic { found: magic });
+        }
+
+        let mut version_buf = [0u8; 1];
+        reader
+            .read_exact(&mut version_buf)
+            .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
+        if version_buf[0] > SNAPSHOT_TYPE_INCREMENTAL {
+            return Err(SnapshotError::UnsupportedVersion { version: version_buf[0] });
+        }
+
+        let mut buf = [0u8; 8];
+        reader
+            .read_exact(&mut buf)
+            .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
+        let base_generation = u64::from_le_bytes(buf);
+
+        reader
+            .read_exact(&mut buf)
+            .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
+        let current_generation = u64::from_le_bytes(buf);
+
+        Ok(IncrementalSnapshotHeader { base_generation, current_generation })
+    }
+
+    /// Reads a u64 LE from the stream.
+    pub fn read_u64<R: std::io::Read>(reader: &mut R) -> Result<u64, SnapshotError> {
+        let mut buf = [0u8; 8];
+        reader
+            .read_exact(&mut buf)
+            .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
+        Ok(u64::from_le_bytes(buf))
+    }
+
+    /// Reads a single page entry (page_id, page_data).
+    pub fn read_page<R: std::io::Read>(reader: &mut R) -> Result<(u64, Vec<u8>), SnapshotError> {
+        let mut id_buf = [0u8; 8];
+        sync_read_exact_or_truncated(reader, &mut id_buf, "page_id")?;
+        let page_id = u64::from_le_bytes(id_buf);
+
+        let mut len_buf = [0u8; 4];
+        sync_read_exact_or_truncated(reader, &mut len_buf, "page_data_len")?;
+        let data_len = u32::from_le_bytes(len_buf);
+
+        if data_len > INCREMENTAL_MAX_PAGE_SIZE {
+            return Err(SnapshotError::InvalidEntry {
+                reason: format!(
+                    "page_data_len={data_len} exceeds {} byte limit",
+                    INCREMENTAL_MAX_PAGE_SIZE
+                ),
+            });
+        }
+
+        let mut data = vec![0u8; data_len as usize];
+        sync_read_exact_or_truncated(reader, &mut data, "page_data")?;
+
+        Ok((page_id, data))
+    }
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     inferadb_ledger_types::bytes_to_hex(bytes)
 }
@@ -1365,5 +1611,176 @@ mod tests {
         assert_eq!(SnapshotReader::read_table_count(&mut decoder).await.unwrap(), 0);
         assert_eq!(SnapshotReader::read_entity_count(&mut decoder).await.unwrap(), 0);
         assert_eq!(SnapshotReader::read_event_count(&mut decoder).await.unwrap(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Incremental snapshot tests
+    // -----------------------------------------------------------------------
+
+    /// Round-trip test: write an incremental snapshot with pages, read it back.
+    #[tokio::test]
+    async fn test_incremental_snapshot_round_trip() {
+        let base_gen = 5;
+        let current_gen = 10;
+        let pages: Vec<(u64, Vec<u8>)> =
+            vec![(1, vec![0xAA; 4096]), (7, vec![0xBB; 4096]), (42, vec![0xCC; 2048])];
+
+        // Write
+        let file = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
+        let mut writer = IncrementalSnapshotWriter::new(file);
+        writer.write_header(base_gen, current_gen).await.unwrap();
+        writer.write_page_count(pages.len() as u64).await.unwrap();
+        for (pid, data) in &pages {
+            writer.write_page(*pid, data).await.unwrap();
+        }
+        let mut file = writer.finish().await.unwrap();
+
+        // Verify checksum
+        let file_size = file.seek(std::io::SeekFrom::End(0)).await.unwrap();
+        file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+        SnapshotReader::verify_checksum(&mut file, file_size).await.unwrap();
+
+        // Read back
+        file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+        let buf_reader = BufReader::new(file.take(file_size - CHECKSUM_SIZE as u64));
+        let mut decoder = IncrementalSnapshotReader::decompressor(buf_reader);
+
+        let header = IncrementalSnapshotReader::read_header(&mut decoder).await.unwrap();
+        assert_eq!(header.base_generation, base_gen);
+        assert_eq!(header.current_generation, current_gen);
+
+        let page_count = IncrementalSnapshotReader::read_page_count(&mut decoder).await.unwrap();
+        assert_eq!(page_count, 3);
+
+        for (expected_pid, expected_data) in &pages {
+            let (pid, data) = IncrementalSnapshotReader::read_page(&mut decoder).await.unwrap();
+            assert_eq!(pid, *expected_pid);
+            assert_eq!(data, *expected_data);
+        }
+    }
+
+    /// Empty incremental snapshot (zero pages) round-trips.
+    #[tokio::test]
+    async fn test_incremental_snapshot_empty_round_trip() {
+        let file = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
+        let mut writer = IncrementalSnapshotWriter::new(file);
+        writer.write_header(0, 0).await.unwrap();
+        writer.write_page_count(0).await.unwrap();
+        let mut file = writer.finish().await.unwrap();
+
+        let file_size = file.seek(std::io::SeekFrom::End(0)).await.unwrap();
+        file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+        SnapshotReader::verify_checksum(&mut file, file_size).await.unwrap();
+
+        file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+        let buf_reader = BufReader::new(file.take(file_size - CHECKSUM_SIZE as u64));
+        let mut decoder = IncrementalSnapshotReader::decompressor(buf_reader);
+
+        let header = IncrementalSnapshotReader::read_header(&mut decoder).await.unwrap();
+        assert_eq!(header.base_generation, 0);
+        assert_eq!(header.current_generation, 0);
+
+        let count = IncrementalSnapshotReader::read_page_count(&mut decoder).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// Bad magic is rejected for incremental snapshots.
+    #[tokio::test]
+    async fn test_incremental_snapshot_bad_magic() {
+        let file = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
+        let hashing = HashingWriter::new(file);
+        let mut encoder =
+            ZstdEncoder::with_quality(hashing, async_compression::Level::Precise(ZSTD_LEVEL));
+
+        encoder.write_all(b"BAAD").await.unwrap();
+        encoder.write_all(&[1]).await.unwrap();
+        encoder.write_all(&0u64.to_le_bytes()).await.unwrap();
+        encoder.write_all(&0u64.to_le_bytes()).await.unwrap();
+        encoder.shutdown().await.unwrap();
+
+        let hashing = encoder.into_inner();
+        let (mut file, checksum) = hashing.finalize();
+        file.write_all(&checksum).await.unwrap();
+        file.flush().await.unwrap();
+
+        let file_size = file.seek(std::io::SeekFrom::End(0)).await.unwrap();
+        file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+
+        let buf_reader = BufReader::new(file.take(file_size - CHECKSUM_SIZE as u64));
+        let mut decoder = IncrementalSnapshotReader::decompressor(buf_reader);
+
+        let result = IncrementalSnapshotReader::read_header(&mut decoder).await;
+        assert!(matches!(result, Err(SnapshotError::BadMagic { .. })));
+    }
+
+    /// Oversized page data is rejected during read.
+    #[tokio::test]
+    async fn test_incremental_snapshot_oversized_page_rejected() {
+        let file = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
+        let hashing = HashingWriter::new(file);
+        let mut encoder =
+            ZstdEncoder::with_quality(hashing, async_compression::Level::Precise(ZSTD_LEVEL));
+
+        // Valid header
+        encoder.write_all(INCREMENTAL_MAGIC).await.unwrap();
+        encoder.write_all(&[SNAPSHOT_TYPE_INCREMENTAL]).await.unwrap();
+        encoder.write_all(&0u64.to_le_bytes()).await.unwrap();
+        encoder.write_all(&1u64.to_le_bytes()).await.unwrap();
+
+        // 1 page
+        encoder.write_all(&1u64.to_le_bytes()).await.unwrap();
+
+        // page_id
+        encoder.write_all(&1u64.to_le_bytes()).await.unwrap();
+        // page_data_len = u32::MAX (way over limit)
+        encoder.write_all(&u32::MAX.to_le_bytes()).await.unwrap();
+
+        encoder.shutdown().await.unwrap();
+        let hashing = encoder.into_inner();
+        let (mut file, checksum) = hashing.finalize();
+        file.write_all(&checksum).await.unwrap();
+        file.flush().await.unwrap();
+
+        let file_size = file.seek(std::io::SeekFrom::End(0)).await.unwrap();
+        file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+
+        let buf_reader = BufReader::new(file.take(file_size - CHECKSUM_SIZE as u64));
+        let mut decoder = IncrementalSnapshotReader::decompressor(buf_reader);
+
+        IncrementalSnapshotReader::read_header(&mut decoder).await.unwrap();
+        let count = IncrementalSnapshotReader::read_page_count(&mut decoder).await.unwrap();
+        assert_eq!(count, 1);
+
+        let result = IncrementalSnapshotReader::read_page(&mut decoder).await;
+        assert!(
+            matches!(result, Err(SnapshotError::InvalidEntry { .. })),
+            "Expected InvalidEntry for oversized page, got: {result:?}"
+        );
+    }
+
+    /// Incremental snapshot with many pages compresses effectively.
+    #[tokio::test]
+    async fn test_incremental_snapshot_compression() {
+        let file = tokio::fs::File::from_std(tempfile::tempfile().unwrap());
+        let mut writer = IncrementalSnapshotWriter::new(file);
+        writer.write_header(0, 100).await.unwrap();
+
+        let page_count = 100u64;
+        writer.write_page_count(page_count).await.unwrap();
+        let mut raw_size: usize = 0;
+        for i in 0..page_count {
+            // Repetitive data compresses well
+            let data = vec![0x42u8; 4096];
+            raw_size += 8 + 4 + data.len(); // page_id + len + data
+            writer.write_page(i, &data).await.unwrap();
+        }
+
+        let mut file = writer.finish().await.unwrap();
+        let file_size = file.seek(std::io::SeekFrom::End(0)).await.unwrap() as usize;
+
+        assert!(
+            file_size < raw_size,
+            "Compressed incremental snapshot ({file_size}) should be smaller than raw ({raw_size})"
+        );
     }
 }

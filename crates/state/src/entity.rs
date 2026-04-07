@@ -5,7 +5,7 @@
 //! operating within an existing transaction (e.g., snapshot restoration,
 //! state root recomputation).
 
-use inferadb_ledger_store::{ReadTransaction, StorageBackend, WriteTransaction, tables};
+use inferadb_ledger_store::{ReadTransaction, StorageBackend, TableId, WriteTransaction, tables};
 use inferadb_ledger_types::{CodecError, Entity, VaultId, decode, encode};
 use snafu::{ResultExt, Snafu};
 
@@ -53,7 +53,7 @@ impl EntityStore {
     ) -> Result<Option<Entity>> {
         let storage_key = encode_storage_key(vault, key);
 
-        match txn.get::<tables::Entities>(&storage_key).context(StorageSnafu)? {
+        match txn.get_raw(TableId::Entities, &storage_key).context(StorageSnafu)? {
             Some(data) => {
                 let entity = decode(&data).context(CodecSnafu)?;
                 Ok(Some(entity))
@@ -97,7 +97,7 @@ impl EntityStore {
         key: &[u8],
     ) -> Result<bool> {
         let storage_key = encode_storage_key(vault, key);
-        let existed = txn.delete::<tables::Entities>(&storage_key).context(StorageSnafu)?;
+        let existed = txn.delete_raw(TableId::Entities, &storage_key).context(StorageSnafu)?;
         Ok(existed)
     }
 
@@ -112,7 +112,7 @@ impl EntityStore {
         key: &[u8],
     ) -> Result<bool> {
         let storage_key = encode_storage_key(vault, key);
-        Ok(txn.get::<tables::Entities>(&storage_key).context(StorageSnafu)?.is_some())
+        Ok(txn.get_raw(TableId::Entities, &storage_key).context(StorageSnafu)?.is_some())
     }
 
     /// Lists entities in a vault with pagination.

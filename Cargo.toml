@@ -72,6 +72,9 @@ schemars = "1"
 snafu = "0.9"
 thiserror = "2"
 
+# Parallelism
+rayon = "1.10"
+
 # Concurrency
 parking_lot = "0.12"
 arc-swap = "1"

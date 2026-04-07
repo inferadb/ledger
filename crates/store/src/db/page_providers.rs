@@ -37,7 +37,7 @@ impl<B: StorageBackend> PageProvider for CachingReadPageProvider<'_, '_, B> {
         Ok(page)
     }
 
-    fn write_page(&mut self, _page: Page) {
+    fn write_page(&mut self, _page: &Page) {
         panic!("write_page called on read-only caching page provider");
     }
 
@@ -85,11 +85,12 @@ impl<B: StorageBackend> PageProvider for BufferedWritePageProvider<'_, '_, B> {
         self.db.read_page(page_id)
     }
 
-    fn write_page(&mut self, mut page: Page) {
+    fn write_page(&mut self, page: &Page) {
         // Update checksum and store in local buffer (NOT shared cache)
         // This ensures concurrent read transactions don't see uncommitted writes
-        page.update_checksum();
-        self.dirty_pages.insert(page.id, page);
+        let mut owned = page.clone();
+        owned.update_checksum();
+        self.dirty_pages.insert(owned.id, owned);
     }
 
     fn allocate_page(&mut self, page_type: PageType) -> Page {
@@ -138,7 +139,7 @@ impl<B: StorageBackend> PageProvider for BufferedReadPageProvider<'_, '_, B> {
         self.db.read_page(page_id)
     }
 
-    fn write_page(&mut self, _page: Page) {
+    fn write_page(&mut self, _page: &Page) {
         panic!("write_page called on read-only buffered page provider");
     }
 

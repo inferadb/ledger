@@ -33,6 +33,9 @@ base64.workspace = true
 # Error handling
 snafu.workspace = true
 
+# Parallelism
+rayon.workspace = true
+
 # Concurrency
 parking_lot.workspace = true
 

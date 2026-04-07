@@ -13,7 +13,10 @@ use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{Operation, OrganizationId, VaultId};
 use snafu::{ResultExt, Snafu};
 
-use super::keys::{KeyTier, SystemKeys};
+use super::{
+    keys::{KeyTier, SystemKeys},
+    types::SigningKey,
+};
 use crate::state::{StateError, StateLayer};
 
 pub mod audit;
@@ -130,12 +133,22 @@ pub(super) fn require_tier(key: &str, expected: KeyTier) -> Result<()> {
 /// [`StateLayer`] is internally thread-safe via `inferadb-ledger-store`'s MVCC.
 pub struct SystemOrganizationService<B: StorageBackend> {
     pub(super) state: Arc<StateLayer<B>>,
+    /// In-memory cache for signing keys keyed by kid (UUID key identifier).
+    ///
+    /// Avoids two B+ tree lookups per JWT verification on the hot path.
+    pub(super) signing_key_cache: moka::sync::Cache<String, SigningKey>,
 }
 
 impl<B: StorageBackend> SystemOrganizationService<B> {
     /// Creates a new system organization service.
     pub fn new(state: Arc<StateLayer<B>>) -> Self {
-        Self { state }
+        Self {
+            state,
+            signing_key_cache: moka::sync::Cache::builder()
+                .max_capacity(100)
+                .time_to_live(std::time::Duration::from_secs(60))
+                .build(),
+        }
     }
 
     // =========================================================================

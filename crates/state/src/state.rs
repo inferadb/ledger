@@ -11,7 +11,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use inferadb_ledger_store::{
-    CompactionStats, Database, DatabaseStats, StorageBackend, Table, WriteTransaction, tables,
+    CompactionStats, Database, DatabaseStats, StorageBackend, Table, TableId, WriteTransaction,
+    tables,
 };
 use inferadb_ledger_types::{
     Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus, decode, encode,
@@ -335,7 +336,8 @@ impl<B: StorageBackend> StateLayer<B> {
                     let local_key = key.as_bytes();
                     let storage_key = encode_storage_key(vault, local_key);
 
-                    let existing = txn.get::<tables::Entities>(&storage_key).context(StoreSnafu)?;
+                    let existing =
+                        txn.get_raw(TableId::Entities, &storage_key).context(StoreSnafu)?;
 
                     let is_update = existing.is_some();
                     let entity_data =
@@ -381,7 +383,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     let storage_key = encode_storage_key(vault, local_key);
 
                     let existed =
-                        txn.delete::<tables::Entities>(&storage_key).context(StoreSnafu)?;
+                        txn.delete_raw(TableId::Entities, &storage_key).context(StoreSnafu)?;
 
                     if existed {
                         dirty_keys.push(local_key.to_vec());
@@ -396,7 +398,7 @@ impl<B: StorageBackend> StateLayer<B> {
                     let storage_key = encode_storage_key(vault, local_key);
 
                     let existed =
-                        txn.delete::<tables::Entities>(&storage_key).context(StoreSnafu)?;
+                        txn.delete_raw(TableId::Entities, &storage_key).context(StoreSnafu)?;
 
                     if existed {
                         dirty_keys.push(local_key.to_vec());
@@ -577,7 +579,7 @@ impl<B: StorageBackend> StateLayer<B> {
         let storage_key = encode_storage_key(vault, key);
         let txn = self.db.read().context(StoreSnafu)?;
 
-        match txn.get::<tables::Entities>(&storage_key).context(StoreSnafu)? {
+        match txn.get_raw(TableId::Entities, &storage_key).context(StoreSnafu)? {
             Some(data) => {
                 let entity = decode(&data).context(CodecSnafu)?;
                 Ok(Some(entity))

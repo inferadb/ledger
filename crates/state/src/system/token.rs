@@ -125,13 +125,24 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         }
 
         self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.signing_key_cache.invalidate(&key.kid);
         Ok(())
     }
 
     /// Looks up a signing key by its kid (UUID key identifier).
     ///
+    /// Returns a cached result when available, falling back to two B+ tree
+    /// lookups (kid index then primary entity) on a cache miss.
+    /// Results are cached for up to 60 seconds with a capacity of 100 entries.
+    ///
     /// Returns `None` if no key exists with the given kid.
     pub fn get_signing_key_by_kid(&self, kid: &str) -> Result<Option<SigningKey>> {
+        // Cache hit — avoid both B+ tree lookups.
+        if let Some(cached) = self.signing_key_cache.get(kid) {
+            return Ok(Some(cached));
+        }
+
+        // Cache miss — kid index lookup.
         let index_key = SystemKeys::signing_key_kid_index(kid);
         let entity_opt =
             self.state.get_entity(SYSTEM_VAULT_ID, index_key.as_bytes()).context(StateSnafu)?;
@@ -141,6 +152,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             None => return Ok(None),
         };
 
+        // Primary entity lookup.
         let primary_key = SystemKeys::signing_key(id);
         let entity_opt =
             self.state.get_entity(SYSTEM_VAULT_ID, primary_key.as_bytes()).context(StateSnafu)?;
@@ -148,6 +160,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         match entity_opt {
             Some(entity) => {
                 let key: SigningKey = decode(&entity.value).context(CodecSnafu)?;
+                self.signing_key_cache.insert(kid.to_owned(), key.clone());
                 Ok(Some(key))
             },
             None => Ok(None),
@@ -320,6 +333,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         }
 
         self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.signing_key_cache.invalidate(kid);
         Ok(Some(key))
     }
 
@@ -349,6 +363,10 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         });
 
         self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+
+        for key in &keys {
+            self.signing_key_cache.invalidate(&key.kid);
+        }
 
         Ok(keys.len() as u64)
     }

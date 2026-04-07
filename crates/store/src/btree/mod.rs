@@ -66,7 +66,7 @@ pub trait PageProvider {
     fn read_page(&self, page_id: PageId) -> Result<Page>;
 
     /// Writes a page to the cache/storage.
-    fn write_page(&mut self, page: Page);
+    fn write_page(&mut self, page: &Page);
 
     /// Allocates a new page of the given type.
     fn allocate_page(&mut self, page_type: PageType) -> Page;
@@ -260,7 +260,7 @@ impl<P: PageProvider> BTree<P> {
                 leaf.insert(0, key, value)?;
             }
             self.root_page = page.id;
-            self.provider.write_page(page);
+            self.provider.write_page(&page);
             return Ok(None);
         }
 
@@ -275,7 +275,7 @@ impl<P: PageProvider> BTree<P> {
                 branch.insert(0, &separator_key, self.root_page)?;
             }
             self.root_page = new_root.id;
-            self.provider.write_page(new_root);
+            self.provider.write_page(&new_root);
         }
 
         Ok(old_value)
@@ -322,7 +322,7 @@ impl<P: PageProvider> BTree<P> {
                             }
                         }
                         drop(leaf);
-                        self.provider.write_page(page);
+                        self.provider.write_page(&page);
                         Ok((None, old_value))
                     },
                     SearchResult::NotFound(idx) => {
@@ -330,7 +330,7 @@ impl<P: PageProvider> BTree<P> {
                         if leaf.can_insert(key, value) {
                             leaf.insert(idx, key, value)?;
                             drop(leaf);
-                            self.provider.write_page(page);
+                            self.provider.write_page(&page);
                             Ok((None, old_value))
                         } else {
                             drop(leaf);
@@ -361,7 +361,7 @@ impl<P: PageProvider> BTree<P> {
                             new_child,
                         )?;
                         drop(branch);
-                        self.provider.write_page(page);
+                        self.provider.write_page(&page);
                         Ok((None, old_value))
                     } else {
                         // Branch is full, need to split
@@ -420,8 +420,8 @@ impl<P: PageProvider> BTree<P> {
             }
         }
 
-        self.provider.write_page(page.clone());
-        self.provider.write_page(new_page);
+        self.provider.write_page(page);
+        self.provider.write_page(&new_page);
 
         Ok((Some((split_result.separator_key, split_result.new_page_id)), old_value))
     }
@@ -458,8 +458,8 @@ impl<P: PageProvider> BTree<P> {
             insert_separator_into_branch(&mut branch, key, original_child, right_child)?;
         }
 
-        self.provider.write_page(page.clone());
-        self.provider.write_page(new_page);
+        self.provider.write_page(page);
+        self.provider.write_page(&new_page);
 
         Ok((Some((split_result.separator_key, split_result.new_page_id)), old_value))
     }
@@ -501,7 +501,7 @@ impl<P: PageProvider> BTree<P> {
                     self.provider.free_page(page.id);
                     self.root_page = 0;
                 } else {
-                    self.provider.write_page(page);
+                    self.provider.write_page(&page);
                 }
 
                 Ok(Some(old_value))
@@ -719,7 +719,7 @@ impl<P: PageProvider> BTree<P> {
             let mut current_page = current_page;
             let mut next_page = next_page;
             merge_leaves(&mut current_page, &mut next_page)?;
-            self.provider.write_page(current_page);
+            self.provider.write_page(&current_page);
 
             // Update parent branch: remove the separator between current and next
             if parent_id != 0 {
@@ -757,7 +757,7 @@ impl<P: PageProvider> BTree<P> {
                         self.root_page = only_child;
                         stats.pages_freed += 1;
                     } else {
-                        self.provider.write_page(parent_page);
+                        self.provider.write_page(&parent_page);
                     }
                 }
             }
@@ -1107,8 +1107,8 @@ mod tests {
             self.pages.get(&page_id).cloned().ok_or(Error::PageNotFound { page_id })
         }
 
-        fn write_page(&mut self, page: Page) {
-            self.pages.insert(page.id, page);
+        fn write_page(&mut self, page: &Page) {
+            self.pages.insert(page.id, page.clone());
         }
 
         fn allocate_page(&mut self, page_type: PageType) -> Page {

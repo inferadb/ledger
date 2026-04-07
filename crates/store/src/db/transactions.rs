@@ -98,6 +98,31 @@ impl<'db, B: StorageBackend> ReadTransaction<'db, B> {
         Ok(self.get::<T>(key)?.is_some())
     }
 
+    /// Gets a value by raw key bytes, bypassing `Key::encode` overhead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails during the B-tree lookup.
+    pub fn get_raw(&self, table_id: TableId, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let root = self.snapshot.table_roots[table_id as usize];
+        if root == 0 {
+            return Ok(None);
+        }
+
+        let provider = CachingReadPageProvider { db: self.db, page_cache: &self.page_cache };
+        let btree = BTree::new(root, provider);
+        btree.get(key)
+    }
+
+    /// Checks key existence by raw bytes, bypassing `Key::encode` overhead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails during the B-tree lookup.
+    pub fn contains_raw(&self, table_id: TableId, key: &[u8]) -> Result<bool> {
+        Ok(self.get_raw(table_id, key)?.is_some())
+    }
+
     /// Returns the first (smallest key) entry in a table.
     ///
     /// # Errors
@@ -384,6 +409,50 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         btree.get(&key_bytes)
     }
 
+    /// Gets a value by raw key bytes from a write transaction.
+    ///
+    /// Sees uncommitted writes within this transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read fails during the B-tree lookup.
+    pub fn get_raw(&self, table_id: TableId, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let root = self.table_roots[table_id as usize];
+        if root == 0 {
+            return Ok(None);
+        }
+
+        let provider = BufferedReadPageProvider { db: self.db, dirty_pages: &self.dirty_pages };
+        let btree = BTree::new(root, provider);
+        btree.get(key)
+    }
+
+    /// Deletes a key by raw bytes, bypassing `Key::encode` overhead.
+    ///
+    /// Returns `true` if the key existed and was removed, `false` if not found.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a page read/write fails during the B-tree operation.
+    pub fn delete_raw(&mut self, table_id: TableId, key: &[u8]) -> Result<bool> {
+        let root = self.table_roots[table_id as usize];
+        if root == 0 {
+            return Ok(false);
+        }
+
+        let provider = BufferedWritePageProvider {
+            db: self.db,
+            txn_id: self.snapshot_id.raw(),
+            dirty_pages: &mut self.dirty_pages,
+            pages_to_free: &mut self.pages_to_free,
+        };
+
+        let mut btree = BTree::new(root, provider);
+        let existed = btree.delete(key)?.is_some();
+        self.table_roots[table_id as usize] = btree.root_page();
+        Ok(existed)
+    }
+
     /// Returns the first (smallest key) entry in a table.
     ///
     /// # Errors
@@ -451,11 +520,14 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     ///
     /// Returns [`super::Error::Io`] if flushing dirty pages or writing the header fails.
     pub fn commit(mut self) -> Result<()> {
+        // Collect dirty page IDs before pages are moved to the cache.
+        let dirty_page_ids: Vec<PageId> = self.dirty_pages.keys().copied().collect();
+
         // Record modified page IDs in the backup dirty bitmap before draining.
         // This enables incremental backups to capture exactly which pages changed.
         {
             let mut bitmap = self.db.dirty_bitmap.lock();
-            for &page_id in self.dirty_pages.keys() {
+            for &page_id in &dirty_page_ids {
                 bitmap.mark(page_id);
             }
         }
@@ -463,6 +535,15 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         // Move all buffered dirty pages into the shared cache
         for (_, page) in self.dirty_pages.drain() {
             self.db.cache.insert(page);
+        }
+
+        // Increment generation and record which pages were modified.
+        let current_gen = self.db.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        {
+            let mut page_gens = self.db.page_generations.lock();
+            for &page_id in &dirty_page_ids {
+                page_gens.insert(page_id, current_gen);
+            }
         }
 
         self.db.flush_pages()?;
