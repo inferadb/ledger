@@ -129,18 +129,14 @@ grpcurl -plaintext \
 
 **Resolution**: Retry with exponential backoff. Election should complete within seconds.
 
-```go
-// Example retry logic
-maxRetries := 5
-for i := 0; i < maxRetries; i++ {
-    resp, err := client.Write(ctx, req)
-    if status.Code(err) == codes.Unavailable {
-        time.Sleep(time.Duration(1<<i) * 100 * time.Millisecond)
-        continue
-    }
-    return resp, err
-}
+```bash
+# Retry with exponential backoff until leader is elected
+grpcurl -plaintext \
+  -d '{"organization_slug": {"id": "1"}, "client_id": {"id": "c1"}, "sequence": "1", ...}' \
+  localhost:50051 ledger.v1.WriteService/Write
 ```
+
+The SDK handles retries automatically. See [SDK Guide](../client/sdk.md) for retry configuration.
 
 ### RATE_LIMITED
 
@@ -235,7 +231,7 @@ Token-related operations (via `TokenService`) return specific error conditions:
 | `InvalidRefreshToken` | `UNAUTHENTICATED` | Refresh token is invalid or expired          |
 | `RefreshTokenReuse`   | `UNAUTHENTICATED` | Refresh token reuse detected; family revoked |
 
-> **Note:** Refresh token reuse triggers family poisoning — all tokens in the same family are eventually revoked. This is a theft detection mechanism and cannot be reversed.
+Refresh token reuse triggers family poisoning — all tokens in the same family are eventually revoked. This is a theft detection mechanism and cannot be reversed.
 
 ## Error Details
 
@@ -337,4 +333,4 @@ grpcurl -plaintext \
 
 The idempotency cache ensures the operation is only applied once.
 
-> **Note**: The idempotency cache is replicated via Raft and survives leader failover within the 24-hour TTL window. Retried requests with matching `(client_id, sequence)` return `ALREADY_COMMITTED` after leader change.
+The idempotency cache is replicated via Raft and survives leader failover within the 24-hour TTL window. Retried requests with matching `(client_id, sequence)` return `ALREADY_COMMITTED` after leader change.

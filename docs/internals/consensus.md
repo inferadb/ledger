@@ -199,13 +199,13 @@ Multiple vaults share a Raft group (region). A `state_root` divergence in one va
 ### Vault Health States
 
 ```rust
-// crates/types/src/types.rs - public API type
+// crates/types/src/types/enums.rs - public API type
 enum VaultHealth {
     Healthy,
     Diverged { expected: Hash, computed: Hash, at_height: u64 },
 }
 
-// crates/raft/src/log_storage.rs - internal runtime type
+// crates/raft/src/log_storage/types.rs - internal runtime type
 enum VaultHealthStatus {
     Healthy,
     Diverged { expected: Hash, computed: Hash, at_height: u64 },

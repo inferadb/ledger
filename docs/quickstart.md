@@ -185,19 +185,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = LedgerClient::new(config).await?;
 
     // Create organization
-    let ns = client.create_organization("my_app", Region::US_EAST_VA).await?;
-    println!("Created organization: {}", ns.slug);
+    let org = client.create_organization("my_app", Region::US_EAST_VA).await?;
+    println!("Created organization: {}", org.slug);
 
     // Create vault (returns a Snowflake vault slug)
-    let vault = client.create_vault(ns.slug).await?;
+    let vault = client.create_vault(org.slug).await?;
     println!("Created vault: {}", vault.vault_slug);
 
     // Write entity
     let ops = vec![Operation::set_entity("user:alice", b"Alice".to_vec())];
-    client.write(ns.slug, None, ops).await?;
+    client.write(org.slug, None, ops).await?;
 
     // Read it back
-    let entity = client.read(ns.slug, None, "user:alice").await?;
+    let entity = client.read(org.slug, None, "user:alice").await?;
     println!("Read: {:?}", entity);
 
     Ok(())

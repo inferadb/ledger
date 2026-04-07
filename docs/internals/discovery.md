@@ -235,7 +235,7 @@ Local cache? ─── Hit ──→ Fresh? ─── Yes ──→ Connect to r
        └─ Miss              └─ No
             │                    │
             ▼                    ▼
-    Query _system: ns:1 ────────┘
+    Query _system: org:1 ────────┘
             │
             ▼
     Connect to region leader

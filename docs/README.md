@@ -89,6 +89,7 @@ Implementation details for contributors and advanced operators.
 | `UserService`            | User accounts, emails, verification                        |
 | `AppService`             | Application management, credentials, connections           |
 | `TokenService`           | JWT token lifecycle (sessions, vault tokens, signing keys) |
+| `InvitationService`      | Organization invitation lifecycle                          |
 | `EventsService`          | Audit event queries and ingestion                          |
 | `HealthService`          | Liveness, readiness, and dependency checks                 |
 | `SystemDiscoveryService` | Peer discovery and cluster bootstrap                       |

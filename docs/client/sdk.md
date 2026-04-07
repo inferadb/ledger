@@ -489,11 +489,11 @@ let stream = client.watch_blocks(
 use inferadb_ledger_types::Region;
 
 // Create organization (requires a region for data residency)
-let ns = client.create_organization("my_app", Region::US_EAST_VA).await?;
-println!("Organization ID: {}", ns.id);
+let org = client.create_organization("my_app", Region::US_EAST_VA).await?;
+println!("Organization ID: {}", org.id);
 
 // Get organization info
-let info = client.get_organization(ns.id).await?;
+let info = client.get_organization(org.id).await?;
 println!("Status: {:?}", info.status);
 
 // List organizations
@@ -594,7 +594,7 @@ for key in &keys {
 }
 ```
 
-> **Note:** Refresh tokens use rotate-on-use semantics. Each refresh token can be used at most once — reuse triggers family poisoning (theft detection), revoking all tokens in that family.
+Refresh tokens use rotate-on-use semantics. Each refresh token can be used at most once — reuse triggers family poisoning (theft detection), revoking all tokens in that family.
 
 ## Organization Operations
 
@@ -780,7 +780,7 @@ async fn handle_errors(client: &LedgerClient) -> Result<()> {
 use inferadb_ledger_sdk::SdkError;
 use tonic::Code;
 
-match client.write(ns, vault, ops, None).await {
+match client.write(org_slug, vault, ops, None).await {
     Ok(result) => {
         println!("Committed: {}", result.tx_id);
     }
@@ -817,7 +817,7 @@ The SDK automatically retries transient errors. For custom retry logic:
 use inferadb_ledger_sdk::with_retry;
 
 let result = with_retry(&retry_policy, || async {
-    client.read(ns, None, "key").await
+    client.read(org_slug, None, "key").await
 }).await?;
 ```
 
@@ -936,11 +936,11 @@ Prefer batch operations for bulk work:
 
 ```rust
 // Good: single round-trip
-let results = client.batch_read(ns, None, keys).await?;
+let results = client.batch_read(org_slug, None, keys).await?;
 
 // Bad: N round-trips
 for key in keys {
-    let result = client.read(ns, None, key).await?;
+    let result = client.read(org_slug, None, key).await?;
 }
 ```
 

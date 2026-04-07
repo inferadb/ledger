@@ -355,7 +355,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: ledger
-  organization: inferadb
+  namespace: inferadb
 spec:
   selector:
     matchLabels:
@@ -364,7 +364,7 @@ spec:
     - port: metrics
       interval: 15s
       path: /metrics
-  organizationSelector:
+  namespaceSelector:
     matchNames:
       - inferadb
 ```

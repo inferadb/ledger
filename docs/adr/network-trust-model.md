@@ -73,7 +73,7 @@ TLS is supported for transport encryption (defense in depth) but not enforced fo
 
 - Default `listen_addr` is `127.0.0.1:50051` (localhost-only) — requires explicit override for cluster deployment
 - Optional TLS for transport encryption within the private network
-- Input validation (Task 1) and rate limiting (Task 4) protect against malformed or excessive requests from buggy upstream callers
+- Input validation and rate limiting protect against malformed or excessive requests from buggy upstream callers
 - Audit logging records all mutations with caller slug for attribution
 
 ## References

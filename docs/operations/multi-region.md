@@ -71,7 +71,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: ledger
-  organization: ledger-us-east
+  namespace: ledger-us-east
 spec:
   replicas: 3
   template:
@@ -254,7 +254,7 @@ Moving an organization to a different region:
 
 ```bash
 grpcurl -plaintext target-region-ledger:50051 \
-  -d '{"name": "migrating_ns"}' \
+  -d '{"name": "migrating_org"}' \
   ledger.v1.AdminService/CreateOrganization
 ```
 
@@ -263,7 +263,7 @@ grpcurl -plaintext target-region-ledger:50051 \
 ```bash
 # Export all entities and relationships
 grpcurl -plaintext source-region-ledger:50051 \
-  -d '{"organization_slug": {"id": "OLD_NS"}}' \
+  -d '{"organization_slug": {"slug": 7890123456}}' \
   ledger.v1.ReadService/ExportOrganization > export.json
 ```
 
@@ -285,12 +285,12 @@ Update Control's routing table to point to new region.
 ```bash
 # Verify data integrity
 grpcurl -plaintext target-region-ledger:50051 \
-  -d '{"organization_slug": {"id": "NEW_NS"}}' \
+  -d '{"organization_slug": {"slug": 1234567890}}' \
   ledger.v1.AdminService/CheckIntegrity
 
 # Delete from source (after verification period)
 grpcurl -plaintext source-region-ledger:50051 \
-  -d '{"organization_slug": {"id": "OLD_NS"}}' \
+  -d '{"organization_slug": {"slug": 7890123456}}' \
   ledger.v1.AdminService/DeleteOrganization
 ```
 

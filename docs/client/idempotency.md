@@ -2,7 +2,7 @@
 
 # Idempotency & Retry Semantics
 
-This document covers transaction identification, sequence tracking, and retry behavior.
+Transaction identification, sequence tracking, and retry behavior for Ledger writes.
 
 ## Transaction Identification
 
@@ -120,8 +120,8 @@ Client state is tracked at two levels:
 
 | Write Scope           | GetClientState Call                          | Use Case                         |
 | --------------------- | -------------------------------------------- | -------------------------------- |
-| Organization entities | `GetClientState(ns_id, client_id)`           | Control writing users, sessions  |
-| Vault relationships   | `GetClientState(ns_id, vault_id, client_id)` | App writing authorization tuples |
+| Organization entities | `GetClientState(org_slug, client_id)`           | Control writing users, sessions  |
+| Vault relationships   | `GetClientState(org_slug, vault_slug, client_id)` | App writing authorization tuples |
 
 A single client can have separate sequence streams for each scope.
 

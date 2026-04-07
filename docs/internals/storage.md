@@ -42,7 +42,7 @@ Each region's Raft group gets isolated database files under a dedicated director
 
 Ledger uses a custom B+ tree storage engine providing ACID transactions with MVCC. Each region has four databases (state.db, blocks.db, raft.db, events.db).
 
-### Raft Log Storage (log.db)
+### Raft Log Storage (raft.db)
 
 ```rust
 const LOG_ENTRIES: TableDefinition<u64, &[u8]> = TableDefinition::new("log");

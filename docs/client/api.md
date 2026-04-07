@@ -2,7 +2,7 @@
 
 # Client API
 
-This document covers read and write operations, error handling, and pagination.
+Read and write operations, error handling, and pagination for Ledger's gRPC API.
 
 ## gRPC Services Overview
 
@@ -16,6 +16,7 @@ This document covers read and write operations, error handling, and pagination.
 | `UserService`         | User CRUD, emails, credentials (passkey/TOTP/recovery), TOTP verification |
 | `AppService`          | App lifecycle, credentials, vault connections                             |
 | `TokenService`        | JWT sessions, refresh, signing key management                             |
+| `InvitationService`   | Organization invitation lifecycle                                         |
 | `EventsService`       | Audit event listing, filtering, ingestion                                 |
 | `HealthService`       | Readiness, liveness, startup probes                                       |
 | `DiscoveryService`    | Endpoint discovery, region topology                                       |
@@ -63,7 +64,7 @@ All operations are idempotent, resolved by Raft total ordering:
 | `DeleteEntity`       | exists     | deleted    | Transaction succeeds         |
 | `DeleteEntity`       | not exists | no change  | Transaction succeeds (no-op) |
 
-Note: `WriteResponse` is transaction-level (success or error), not per-operation. All operations in a transaction either succeed together or fail together.
+`WriteResponse` is transaction-level (success or error), not per-operation. All operations in a transaction either succeed together or fail together.
 
 ### Conditional Writes
 

@@ -115,7 +115,6 @@ Seahash produces a 64-bit hash formatted as a fixed 16-character hex string. Ope
 
 - `crates/raft/src/hot_key_detector.rs` — CMS implementation, rotating windows, top-k tracking
 - `crates/types/src/config.rs` — `HotKeyConfig` with defaults and validation
-- `crates/services/src/services/write.rs` — `record_hot_keys()` integration in write path
-- `crates/services/src/services/multi_region_write.rs` — Multi-region coordinator integration
+- `crates/services/src/services/write.rs` — `record_hot_keys()` integration in write path (includes multi-region coordinator)
 - `crates/raft/src/metrics.rs` — `record_hot_key_detected()` with seahash label
 - Cormode & Muthukrishnan, "An Improved Data Stream Summary: The Count-Min Sketch and its Applications" (2005)

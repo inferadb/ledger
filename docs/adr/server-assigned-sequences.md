@@ -92,7 +92,7 @@ enum WriteErrorCode {
 
 | Aspect                | Old (Sequence-Based)                     | New (UUID-Based)                                |
 | --------------------- | ---------------------------------------- | ----------------------------------------------- |
-| **Key**               | `(ns_id, vault_id, client_id, sequence)` | `(ns_id, vault_id, client_id, idempotency_key)` |
+| **Key**               | `(org_id, vault_id, client_id, sequence)` | `(org_id, vault_id, client_id, idempotency_key)` |
 | **Assignment**        | Client                                   | Client (key), Server (sequence)                 |
 | **Validation**        | `seq == last + 1`                        | Key exists in cache?                            |
 | **Retry**             | Same sequence returns cached result      | Same UUID returns cached result                 |

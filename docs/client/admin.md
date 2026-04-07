@@ -184,7 +184,7 @@ Only works on vaults in `DIVERGED` state unless `force: true` is set.
 
 Simulates vault divergence for testing recovery procedures. Forces a vault into the `DIVERGED` state without actual data corruption.
 
-**Note**: Only available when the server is built with the `test-utils` feature.
+Only available when the server is built with the `test-utils` feature.
 
 ```bash
 grpcurl -plaintext \

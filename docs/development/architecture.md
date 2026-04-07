@@ -47,7 +47,7 @@ Foundational types used by all other crates.
 - `hash.rs` - SHA-256 and seahash implementations
 - `merkle.rs` - Merkle tree and proof types
 - `error.rs` - Error types with snafu
-- `identifiers.rs` - OrganizationSlug, VaultId, NodeId, etc.
+- `types/ids.rs` - OrganizationSlug, VaultId, NodeId, etc.
 
 **Design principle:** No I/O, no external dependencies beyond crypto.
 
@@ -111,6 +111,7 @@ gRPC service implementations and server assembly.
 - `UserService` - User accounts, emails, verification
 - `AppService` - Application management, credentials, connections
 - `TokenService` - JWT token lifecycle (sessions, vault tokens, signing keys)
+- `InvitationService` - Organization invitation lifecycle
 - `EventsService` - Audit event queries and ingestion
 - `HealthService` - Health checks with dependency probes
 - `RaftService` - Node-to-node Raft RPCs
@@ -123,7 +124,7 @@ Generated protobuf code and domain type conversions.
 **Key modules:**
 
 - `generated/` - Auto-generated from `proto/ledger/v1/ledger.proto`
-- `convert.rs` - `From`/`TryFrom` conversions between proto and domain types
+- `convert/` - `From`/`TryFrom` conversions between proto and domain types
 
 ### `inferadb-ledger-server`
 
