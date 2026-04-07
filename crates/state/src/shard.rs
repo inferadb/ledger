@@ -247,39 +247,13 @@ impl<B: StorageBackend> ShardManager<B> {
         let mut vault_meta = self.vault_meta.write();
 
         for entry in &block.vault_entries {
-            // Apply operations
-            let mut dirty_keys = Vec::new();
+            // Apply operations — dirty key tracking and bucket marking are handled
+            // internally by apply_operations.
             for tx in &entry.transactions {
                 let _statuses = self
                     .state
                     .apply_operations(entry.vault, &tx.operations, entry.vault_height)
                     .context(StateSnafu)?;
-
-                // Track that we have dirty keys
-                for op in &tx.operations {
-                    match op {
-                        inferadb_ledger_types::Operation::SetEntity { key, .. }
-                        | inferadb_ledger_types::Operation::DeleteEntity { key }
-                        | inferadb_ledger_types::Operation::ExpireEntity { key, .. } => {
-                            dirty_keys.push(key.as_bytes().to_vec());
-                        },
-                        inferadb_ledger_types::Operation::CreateRelationship {
-                            resource,
-                            relation,
-                            subject,
-                        }
-                        | inferadb_ledger_types::Operation::DeleteRelationship {
-                            resource,
-                            relation,
-                            subject,
-                        } => {
-                            let rel = inferadb_ledger_types::Relationship::new(
-                                resource, relation, subject,
-                            );
-                            dirty_keys.push(rel.to_key().into_bytes());
-                        },
-                    }
-                }
             }
 
             // Compute and verify state root

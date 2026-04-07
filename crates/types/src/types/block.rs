@@ -385,11 +385,6 @@ impl Relationship {
     ) -> Self {
         Self { resource: resource.into(), relation: relation.into(), subject: subject.into() }
     }
-
-    /// Encodes relationship as a canonical string key.
-    pub fn to_key(&self) -> String {
-        format!("rel:{}#{}@{}", self.resource, self.relation, self.subject)
-    }
 }
 
 // ============================================================================

@@ -20,6 +20,7 @@ use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
 
 use crate::{
+    binary_keys::InternCategory,
     bucket::{BucketRootBuilder, NUM_BUCKETS, VaultCommitment},
     indexes::{IndexError, IndexManager},
     keys::encode_storage_key,
@@ -53,6 +54,16 @@ pub enum StateError {
     Codec {
         /// The underlying codec error.
         source: inferadb_ledger_types::CodecError,
+        /// Location where the error occurred.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// Relationship storage operation failed.
+    #[snafu(display("Relationship error: {source}"))]
+    Relationship {
+        /// The underlying relationship error.
+        source: crate::relationship::RelationshipError,
         /// Location where the error occurred.
         #[snafu(implicit)]
         location: snafu::Location,
@@ -236,6 +247,7 @@ impl<B: StorageBackend> StateLayer<B> {
     pub fn apply_operations_in_txn(
         &self,
         txn: &mut WriteTransaction<'_, B>,
+        dict: &mut crate::dictionary::VaultDictionary,
         vault: VaultId,
         operations: &[Operation],
         block_height: u64,
@@ -321,57 +333,41 @@ impl<B: StorageBackend> StateLayer<B> {
                 },
 
                 Operation::CreateRelationship { resource, relation, subject } => {
-                    let rel = Relationship::new(resource, relation, subject);
-                    let rel_key = rel.to_key();
-                    let local_key = rel_key.as_bytes();
-                    let storage_key = encode_storage_key(vault, local_key);
+                    let created = crate::relationship::RelationshipStore::create(
+                        txn, dict, vault, resource, relation, subject,
+                    )
+                    .context(RelationshipSnafu)?;
 
-                    let already_exists = txn
-                        .get::<tables::Relationships>(&storage_key)
-                        .context(StoreSnafu)?
-                        .is_some();
-
-                    if already_exists {
-                        WriteStatus::AlreadyExists
-                    } else {
-                        let encoded = encode(&rel).context(CodecSnafu)?;
-                        txn.insert::<tables::Relationships>(&storage_key, &encoded)
-                            .context(StoreSnafu)?;
-
+                    if created {
                         IndexManager::add_to_obj_index(
-                            &mut *txn, vault, resource, relation, subject,
+                            &mut *txn, dict, vault, resource, relation, subject,
                         )
                         .context(IndexSnafu)?;
                         IndexManager::add_to_subj_index(
-                            &mut *txn, vault, resource, relation, subject,
+                            &mut *txn, dict, vault, resource, relation, subject,
                         )
                         .context(IndexSnafu)?;
-
-                        dirty_keys.push(local_key.to_vec());
                         WriteStatus::Created
+                    } else {
+                        WriteStatus::AlreadyExists
                     }
                 },
 
                 Operation::DeleteRelationship { resource, relation, subject } => {
-                    let rel = Relationship::new(resource, relation, subject);
-                    let rel_key = rel.to_key();
-                    let local_key = rel_key.as_bytes();
-                    let storage_key = encode_storage_key(vault, local_key);
+                    let deleted = crate::relationship::RelationshipStore::delete(
+                        txn, dict, vault, resource, relation, subject,
+                    )
+                    .context(RelationshipSnafu)?;
 
-                    let existed =
-                        txn.delete::<tables::Relationships>(&storage_key).context(StoreSnafu)?;
-
-                    if existed {
+                    if deleted {
                         IndexManager::remove_from_obj_index(
-                            &mut *txn, vault, resource, relation, subject,
+                            &mut *txn, dict, vault, resource, relation, subject,
                         )
                         .context(IndexSnafu)?;
                         IndexManager::remove_from_subj_index(
-                            &mut *txn, vault, resource, relation, subject,
+                            &mut *txn, dict, vault, resource, relation, subject,
                         )
                         .context(IndexSnafu)?;
-
-                        dirty_keys.push(local_key.to_vec());
                         WriteStatus::Deleted
                     } else {
                         WriteStatus::NotFound
@@ -449,9 +445,25 @@ impl<B: StorageBackend> StateLayer<B> {
         operations: &[Operation],
         block_height: u64,
     ) -> Result<Vec<WriteStatus>> {
+        // Load existing dictionary so intern() reuses previously assigned IDs.
+        let read_txn = self.db.read().context(StoreSnafu)?;
+        let mut dict =
+            crate::dictionary::VaultDictionary::load(&read_txn, vault).map_err(|e| match e {
+                crate::dictionary::DictionaryError::Storage { source, .. } => {
+                    StateError::Store { source, location: snafu::location!() }
+                },
+                other => StateError::Relationship {
+                    source: crate::relationship::RelationshipError::Dictionary {
+                        source: other,
+                        location: snafu::location!(),
+                    },
+                    location: snafu::location!(),
+                },
+            })?;
+        drop(read_txn);
         let mut txn = self.begin_write()?;
         let (statuses, dirty_keys) =
-            self.apply_operations_in_txn(&mut txn, vault, operations, block_height)?;
+            self.apply_operations_in_txn(&mut txn, &mut dict, vault, operations, block_height)?;
         // Mark dirty before commit: dirty marks are conservative (trigger re-hash
         // from storage). If commit fails, the re-hash reads old data and produces
         // the correct (pre-commit) state root. If commit succeeds, dirty buckets
@@ -476,6 +488,8 @@ impl<B: StorageBackend> StateLayer<B> {
         delete_vault_keys::<B, tables::Relationships>(&mut txn, vault)?;
         delete_vault_keys::<B, tables::ObjIndex>(&mut txn, vault)?;
         delete_vault_keys::<B, tables::SubjIndex>(&mut txn, vault)?;
+        delete_vault_keys::<B, tables::StringDictionary>(&mut txn, vault)?;
+        delete_vault_keys::<B, tables::StringDictionaryReverse>(&mut txn, vault)?;
 
         txn.commit().context(StoreSnafu)?;
 
@@ -516,13 +530,23 @@ impl<B: StorageBackend> StateLayer<B> {
         relation: &str,
         subject: &str,
     ) -> Result<bool> {
-        let rel = Relationship::new(resource, relation, subject);
-        let local_key = rel.to_key();
-        let storage_key = encode_storage_key(vault, local_key.as_bytes());
-
         let txn = self.db.read().context(StoreSnafu)?;
-
-        Ok(txn.get::<tables::Relationships>(&storage_key).context(StoreSnafu)?.is_some())
+        let dict = crate::dictionary::VaultDictionary::load(&txn, vault).map_err(|e| match e {
+            crate::dictionary::DictionaryError::Storage { source, .. } => {
+                StateError::Store { source, location: snafu::location!() }
+            },
+            other => StateError::Relationship {
+                source: crate::relationship::RelationshipError::Dictionary {
+                    source: other,
+                    location: snafu::location!(),
+                },
+                location: snafu::location!(),
+            },
+        })?;
+        crate::relationship::RelationshipStore::exists(
+            &txn, &dict, vault, resource, relation, subject,
+        )
+        .context(RelationshipSnafu)
     }
 
     /// Computes state root for a vault, updating dirty bucket roots.
@@ -659,7 +683,10 @@ impl<B: StorageBackend> StateLayer<B> {
         relation: &str,
     ) -> Result<Vec<String>> {
         let txn = self.db.read().context(StoreSnafu)?;
-        IndexManager::get_subjects(&txn, vault, resource, relation).context(IndexSnafu)
+        let dict = crate::dictionary::VaultDictionary::load(&txn, vault)
+            .map_err(|e| IndexError::Dictionary { source: e, location: snafu::location!() })
+            .context(IndexSnafu)?;
+        IndexManager::get_subjects(&txn, &dict, vault, resource, relation).context(IndexSnafu)
     }
 
     /// Lists resource-relation pairs for a given subject.
@@ -674,7 +701,10 @@ impl<B: StorageBackend> StateLayer<B> {
         subject: &str,
     ) -> Result<Vec<(String, String)>> {
         let txn = self.db.read().context(StoreSnafu)?;
-        IndexManager::get_resources(&txn, vault, subject).context(IndexSnafu)
+        let dict = crate::dictionary::VaultDictionary::load(&txn, vault)
+            .map_err(|e| IndexError::Dictionary { source: e, location: snafu::location!() })
+            .context(IndexSnafu)?;
+        IndexManager::get_resources(&txn, &dict, vault, subject).context(IndexSnafu)
     }
 
     /// Lists all entities in a vault with optional prefix filter.
@@ -752,58 +782,103 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Lists all relationships in a vault.
     ///
-    /// Returns up to `limit` relationships. Use `start_after` for pagination.
+    /// Returns up to `limit` relationships. Use `start_after` for cursor-based
+    /// pagination — pass the last relationship from the previous page to resume.
     ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the read transaction or iteration fails.
-    /// Returns [`StateError::Codec`] if deserialization of any relationship fails.
+    /// Returns [`StateError::Relationship`] if dictionary loading or key decoding fails.
     pub fn list_relationships(
         &self,
         vault: VaultId,
-        start_after: Option<&str>,
+        start_after: Option<&Relationship>,
         limit: usize,
     ) -> Result<Vec<Relationship>> {
-        use crate::keys::vault_prefix;
-
         let txn = self.db.read().context(StoreSnafu)?;
+        let dict = crate::dictionary::VaultDictionary::load(&txn, vault).map_err(|e| match e {
+            crate::dictionary::DictionaryError::Storage { source, .. } => {
+                StateError::Store { source, location: snafu::location!() }
+            },
+            other => StateError::Relationship {
+                source: crate::relationship::RelationshipError::Dictionary {
+                    source: other,
+                    location: snafu::location!(),
+                },
+                location: snafu::location!(),
+            },
+        })?;
+
+        // Build start key for pagination. If start_after is provided, resolve
+        // its components through the dictionary to build a binary storage key.
+        let vault_start = crate::keys::vault_prefix(vault);
+        let start_key: Vec<u8> = if let Some(after) = start_after {
+            // Resolve the cursor relationship to its binary storage key
+            use crate::binary_keys::{
+                InternCategory, encode_relationship_local_key, split_typed_id,
+            };
+
+            let (res_type_str, res_local) =
+                split_typed_id(&after.resource).unwrap_or(("", &after.resource));
+            let (subj_type_str, subj_local) =
+                split_typed_id(&after.subject).unwrap_or(("", &after.subject));
+
+            if let (Some(res_type), Some(rel_id), Some(subj_type)) = (
+                dict.get_id(InternCategory::ResourceType, res_type_str),
+                dict.get_id(InternCategory::Relation, &after.relation),
+                dict.get_id(InternCategory::SubjectType, subj_type_str),
+            ) {
+                let local_key = encode_relationship_local_key(
+                    res_type,
+                    res_local.as_bytes(),
+                    rel_id,
+                    subj_type,
+                    subj_local.as_bytes(),
+                );
+                let mut k = encode_storage_key(vault, &local_key);
+                k.push(0); // Advance past the exact key
+                k
+            } else {
+                // Cursor relationship has unknown dictionary entries — start from beginning
+                vault_start.to_vec()
+            }
+        } else {
+            vault_start.to_vec()
+        };
 
         let mut relationships = Vec::with_capacity(limit.min(1000));
 
-        // Build the range start key.
-        // Note: Keys are ordered by (vault, bucket_id, local_key). For full
-        // vault scans without start_after, we use the 8-byte vault prefix to
-        // iterate from the first key in the vault (bucket 0).
-        let start_key = if let Some(after) = start_after {
-            let mut k = encode_storage_key(vault, after.as_bytes());
-            k.push(0);
-            k
-        } else {
-            vault_prefix(vault).to_vec()
-        };
-
-        for (key_bytes, value) in txn.iter::<tables::Relationships>().context(StoreSnafu)? {
+        for (key_bytes, _) in txn.iter::<tables::Relationships>().context(StoreSnafu)? {
             if relationships.len() >= limit {
                 break;
             }
 
-            // Skip until we reach the start key
             if key_bytes < start_key {
                 continue;
             }
 
-            // Check we're still in the same vault
             if key_bytes.len() < 9 {
                 break;
             }
-            let key_vault_id = i64::from_be_bytes(key_bytes[..8].try_into().unwrap_or([0; 8]));
-            if key_vault_id != vault.value() {
+            if key_bytes[..8] != vault_start[..] {
+                if key_bytes[..8] < vault_start[..] {
+                    continue;
+                }
                 break;
             }
 
-            let rel: Relationship = decode(&value).context(CodecSnafu)?;
-
-            relationships.push(rel);
+            // Decode binary local key (bytes after vault_id + bucket_id)
+            let local_key = &key_bytes[9..];
+            if let Some((res_type, res_id, rel_id, subj_type, subj_id)) =
+                crate::binary_keys::decode_relationship_local_key(local_key)
+                && let (Some(resource), Some(relation), Some(subject)) = (
+                    dict.resolve_typed_id(InternCategory::ResourceType, res_type, res_id),
+                    dict.resolve(InternCategory::Relation, rel_id).map(str::to_owned),
+                    dict.resolve_typed_id(InternCategory::SubjectType, subj_type, subj_id),
+                )
+            {
+                relationships.push(Relationship::new(resource, relation, subject));
+            }
         }
 
         Ok(relationships)
@@ -1001,22 +1076,12 @@ mod tests {
         assert!(!state.relationship_exists(vault, "doc:123", "viewer", "user:alice").unwrap());
     }
 
-    /// Regression test for list_relationships bug where using encode_storage_key
-    /// with an empty key caused iteration to start at bucket 185, skipping ~72%
-    /// of relationships in buckets 0-184.
-    ///
-    /// This test creates relationships with keys that hash to various buckets
-    /// (including low-numbered buckets) and verifies list_relationships returns
-    /// all of them when starting from scratch (no start_after).
+    /// Verifies list_relationships returns all relationships across all buckets.
     #[test]
     fn test_list_relationships_returns_all_buckets() {
-        use inferadb_ledger_types::bucket_id;
-
         let state = create_test_state();
         let vault = VaultId::new(1);
 
-        // Create relationships with resource names chosen to land in different buckets.
-        // We want at least some in buckets < 185 to catch the regression.
         let test_cases = vec![
             ("doc:alpha", "viewer", "user:a"),
             ("doc:beta", "viewer", "user:b"),
@@ -1027,23 +1092,6 @@ mod tests {
             ("doc:eta", "viewer", "user:g"),
             ("doc:theta", "viewer", "user:h"),
         ];
-
-        // Verify we have relationships in different bucket ranges
-        let mut has_low_bucket = false;
-        let mut has_high_bucket = false;
-        for (resource, relation, subject) in &test_cases {
-            let rel_key = format!("rel:{}#{}@{}", resource, relation, subject);
-            let bucket = bucket_id(rel_key.as_bytes());
-            if bucket < 128 {
-                has_low_bucket = true;
-            } else {
-                has_high_bucket = true;
-            }
-        }
-        assert!(
-            has_low_bucket && has_high_bucket,
-            "Test data should span both low and high buckets for meaningful coverage"
-        );
 
         // Create all relationships
         let ops: Vec<Operation> = test_cases
@@ -1058,15 +1106,13 @@ mod tests {
         let statuses = state.apply_operations(vault, &ops, 1).unwrap();
         assert!(statuses.iter().all(|s| *s == WriteStatus::Created));
 
-        // List all relationships without start_after - this is the bug scenario
+        // List all relationships without start_after
         let listed = state.list_relationships(vault, None, 100).unwrap();
 
-        // Must return all relationships, not just those in buckets >= 185
         assert_eq!(
             listed.len(),
             test_cases.len(),
-            "list_relationships should return all {} relationships, got {}. \
-             This may indicate the start key bug (starting at bucket 185 instead of 0).",
+            "list_relationships should return all {} relationships, got {}.",
             test_cases.len(),
             listed.len()
         );
@@ -1086,19 +1132,17 @@ mod tests {
 
     /// Reproduction test for Engine integration test failure.
     ///
-    /// Simulates the concurrent write + list pattern that fails in the Engine's
-    /// ledger_integration.rs tests. Writes 11 relationships (1 sequential + 10 concurrent)
-    /// and verifies all are returned by list_relationships.
+    /// Simulates the concurrent write + list pattern. Writes 11 relationships
+    /// (1 sequential + 10 concurrent) and verifies all are returned by
+    /// list_relationships.
     #[test]
     fn test_list_relationships_after_concurrent_writes() {
         use std::thread;
 
-        use inferadb_ledger_types::bucket_id;
-
         let state = create_test_state();
-        let vault = VaultId::new(20_000_002_690_000); // Same vault ID pattern as integration tests
+        let vault = VaultId::new(20_000_002_690_000);
 
-        // First: sequential write (like Engine test does)
+        // First: sequential write
         let seq_ops = vec![Operation::CreateRelationship {
             resource: "document:seq-test".to_string(),
             relation: "viewer".to_string(),
@@ -1107,15 +1151,13 @@ mod tests {
         let statuses = state.apply_operations(vault, &seq_ops, 1).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Created]);
 
-        // Verify sequential write via direct read
         assert!(
             state
                 .relationship_exists(vault, "document:seq-test", "viewer", "user:seq-test")
                 .unwrap()
         );
 
-        // Now: concurrent writes (mimicking tokio::spawn in integration test)
-        // Note: StateLayer is internally thread-safe, so we use threads
+        // Concurrent writes
         let state_arc = std::sync::Arc::new(state);
         let mut handles = Vec::new();
 
@@ -1132,13 +1174,11 @@ mod tests {
             handles.push(handle);
         }
 
-        // Wait for all concurrent writes
         for handle in handles {
             let statuses = handle.join().expect("thread panicked");
             assert_eq!(statuses, vec![WriteStatus::Created]);
         }
 
-        // Verify all concurrent writes via direct reads
         for i in 0..10 {
             assert!(
                 state_arc
@@ -1154,24 +1194,8 @@ mod tests {
             );
         }
 
-        // Debug: print bucket distribution
-        eprintln!("=== Bucket distribution ===");
-        let seq_key = "rel:document:seq-test#viewer@user:seq-test".to_string();
-        eprintln!("seq-test: bucket {}", bucket_id(seq_key.as_bytes()));
-        for i in 0..10 {
-            let key = format!("rel:document:concurrent-{}#viewer@user:concurrent-{}", i, i);
-            eprintln!("concurrent-{}: bucket {}", i, bucket_id(key.as_bytes()));
-        }
-
-        // Now: list all relationships (the operation that fails in integration tests)
         let all_relationships = state_arc.list_relationships(vault, None, 100).unwrap();
 
-        eprintln!("=== Listed {} relationships ===", all_relationships.len());
-        for rel in &all_relationships {
-            eprintln!("  {}#{}@{}", rel.resource, rel.relation, rel.subject);
-        }
-
-        // Should have all 11 relationships
         assert_eq!(
             all_relationships.len(),
             11,
@@ -1179,7 +1203,6 @@ mod tests {
             all_relationships.len()
         );
 
-        // Verify specific relationships are present
         assert!(
             all_relationships.iter().any(|r| r.resource == "document:seq-test"),
             "Sequential relationship not found in list"
@@ -1650,17 +1673,16 @@ mod tests {
         assert!(matches!(err, StateError::Codec { .. }), "Should be StateError::Codec variant");
     }
 
-    // Test the full error chain: CodecError -> IndexError -> StateError
+    // Test the full error chain: StorageError -> IndexError -> StateError
     #[test]
     fn test_state_error_chain_from_index() {
         use crate::indexes::IndexError;
 
-        // IndexError with Codec source via context
-        let malformed: &[u8] = &[0xFF];
-        let codec_result: std::result::Result<u64, inferadb_ledger_types::CodecError> =
-            inferadb_ledger_types::decode(malformed);
-        let codec_err = codec_result.expect_err("should fail");
-        let index_err = IndexError::Codec { source: codec_err, location: snafu::location!() };
+        // IndexError::Storage wraps a store error — construct one via the
+        // Storage variant directly. We just verify the StateError display chain.
+        let store_err =
+            inferadb_ledger_store::Error::Io { source: std::io::Error::other("test io error") };
+        let index_err = IndexError::Storage { source: store_err, location: snafu::location!() };
 
         // Convert IndexError -> StateError via context selector
         let state_err = StateError::Index { source: index_err, location: snafu::location!() };
@@ -1791,9 +1813,11 @@ mod tests {
 
         // Write entity data AND sentinel in the same transaction
         let mut txn = state.begin_write().unwrap();
+        let mut dict = crate::dictionary::VaultDictionary::new(vault);
         state
             .apply_operations_in_txn(
                 &mut txn,
+                &mut dict,
                 vault,
                 &[Operation::SetEntity {
                     key: "key1".into(),
@@ -1820,9 +1844,11 @@ mod tests {
 
         // Write entity data AND sentinel, but drop txn (rollback)
         let mut txn = state.begin_write().unwrap();
+        let mut dict = crate::dictionary::VaultDictionary::new(vault);
         state
             .apply_operations_in_txn(
                 &mut txn,
+                &mut dict,
                 vault,
                 &[Operation::SetEntity {
                     key: "key1".into(),

@@ -406,6 +406,8 @@ fn iter_table_raw(
         TableId::VaultHealth => collect_table!(tables::VaultHealth),
         TableId::TeamSlugIndex => collect_table!(tables::TeamSlugIndex),
         TableId::AppSlugIndex => collect_table!(tables::AppSlugIndex),
+        TableId::StringDictionary => collect_table!(tables::StringDictionary),
+        TableId::StringDictionaryReverse => collect_table!(tables::StringDictionaryReverse),
     }
 }
 

@@ -69,6 +69,19 @@ fn validate_read_key(key: &str) -> Result<(), Status> {
     Ok(())
 }
 
+/// Parses a relationship cursor string (`"resource#relation@subject"`) into a
+/// [`Relationship`](inferadb_ledger_types::Relationship) for cursor-based pagination.
+///
+/// Returns `None` if the string does not contain both `#` and `@` separators.
+fn parse_relationship_cursor(cursor: &str) -> Option<inferadb_ledger_types::Relationship> {
+    let hash_pos = cursor.find('#')?;
+    let at_pos = cursor[hash_pos..].find('@')? + hash_pos;
+    let resource = &cursor[..hash_pos];
+    let relation = &cursor[hash_pos + 1..at_pos];
+    let subject = &cursor[at_pos + 1..];
+    Some(inferadb_ledger_types::Relationship::new(resource, relation, subject))
+}
+
 /// gRPC handler for read operations.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
@@ -1892,8 +1905,9 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                     .collect()
             } else {
                 // Full scan with optional resource filter
+                let cursor_rel = resume_key.as_deref().and_then(parse_relationship_cursor);
                 let raw_rels = state
-                    .list_relationships(vault_id, resume_key.as_deref(), limit)
+                    .list_relationships(vault_id, cursor_rel.as_ref(), limit)
                     .map_err(storage_err)?;
 
                 raw_rels
@@ -2010,8 +2024,9 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // List relationships and extract unique resources matching the type prefix
         let state = &*region.state;
+        let cursor_rel = resume_key.as_deref().and_then(parse_relationship_cursor);
         let relationships = state
-            .list_relationships(vault_id, resume_key.as_deref(), limit * 10) // Over-fetch to filter
+            .list_relationships(vault_id, cursor_rel.as_ref(), limit * 10) // Over-fetch to filter
             .map_err(storage_err)?;
 
         // Extract unique resource IDs matching the type prefix

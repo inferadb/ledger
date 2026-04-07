@@ -86,6 +86,14 @@ pub enum TableId {
     AppSlugIndex = 20,
 
     // ========================================================================
+    // String Dictionary Tables (per-vault string interning)
+    // ========================================================================
+    /// Per-vault string dictionary: forward mapping (string → InternId).
+    StringDictionary = 21,
+    /// Per-vault string dictionary: reverse mapping (InternId → string).
+    StringDictionaryReverse = 22,
+
+    // ========================================================================
     // Vault-Scoped State Tables (composite key: {organization_id:8BE}{vault_id:8BE})
     // ========================================================================
     /// Vault block heights: composite key → `u64` vault block height.
@@ -100,7 +108,7 @@ pub enum TableId {
 
 impl TableId {
     /// Total number of tables.
-    pub const COUNT: usize = 21;
+    pub const COUNT: usize = 23;
 
     /// Returns the key type for this table.
     #[inline]
@@ -124,7 +132,9 @@ impl TableId {
             | Self::ClientSequences
             | Self::VaultHeights
             | Self::VaultHashes
-            | Self::VaultHealth => KeyType::Bytes,
+            | Self::VaultHealth
+            | Self::StringDictionary
+            | Self::StringDictionaryReverse => KeyType::Bytes,
 
             // u64 keys (slug → internal ID)
             Self::OrganizationSlugIndex
@@ -160,6 +170,8 @@ impl TableId {
             Self::UserSlugIndex => "user_slug_index",
             Self::TeamSlugIndex => "team_slug_index",
             Self::AppSlugIndex => "app_slug_index",
+            Self::StringDictionary => "string_dictionary",
+            Self::StringDictionaryReverse => "string_dictionary_reverse",
         }
     }
 
@@ -187,6 +199,8 @@ impl TableId {
             Self::UserSlugIndex,
             Self::TeamSlugIndex,
             Self::AppSlugIndex,
+            Self::StringDictionary,
+            Self::StringDictionaryReverse,
         ]
     }
 
@@ -215,6 +229,8 @@ impl TableId {
             18 => Some(Self::UserSlugIndex),
             19 => Some(Self::TeamSlugIndex),
             20 => Some(Self::AppSlugIndex),
+            21 => Some(Self::StringDictionary),
+            22 => Some(Self::StringDictionaryReverse),
             _ => None,
         }
     }
@@ -421,6 +437,22 @@ impl Table for VaultHealth {
     type ValueType = Vec<u8>;
 }
 
+/// String dictionary table: per-vault string interning (forward lookup).
+pub struct StringDictionary;
+impl Table for StringDictionary {
+    const ID: TableId = TableId::StringDictionary;
+    type KeyType = Vec<u8>;
+    type ValueType = Vec<u8>;
+}
+
+/// String dictionary reverse table: per-vault InternId → string resolution.
+pub struct StringDictionaryReverse;
+impl Table for StringDictionaryReverse {
+    const ID: TableId = TableId::StringDictionaryReverse;
+    type KeyType = Vec<u8>;
+    type ValueType = Vec<u8>;
+}
+
 // ============================================================================
 // Table Directory Entry
 // ============================================================================
@@ -428,7 +460,7 @@ impl Table for VaultHealth {
 /// On-disk representation of a table's metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct TableEntry {
-    /// Table identifier (0–20).
+    /// Table identifier (0–22).
     pub table_id: TableId,
     /// Root page of the B-tree (0 = empty table).
     pub root_page: u64,
@@ -515,23 +547,46 @@ mod tests {
     }
 
     #[test]
-    fn test_table_count_is_21() {
-        assert_eq!(TableId::COUNT, 21);
-        assert_eq!(TableId::all().len(), 21);
+    fn test_table_count_is_23() {
+        assert_eq!(TableId::COUNT, 23);
+        assert_eq!(TableId::all().len(), 23);
     }
 
     #[test]
     fn test_from_u8_rejects_out_of_range() {
-        assert!(TableId::from_u8(21).is_none());
+        assert!(TableId::from_u8(23).is_none());
         assert!(TableId::from_u8(255).is_none());
     }
 
     #[test]
+    fn test_string_dictionary_tables_round_trip() {
+        for (id, expected_byte) in
+            [(TableId::StringDictionary, 21u8), (TableId::StringDictionaryReverse, 22)]
+        {
+            assert_eq!(id as u8, expected_byte);
+            let recovered = TableId::from_u8(expected_byte).expect("from_u8 should succeed");
+            assert_eq!(id, recovered);
+        }
+    }
+
+    #[test]
+    fn test_string_dictionary_tables_key_types() {
+        assert_eq!(TableId::StringDictionary.key_type(), KeyType::Bytes);
+        assert_eq!(TableId::StringDictionaryReverse.key_type(), KeyType::Bytes);
+    }
+
+    #[test]
+    fn test_string_dictionary_tables_names() {
+        assert_eq!(TableId::StringDictionary.name(), "string_dictionary");
+        assert_eq!(TableId::StringDictionaryReverse.name(), "string_dictionary_reverse");
+    }
+
+    #[test]
     fn test_directory_page_fits_minimum_page_size() {
-        // With COUNT=21 tables, the directory occupies 21 * 9 = 189 bytes.
+        // With COUNT=23 tables, the directory occupies 23 * 9 = 207 bytes.
         // This must fit within the minimum 512-byte page size.
         let directory_size = TableId::COUNT * TableEntry::SIZE;
-        assert_eq!(directory_size, 189);
+        assert_eq!(directory_size, 207);
         assert!(
             directory_size <= 512,
             "directory size {directory_size} exceeds minimum 512-byte page"

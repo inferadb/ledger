@@ -200,9 +200,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             },
                         };
                         let mut all_dirty_keys = Vec::new();
+                        let mut dict =
+                            inferadb_ledger_state::dictionary::VaultDictionary::new(*vault);
                         for tx in transactions.iter() {
                             match state_layer.apply_operations_in_txn(
                                 &mut write_txn,
+                                &mut dict,
                                 *vault,
                                 &tx.operations,
                                 new_height,
@@ -293,8 +296,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             },
                         );
                         if !audit_ops.is_empty() {
+                            let mut audit_dict =
+                                inferadb_ledger_state::dictionary::VaultDictionary::new(
+                                    SYSTEM_VAULT_ID,
+                                );
                             match state_layer.apply_operations_in_txn(
                                 &mut write_txn,
+                                &mut audit_dict,
                                 SYSTEM_VAULT_ID,
                                 &audit_ops,
                                 new_height,

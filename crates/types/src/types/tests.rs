@@ -6,12 +6,6 @@ use super::*;
 use crate::hash::ZERO_HASH;
 
 #[test]
-fn relationship_to_key_format() {
-    let rel = Relationship::new("doc:123", "viewer", "user:alice");
-    assert_eq!(rel.to_key(), "rel:doc:123#viewer@user:alice");
-}
-
-#[test]
 fn set_condition_type_bytes() {
     assert_eq!(SetCondition::MustNotExist.type_byte(), 0x01);
     assert_eq!(SetCondition::MustExist.type_byte(), 0x02);

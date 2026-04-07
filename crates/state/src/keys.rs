@@ -68,18 +68,17 @@ pub fn decode_storage_key(key: &[u8]) -> Option<StorageKey> {
     Some(StorageKey { vault_id: VaultId::new(vault_id), bucket_id, local_key })
 }
 
-/// Encodes an object index key.
+/// Encodes an index key WITHOUT bucket_id.
 ///
-/// Format: obj_idx:{resource}#{relation}
-pub fn encode_obj_index_key(resource: &str, relation: &str) -> Vec<u8> {
-    format!("obj_idx:{}#{}", resource, relation).into_bytes()
-}
-
-/// Encodes a subject index key.
+/// Format: `[vault_id:8BE][local_key]`
 ///
-/// Format: subj_idx:{subject}
-pub fn encode_subj_index_key(subject: &str) -> Vec<u8> {
-    format!("subj_idx:{}", subject).into_bytes()
+/// Used for ObjIndex and SubjIndex tables which are not Merkleized
+/// and need prefix-scannable keys (bucket_id would scatter entries).
+pub fn encode_index_key(vault: VaultId, local_key: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(8 + local_key.len());
+    key.extend_from_slice(&vault.value().to_be_bytes());
+    key.extend_from_slice(local_key);
+    key
 }
 
 #[cfg(test)]
@@ -110,18 +109,36 @@ mod tests {
     }
 
     #[test]
-    fn test_index_key_formats() {
-        let obj_key = encode_obj_index_key("doc:123", "viewer");
-        assert_eq!(obj_key, b"obj_idx:doc:123#viewer");
-
-        let subj_key = encode_subj_index_key("user:alice");
-        assert_eq!(subj_key, b"subj_idx:user:alice");
-    }
-
-    #[test]
     fn test_decode_too_short() {
         assert!(decode_storage_key(&[0u8; 8]).is_none());
         assert!(decode_storage_key(&[0u8; 7]).is_none());
+    }
+
+    #[test]
+    fn encode_index_key_no_bucket() {
+        let vault = VaultId::new(1);
+        let local = b"test_key";
+        let key = encode_index_key(vault, local);
+        assert_eq!(key.len(), 8 + local.len(), "index key = 8-byte vault + local (no bucket)");
+        assert_eq!(&key[..8], &vault.value().to_be_bytes());
+        assert_eq!(&key[8..], local);
+    }
+
+    #[test]
+    fn index_key_vault_ordering() {
+        let key1 = encode_index_key(VaultId::new(1), b"abc");
+        let key2 = encode_index_key(VaultId::new(2), b"abc");
+        assert!(key1 < key2, "vault 1 sorts before vault 2");
+    }
+
+    #[test]
+    fn index_key_prefix_scannable() {
+        let vault = VaultId::new(42);
+        let key_a = encode_index_key(vault, b"prefix_aaa");
+        let key_b = encode_index_key(vault, b"prefix_bbb");
+        let prefix = encode_index_key(vault, b"prefix_");
+        assert!(key_a.starts_with(&prefix));
+        assert!(key_b.starts_with(&prefix));
     }
 
     #[test]

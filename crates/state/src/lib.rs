@@ -14,8 +14,10 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod binary_keys;
 mod block_archive;
 mod bucket;
+pub mod dictionary;
 mod engine;
 mod entity;
 mod events;
@@ -34,8 +36,10 @@ mod state;
 pub mod system;
 mod tiered_storage;
 
+pub use binary_keys::{InternCategory, InternId};
 pub use block_archive::{BlockArchive, BlockArchiveError};
 pub use bucket::{NUM_BUCKETS, VaultCommitment};
+pub use dictionary::{DictionaryError, VaultDictionary};
 pub use engine::{InMemoryStorageEngine, StorageEngine};
 pub use entity::EntityStore;
 pub use events::{
@@ -43,7 +47,7 @@ pub use events::{
 };
 pub use events_keys::encode_event_key;
 pub use indexes::IndexManager;
-pub use keys::{StorageKey, decode_storage_key, encode_storage_key};
+pub use keys::{StorageKey, decode_storage_key, encode_index_key, encode_storage_key};
 pub use relationship::RelationshipStore;
 pub use shard::ShardManager;
 pub use snapshot::{
