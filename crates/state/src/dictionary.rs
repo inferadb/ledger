@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use inferadb_ledger_store::{StorageBackend, tables};
+use inferadb_ledger_store::{StorageBackend, TableId, tables};
 use inferadb_ledger_types::VaultId;
 use snafu::{ResultExt, Snafu};
 
@@ -160,7 +160,7 @@ impl VaultDictionary {
         // Forward value: [intern_id:2LE]
         let forward_value = id.0.to_le_bytes().to_vec();
 
-        txn.insert::<tables::StringDictionary>(&forward_key, &forward_value)
+        txn.insert_raw(TableId::StringDictionary, &forward_key, &forward_value)
             .context(StorageSnafu)?;
 
         // Reverse key: [vault_id:8BE][category:1][intern_id:2BE]
@@ -172,7 +172,7 @@ impl VaultDictionary {
         // Reverse value: [string_bytes]
         let reverse_value = value.as_bytes().to_vec();
 
-        txn.insert::<tables::StringDictionaryReverse>(&reverse_key, &reverse_value)
+        txn.insert_raw(TableId::StringDictionaryReverse, &reverse_key, &reverse_value)
             .context(StorageSnafu)?;
 
         // Update cache

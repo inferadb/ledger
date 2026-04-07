@@ -16,7 +16,7 @@ use inferadb_ledger_store::{
 use inferadb_ledger_types::{
     Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus, decode, encode,
 };
-use parking_lot::RwLock;
+use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
 use snafu::{ResultExt, Snafu};
 
 use crate::{
@@ -116,13 +116,19 @@ pub struct StateLayer<B: StorageBackend> {
     db: Arc<Database<B>>,
     /// Per-vault commitment tracking.
     vault_commitments: RwLock<HashMap<VaultId, VaultCommitment>>,
+    /// Cached per-vault string dictionaries for relationship storage.
+    vault_dictionaries: RwLock<HashMap<VaultId, crate::dictionary::VaultDictionary>>,
 }
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> StateLayer<B> {
     /// Creates a new state layer backed by the given database.
     pub fn new(db: Arc<Database<B>>) -> Self {
-        Self { db, vault_commitments: RwLock::new(HashMap::new()) }
+        Self {
+            db,
+            vault_commitments: RwLock::new(HashMap::new()),
+            vault_dictionaries: RwLock::new(HashMap::new()),
+        }
     }
 
     /// Returns database-level statistics for metrics collection.
@@ -156,6 +162,74 @@ impl<B: StorageBackend> StateLayer<B> {
         let mut map = self.vault_commitments.write();
         let commitment = map.entry(vault).or_default();
         f(commitment)
+    }
+
+    /// Takes the dictionary for a vault out of the cache for mutable use.
+    ///
+    /// If not cached, loads from storage. The caller **must** return it via
+    /// [`return_dictionary`](Self::return_dictionary) after use, or it will be
+    /// reloaded from storage on the next access.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the storage read fails.
+    /// Returns [`StateError::Relationship`] if dictionary loading fails.
+    pub fn take_dictionary(&self, vault: VaultId) -> Result<crate::dictionary::VaultDictionary> {
+        if let Some(dict) = self.vault_dictionaries.write().remove(&vault) {
+            return Ok(dict);
+        }
+        let txn = self.db.read().context(StoreSnafu)?;
+        crate::dictionary::VaultDictionary::load(&txn, vault).map_err(|e| match e {
+            crate::dictionary::DictionaryError::Storage { source, .. } => {
+                StateError::Store { source, location: snafu::location!() }
+            },
+            other => StateError::Relationship {
+                source: crate::relationship::RelationshipError::Dictionary {
+                    source: other,
+                    location: snafu::location!(),
+                },
+                location: snafu::location!(),
+            },
+        })
+    }
+
+    /// Returns a dictionary to the cache after use.
+    pub fn return_dictionary(&self, vault: VaultId, dict: crate::dictionary::VaultDictionary) {
+        self.vault_dictionaries.write().insert(vault, dict);
+    }
+
+    /// Returns a read-only reference to the cached dictionary for a vault.
+    ///
+    /// Loads the dictionary from storage if it is not already cached.
+    fn get_dictionary(
+        &self,
+        vault: VaultId,
+    ) -> Result<MappedRwLockReadGuard<'_, crate::dictionary::VaultDictionary>> {
+        // Fast path: dictionary already cached.
+        {
+            let map = self.vault_dictionaries.read();
+            if map.contains_key(&vault) {
+                return Ok(RwLockReadGuard::map(map, |m| &m[&vault]));
+            }
+        }
+        // Slow path: load from storage and insert into cache.
+        let txn = self.db.read().context(StoreSnafu)?;
+        let dict = crate::dictionary::VaultDictionary::load(&txn, vault).map_err(|e| match e {
+            crate::dictionary::DictionaryError::Storage { source, .. } => {
+                StateError::Store { source, location: snafu::location!() }
+            },
+            other => StateError::Relationship {
+                source: crate::relationship::RelationshipError::Dictionary {
+                    source: other,
+                    location: snafu::location!(),
+                },
+                location: snafu::location!(),
+            },
+        })?;
+        drop(txn);
+        self.vault_dictionaries.write().insert(vault, dict);
+        let map = self.vault_dictionaries.read();
+        Ok(RwLockReadGuard::map(map, |m| &m[&vault]))
     }
 
     /// Opens a write transaction on the underlying database.
@@ -445,32 +519,25 @@ impl<B: StorageBackend> StateLayer<B> {
         operations: &[Operation],
         block_height: u64,
     ) -> Result<Vec<WriteStatus>> {
-        // Load existing dictionary so intern() reuses previously assigned IDs.
-        let read_txn = self.db.read().context(StoreSnafu)?;
-        let mut dict =
-            crate::dictionary::VaultDictionary::load(&read_txn, vault).map_err(|e| match e {
-                crate::dictionary::DictionaryError::Storage { source, .. } => {
-                    StateError::Store { source, location: snafu::location!() }
-                },
-                other => StateError::Relationship {
-                    source: crate::relationship::RelationshipError::Dictionary {
-                        source: other,
-                        location: snafu::location!(),
-                    },
-                    location: snafu::location!(),
-                },
-            })?;
-        drop(read_txn);
+        let mut dict = self.take_dictionary(vault)?;
         let mut txn = self.begin_write()?;
-        let (statuses, dirty_keys) =
-            self.apply_operations_in_txn(&mut txn, &mut dict, vault, operations, block_height)?;
-        // Mark dirty before commit: dirty marks are conservative (trigger re-hash
-        // from storage). If commit fails, the re-hash reads old data and produces
-        // the correct (pre-commit) state root. If commit succeeds, dirty buckets
-        // are correctly tracked for the new data.
-        self.mark_dirty_keys(vault, &dirty_keys);
-        txn.commit().context(StoreSnafu)?;
-        Ok(statuses)
+        match self.apply_operations_in_txn(&mut txn, &mut dict, vault, operations, block_height) {
+            Ok((statuses, dirty_keys)) => {
+                // Mark dirty before commit: dirty marks are conservative (trigger
+                // re-hash from storage). If commit fails, the re-hash reads old
+                // data and produces the correct (pre-commit) state root. If commit
+                // succeeds, dirty buckets are correctly tracked for the new data.
+                self.mark_dirty_keys(vault, &dirty_keys);
+                txn.commit().context(StoreSnafu)?;
+                self.return_dictionary(vault, dict);
+                Ok(statuses)
+            },
+            Err(e) => {
+                // Discard potentially-dirty dictionary on failure.
+                // Next call will reload from storage.
+                Err(e)
+            },
+        }
     }
 
     /// Clears all entities and relationships for a vault.
@@ -493,8 +560,9 @@ impl<B: StorageBackend> StateLayer<B> {
 
         txn.commit().context(StoreSnafu)?;
 
-        // Reset commitment tracking for this vault
+        // Reset commitment and dictionary caches for this vault
         self.vault_commitments.write().remove(&vault);
+        self.vault_dictionaries.write().remove(&vault);
 
         Ok(())
     }
@@ -530,19 +598,8 @@ impl<B: StorageBackend> StateLayer<B> {
         relation: &str,
         subject: &str,
     ) -> Result<bool> {
+        let dict = self.get_dictionary(vault)?;
         let txn = self.db.read().context(StoreSnafu)?;
-        let dict = crate::dictionary::VaultDictionary::load(&txn, vault).map_err(|e| match e {
-            crate::dictionary::DictionaryError::Storage { source, .. } => {
-                StateError::Store { source, location: snafu::location!() }
-            },
-            other => StateError::Relationship {
-                source: crate::relationship::RelationshipError::Dictionary {
-                    source: other,
-                    location: snafu::location!(),
-                },
-                location: snafu::location!(),
-            },
-        })?;
         crate::relationship::RelationshipStore::exists(
             &txn, &dict, vault, resource, relation, subject,
         )
@@ -580,8 +637,10 @@ impl<B: StorageBackend> StateLayer<B> {
 
         // Single vault-scoped range scan distributing entities to dirty bucket builders
         let txn = self.db.read().context(StoreSnafu)?;
-        let mut builders: HashMap<u8, BucketRootBuilder> =
-            dirty_buckets.iter().map(|&b| (b, BucketRootBuilder::new(b))).collect();
+        let mut builders: [Option<BucketRootBuilder>; 256] = std::array::from_fn(|_| None);
+        for &b in &dirty_buckets {
+            builders[b as usize] = Some(BucketRootBuilder::new(b));
+        }
 
         let vault_start = crate::keys::vault_prefix(vault).to_vec();
         let vault_end = crate::keys::vault_prefix(VaultId::new(vault.value() + 1)).to_vec();
@@ -594,7 +653,7 @@ impl<B: StorageBackend> StateLayer<B> {
                 continue;
             }
             let bucket = key_bytes[8];
-            if let Some(builder) = builders.get_mut(&bucket) {
+            if let Some(builder) = builders[bucket as usize].as_mut() {
                 let entity: Entity = decode(&value).context(CodecSnafu)?;
                 builder.add_entity(&entity);
             }
@@ -602,7 +661,7 @@ impl<B: StorageBackend> StateLayer<B> {
 
         let bucket_roots: Vec<(u8, Hash)> = dirty_buckets
             .into_iter()
-            .filter_map(|b| builders.remove(&b).map(|builder| (b, builder.finalize())))
+            .filter_map(|b| builders[b as usize].take().map(|builder| (b, builder.finalize())))
             .collect();
 
         // Update commitment with computed bucket roots (brief write lock)
@@ -682,10 +741,8 @@ impl<B: StorageBackend> StateLayer<B> {
         resource: &str,
         relation: &str,
     ) -> Result<Vec<String>> {
+        let dict = self.get_dictionary(vault)?;
         let txn = self.db.read().context(StoreSnafu)?;
-        let dict = crate::dictionary::VaultDictionary::load(&txn, vault)
-            .map_err(|e| IndexError::Dictionary { source: e, location: snafu::location!() })
-            .context(IndexSnafu)?;
         IndexManager::get_subjects(&txn, &dict, vault, resource, relation).context(IndexSnafu)
     }
 
@@ -700,10 +757,8 @@ impl<B: StorageBackend> StateLayer<B> {
         vault: VaultId,
         subject: &str,
     ) -> Result<Vec<(String, String)>> {
+        let dict = self.get_dictionary(vault)?;
         let txn = self.db.read().context(StoreSnafu)?;
-        let dict = crate::dictionary::VaultDictionary::load(&txn, vault)
-            .map_err(|e| IndexError::Dictionary { source: e, location: snafu::location!() })
-            .context(IndexSnafu)?;
         IndexManager::get_resources(&txn, &dict, vault, subject).context(IndexSnafu)
     }
 
@@ -795,19 +850,8 @@ impl<B: StorageBackend> StateLayer<B> {
         start_after: Option<&Relationship>,
         limit: usize,
     ) -> Result<Vec<Relationship>> {
+        let dict = self.get_dictionary(vault)?;
         let txn = self.db.read().context(StoreSnafu)?;
-        let dict = crate::dictionary::VaultDictionary::load(&txn, vault).map_err(|e| match e {
-            crate::dictionary::DictionaryError::Storage { source, .. } => {
-                StateError::Store { source, location: snafu::location!() }
-            },
-            other => StateError::Relationship {
-                source: crate::relationship::RelationshipError::Dictionary {
-                    source: other,
-                    location: snafu::location!(),
-                },
-                location: snafu::location!(),
-            },
-        })?;
 
         // Build start key for pagination. If start_after is provided, resolve
         // its components through the dictionary to build a binary storage key.
@@ -890,6 +934,7 @@ impl<B: StorageBackend> Clone for StateLayer<B> {
         Self {
             db: Arc::clone(&self.db),
             vault_commitments: RwLock::new(HashMap::new()), // Each clone starts fresh
+            vault_dictionaries: RwLock::new(HashMap::new()), // Each clone starts fresh
         }
     }
 }
@@ -2296,5 +2341,103 @@ mod tests {
         // Clone should not inherit commitment state
         let cloned = state.clone();
         assert!(cloned.get_bucket_roots(vault).is_none());
+    }
+
+    // =========================================================================
+    // Dictionary cache tests
+    // =========================================================================
+
+    #[test]
+    fn dictionary_cached_across_operations() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // First apply: creates relationships and populates dictionary cache
+        let ops1 = vec![Operation::CreateRelationship {
+            resource: "doc:1".to_string(),
+            relation: "viewer".to_string(),
+            subject: "user:alice".to_string(),
+        }];
+        let statuses1 = state.apply_operations(vault, &ops1, 1).unwrap();
+        assert_eq!(statuses1, vec![WriteStatus::Created]);
+
+        // Second apply: should reuse cached dictionary (no redundant B+ tree scan)
+        let ops2 = vec![Operation::CreateRelationship {
+            resource: "doc:2".to_string(),
+            relation: "viewer".to_string(),
+            subject: "user:bob".to_string(),
+        }];
+        let statuses2 = state.apply_operations(vault, &ops2, 2).unwrap();
+        assert_eq!(statuses2, vec![WriteStatus::Created]);
+
+        // Verify both relationships exist
+        assert!(state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
+        assert!(state.relationship_exists(vault, "doc:2", "viewer", "user:bob").unwrap());
+    }
+
+    #[test]
+    fn dictionary_cache_cleared_on_clear_vault() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // Create a relationship (populates dictionary cache)
+        let ops = vec![Operation::CreateRelationship {
+            resource: "doc:1".to_string(),
+            relation: "viewer".to_string(),
+            subject: "user:alice".to_string(),
+        }];
+        state.apply_operations(vault, &ops, 1).unwrap();
+        assert!(state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
+
+        // Clear vault — should evict dictionary cache
+        state.clear_vault(vault).unwrap();
+
+        // Verify data is gone
+        assert!(!state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
+
+        // Re-create a relationship — should work with a fresh dictionary
+        let ops2 = vec![Operation::CreateRelationship {
+            resource: "doc:2".to_string(),
+            relation: "editor".to_string(),
+            subject: "user:bob".to_string(),
+        }];
+        let statuses = state.apply_operations(vault, &ops2, 2).unwrap();
+        assert_eq!(statuses, vec![WriteStatus::Created]);
+        assert!(state.relationship_exists(vault, "doc:2", "editor", "user:bob").unwrap());
+    }
+
+    #[test]
+    fn dictionary_cache_rollback_on_error() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // Create an entity so we can trigger PreconditionFailed
+        let ops = vec![Operation::SetEntity {
+            key: "key".to_string(),
+            value: b"value1".to_vec(),
+            condition: None,
+            expires_at: None,
+        }];
+        state.apply_operations(vault, &ops, 1).unwrap();
+
+        // Trigger PreconditionFailed — dictionary should be discarded on error
+        let bad_ops = vec![Operation::SetEntity {
+            key: "key".to_string(),
+            value: b"value2".to_vec(),
+            condition: Some(SetCondition::MustNotExist),
+            expires_at: None,
+        }];
+        let result = state.apply_operations(vault, &bad_ops, 2);
+        assert!(matches!(result, Err(StateError::PreconditionFailed { .. })));
+
+        // Next call should still work (dictionary reloaded from storage)
+        let ops2 = vec![Operation::CreateRelationship {
+            resource: "doc:1".to_string(),
+            relation: "viewer".to_string(),
+            subject: "user:alice".to_string(),
+        }];
+        let statuses = state.apply_operations(vault, &ops2, 3).unwrap();
+        assert_eq!(statuses, vec![WriteStatus::Created]);
+        assert!(state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
     }
 }

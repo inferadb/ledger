@@ -200,8 +200,18 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             },
                         };
                         let mut all_dirty_keys = Vec::new();
-                        let mut dict =
-                            inferadb_ledger_state::dictionary::VaultDictionary::new(*vault);
+                        let mut dict = match state_layer.take_dictionary(*vault) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::Internal,
+                                        message: format!("Failed to load dictionary: {e}"),
+                                    },
+                                    None,
+                                );
+                            },
+                        };
                         for tx in transactions.iter() {
                             match state_layer.apply_operations_in_txn(
                                 &mut write_txn,
@@ -295,11 +305,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 ],
                             },
                         );
+                        let mut audit_dict_to_return = None;
                         if !audit_ops.is_empty() {
                             let mut audit_dict =
-                                inferadb_ledger_state::dictionary::VaultDictionary::new(
-                                    SYSTEM_VAULT_ID,
-                                );
+                                state_layer.take_dictionary(SYSTEM_VAULT_ID).unwrap_or_else(|_| {
+                                    inferadb_ledger_state::dictionary::VaultDictionary::new(
+                                        SYSTEM_VAULT_ID,
+                                    )
+                                });
                             match state_layer.apply_operations_in_txn(
                                 &mut write_txn,
                                 &mut audit_dict,
@@ -309,6 +322,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             ) {
                                 Ok((_statuses, audit_dirty)) => {
                                     state_layer.mark_dirty_keys(SYSTEM_VAULT_ID, &audit_dirty);
+                                    audit_dict_to_return = Some(audit_dict);
                                 },
                                 Err(e) => {
                                     tracing::warn!(
@@ -330,6 +344,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 },
                                 None,
                             );
+                        }
+
+                        // Return dictionaries to cache after successful commit.
+                        // On failure paths above, dictionaries are dropped so the
+                        // next call reloads fresh from storage.
+                        state_layer.return_dictionary(*vault, dict);
+                        if let Some(audit_dict) = audit_dict_to_return {
+                            state_layer.return_dictionary(SYSTEM_VAULT_ID, audit_dict);
                         }
                     }
 

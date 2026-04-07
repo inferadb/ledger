@@ -10,7 +10,7 @@
 //!
 //! Indexes are NOT Merkleized (no per-write amplification).
 
-use inferadb_ledger_store::{ReadTransaction, StorageBackend, WriteTransaction, tables};
+use inferadb_ledger_store::{ReadTransaction, StorageBackend, TableId, WriteTransaction, tables};
 use inferadb_ledger_types::VaultId;
 use snafu::{ResultExt, Snafu};
 
@@ -95,8 +95,7 @@ impl IndexManager {
         let local_key = encode_obj_index_local_key(res_type, &res_id, rel_id, subj_type, &subj_id);
         let storage_key = encode_index_key(vault, &local_key);
 
-        let empty: Vec<u8> = Vec::new();
-        txn.insert::<tables::ObjIndex>(&storage_key, &empty).context(StorageSnafu)?;
+        txn.insert_raw(TableId::ObjIndex, &storage_key, &[]).context(StorageSnafu)?;
 
         Ok(())
     }
@@ -168,8 +167,7 @@ impl IndexManager {
         let local_key = encode_subj_index_local_key(subj_type, &subj_id, res_type, &res_id, rel_id);
         let storage_key = encode_index_key(vault, &local_key);
 
-        let empty: Vec<u8> = Vec::new();
-        txn.insert::<tables::SubjIndex>(&storage_key, &empty).context(StorageSnafu)?;
+        txn.insert_raw(TableId::SubjIndex, &storage_key, &[]).context(StorageSnafu)?;
 
         Ok(())
     }

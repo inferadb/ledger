@@ -5,7 +5,7 @@
 //! (`0x01`); the full [`Relationship`] is reconstructed from the key via
 //! dictionary resolution.
 
-use inferadb_ledger_store::{ReadTransaction, StorageBackend, WriteTransaction, tables};
+use inferadb_ledger_store::{ReadTransaction, StorageBackend, TableId, WriteTransaction, tables};
 use inferadb_ledger_types::{Relationship, VaultId};
 use snafu::{ResultExt, Snafu};
 
@@ -138,8 +138,8 @@ impl RelationshipStore {
             return Ok(false);
         }
 
-        let value = vec![VALUE_VERSION];
-        txn.insert::<tables::Relationships>(&storage_key, &value).context(StorageSnafu)?;
+        let value = [VALUE_VERSION];
+        txn.insert_raw(TableId::Relationships, &storage_key, &value).context(StorageSnafu)?;
 
         Ok(true)
     }
