@@ -1,11 +1,11 @@
 //! Service layer for `_system` organization operations.
 //!
-//! Provides high-level operations on the _system organization:
+//! Provides high-level operations on the `_system` organization:
 //! - Node registration and discovery
 //! - Organization routing table management
 //! - Sequence counter management for ID generation
 //!
-//! The _system organization uses organization_id = 0 and vault_id = 0.
+//! The `_system` organization uses `organization_id = 0` and `vault_id = 0`.
 
 use std::sync::Arc;
 
@@ -29,10 +29,10 @@ mod user_directory;
 mod users;
 mod vault_slugs;
 
-/// The reserved organization ID for _system.
+/// The reserved organization ID for `_system`.
 pub const SYSTEM_ORGANIZATION_ID: OrganizationId = OrganizationId::new(0);
 
-/// The reserved vault ID for _system entities.
+/// The reserved vault ID for `_system` entities.
 pub const SYSTEM_VAULT_ID: VaultId = VaultId::new(0);
 
 /// Errors from system organization operations.
@@ -126,8 +126,8 @@ pub(super) fn require_tier(key: &str, expected: KeyTier) -> Result<()> {
 
 /// Service for reading from and writing to the `_system` organization.
 ///
-/// All _system data is stored in organization_id=0, vault_id=0.
-/// StateLayer is internally thread-safe via inferadb-ledger-store's MVCC.
+/// All `_system` data is stored in `organization_id=0`, `vault_id=0`.
+/// [`StateLayer`] is internally thread-safe via `inferadb-ledger-store`'s MVCC.
 pub struct SystemOrganizationService<B: StorageBackend> {
     pub(super) state: Arc<StateLayer<B>>,
 }

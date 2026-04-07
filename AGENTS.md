@@ -61,7 +61,7 @@ Activate at session start: `mcp__plugin_serena_serena__activate_project`
 - Fallible builders via `#[bon]` impl block when validation needed
 - Prefer compile-time required fields over runtime checks
 
-**Doc comments:** Use ` ```no_run ` (never ignore or text) — `cargo test` skips, `cargo doc` validates. To avoid documentation compiling problems, instead use hidden setup lines.
+**Doc comments:** Use ` ```no_run ` for Rust examples — `cargo test` skips, `cargo doc` validates. Use ` ```text ` for non-Rust content (CLI output, diagrams, pseudocode). Never use ` ```ignore `. To avoid documentation compiling problems, use hidden setup lines.
 
 **Linting:** `cargo +1.92 clippy --workspace --all-targets -- -D warnings`
 
@@ -86,14 +86,22 @@ just test-ff      # unit tests, stop on first failure
 just test-integration     # integration tests (spawns clusters)
 just test-integration-ff  # integration tests, stop on first failure
 just test-stress  # stress/scale tests
-just test-recovery # crash recovery tests (store crate)
+just test-stress-ff       # stress tests, stop on first failure
+just test-recovery        # crash recovery tests (store crate)
+just test-recovery-ff     # crash recovery tests, stop on first failure
 just test-all     # all tests including slow/ignored
+just test-proptest        # property tests with high iterations (default: 10000)
+just test-external        # tests against a live cluster (requires LEDGER_ENDPOINTS)
 just fmt          # format code
+just fmt-check    # check formatting without modifying
 just clippy       # run linter
 just doc          # build rustdoc
 just doc-check    # build rustdoc with -D warnings
 just proto        # generate protobuf code
 just run          # run server (dev mode)
+just clean        # cargo clean
+just clean-stale  # prune stale build artifacts (default: >7 days old)
+just udeps        # check for unused dependencies
 ```
 
 Or use cargo directly:
@@ -111,7 +119,7 @@ cargo +1.92 clippy --workspace --all-targets -- -D warnings
 ```
 gRPC Services (13): Read, Write, Admin, Organization, Vault, User, App, Token, Invitation, Events, Health, Discovery, Raft
        ↓
-inferadb-ledger-services — gRPC service implementations, JWT engine, server assembly
+inferadb-ledger-services — gRPC service implementations, ProposalService trait, JWT engine, server assembly
        ↓
 inferadb-ledger-raft     — Raft consensus, log storage, batching, saga orchestrator, background jobs
        ↓
@@ -120,6 +128,8 @@ inferadb-ledger-state    — Entity/Relationship stores, state roots, system ser
 inferadb-ledger-store    — B+ tree engine, pages, transactions, backends, crypto (key management)
        ↓
 inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors, token types, newtype IDs
+
+inferadb-ledger-proto    — Protobuf codegen, From/TryFrom conversions (cross-cutting: used by raft, services, server, sdk)
 ```
 
 **Crates (9):**
@@ -129,7 +139,7 @@ inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors, tok
 - `proto` — Protobuf code generation and From/TryFrom conversions
 - `state` — Domain state, entity/relationship CRUD, state root computation, system services (users, signing keys, refresh tokens, invitations)
 - `raft` — openraft 0.9 integration, transaction batching, rate limiting, saga orchestrator, background jobs
-- `services` — gRPC service implementations, JwtEngine, LedgerServer assembly
+- `services` — gRPC service implementations, ProposalService trait (testable Raft abstraction), JwtEngine, LedgerServer assembly
 - `server` — Binary, bootstrap, CLI configuration, node ID generation
 - `sdk` — Client library, retry/circuit-breaker, cancellation, metrics
 - `test-utils` — Test fixtures, mock backends, crash injection, proptest strategies
@@ -143,7 +153,7 @@ inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors, tok
 **Data model:**
 
 - Organization → isolated storage per tenant
-- Vault → relationship store within organization, owns its blockchain
+- Vault → relationship store within organization, owns its blockchain (conceptual entity — no `Vault` struct; represented by `VaultId`/`VaultSlug` + `VaultBlock`/`VaultEntry`)
 - Entity → key-value with TTL and versioning
 - Relationship → authorization tuple (resource, relation, subject)
 - User → identity with email, role, status, token version
@@ -152,7 +162,7 @@ inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors, tok
 - SigningKey → Ed25519 JWT signing key with scope (Global/Organization) and status (Active/Rotated/Revoked)
 - RefreshToken → session token family with poison detection and TTL
 - OrganizationInvitation → invitation lifecycle (REGIONAL-only, Pattern 1)
-- Shard → organizations sharing a Raft group
+- Shard → organizations sharing a Raft group (conceptual — managed by `ShardManager` in `state/src/shard.rs`, not a persisted type)
 
 **Dual-ID architecture:** Internal sequential IDs (`i64`) for storage, Snowflake slugs (`u64`) for external APIs. The `SlugResolver` translates at gRPC service boundaries.
 
@@ -165,7 +175,7 @@ inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors, tok
 | `TeamId(i64)`         | `TeamSlug(u64)`         |
 | `InviteId(i64)`       | `InviteSlug(u64)`       |
 
-Other newtypes: `SigningKeyId(i64)`, `RefreshTokenId(i64)`, `UserEmailId(i64)`, `EmailVerifyTokenId(i64)`, `ClientAssertionId(i64)`, `TokenVersion(u64)`. All defined in `types/src/types.rs` via `define_id!`/`define_slug!` macros.
+Other newtypes: `SigningKeyId(i64)`, `RefreshTokenId(i64)`, `UserEmailId(i64)`, `EmailVerifyTokenId(i64)`, `ClientAssertionId(i64)`, `UserCredentialId(i64)`, `TokenVersion(u64)`. All defined in `types/src/types/ids.rs` — most via `define_id!`/`define_slug!` macros, `TokenVersion` is manually implemented (needs `Default` and `increment()`).
 
 **Storage key conventions:**
 

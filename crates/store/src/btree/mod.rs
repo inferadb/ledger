@@ -1918,7 +1918,7 @@ mod tests {
     }
 
     // ====================================================================
-    // Forward-only compaction tests (Task 12)
+    // Forward-only compaction tests
     // ====================================================================
 
     /// Helper: count all entries by walking the leaf linked list directly.

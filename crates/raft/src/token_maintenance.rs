@@ -62,7 +62,7 @@ pub struct TokenMaintenanceJob<B: StorageBackend + 'static> {
     raft: Arc<Raft<LedgerTypeConfig>>,
     /// This node's ID.
     node_id: LedgerNodeId,
-    /// State layer for reading signing key status (Phase 2 scan).
+    /// State layer for reading signing key status during revocation scans.
     state: Arc<StateLayer<B>>,
     /// Interval between maintenance cycles.
     #[builder(default = DEFAULT_MAINTENANCE_INTERVAL)]
@@ -84,9 +84,9 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
 
     /// Runs a single maintenance cycle.
     ///
-    /// Phase 1: Propose `DeleteExpiredRefreshTokens` through Raft.
-    /// Phase 2: Scan for rotated signing keys past grace, propose
-    ///          `TransitionSigningKeyRevoked` for each.
+    /// First deletes expired refresh tokens via a Raft proposal, then scans
+    /// for rotated signing keys past their grace period and proposes
+    /// `TransitionSigningKeyRevoked` for each.
     pub async fn run_cycle(&self) -> MaintenanceResult {
         if !self.is_leader() {
             debug!("Skipping token maintenance cycle (not leader)");

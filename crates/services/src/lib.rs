@@ -1,7 +1,7 @@
 //! gRPC services and server assembly for InferaDB Ledger.
 //!
-//! gRPC service implementations and the
-//! [`LedgerServer`] that wires them together with Raft consensus.
+//! Provides gRPC service implementations and the [`LedgerServer`] that wires
+//! them together with Raft consensus, region routing, and rate limiting.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]

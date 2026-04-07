@@ -69,8 +69,8 @@ pub(crate) trait ProposalService: Send + Sync {
 
 /// Production [`ProposalService`] backed by `openraft::Raft` and [`RaftManager`].
 ///
-/// Extracts the proposal logic that was previously inlined in
-/// [`ServiceContext`](super::services::service_infra::ServiceContext) methods.
+/// Owns the Raft handle and manager reference, delegating proposal submission
+/// to the appropriate region's Raft group.
 pub(crate) struct RaftProposalService {
     raft: Arc<Raft<LedgerTypeConfig>>,
     manager: Option<Arc<RaftManager>>,

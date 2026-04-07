@@ -2073,7 +2073,7 @@ impl proto::user_service_server::UserService for UserService {
         }))
     }
 
-    // ── Credential Management (Task 9) ──
+    // ── Credential Management ──
 
     async fn create_user_credential(
         &self,

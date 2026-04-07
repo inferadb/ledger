@@ -334,7 +334,7 @@ pub async fn bootstrap_node(
 
     // Create RaftManager and register the externally-created system region.
     // This bridges the existing manual bootstrap flow with the unified LedgerServer
-    // that requires a manager. Phase 4 will replace this with start_system_region().
+    // that requires a manager.
     let raft_manager_config =
         RaftManagerConfig::new(data_dir.to_path_buf(), node_id, config.region);
     let manager = Arc::new(RaftManager::new(raft_manager_config));

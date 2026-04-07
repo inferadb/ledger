@@ -435,7 +435,7 @@ async fn test_org_deletion_cascades_token_revocation() {
 }
 
 // ============================================================================
-// Race Condition & Concurrency Tests (Task 9.2)
+// Race Condition & Concurrency Tests
 // ============================================================================
 
 /// Refresh token theft detection: reusing a consumed token poisons the family.
@@ -674,7 +674,7 @@ async fn test_concurrent_refresh_same_token() {
 }
 
 // ============================================================================
-// Scope & Authorization Tests (Task 9.3)
+// Scope & Authorization Tests
 // ============================================================================
 
 /// Creates an app within an organization and returns its slug.
@@ -1213,7 +1213,7 @@ async fn test_connection_removed_blocks_creation_and_revokes_tokens() {
 }
 
 // ============================================================================
-// Signing Key Lifecycle Tests (Task 9.4)
+// Signing Key Lifecycle Tests
 // ============================================================================
 
 /// Signing key rotation during active sessions: old tokens remain valid during grace period.
@@ -1596,7 +1596,7 @@ async fn test_global_key_not_found_returns_error() {
 }
 
 // ============================================================================
-// State Machine Determinism Tests (Task 9.5)
+// State Machine Determinism Tests
 // ============================================================================
 
 /// Verifies that the Raft state machine uses `proposed_at` for all timestamps.
@@ -1776,7 +1776,7 @@ async fn test_poisoned_family_persists_across_replication() {
 }
 
 // ============================================================================
-// Operational Tests (Task 9.6)
+// Operational Tests
 // ============================================================================
 
 /// TokenMaintenanceJob: rotated signing keys past grace period are transitioned to revoked.

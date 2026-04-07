@@ -1,4 +1,4 @@
-//! Storage engine wrapper around [`inferadb-ledger-store`].
+//! Storage engine wrapper around `inferadb-ledger-store`.
 //!
 //! Provides lifecycle management for the underlying B+ tree database:
 //! - File-based ([`StorageEngine`]) and in-memory ([`InMemoryStorageEngine`]) backends

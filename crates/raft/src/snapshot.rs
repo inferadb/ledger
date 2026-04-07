@@ -1,7 +1,7 @@
 //! File-based streaming snapshots with zstd compression and SHA-256 integrity.
 //!
-//! Replaces the in-memory `Cursor<Vec<u8>>` snapshot system with file-based
-//! streaming using `tokio::fs::File` as the openraft `SnapshotData` type.
+//! Uses `tokio::fs::File` as the openraft `SnapshotData` type for file-based
+//! streaming rather than in-memory buffers.
 //!
 //! ## File format
 //!
@@ -652,8 +652,7 @@ impl SyncSnapshotReader {
 
 /// External table IDs that are included in snapshots.
 ///
-/// These are the 9 tables from Task 4 that store externalized `AppliedState`
-/// fields.
+/// The nine tables that store externalized `AppliedState` fields.
 pub const SNAPSHOT_TABLE_IDS: &[u8] = &[
     8,  // VaultMeta
     9,  // OrganizationMeta

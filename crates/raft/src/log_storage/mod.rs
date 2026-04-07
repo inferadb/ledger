@@ -4195,7 +4195,7 @@ mod tests {
         assert_eq!(write_committed[0].organization_id, org_id);
     }
 
-    // ── Task 5: System-Level Event Hook Tests ──────────────────────
+    // ── System-Level Event Hook Tests ─────────────────────────────
 
     #[test]
     fn event_organization_created_has_slug_detail() {

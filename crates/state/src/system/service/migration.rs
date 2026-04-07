@@ -1,4 +1,4 @@
-//! User migration operations (flat _system → regional).
+//! User migration operations (flat `_system` to regional).
 
 use chrono::Utc;
 use inferadb_ledger_store::StorageBackend;
@@ -18,7 +18,7 @@ const MAX_LIST_USERS: usize = 100_000;
 
 impl<B: StorageBackend> SystemOrganizationService<B> {
     // ========================================================================
-    // User Migration (flat _system → regional)
+    // User Migration (flat `_system` → regional)
     // ========================================================================
 
     /// Migrates pre-computed user entries from flat `_system` store to

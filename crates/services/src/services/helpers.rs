@@ -1,7 +1,7 @@
 //! Shared service helpers for rate limiting, validation, and hot key detection.
 //!
-//! These functions consolidate logic that was previously duplicated across
-//! `WriteService` and `AdminService`.
+//! Centralizes logic used by `WriteService`, `AdminService`, and other
+//! gRPC service implementations.
 
 use std::{fmt::Display, sync::Arc};
 

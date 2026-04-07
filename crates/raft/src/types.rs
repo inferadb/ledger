@@ -1647,8 +1647,8 @@ pub enum LedgerResponse {
     Error {
         /// Structured error code for type-safe matching.
         ///
-        /// Defaults to `Internal` when deserializing log entries written before
-        /// this field was added.
+        /// Defaults to `Internal` when deserializing log entries that lack
+        /// this field.
         #[serde(default)]
         code: inferadb_ledger_types::ErrorCode,
         /// Human-readable error message.

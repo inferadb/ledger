@@ -1,8 +1,8 @@
 //! Background invitation maintenance job.
 //!
 //! Periodically scans GLOBAL `_idx:invite:email_hash:` indexes and:
-//! - **Phase 1**: Expires Pending invitations past their `expires_at` timestamp.
-//! - **Phase 2**: Reaps terminal invitations older than the retention window (90 days).
+//! - **Expiration**: Expires Pending invitations past their `expires_at` timestamp.
+//! - **Retention reaping**: Reaps terminal invitations older than the retention window (90 days).
 //!
 //! Only runs on the leader node. Proposals go through Raft for deterministic
 //! state machine replay. Follows the `TokenMaintenanceJob` pattern.
@@ -37,10 +37,10 @@ use crate::{
 /// Default interval between maintenance cycles (5 minutes).
 const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(300);
 
-/// Maximum expirations per cycle (Phase 1).
+/// Maximum expirations per cycle (pending invitation expiration).
 const MAX_EXPIRATIONS_PER_CYCLE: usize = 200;
 
-/// Maximum deletions per cycle (Phase 2 — retention reaping).
+/// Maximum deletions per cycle (terminal invitation retention reaping).
 const MAX_DELETIONS_PER_CYCLE: usize = 100;
 
 /// Retention window for terminal invitations (90 days).
@@ -55,9 +55,9 @@ const EMAIL_HASH_INDEX_PREFIX: &str = "_idx:invite:email_hash:";
 /// Result of an invitation maintenance cycle.
 #[derive(Debug, Default)]
 pub struct InviteMaintenanceResult {
-    /// Number of Pending invitations expired (Phase 1).
+    /// Number of Pending invitations expired.
     pub invitations_expired: u64,
-    /// Number of terminal invitations reaped (Phase 2).
+    /// Number of terminal invitations reaped past the retention window.
     pub invitations_reaped: u64,
 }
 
@@ -167,7 +167,7 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
         }
     }
 
-    /// Phase 1: Expire Pending invitations past their `expires_at`.
+    /// Expire Pending invitations past their `expires_at`.
     async fn expire_pending(&self, entries: &[ScannedEntry], trace_id: &str) -> (u64, bool) {
         let Some(ref manager) = self.manager else {
             debug!("Skipping invite expiration (no region manager)");
@@ -274,7 +274,7 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
         (expired_count, had_errors)
     }
 
-    /// Phase 2: Reap terminal invitations past the retention window (90 days).
+    /// Reap terminal invitations past the retention window (90 days).
     async fn reap_terminal(&self, entries: &[ScannedEntry], trace_id: &str) -> (u64, bool) {
         let Some(ref manager) = self.manager else {
             debug!("Skipping invite reaping (no region manager)");
@@ -430,15 +430,15 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
             return result;
         }
 
-        // Phase 1: Expire pending invitations
-        let (expired, phase1_errors) = self.expire_pending(&entries, &trace_ctx.trace_id).await;
+        // Expire pending invitations
+        let (expired, expiration_errors) = self.expire_pending(&entries, &trace_ctx.trace_id).await;
         result.invitations_expired = expired;
-        had_errors |= phase1_errors;
+        had_errors |= expiration_errors;
 
-        // Phase 2: Reap terminal invitations past retention
-        let (reaped, phase2_errors) = self.reap_terminal(&entries, &trace_ctx.trace_id).await;
+        // Reap terminal invitations past retention
+        let (reaped, reaping_errors) = self.reap_terminal(&entries, &trace_ctx.trace_id).await;
         result.invitations_reaped = reaped;
-        had_errors |= phase2_errors;
+        had_errors |= reaping_errors;
 
         let duration = cycle_start.elapsed().as_secs_f64();
         record_background_job_duration("invite_maintenance", duration);
@@ -786,14 +786,14 @@ mod tests {
         // Simulates the had_errors logic from run_cycle
         let mut had_errors = false;
 
-        // Phase 1 returns (count, errors)
-        let (_, phase1_errors) = (5u64, false);
-        had_errors |= phase1_errors;
+        // Expiration returns (count, errors)
+        let (_, expiration_errors) = (5u64, false);
+        had_errors |= expiration_errors;
         assert!(!had_errors);
 
-        // Phase 2 returns (count, errors)
-        let (_, phase2_errors) = (3u64, true);
-        had_errors |= phase2_errors;
+        // Reaping returns (count, errors)
+        let (_, reaping_errors) = (3u64, true);
+        had_errors |= reaping_errors;
         assert!(had_errors);
     }
 }
