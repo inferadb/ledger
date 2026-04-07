@@ -22,19 +22,18 @@ pub enum InvitationStatus {
     Revoked,
 }
 
-impl std::fmt::Display for InvitationStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl InvitationStatus {
+    /// Returns the status as a static string slice.
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Pending => write!(f, "pending"),
-            Self::Accepted => write!(f, "accepted"),
-            Self::Declined => write!(f, "declined"),
-            Self::Expired => write!(f, "expired"),
-            Self::Revoked => write!(f, "revoked"),
+            Self::Pending => "pending",
+            Self::Accepted => "accepted",
+            Self::Declined => "declined",
+            Self::Expired => "expired",
+            Self::Revoked => "revoked",
         }
     }
-}
 
-impl InvitationStatus {
     /// Converts from protobuf enum value.
     pub(crate) fn from_proto(value: i32) -> Self {
         match proto::InvitationStatus::try_from(value) {
@@ -55,6 +54,12 @@ impl InvitationStatus {
             InvitationStatus::Expired => proto::InvitationStatus::Expired.into(),
             InvitationStatus::Revoked => proto::InvitationStatus::Revoked.into(),
         }
+    }
+}
+
+impl std::fmt::Display for InvitationStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

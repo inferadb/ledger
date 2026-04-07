@@ -29,20 +29,19 @@ pub enum OrganizationStatus {
     Deleted,
 }
 
-impl fmt::Display for OrganizationStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl OrganizationStatus {
+    /// Returns the variant as a static string slice.
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Unspecified => write!(f, "unspecified"),
-            Self::Active => write!(f, "active"),
-            Self::Provisioning => write!(f, "provisioning"),
-            Self::Migrating => write!(f, "migrating"),
-            Self::Suspended => write!(f, "suspended"),
-            Self::Deleted => write!(f, "deleted"),
+            Self::Unspecified => "unspecified",
+            Self::Active => "active",
+            Self::Provisioning => "provisioning",
+            Self::Migrating => "migrating",
+            Self::Suspended => "suspended",
+            Self::Deleted => "deleted",
         }
     }
-}
 
-impl OrganizationStatus {
     /// Converts from protobuf enum value.
     pub(crate) fn from_proto(value: i32) -> Self {
         match proto::OrganizationStatus::try_from(value) {
@@ -56,6 +55,12 @@ impl OrganizationStatus {
     }
 }
 
+impl fmt::Display for OrganizationStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Billing tier for an organization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -64,28 +69,27 @@ pub enum OrganizationTier {
     /// Free tier with basic features.
     #[default]
     Free,
-    /// Pro tier with enhanced features.
-    Pro,
-    /// Enterprise tier with full features.
-    Enterprise,
-}
-
-impl fmt::Display for OrganizationTier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Free => write!(f, "free"),
-            Self::Pro => write!(f, "pro"),
-            Self::Enterprise => write!(f, "enterprise"),
-        }
-    }
+    /// Launch tier with enhanced features.
+    Launch,
+    /// Scale tier with full features.
+    Scale,
 }
 
 impl OrganizationTier {
+    /// Returns the variant as a static string slice.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::Launch => "launch",
+            Self::Scale => "scale",
+        }
+    }
+
     /// Converts from protobuf enum value.
     pub(crate) fn from_proto(value: i32) -> Self {
         match proto::OrganizationTier::try_from(value) {
-            Ok(proto::OrganizationTier::Pro) => OrganizationTier::Pro,
-            Ok(proto::OrganizationTier::Enterprise) => OrganizationTier::Enterprise,
+            Ok(proto::OrganizationTier::Launch) => OrganizationTier::Launch,
+            Ok(proto::OrganizationTier::Scale) => OrganizationTier::Scale,
             _ => OrganizationTier::Free,
         }
     }
@@ -94,9 +98,15 @@ impl OrganizationTier {
     pub(crate) fn to_proto(self) -> i32 {
         match self {
             OrganizationTier::Free => proto::OrganizationTier::Free.into(),
-            OrganizationTier::Pro => proto::OrganizationTier::Pro.into(),
-            OrganizationTier::Enterprise => proto::OrganizationTier::Enterprise.into(),
+            OrganizationTier::Launch => proto::OrganizationTier::Launch.into(),
+            OrganizationTier::Scale => proto::OrganizationTier::Scale.into(),
         }
+    }
+}
+
+impl fmt::Display for OrganizationTier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -116,18 +126,17 @@ pub enum VaultStatus {
     Deleted,
 }
 
-impl fmt::Display for VaultStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl VaultStatus {
+    /// Returns the variant as a static string slice.
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Unspecified => write!(f, "unspecified"),
-            Self::Active => write!(f, "active"),
-            Self::ReadOnly => write!(f, "read_only"),
-            Self::Deleted => write!(f, "deleted"),
+            Self::Unspecified => "unspecified",
+            Self::Active => "active",
+            Self::ReadOnly => "read_only",
+            Self::Deleted => "deleted",
         }
     }
-}
 
-impl VaultStatus {
     /// Converts from protobuf enum value.
     pub(crate) fn from_proto(value: i32) -> Self {
         match proto::VaultStatus::try_from(value) {
@@ -136,6 +145,12 @@ impl VaultStatus {
             Ok(proto::VaultStatus::Deleted) => VaultStatus::Deleted,
             _ => VaultStatus::Unspecified,
         }
+    }
+}
+
+impl fmt::Display for VaultStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -332,16 +347,15 @@ pub enum OrganizationMemberRole {
     Member,
 }
 
-impl fmt::Display for OrganizationMemberRole {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl OrganizationMemberRole {
+    /// Returns the variant as a static string slice.
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Admin => write!(f, "admin"),
-            Self::Member => write!(f, "member"),
+            Self::Admin => "admin",
+            Self::Member => "member",
         }
     }
-}
 
-impl OrganizationMemberRole {
     /// Converts from protobuf enum value.
     pub(crate) fn from_proto(value: i32) -> Self {
         match proto::OrganizationMemberRole::try_from(value) {
@@ -356,6 +370,12 @@ impl OrganizationMemberRole {
             OrganizationMemberRole::Admin => proto::OrganizationMemberRole::Admin.into(),
             OrganizationMemberRole::Member => proto::OrganizationMemberRole::Member.into(),
         }
+    }
+}
+
+impl fmt::Display for OrganizationMemberRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -393,16 +413,15 @@ pub enum TeamMemberRole {
     Member,
 }
 
-impl fmt::Display for TeamMemberRole {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl TeamMemberRole {
+    /// Returns the variant as a static string slice.
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Manager => write!(f, "manager"),
-            Self::Member => write!(f, "member"),
+            Self::Manager => "manager",
+            Self::Member => "member",
         }
     }
-}
 
-impl TeamMemberRole {
     /// Converts from protobuf enum value.
     pub(crate) fn from_proto(value: i32) -> Self {
         match proto::OrganizationTeamMemberRole::try_from(value) {
@@ -417,6 +436,12 @@ impl TeamMemberRole {
             TeamMemberRole::Manager => proto::OrganizationTeamMemberRole::Manager,
             TeamMemberRole::Member => proto::OrganizationTeamMemberRole::Member,
         }
+    }
+}
+
+impl fmt::Display for TeamMemberRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

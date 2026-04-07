@@ -49,24 +49,38 @@ pub enum OrganizationMemberRole {
     Member,
 }
 
+impl UserStatus {
+    /// Returns the status as a static string slice.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::PendingOrg => "pending_org",
+            Self::Suspended => "suspended",
+            Self::Deleting => "deleting",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
 impl fmt::Display for UserStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl UserRole {
+    /// Returns the role as a static string slice.
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Active => write!(f, "active"),
-            Self::PendingOrg => write!(f, "pending_org"),
-            Self::Suspended => write!(f, "suspended"),
-            Self::Deleting => write!(f, "deleting"),
-            Self::Deleted => write!(f, "deleted"),
+            Self::User => "user",
+            Self::Admin => "admin",
         }
     }
 }
 
 impl fmt::Display for UserRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::User => write!(f, "user"),
-            Self::Admin => write!(f, "admin"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
