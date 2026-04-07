@@ -61,11 +61,26 @@ pub struct ClientConfig {
     /// SDK-side metrics collector.
     pub(crate) metrics: std::sync::Arc<dyn crate::metrics::SdkMetrics>,
 
-    /// Preferred region for latency optimization.
+    /// Preferred data residency region for this client.
     ///
-    /// When set, the SDK prefers connecting to nodes in this region for
-    /// lower latency. Does not affect data residency — organizations and
-    /// users still reside in their assigned regions.
+    /// When set, the SDK discovers the leader node for this region via the
+    /// `ResolveRegionLeader` RPC and routes all requests directly to it.
+    /// The resolved endpoint is cached with a server-recommended TTL
+    /// (typically 30 seconds).
+    ///
+    /// On leadership changes (detected via UNAVAILABLE errors), the SDK
+    /// re-resolves the leader. If resolution fails, requests fall back to
+    /// routing through the gateway endpoint (slower but always works).
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{ClientConfig, ServerSource, Region};
+    /// let config = ClientConfig::builder()
+    ///     .servers(ServerSource::from_static(["https://api.inferadb.com"]))
+    ///     .client_id("my-service")
+    ///     .preferred_region(Region::US_EAST_VA)
+    ///     .build()
+    ///     .unwrap();
+    /// ```
     pub(crate) preferred_region: Option<Region>,
 }
 

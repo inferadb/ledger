@@ -3279,6 +3279,11 @@ service SystemDiscoveryService {
 
   // Get full system state (nodes + organization registry)
   rpc GetSystemState(GetSystemStateRequest) returns (GetSystemStateResponse);
+
+  // Resolve the current leader endpoint for a data residency region.
+  // Any node can serve this — reads Raft membership state.
+  // Used by SDKs to establish direct connections to regional leaders.
+  rpc ResolveRegionLeader(ResolveRegionLeaderRequest) returns (ResolveRegionLeaderResponse);
 }
 
 message GetPeersRequest {
@@ -3342,6 +3347,17 @@ message OrganizationRegistry {
   OrganizationStatus status = 5;  // Lifecycle state
   uint64 config_version = 6;      // For cache invalidation
   google.protobuf.Timestamp created_at = 7;
+}
+
+// Region leader resolution for SDK direct-connect optimization.
+message ResolveRegionLeaderRequest {
+  Region region = 1; // Target data residency region
+}
+
+message ResolveRegionLeaderResponse {
+  string endpoint = 1;    // Full endpoint URL (e.g., "https://10.0.1.5:5000")
+  uint64 raft_term = 2;   // Current Raft term (cache invalidation signal)
+  uint32 ttl_seconds = 3; // Recommended cache TTL (default: 30)
 }
 
 // =============================================================================

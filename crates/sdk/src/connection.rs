@@ -71,6 +71,12 @@ pub struct ConnectionPool {
 
     /// Per-endpoint circuit breaker, if enabled.
     circuit_breaker: Option<crate::circuit_breaker::CircuitBreaker>,
+
+    /// Region leader cache for preferred-region routing.
+    region_cache: Option<Arc<crate::region_resolver::RegionLeaderCache>>,
+
+    /// Gateway channel kept alive as fallback for region resolution.
+    gateway_channel: Arc<RwLock<Option<Channel>>>,
 }
 
 impl ConnectionPool {
@@ -84,12 +90,18 @@ impl ConnectionPool {
             .circuit_breaker()
             .map(|cb_config| crate::circuit_breaker::CircuitBreaker::new(cb_config.clone()));
 
+        let region_cache = config
+            .preferred_region()
+            .map(|r| Arc::new(crate::region_resolver::RegionLeaderCache::new(r)));
+
         Self {
             channel: Arc::new(RwLock::new(None)),
             config,
             dynamic_endpoints: Arc::new(RwLock::new(None)),
             selector: ServerSelector::new(),
             circuit_breaker,
+            region_cache,
+            gateway_channel: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -102,12 +114,18 @@ impl ConnectionPool {
             .circuit_breaker()
             .map(|cb_config| crate::circuit_breaker::CircuitBreaker::new(cb_config.clone()));
 
+        let region_cache = config
+            .preferred_region()
+            .map(|r| Arc::new(crate::region_resolver::RegionLeaderCache::new(r)));
+
         Self {
             channel: Arc::new(RwLock::new(None)),
             config,
             dynamic_endpoints: Arc::new(RwLock::new(None)),
             selector,
             circuit_breaker,
+            region_cache,
+            gateway_channel: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -128,6 +146,11 @@ impl ConnectionPool {
         if let Some(ref cb) = self.circuit_breaker {
             let endpoint = self.current_endpoint();
             cb.check(&endpoint)?;
+        }
+
+        // Region-aware routing: if preferred_region is set, use leader cache
+        if let Some(ref cache) = self.region_cache {
+            return self.get_region_channel(cache).await;
         }
 
         // Fast path: check if channel already exists
@@ -268,6 +291,88 @@ impl ConnectionPool {
         }
 
         Ok(tls_config)
+    }
+
+    /// Gets a channel to the resolved regional leader, resolving if needed.
+    ///
+    /// When a preferred region is configured, this method manages a direct
+    /// channel to that region's Raft leader. On first call (or after cache
+    /// expiry), the leader is resolved via the gateway's `ResolveRegionLeader`
+    /// RPC. If resolution fails, falls back to the gateway channel so the
+    /// server can handle routing via forwarding.
+    async fn get_region_channel(
+        &self,
+        cache: &crate::region_resolver::RegionLeaderCache,
+    ) -> Result<Channel> {
+        // Check if cached leader is still valid
+        if cache.cached_endpoint().is_some() {
+            // Cache valid — return existing channel or reconnect
+            let existing = self.channel.read().clone();
+            if let Some(channel) = existing {
+                return Ok(channel);
+            }
+            // Cache valid but channel dropped — resolve again to get endpoint
+            // (cached_endpoint() was Some so resolve should populate quickly)
+        }
+
+        // Cache miss/expired — resolve via gateway
+        let gateway = self.get_or_create_gateway_channel().await?;
+        match cache.resolve(&gateway).await {
+            Ok(endpoint) => {
+                let channel = self.connect_to_endpoint(&endpoint).await?;
+                *self.channel.write() = Some(channel.clone());
+                Ok(channel)
+            },
+            Err(_) => {
+                // Resolution failed — fall back to gateway
+                tracing::warn!(
+                    region = %cache.region(),
+                    "Region leader resolution failed, falling back to gateway"
+                );
+                Ok(gateway)
+            },
+        }
+    }
+
+    /// Gets or creates the gateway channel (the originally-configured endpoint).
+    ///
+    /// The gateway channel is the generic entry point (e.g. `api.inferadb.com`)
+    /// that can forward requests to the correct regional leader server-side.
+    /// It is kept alive as a fallback when direct leader resolution fails.
+    async fn get_or_create_gateway_channel(&self) -> Result<Channel> {
+        {
+            let existing = self.gateway_channel.read().clone();
+            if let Some(channel) = existing {
+                return Ok(channel);
+            }
+        }
+        // Create gateway channel using existing create_channel logic
+        let channel = self.create_channel().await?;
+        *self.gateway_channel.write() = Some(channel.clone());
+        Ok(channel)
+    }
+
+    /// Connects to a specific endpoint URL with the pool's TLS and timeout settings.
+    async fn connect_to_endpoint(&self, endpoint_url: &str) -> Result<Channel> {
+        let endpoint = Endpoint::try_from(endpoint_url.to_owned()).map_err(|_| {
+            SdkError::Connection { message: format!("Invalid leader endpoint: {endpoint_url}") }
+        })?;
+        let endpoint = self.configure_endpoint(endpoint)?;
+        endpoint.connect().await.map_err(|e| SdkError::Connection {
+            message: format!("Failed to connect to region leader: {e}"),
+        })
+    }
+
+    /// Invalidates the cached region leader endpoint.
+    ///
+    /// Called when `UNAVAILABLE` or leadership-change errors indicate the
+    /// cached leader is stale. The next [`get_channel`](Self::get_channel)
+    /// call will re-resolve via the gateway.
+    pub fn invalidate_region_leader(&self) {
+        if let Some(ref cache) = self.region_cache {
+            cache.invalidate();
+            *self.channel.write() = None;
+        }
     }
 
     /// Returns whether compression is enabled for this connection.

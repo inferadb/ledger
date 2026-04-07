@@ -75,6 +75,7 @@ mod metrics;
 pub mod mock;
 mod ops;
 pub(crate) mod proto_util;
+pub mod region_resolver;
 mod retry;
 pub mod server;
 mod streaming;
@@ -100,6 +101,7 @@ pub use inferadb_ledger_types::{
     VaultSlug,
 };
 pub use metrics::{ConnectionEvent, MetricsSdkMetrics, NoopSdkMetrics, SdkMetrics};
+pub use region_resolver::RegionLeaderCache;
 pub use retry::{with_retry, with_retry_cancellable};
 pub use server::{
     DnsConfig, FileConfig, ResolvedServer, ServerResolver, ServerSelector, ServerSource,

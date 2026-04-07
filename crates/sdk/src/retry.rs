@@ -173,6 +173,14 @@ where
                     p.record_failure();
                 }
 
+                // Invalidate region leader cache on UNAVAILABLE errors
+                // so the next attempt re-resolves via the gateway
+                if let SdkError::Rpc { code: tonic::Code::Unavailable, .. } = &err
+                    && let Some(p) = pool
+                {
+                    p.invalidate_region_leader();
+                }
+
                 // Record this attempt in the history
                 attempt_history.push((attempt, err.to_string()));
 

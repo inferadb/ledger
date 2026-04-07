@@ -3753,6 +3753,25 @@ pub struct OrganizationRegistry {
     #[prost(message, optional, tag = "7")]
     pub created_at: ::core::option::Option<::prost_types::Timestamp>,
 }
+/// Region leader resolution for SDK direct-connect optimization.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ResolveRegionLeaderRequest {
+    /// Target data residency region
+    #[prost(enumeration = "Region", tag = "1")]
+    pub region: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ResolveRegionLeaderResponse {
+    /// Full endpoint URL (e.g., "<https://10.0.1.5:5000">)
+    #[prost(string, tag = "1")]
+    pub endpoint: ::prost::alloc::string::String,
+    /// Current Raft term (cache invalidation signal)
+    #[prost(uint64, tag = "2")]
+    pub raft_term: u64,
+    /// Recommended cache TTL (default: 30)
+    #[prost(uint32, tag = "3")]
+    pub ttl_seconds: u32,
+}
 /// Raft vote (term + node_id + committed flag).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RaftVote {
@@ -18353,6 +18372,38 @@ pub mod system_discovery_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Resolve the current leader endpoint for a data residency region.
+        /// Any node can serve this — reads Raft membership state.
+        /// Used by SDKs to establish direct connections to regional leaders.
+        pub async fn resolve_region_leader(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ResolveRegionLeaderRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ResolveRegionLeaderResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.SystemDiscoveryService/ResolveRegionLeader",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "ledger.v1.SystemDiscoveryService",
+                        "ResolveRegionLeader",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -18390,6 +18441,16 @@ pub mod system_discovery_service_server {
             request: tonic::Request<super::GetSystemStateRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetSystemStateResponse>,
+            tonic::Status,
+        >;
+        /// Resolve the current leader endpoint for a data residency region.
+        /// Any node can serve this — reads Raft membership state.
+        /// Used by SDKs to establish direct connections to regional leaders.
+        async fn resolve_region_leader(
+            &self,
+            request: tonic::Request<super::ResolveRegionLeaderRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ResolveRegionLeaderResponse>,
             tonic::Status,
         >;
     }
@@ -18599,6 +18660,55 @@ pub mod system_discovery_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetSystemStateSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.SystemDiscoveryService/ResolveRegionLeader" => {
+                    #[allow(non_camel_case_types)]
+                    struct ResolveRegionLeaderSvc<T: SystemDiscoveryService>(pub Arc<T>);
+                    impl<
+                        T: SystemDiscoveryService,
+                    > tonic::server::UnaryService<super::ResolveRegionLeaderRequest>
+                    for ResolveRegionLeaderSvc<T> {
+                        type Response = super::ResolveRegionLeaderResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ResolveRegionLeaderRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SystemDiscoveryService>::resolve_region_leader(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ResolveRegionLeaderSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

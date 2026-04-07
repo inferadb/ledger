@@ -58,4 +58,11 @@ impl inferadb_ledger_proto::proto::system_discovery_service_server::SystemDiscov
             organizations: vec![],
         }))
     }
+
+    async fn resolve_region_leader(
+        &self,
+        _request: Request<proto::ResolveRegionLeaderRequest>,
+    ) -> Result<Response<proto::ResolveRegionLeaderResponse>, Status> {
+        Err(Status::unimplemented("ResolveRegionLeader not available in mock"))
+    }
 }

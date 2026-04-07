@@ -13,8 +13,8 @@ use std::{
 use inferadb_ledger_proto::proto::{
     AnnouncePeerRequest, AnnouncePeerResponse, GetPeersRequest, GetPeersResponse,
     GetSystemStateRequest, GetSystemStateResponse, NodeId, NodeInfo, OrganizationRegistry,
-    OrganizationSlug, PeerInfo, Region as ProtoRegion,
-    system_discovery_service_server::SystemDiscoveryService,
+    OrganizationSlug, PeerInfo, Region as ProtoRegion, ResolveRegionLeaderRequest,
+    ResolveRegionLeaderResponse, system_discovery_service_server::SystemDiscoveryService,
 };
 use inferadb_ledger_raft::{
     log_storage::AppliedStateAccessor, peer_tracker::PeerTracker, types::LedgerTypeConfig,
@@ -258,6 +258,40 @@ impl DiscoveryService {
         let tracker = self.peer_tracker.read();
         tracker.maintenance_interval()
     }
+
+    /// Resolves the leader endpoint for a data residency region.
+    ///
+    /// Returns the leader's endpoint URL, the current Raft term, and a
+    /// recommended cache TTL in seconds. Currently all regions share a
+    /// single Raft group, so the resolved leader is the same regardless
+    /// of region; the region parameter is validated and reserved for
+    /// future multi-Raft routing.
+    fn resolve_region_leader_impl(
+        &self,
+        _region: inferadb_ledger_types::Region,
+    ) -> std::result::Result<(String, u64, u32), Status> {
+        let metrics = self.raft.metrics().borrow().clone();
+
+        let leader_id =
+            metrics.current_leader.ok_or_else(|| Status::unavailable("No leader elected"))?;
+
+        let raft_term = metrics.current_term;
+
+        // Look up leader's network address from Raft membership.
+        let membership = metrics.membership_config.membership();
+        let (_, leader_node) = membership
+            .nodes()
+            .find(|(id, _)| **id == leader_id)
+            .ok_or_else(|| Status::unavailable("Leader node not found in membership"))?;
+
+        // Build endpoint from the node's registered address. The address
+        // in BasicNode is typically "host:port" or just "host".
+        let addr = &leader_node.addr;
+        let endpoint = if addr.contains("://") { addr.clone() } else { format!("http://{addr}") };
+
+        // 30-second recommended cache TTL.
+        Ok((endpoint, raft_term, 30))
+    }
 }
 
 #[tonic::async_trait]
@@ -412,6 +446,20 @@ impl SystemDiscoveryService for DiscoveryService {
             .collect();
 
         Ok(Response::new(GetSystemStateResponse { version: current_version, nodes, organizations }))
+    }
+
+    async fn resolve_region_leader(
+        &self,
+        request: Request<ResolveRegionLeaderRequest>,
+    ) -> Result<Response<ResolveRegionLeaderResponse>, Status> {
+        let req = request.into_inner();
+
+        let proto_region = ProtoRegion::try_from(req.region).unwrap_or(ProtoRegion::Unspecified);
+        let region = inferadb_ledger_types::Region::try_from(proto_region)?;
+
+        let (endpoint, raft_term, ttl_seconds) = self.resolve_region_leader_impl(region)?;
+
+        Ok(Response::new(ResolveRegionLeaderResponse { endpoint, raft_term, ttl_seconds }))
     }
 }
 
