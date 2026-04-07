@@ -29,7 +29,7 @@ The counter floors at zero via saturating subtraction. Because only committed wr
 
 ## Tier-Based Limits
 
-Resource limits are derived from the organization's `OrganizationTier` (`Free`, `Pro`, `Enterprise`) by the downstream Engine and Control layers. The Ledger tracks cumulative storage bytes but does not enforce limits itself — enforcement is handled externally based on tier.
+Resource limits are derived from the organization's `OrganizationTier` (`Free`, `Launch`, `Scale`) by the downstream Engine and Control layers. The Ledger tracks cumulative storage bytes but does not enforce limits itself — enforcement is handled externally based on tier.
 
 ## Dashboard Queries
 

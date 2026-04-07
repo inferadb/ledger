@@ -33,8 +33,8 @@ pub(crate) fn organization_status_to_proto(
 pub(crate) fn organization_tier_to_proto(tier: OrganizationTier) -> proto::OrganizationTier {
     match tier {
         OrganizationTier::Free => proto::OrganizationTier::Free,
-        OrganizationTier::Pro => proto::OrganizationTier::Pro,
-        OrganizationTier::Enterprise => proto::OrganizationTier::Enterprise,
+        OrganizationTier::Launch => proto::OrganizationTier::Launch,
+        OrganizationTier::Scale => proto::OrganizationTier::Scale,
     }
 }
 
@@ -46,8 +46,8 @@ pub(crate) fn organization_tier_from_proto(tier: proto::OrganizationTier) -> Org
         proto::OrganizationTier::Unspecified | proto::OrganizationTier::Free => {
             OrganizationTier::Free
         },
-        proto::OrganizationTier::Pro => OrganizationTier::Pro,
-        proto::OrganizationTier::Enterprise => OrganizationTier::Enterprise,
+        proto::OrganizationTier::Launch => OrganizationTier::Launch,
+        proto::OrganizationTier::Scale => OrganizationTier::Scale,
     }
 }
 
@@ -209,17 +209,17 @@ mod tests {
     }
 
     #[test]
-    fn org_tier_roundtrip_pro() {
-        let proto_tier = organization_tier_to_proto(OrganizationTier::Pro);
-        assert_eq!(proto_tier, proto::OrganizationTier::Pro);
-        assert_eq!(organization_tier_from_proto(proto_tier), OrganizationTier::Pro);
+    fn org_tier_roundtrip_launch() {
+        let proto_tier = organization_tier_to_proto(OrganizationTier::Launch);
+        assert_eq!(proto_tier, proto::OrganizationTier::Launch);
+        assert_eq!(organization_tier_from_proto(proto_tier), OrganizationTier::Launch);
     }
 
     #[test]
-    fn org_tier_roundtrip_enterprise() {
-        let proto_tier = organization_tier_to_proto(OrganizationTier::Enterprise);
-        assert_eq!(proto_tier, proto::OrganizationTier::Enterprise);
-        assert_eq!(organization_tier_from_proto(proto_tier), OrganizationTier::Enterprise);
+    fn org_tier_roundtrip_scale() {
+        let proto_tier = organization_tier_to_proto(OrganizationTier::Scale);
+        assert_eq!(proto_tier, proto::OrganizationTier::Scale);
+        assert_eq!(organization_tier_from_proto(proto_tier), OrganizationTier::Scale);
     }
 
     #[test]

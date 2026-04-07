@@ -123,7 +123,7 @@ pub struct OrganizationMeta {
     /// Organization lifecycle status.
     #[serde(default)]
     pub status: OrganizationStatus,
-    /// Billing tier (Free, Pro, Enterprise).
+    /// Billing tier (Free, Launch, Scale).
     #[serde(default)]
     pub tier: OrganizationTier,
     /// Target region for pending migration (only set when status is Migrating).

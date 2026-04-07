@@ -4456,10 +4456,10 @@ pub enum OrganizationTier {
     Unspecified = 0,
     /// Free tier (default)
     Free = 1,
-    /// Professional tier
-    Pro = 2,
-    /// Enterprise tier
-    Enterprise = 3,
+    /// Launch tier
+    Launch = 2,
+    /// Scale tier
+    Scale = 3,
 }
 impl OrganizationTier {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -4470,8 +4470,8 @@ impl OrganizationTier {
         match self {
             Self::Unspecified => "ORGANIZATION_TIER_UNSPECIFIED",
             Self::Free => "ORGANIZATION_TIER_FREE",
-            Self::Pro => "ORGANIZATION_TIER_PRO",
-            Self::Enterprise => "ORGANIZATION_TIER_ENTERPRISE",
+            Self::Launch => "ORGANIZATION_TIER_LAUNCH",
+            Self::Scale => "ORGANIZATION_TIER_SCALE",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -4479,8 +4479,8 @@ impl OrganizationTier {
         match value {
             "ORGANIZATION_TIER_UNSPECIFIED" => Some(Self::Unspecified),
             "ORGANIZATION_TIER_FREE" => Some(Self::Free),
-            "ORGANIZATION_TIER_PRO" => Some(Self::Pro),
-            "ORGANIZATION_TIER_ENTERPRISE" => Some(Self::Enterprise),
+            "ORGANIZATION_TIER_LAUNCH" => Some(Self::Launch),
+            "ORGANIZATION_TIER_SCALE" => Some(Self::Scale),
             _ => None,
         }
     }

@@ -433,10 +433,10 @@ pub enum OrganizationTier {
     /// Free tier (default for new organizations).
     #[default]
     Free,
-    /// Professional tier with higher limits.
-    Pro,
-    /// Enterprise tier with custom limits and SLA.
-    Enterprise,
+    /// Launch tier with higher limits.
+    Launch,
+    /// Scale tier with custom limits and SLA.
+    Scale,
 }
 
 // ============================================================================

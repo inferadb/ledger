@@ -851,7 +851,7 @@ fn test_create_organization_saga_transitions() {
     let input = CreateOrganizationInput {
         slug: OrganizationSlug::new(9999),
         region: Region::US_EAST_VA,
-        tier: OrganizationTier::Pro,
+        tier: OrganizationTier::Launch,
         admin: UserId::new(1),
     };
     let mut saga = CreateOrganizationSaga::new(SagaId::new("org-saga-2"), input);
@@ -1014,7 +1014,7 @@ fn test_create_organization_saga_serialization() {
     let input = CreateOrganizationInput {
         slug: OrganizationSlug::new(777),
         region: Region::US_EAST_VA,
-        tier: OrganizationTier::Enterprise,
+        tier: OrganizationTier::Scale,
         admin: UserId::new(7),
     };
     let saga = CreateOrganizationSaga::new(SagaId::new("org-saga-ser"), input);
@@ -1027,7 +1027,7 @@ fn test_create_organization_saga_serialization() {
         Saga::CreateOrganization(s) => {
             assert_eq!(s.id, "org-saga-ser");
             assert_eq!(s.input.region, Region::US_EAST_VA);
-            assert_eq!(s.input.tier, OrganizationTier::Enterprise);
+            assert_eq!(s.input.tier, OrganizationTier::Scale);
             assert_eq!(s.input.admin, UserId::new(7));
         },
         _ => panic!("wrong saga variant"),

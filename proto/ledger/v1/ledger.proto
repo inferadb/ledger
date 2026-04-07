@@ -1206,8 +1206,8 @@ enum OrganizationStatus {
 enum OrganizationTier {
   ORGANIZATION_TIER_UNSPECIFIED = 0;
   ORGANIZATION_TIER_FREE = 1;        // Free tier (default)
-  ORGANIZATION_TIER_PRO = 2;         // Professional tier
-  ORGANIZATION_TIER_ENTERPRISE = 3;  // Enterprise tier
+  ORGANIZATION_TIER_LAUNCH = 2;      // Launch tier
+  ORGANIZATION_TIER_SCALE = 3;       // Scale tier
 }
 
 enum OrganizationMemberRole {
