@@ -172,7 +172,10 @@ tokio = { version = "1", features = ["full"] }
 Basic usage:
 
 ```rust
-use inferadb_ledger_sdk::{LedgerClient, ClientConfig, Operation, ServerSource, Region};
+use inferadb_ledger_sdk::{
+    LedgerClient, ClientConfig, Operation, ServerSource, Region,
+    OrganizationSlug, UserSlug, OrganizationTier,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -184,20 +187,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = LedgerClient::new(config).await?;
 
+    let caller = UserSlug::new(1);
+
     // Create organization
-    let org = client.create_organization("my_app", Region::US_EAST_VA).await?;
+    let org = client
+        .create_organization("my_app", Region::US_EAST_VA, caller, OrganizationTier::default())
+        .await?;
     println!("Created organization: {}", org.slug);
 
     // Create vault (returns a Snowflake vault slug)
-    let vault = client.create_vault(org.slug).await?;
+    let vault = client.create_vault(caller, org.slug).await?;
     println!("Created vault: {}", vault.vault_slug);
 
     // Write entity
     let ops = vec![Operation::set_entity("user:alice", b"Alice".to_vec())];
-    client.write(org.slug, None, ops).await?;
+    client.write(caller, org.slug, None, ops, None).await?;
 
     // Read it back
-    let entity = client.read(org.slug, None, "user:alice").await?;
+    let entity = client.read(caller, org.slug, None, "user:alice", None, None).await?;
     println!("Read: {:?}", entity);
 
     Ok(())

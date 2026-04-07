@@ -75,7 +75,7 @@ The SDK's `SdkError` extracts error codes from gRPC error detail metadata
 when available. Use `SdkError::is_retryable()` for retry decisions.
 
 ```rust
-match client.write(request).await {
+match client.write(caller, org, None, ops, None).await {
     Ok(response) => { /* success */ }
     Err(e) if e.is_retryable() => {
         // Retry with backoff

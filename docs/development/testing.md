@@ -114,7 +114,9 @@ Use `#[tokio::test]` for async tests:
 #[tokio::test]
 async fn test_async_operation() {
     let client = create_test_client().await;
-    let result = client.write(...).await.unwrap();
+    let caller = UserSlug::new(1);
+    let org = OrganizationSlug::new(100);
+    let result = client.write(caller, org, None, ops, None).await.unwrap();
     assert!(result.is_ok());
 }
 ```

@@ -119,8 +119,10 @@ Check `rejections` for individual event failures. Partial success is possible.
 ### SDK Usage
 
 ```rust,no_run
-# use inferadb_ledger_sdk::{LedgerClient, SdkIngestEventEntry, EventOutcome};
+# use inferadb_ledger_sdk::{LedgerClient, SdkIngestEventEntry, EventOutcome, OrganizationSlug};
 # async fn example(client: &LedgerClient) -> Result<(), Box<dyn std::error::Error>> {
+let org = OrganizationSlug::new(12345);
+
 let events = vec![
     SdkIngestEventEntry::new(
         "engine.authorization.checked",
@@ -130,7 +132,7 @@ let events = vec![
     .detail("resource", "document:123")
     .detail("relation", "viewer"),
 ];
-let result = client.ingest_events(12345, "engine", events).await?;
+let result = client.ingest_events(org, "engine", events).await?;
 # Ok(())
 # }
 ```
@@ -152,15 +154,17 @@ Ledger's `DeleteUserSaga` removes membership entities directly (bypassing Contro
 Query all events from one API:
 
 ```rust,no_run
-# use inferadb_ledger_sdk::{LedgerClient, EventFilter};
+# use inferadb_ledger_sdk::{LedgerClient, EventFilter, OrganizationSlug};
 # async fn example(client: &LedgerClient) -> Result<(), Box<dyn std::error::Error>> {
+let org = OrganizationSlug::new(12345);
+
 // All Engine events in an org
 let filter = EventFilter::new().event_type_prefix("engine");
-let page = client.list_events(12345, filter, 100).await?;
+let page = client.list_events(org, filter, 100).await?;
 
 // All denial events across services
 let filter = EventFilter::new().outcome_denied();
-let page = client.list_events(12345, filter, 100).await?;
+let page = client.list_events(org, filter, 100).await?;
 # Ok(())
 # }
 ```

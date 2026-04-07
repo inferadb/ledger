@@ -150,18 +150,19 @@ spec:
 The Rust SDK supports TLS connections:
 
 ```rust
-use inferadb_ledger_sdk::{Client, ClientConfig, TlsConfig};
+use inferadb_ledger_sdk::{LedgerClient, ClientConfig, TlsConfig, ServerSource};
 
 let tls = TlsConfig::builder()
     .ca_cert("/path/to/ca.crt")
     .build()?;
 
-let client = Client::connect(
-    ClientConfig::builder()
-        .endpoints(vec!["https://ledger.internal:50051".into()])
-        .tls(tls)
-        .build()
-).await?;
+let config = ClientConfig::builder()
+    .servers(ServerSource::from_static(["https://ledger.internal:50051"]))
+    .client_id("my-service")
+    .tls(tls)
+    .build()?;
+
+let client = LedgerClient::new(config).await?;
 ```
 
 ## Threat Model

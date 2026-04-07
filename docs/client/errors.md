@@ -296,17 +296,19 @@ def call_with_retry(fn, max_retries=5):
 
 ```rust
 // Pseudo-code for sequence recovery
-async fn write_with_recovery(client: &Client, ops: Vec<Op>) -> Result<()> {
+async fn write_with_recovery(
+    client: &LedgerClient,
+    caller: UserSlug,
+    org: OrganizationSlug,
+    ops: Vec<Operation>,
+) -> Result<()> {
     loop {
-        match client.write(organization_slug, client_id, sequence, &ops).await {
+        match client.write(caller, org, None, ops.clone(), None).await {
             Ok(resp) => {
-                sequence = resp.committed_sequence + 1;
                 return Ok(());
             }
-            Err(e) if e.code() == FAILED_PRECONDITION => {
-                // Sequence gap - recover
-                let state = client.get_client_state(organization_slug, client_id).await?;
-                sequence = state.last_committed_sequence + 1;
+            Err(e) if e.is_sequence_gap() => {
+                // Sequence gap - recover and retry
                 continue;
             }
             Err(e) => return Err(e),

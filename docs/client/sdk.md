@@ -16,6 +16,7 @@ tokio = { version = "1", features = ["full"] }
 
 ```rust
 use inferadb_ledger_sdk::{LedgerClient, ClientConfig, ServerSource, Operation};
+use inferadb_ledger_types::{OrganizationSlug, VaultSlug, UserSlug};
 
 #[tokio::main]
 async fn main() -> inferadb_ledger_sdk::Result<()> {
@@ -26,13 +27,17 @@ async fn main() -> inferadb_ledger_sdk::Result<()> {
 
     let client = LedgerClient::new(config).await?;
 
+    let caller = UserSlug::new(5551234567);
+    let organization = OrganizationSlug::new(1234567890);
+    let vault = VaultSlug::new(9876543210);
+
     // Write an entity
     let ops = vec![Operation::set_entity("user:123", b"data".to_vec(), None, None)];
-    let result = client.write(organization_slug, None, ops, None).await?;
+    let result = client.write(caller, organization, vault, ops, None).await?;
     println!("Committed at block {}", result.block_height);
 
     // Read it back
-    let value = client.read(organization_slug, None, "user:123", None, None).await?;
+    let value = client.read(caller, organization, vault, "user:123", None, None).await?;
     println!("Value: {:?}", value);
 
     Ok(())
@@ -180,8 +185,12 @@ tracing_subscriber::registry()
 // Now SDK calls within instrumented spans propagate trace context
 #[tracing::instrument]
 async fn process_request(client: &LedgerClient) -> Result<()> {
+    let caller = UserSlug::new(5551234567);
+    let org = OrganizationSlug::new(1234567890);
+    let vault = VaultSlug::new(9876543210);
+
     // This read will include traceparent header linking to current span
-    let value = client.read(organization_slug, None, "key").await?;
+    let value = client.read(caller, org, vault, "key", None, None).await?;
     Ok(())
 }
 ```
@@ -205,7 +214,7 @@ my-service::process_request
 let client = LedgerClient::new(config).await?;
 
 // Or use connect() for single-endpoint convenience
-let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+let client = LedgerClient::connect("http://localhost:50051", "my-service-pod-1").await?;
 ```
 
 ### Graceful Shutdown
@@ -232,21 +241,22 @@ After shutdown:
 ### Single Read
 
 ```rust
-// Read from organization (entity) with eventual consistency
-let value = client.read(organization_slug, None, "user:123", None, None).await?;
+let caller = UserSlug::new(5551234567);
+let organization = OrganizationSlug::new(1234567890);
+let vault = VaultSlug::new(9876543210);
 
-// Read from vault (relationship context)
-let value = client.read(organization_slug, Some(vault_slug), "key", None, None).await?;
+// Read with eventual consistency (default)
+let value = client.read(caller, organization, vault, "user:123", None, None).await?;
 
 // Read with linearizable consistency (always from leader)
 let value = client.read(
-    organization_slug, None, "user:123",
+    caller, organization, vault, "user:123",
     Some(ReadConsistency::Linearizable), None,
 ).await?;
 
 // Read with a cancellation token
 let token = tokio_util::sync::CancellationToken::new();
-let value = client.read(organization_slug, None, "key", None, Some(token)).await?;
+let value = client.read(caller, organization, vault, "config:main", None, Some(token)).await?;
 ```
 
 ### Batch Read
@@ -254,8 +264,12 @@ let value = client.read(organization_slug, None, "key", None, Some(token)).await
 Read multiple keys efficiently:
 
 ```rust
+let caller = UserSlug::new(5551234567);
+let organization = OrganizationSlug::new(1234567890);
+let vault = VaultSlug::new(9876543210);
+
 let keys = vec!["user:1".into(), "user:2".into(), "user:3".into()];
-let results = client.batch_read(organization_slug, None, keys, None, None).await?;
+let results = client.batch_read(caller, organization, vault, keys.clone(), None, None).await?;
 
 for (key, value) in results {
     match value {
@@ -266,7 +280,7 @@ for (key, value) in results {
 
 // Batch read with linearizable consistency
 let results = client.batch_read(
-    organization_slug, None, keys,
+    caller, organization, vault, keys,
     Some(ReadConsistency::Linearizable), None,
 ).await?;
 ```
@@ -278,9 +292,14 @@ Read with cryptographic proof:
 ```rust
 use inferadb_ledger_sdk::VerifyOpts;
 
+let caller = UserSlug::new(5551234567);
+let organization = OrganizationSlug::new(1234567890);
+let vault = VaultSlug::new(9876543210);
+
 let verified = client.verified_read(
-    organization_slug,
-    vault_slug,
+    caller,
+    organization,
+    vault,
     "user:123",
     VerifyOpts::default(),
 ).await?;
@@ -303,7 +322,10 @@ let opts = ListEntitiesOpts::builder()
     .limit(100)
     .build();
 
-let page = client.list_entities(organization_slug, opts).await?;
+let caller = UserSlug::new(5551234567);
+let organization = OrganizationSlug::new(1234567890);
+
+let page = client.list_entities(caller, organization, opts).await?;
 for entity in page.items {
     println!("{}: {} bytes", entity.key, entity.value.len());
 }
@@ -314,7 +336,7 @@ if let Some(token) = page.next_token {
         .prefix("user:")
         .page_token(token)
         .build();
-    let next_page = client.list_entities(organization_slug, next_opts).await?;
+    let next_page = client.list_entities(caller, organization, next_opts).await?;
 }
 ```
 
@@ -329,7 +351,11 @@ let opts = ListRelationshipsOpts::builder()
     .limit(100)
     .build();
 
-let page = client.list_relationships(organization_slug, vault_slug, opts).await?;
+let caller = UserSlug::new(5551234567);
+let organization = OrganizationSlug::new(1234567890);
+let vault = VaultSlug::new(9876543210);
+
+let page = client.list_relationships(caller, organization, vault, opts).await?;
 for rel in page.items {
     println!("{} is {} of {}", rel.subject, rel.relation, rel.resource);
 }
@@ -346,7 +372,11 @@ let opts = ListResourcesOpts::builder()
     .limit(100)
     .build();
 
-let page = client.list_resources(organization_slug, vault_slug, opts).await?;
+let caller = UserSlug::new(5551234567);
+let organization = OrganizationSlug::new(1234567890);
+let vault = VaultSlug::new(9876543210);
+
+let page = client.list_resources(caller, organization, vault, opts).await?;
 ```
 
 ## Write Operations
@@ -402,12 +432,16 @@ let delete_rel = Operation::delete_relationship(
 ### Single Write
 
 ```rust
+let caller = UserSlug::new(5551234567);
+let organization = OrganizationSlug::new(1234567890);
+let vault = VaultSlug::new(9876543210);
+
 let ops = vec![
     Operation::set_entity("user:123", b"updated".to_vec(), None, None),
     Operation::create_relationship("doc:1", "owner", "user:123"),
 ];
 
-let result = client.write(organization_slug, Some(vault_slug), ops, None).await?;
+let result = client.write(caller, organization, vault, ops, None).await?;
 println!("Transaction ID: {}", result.tx_id);
 println!("Block height: {}", result.block_height);
 ```
@@ -430,7 +464,11 @@ let ops = vec![
     Operation::create_relationship("org:acme", "member", "user:123"),
 ];
 
-let result = client.batch_write(organization_slug, Some(vault_slug), ops, None).await?;
+let caller = UserSlug::new(5551234567);
+let organization = OrganizationSlug::new(1234567890);
+let vault = VaultSlug::new(9876543210);
+
+let result = client.batch_write(caller, organization, vault, ops, None).await?;
 ```
 
 If any conditional operation fails, the entire batch is rejected atomically.
@@ -444,7 +482,11 @@ Subscribe to new blocks in real-time:
 ```rust
 use futures::StreamExt;
 
-let mut stream = client.watch_blocks(organization_slug, vault_slug, start_height).await?;
+let caller = UserSlug::new(5551234567);
+let organization = OrganizationSlug::new(1234567890);
+let vault = VaultSlug::new(9876543210);
+
+let mut stream = client.watch_blocks(caller, organization, vault, start_height).await?;
 
 while let Some(result) = stream.next().await {
     match result {
@@ -472,11 +514,16 @@ The SDK handles stream reconnection automatically:
 **Starting from current tip:**
 
 ```rust
+let caller = UserSlug::new(5551234567);
+let organization = OrganizationSlug::new(1234567890);
+let vault = VaultSlug::new(9876543210);
+
 // Get current tip, then subscribe from next block
-let vault_info = client.get_vault(organization_slug, vault_slug).await?;
+let vault_info = client.get_vault(organization, vault).await?;
 let stream = client.watch_blocks(
-    organization_slug,
-    vault_slug,
+    caller,
+    organization,
+    vault,
     vault_info.height + 1,
 ).await?;
 ```
@@ -486,33 +533,38 @@ let stream = client.watch_blocks(
 ### Organization Management
 
 ```rust
-use inferadb_ledger_types::Region;
+use inferadb_ledger_types::{Region, UserSlug, OrganizationSlug};
 
-// Create organization (requires a region for data residency)
-let org = client.create_organization("my_app", Region::US_EAST_VA).await?;
-println!("Organization ID: {}", org.id);
+let caller = UserSlug::new(5551234567);
+
+// Create organization (requires name, region, caller, and tier)
+let org = client.create_organization("my_app", Region::US_EAST_VA, caller, None).await?;
+println!("Organization slug: {}", org.slug);
 
 // Get organization info
-let info = client.get_organization(org.id).await?;
+let info = client.get_organization(org.slug).await?;
 println!("Status: {:?}", info.status);
 
-// List organizations
-let organizations = client.list_organizations(None).await?;
+// List organizations with pagination
+let organizations = client.list_organizations(caller, None, None).await?;
 ```
 
 ### Vault Management
 
 ```rust
+let caller = UserSlug::new(5551234567);
+let organization = OrganizationSlug::new(1234567890);
+
 // Create vault (returns Snowflake slug)
-let vault = client.create_vault(organization_slug).await?;
+let vault = client.create_vault(caller, organization).await?;
 println!("Vault slug: {}", vault.vault_slug);
 
 // Get vault info
-let info = client.get_vault(organization_slug, vault.vault_slug).await?;
+let info = client.get_vault(organization, vault.vault_slug).await?;
 println!("Height: {}, State root: {:?}", info.height, info.state_root);
 
-// List vaults
-let vaults = client.list_vaults(organization_slug, None).await?;
+// List vaults with pagination
+let vaults = client.list_vaults(caller, None, None, organization).await?;
 ```
 
 ### Health Checks
@@ -530,7 +582,9 @@ println!("Status: {:?}", result.status);
 println!("Leader: {}", result.is_leader);
 
 // Vault-specific health
-let vault_health = client.health_check_vault(organization_slug, vault_slug).await?;
+let organization = OrganizationSlug::new(1234567890);
+let vault = VaultSlug::new(9876543210);
+let vault_health = client.health_check_vault(organization, vault).await?;
 ```
 
 ## Token Operations
@@ -599,29 +653,31 @@ Refresh tokens use rotate-on-use semantics. Each refresh token can be used at mo
 ## Organization Operations
 
 ```rust
+let caller = UserSlug::new(5551234567);
+
 // Create organization
-let org = client.create_organization("my_app", Region::US_EAST_VA).await?;
+let org = client.create_organization("my_app", Region::US_EAST_VA, caller, None).await?;
 
 // Get, update, delete
-let info = client.get_organization(org_slug).await?;
-client.update_organization(org_slug, Some("new_name"), None).await?;
-client.delete_organization(org_slug).await?;
+let info = client.get_organization(org.slug).await?;
+client.update_organization(org.slug, Some("new_name"), None).await?;
+client.delete_organization(org.slug, caller).await?;
 
 // List with pagination
-let orgs = client.list_organizations(None).await?;
+let orgs = client.list_organizations(caller, None, None).await?;
 
 // Member management
-let members = client.list_organization_members(org_slug, None).await?;
-client.remove_organization_member(org_slug, user_slug).await?;
-client.update_organization_member_role(org_slug, user_slug, role).await?;
+let members = client.list_organization_members(org.slug, None).await?;
+client.remove_organization_member(org.slug, caller).await?;
+client.update_organization_member_role(org.slug, caller, role).await?;
 
 // Team management
-let teams = client.list_organization_teams(org_slug).await?;
-client.create_organization_team(org_slug, "engineering").await?;
-client.delete_organization_team(org_slug, team_slug).await?;
+let teams = client.list_organization_teams(org.slug).await?;
+client.create_organization_team(org.slug, "engineering").await?;
+client.delete_organization_team(org.slug, team_slug).await?;
 
 // Region migration
-client.migrate_organization(org_slug, target_region).await?;
+client.migrate_organization(org.slug, target_region).await?;
 ```
 
 ## User Operations
@@ -734,7 +790,11 @@ client.ingest_events(org_slug, events).await?;
 use inferadb_ledger_sdk::{SdkError, Result};
 
 async fn handle_errors(client: &LedgerClient) -> Result<()> {
-    match client.read(1, None, "key").await {
+    let caller = UserSlug::new(5551234567);
+    let org = OrganizationSlug::new(1234567890);
+    let vault = VaultSlug::new(9876543210);
+
+    match client.read(caller, org, vault, "key", None, None).await {
         Ok(value) => println!("Got: {:?}", value),
 
         // Connection errors (retryable)
@@ -780,7 +840,11 @@ async fn handle_errors(client: &LedgerClient) -> Result<()> {
 use inferadb_ledger_sdk::SdkError;
 use tonic::Code;
 
-match client.write(org_slug, vault, ops, None).await {
+let caller = UserSlug::new(5551234567);
+let org = OrganizationSlug::new(1234567890);
+let vault = VaultSlug::new(9876543210);
+
+match client.write(caller, org, vault, ops, None).await {
     Ok(result) => {
         println!("Committed: {}", result.tx_id);
     }
@@ -816,8 +880,12 @@ The SDK automatically retries transient errors. For custom retry logic:
 ```rust
 use inferadb_ledger_sdk::with_retry;
 
+let caller = UserSlug::new(5551234567);
+let org = OrganizationSlug::new(1234567890);
+let vault = VaultSlug::new(9876543210);
+
 let result = with_retry(&retry_policy, || async {
-    client.read(org_slug, None, "key").await
+    client.read(caller, org, vault, "key", None, None).await
 }).await?;
 ```
 
@@ -855,12 +923,15 @@ let client = LedgerClient::with_sequence_storage(config, storage).await?;
 For advanced use cases:
 
 ```rust
+let organization = OrganizationSlug::new(1234567890);
+let vault = VaultSlug::new(9876543210);
+
 // Get current sequence state
 let tracker = client.sequences();
-let seq = tracker.get(organization_slug, vault_slug).await;
+let seq = tracker.get(organization, vault).await;
 
 // Recover from server if state is lost
-let state = client.get_client_state(organization_slug, vault_slug).await?;
+let state = client.get_client_state(organization, vault).await?;
 println!("Last committed: {}", state.last_committed_sequence);
 ```
 
@@ -935,12 +1006,16 @@ match result {
 Prefer batch operations for bulk work:
 
 ```rust
+let caller = UserSlug::new(5551234567);
+let org = OrganizationSlug::new(1234567890);
+let vault = VaultSlug::new(9876543210);
+
 // Good: single round-trip
-let results = client.batch_read(org_slug, None, keys).await?;
+let results = client.batch_read(caller, org, vault, keys.clone(), None, None).await?;
 
 // Bad: N round-trips
 for key in keys {
-    let result = client.read(org_slug, None, key).await?;
+    let result = client.read(caller, org, vault, key, None, None).await?;
 }
 ```
 
