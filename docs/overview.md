@@ -215,12 +215,12 @@ Ledger offers two read consistency levels:
 ```bash
 # Eventually consistent read (default)
 grpcurl -plaintext \
-  -d '{"organization_slug": {"slug": 1234567890}, "key": "user:alice"}' \
+  -d '{"organization": {"slug": 1234567890}, "key": "user:alice"}' \
   localhost:50051 ledger.v1.ReadService/Read
 
 # Linearizable read
 grpcurl -plaintext \
-  -d '{"organization_slug": {"slug": 1234567890}, "key": "user:alice", "linearizable": true}' \
+  -d '{"organization": {"slug": 1234567890}, "key": "user:alice", "linearizable": true}' \
   localhost:50051 ledger.v1.ReadService/Read
 ```
 

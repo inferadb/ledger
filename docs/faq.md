@@ -139,7 +139,7 @@ Yes. All read operations accept an optional `height` parameter:
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"slug": 1234567890}, "key": "user:alice", "height": "100"}' \
+  -d '{"organization": {"slug": 1234567890}, "key": "user:alice", "height": "100"}' \
   localhost:50051 ledger.v1.ReadService/Read
 ```
 
@@ -222,7 +222,7 @@ For persistent logging, configure a log aggregator (Loki, CloudWatch, etc.).
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
+  -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 ```
 

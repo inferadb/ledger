@@ -108,7 +108,7 @@ grpcurl -plaintext node1:50051 ledger.v1.AdminService/GetClusterInfo > pre-upgra
 for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
   echo "Vault $vault:"
   grpcurl -plaintext \
-    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}}" \
+    -d "{\"organization\": {\"slug\": 1234567890}, \"vault\": {\"slug\": $vault}}" \
     localhost:50051 ledger.v1.ReadService/GetTip | jq '.height'
 done > pre-upgrade-heights.txt
 ```
@@ -180,14 +180,14 @@ grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListOrganizations
 for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
   echo "Vault $vault:"
   grpcurl -plaintext \
-    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}}" \
+    -d "{\"organization\": {\"slug\": 1234567890}, \"vault\": {\"slug\": $vault}}" \
     localhost:50051 ledger.v1.ReadService/GetTip | jq '.height'
 done
 
 # Run integrity checks
 for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
   grpcurl -plaintext \
-    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}, \"full_check\": true}" \
+    -d "{\"organization\": {\"slug\": 1234567890}, \"vault\": {\"slug\": $vault}, \"full_check\": true}" \
     localhost:50051 ledger.v1.AdminService/CheckIntegrity
 done
 ```
@@ -225,7 +225,7 @@ grpcurl -plaintext node1:50051 ledger.v1.AdminService/GetClusterInfo
 
 # Run functional test
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "client_id": {"id": "upgrade-test"}, "sequence": "1", "operations": [{"set_entity": {"key": "test:upgrade", "value": "dGVzdA=="}}]}' \
+  -d '{"organization": {"slug": 1234567890}, "client_id": {"id": "upgrade-test"}, "idempotency_key": "AAAAAAAAAAAAAAAAAAAAAA==", "operations": [{"set_entity": {"key": "test:upgrade", "value": "dGVzdA=="}}]}' \
   localhost:50051 ledger.v1.WriteService/Write
 ```
 
@@ -238,7 +238,7 @@ grpcurl -plaintext \
 diff pre-upgrade-heights.txt <(for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
   echo "Vault $vault:"
   grpcurl -plaintext \
-    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}}" \
+    -d "{\"organization\": {\"slug\": 1234567890}, \"vault\": {\"slug\": $vault}}" \
     localhost:50051 ledger.v1.ReadService/GetTip | jq '.height'
 done)
 ```

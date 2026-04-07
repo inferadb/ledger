@@ -74,7 +74,7 @@ grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults
 # Run integrity check
 for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
   grpcurl -plaintext \
-    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}, \"full_check\": true}" \
+    -d "{\"organization\": {\"slug\": 1234567890}, \"vault\": {\"slug\": $vault}, \"full_check\": true}" \
     localhost:50051 ledger.v1.AdminService/CheckIntegrity
 done
 ```
@@ -131,7 +131,7 @@ grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults
 for vault in $(grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListVaults | jq -r '.vaults[].vault.slug'); do
   echo "Vault $vault:"
   grpcurl -plaintext \
-    -d "{\"organization_slug\": {\"id\": \"1\"}, \"vault\": {\"slug\": \"$vault\"}}" \
+    -d "{\"organization\": {\"slug\": 1234567890}, \"vault\": {\"slug\": $vault}}" \
     localhost:50051 ledger.v1.ReadService/GetTip | jq '.height'
 done
 ```
@@ -181,7 +181,7 @@ curl -s localhost:9090/metrics | grep determinism_bug
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "AFFECTED_VAULT_SLUG"}}' \
+  -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
   localhost:50051 ledger.v1.AdminService/GetVault
 ```
 
@@ -191,7 +191,7 @@ Status will be `DIVERGED`. The auto-recovery background job will attempt recover
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "AFFECTED_VAULT_SLUG"}}' \
+  -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
   localhost:50051 ledger.v1.AdminService/RecoverVault
 ```
 
@@ -202,13 +202,13 @@ grpcurl -plaintext \
 for node in node1 node2 node3; do
   echo "$node:"
   grpcurl -plaintext $node:50051 \
-    -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "AFFECTED_VAULT_SLUG"}}' \
+    -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
     ledger.v1.AdminService/CheckIntegrity
 done
 
 # Snapshot from healthy node
 grpcurl -plaintext healthy-node:50051 \
-  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "AFFECTED_VAULT_SLUG"}}' \
+  -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
   ledger.v1.AdminService/CreateSnapshot
 
 # Remove corrupted node, let it resync from snapshot
@@ -301,4 +301,4 @@ Escalation path for production incidents:
 
 - [Backup Verification](backup-verification.md) - Ensure backups are restorable
 - [Upgrade Runbook](rolling-upgrade.md) - Version upgrade procedures
-- [Troubleshooting](../../troubleshooting.md) - Common issues
+- [Troubleshooting](../troubleshooting.md) - Common issues

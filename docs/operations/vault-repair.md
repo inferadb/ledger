@@ -95,7 +95,7 @@ Manual intervention is required.
 
 ```bash
 # Check vault health status via HealthService
-grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault": {"slug": "7180591718400"}}' \
+grpcurl -plaintext -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
   localhost:50051 ledger.v1.HealthService/Check
 
 # View recent divergence events in logs
@@ -120,11 +120,11 @@ Once you've identified and addressed the root cause:
 
 ```bash
 # Force recovery for a specific vault via AdminService
-grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault": {"slug": "7180591718400"}}' \
+grpcurl -plaintext -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
   localhost:50051 ledger.v1.AdminService/RecoverVault
 
 # Monitor recovery progress via health checks
-watch -n 5 'grpcurl -plaintext -d "{\"organization_slug\": {\"id\": 1}, \"vault\": {\"slug\": \"7180591718400\"}}" \
+watch -n 5 'grpcurl -plaintext -d "{\"organization\": {\"slug\": 1234567890}, \"vault\": {\"slug\": 7180591718400}}" \
   localhost:50051 ledger.v1.HealthService/Check'
 ```
 
@@ -138,11 +138,11 @@ The `RecoverVault` RPC:
 
 ```bash
 # Check vault is healthy
-grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault": {"slug": "7180591718400"}}' \
+grpcurl -plaintext -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
   localhost:50051 ledger.v1.HealthService/Check
 
 # Test read operations
-grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault": {"slug": "7180591718400"}, "key": "test"}' \
+grpcurl -plaintext -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}, "key": "test"}' \
   localhost:50051 ledger.v1.ReadService/Read
 ```
 
@@ -191,7 +191,7 @@ cp -r /var/lib/ledger/state.db /var/lib/ledger/state.db.corrupt.$(date +%Y%m%d)
 systemctl start ledger
 
 # 4. Monitor recovery via HealthService
-grpcurl -plaintext -d '{"organization_slug": {"id": 1}, "vault": {"slug": "7180591718400"}}' \
+grpcurl -plaintext -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
   localhost:50051 ledger.v1.HealthService/Check
 
 # 5. Check logs for recovery progress

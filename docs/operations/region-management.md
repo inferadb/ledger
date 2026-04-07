@@ -373,4 +373,4 @@ inferadb_ledger_disk_bytes / inferadb_ledger_disk_capacity_bytes > 0.85
 - [Deployment Guide](deployment.md) - Cluster setup
 - [Multi-Region](multi-region.md) - Geographic distribution patterns
 - [Capacity Planning](capacity-planning.md) - Sizing guidelines
-- [SystemDiscoveryService](../client/discovery.md) - Routing API
+- SystemDiscoveryService `GetSystemState` RPC - Routing API

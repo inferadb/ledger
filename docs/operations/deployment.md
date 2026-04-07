@@ -293,7 +293,7 @@ Configuration can be set via CLI arguments or environment variables. CLI argumen
 | CLI         | Environment Variable        | Default           | Description                                             |
 | ----------- | --------------------------- | ----------------- | ------------------------------------------------------- |
 | `--listen`  | `INFERADB__LEDGER__LISTEN`  | `127.0.0.1:50051` | Host and port to accept connections                     |
-| `--data`    | `INFERADB__LEDGER__DATA`    | (ephemeral)       | Where to store data ([layout](../internals/storage.md)) |
+| `--data`    | `INFERADB__LEDGER__DATA`    | (ephemeral)       | Where to store data                                     |
 | `--metrics` | `INFERADB__LEDGER__METRICS` | (disabled)        | Expose Prometheus metrics at this address               |
 
 ### Bootstrap Mode
@@ -308,7 +308,7 @@ These flags are mutually exclusive. If none is specified, `--cluster 3` is the d
 
 ### Discovery Options
 
-How nodes find each other. See [discovery internals](../internals/discovery.md) for details.
+How nodes find each other.
 
 | CLI           | Environment Variable          | Default    | Description                             |
 | ------------- | ----------------------------- | ---------- | --------------------------------------- |
@@ -322,7 +322,7 @@ The `--peers` value is auto-detected:
 
 ### Tuning Options
 
-These defaults work well for most deployments. See [consensus internals](../internals/consensus.md) for batching details.
+These defaults work well for most deployments.
 
 | CLI               | Environment Variable               | Default | Description                             |
 | ----------------- | ---------------------------------- | ------- | --------------------------------------- |

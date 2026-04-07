@@ -301,8 +301,6 @@ services:
       INFERADB__LEDGER__DATA: "/data"
       INFERADB__LEDGER__CLUSTER: "3"
       INFERADB__LEDGER__PEERS: "ledger.internal"
-      INFERADB__LEDGER__BATCH_SIZE: "100"
-      INFERADB__LEDGER__BATCH_DELAY: "0.01"
     volumes:
       - ledger-data:/data
     ports:
@@ -381,7 +379,7 @@ grpcurl -plaintext localhost:50051 ledger.v1.AdminService/GetConfig
 
 ## JWT Configuration
 
-Token issuance and signing key management settings. See [INTEGRATION.md](../INTEGRATION.md) for the full JWT integration guide.
+Token issuance and signing key management settings.
 
 | Variable                                          | Default             | Description                            |
 | ------------------------------------------------- | ------------------- | -------------------------------------- |

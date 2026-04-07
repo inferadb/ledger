@@ -50,8 +50,6 @@ data:
   INFERADB__LEDGER__DATA: "/data"
   INFERADB__LEDGER__CLUSTER: "3"
   INFERADB__LEDGER__PEERS: "ledger-headless.inferadb.svc.cluster.local"
-  INFERADB__LEDGER__BATCH_SIZE: "100"
-  INFERADB__LEDGER__BATCH_DELAY: "0.005"
 ```
 
 **Headless Service:**
@@ -395,12 +393,12 @@ Create an organization and vault:
 ```bash
 # Create organization
 grpcurl -plaintext \
-  -d '{"name": "production"}' \
+  -d '{"name": "production", "region": "REGION_US_EAST_VA"}' \
   localhost:50051 ledger.v1.AdminService/CreateOrganization
 
-# Create vault (note the organization_slug from previous response)
+# Create vault (use the organization slug from the CreateOrganization response)
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}}' \
+  -d '{"organization": {"slug": 1234567890}}' \
   localhost:50051 ledger.v1.AdminService/CreateVault
 ```
 
@@ -479,7 +477,7 @@ spec:
 
 ```bash
 kubectl exec ledger-0 -- grpcurl -plaintext localhost:50051 \
-  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
+  -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
   ledger.v1.AdminService/CreateSnapshot
 ```
 
@@ -546,12 +544,12 @@ kubectl exec ledger-0 -- grpcurl -plaintext localhost:50051 ledger.v1.HealthServ
 
 echo "=== Write Test ==="
 kubectl exec ledger-0 -- grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "client_id": {"id": "test"}, "sequence": "1", "operations": [{"set_entity": {"key": "test:deploy", "value": "dGVzdA=="}}]}' \
+  -d '{"organization": {"slug": 1234567890}, "client_id": {"id": "test"}, "idempotency_key": "dGVzdC1rZXk=", "operations": [{"set_entity": {"key": "test:deploy", "value": "dGVzdA=="}}]}' \
   localhost:50051 ledger.v1.WriteService/Write
 
 echo "=== Read Test ==="
 kubectl exec ledger-0 -- grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "key": "test:deploy"}' \
+  -d '{"organization": {"slug": 1234567890}, "key": "test:deploy"}' \
   localhost:50051 ledger.v1.ReadService/Read
 ```
 

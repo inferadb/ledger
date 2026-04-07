@@ -269,7 +269,7 @@ The `SigningKeyEnvelope` binary format: `wrapped_dek(40) + nonce(12) + ciphertex
 
 Private key material is zeroized on drop (`Zeroizing<Vec<u8>>`). `EncodingKey` is built on-demand per signing operation, never cached. Only public `DecodingKey` is cached for the validation hot path.
 
-See [INTEGRATION.md](../INTEGRATION.md) for key rotation runbook and [ADR: Network Trust Model](../adr/network-trust-model.md) for the trust boundary design.
+Key rotation follows the same envelope encryption lifecycle: generate a new DEK, re-wrap with the current RMK, and re-encrypt the private key material. The trust boundary design is documented in the [Security](#design-philosophy) section above.
 
 ### User Credential Protection
 

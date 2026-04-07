@@ -54,7 +54,7 @@ grpcurl -plaintext localhost:50051 ledger.v1.HealthService/Check
 
 # Vault-specific health
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
+  -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
   localhost:50051 ledger.v1.HealthService/Check
 ```
 
@@ -78,9 +78,3 @@ grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListOrganizations
 # Metrics
 curl localhost:9090/metrics
 ```
-
-## Related Documentation
-
-- [Client API](../client/api.md) - Read/write operations
-- [Admin API](../client/admin.md) - Cluster management
-- [DESIGN.md](../../DESIGN.md) - System design specification

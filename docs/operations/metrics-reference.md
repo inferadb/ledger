@@ -242,7 +242,7 @@ ledger_determinism_bug_total > 0
 | --------------------------------- | --------- | -------------------------------------------- | -------------------------------- |
 | `ledger_grpc_sli_latency_seconds` | Histogram | `service`, `method`, `status`, `error_class` | Per-RPC latency with SLI buckets |
 
-**SLI histogram buckets**: 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 10.0 seconds.
+**SLI histogram buckets**: 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0, 10.0 seconds.
 
 ## Hot Key Detection
 
@@ -332,7 +332,7 @@ scrape_configs:
   - job_name: "ledger"
     kubernetes_sd_configs:
       - role: pod
-        organizations:
+        namespaces:
           names:
             - inferadb
     relabel_configs:
@@ -371,4 +371,9 @@ spec:
 
 ## Grafana Dashboard
 
-See [grafana/ledger-dashboard.json](grafana/ledger-dashboard.json) for a complete dashboard.
+See the [dashboards directory](../dashboards/) for pre-built Grafana dashboards:
+
+- `api-performance.json` — API latency, throughput, and error rates
+- `raft-health.json` — Raft consensus health and replication metrics
+- `resource-saturation.json` — Resource utilization and saturation indicators
+- `storage-engine.json` — B+ tree and storage engine metrics

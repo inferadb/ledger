@@ -16,7 +16,7 @@ The events system uses two layers:
 
 ### Multi-Service Context
 
-Ledger serves as the central audit store. Engine and Control write events via the `IngestEvents` RPC. See [audit-protocol.md](../architecture/audit-protocol.md) for integration details.
+Ledger serves as the central audit store. Engine and Control write events via the `IngestEvents` RPC.
 
 ## Configuration Reference
 

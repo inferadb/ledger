@@ -727,4 +727,4 @@ cargo bench -p inferadb-ledger-raft --bench logging_bench
 - [Dashboard Templates](dashboards/) - Pre-built Grafana, Kibana, Datadog dashboards
 - [Metrics Reference](metrics-reference.md) - Prometheus metrics (complementary)
 - [Alerting Guide](alerting.md) - Using metrics for alerts
-- [Developer Guide](../development/logging.md) - Adding request logging to new services
+

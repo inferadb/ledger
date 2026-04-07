@@ -32,7 +32,7 @@ Look for:
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
+  -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 ```
 
@@ -69,7 +69,7 @@ curl -s localhost:9090/metrics | grep inferadb_ledger_raft_proposals_pending
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "client_id": {"id": "my-client"}}' \
+  -d '{"organization": {"slug": 1234567890}, "client_id": {"id": "my-client"}}' \
   localhost:50051 ledger.v1.ReadService/GetClientState
 ```
 
@@ -110,7 +110,7 @@ grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListOrganizations
 
 # List vaults in organization
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}}' \
+  -d '{"organization": {"slug": 1234567890}}' \
   localhost:50051 ledger.v1.AdminService/ListVaults
 ```
 
@@ -123,7 +123,7 @@ grpcurl -plaintext \
 ```bash
 # Get current tip
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
+  -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 ```
 
@@ -172,7 +172,7 @@ grpcurl -plaintext localhost:50051 ledger.v1.AdminService/GetNodeInfo
 ```bash
 # Check vault health
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
+  -d '{"organization": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 
 # Check metrics

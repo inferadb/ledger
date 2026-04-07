@@ -250,48 +250,41 @@ scrape_configs:
 
 Moving an organization to a different region:
 
-### 1. Create Organization in Target Region
+### 1. Migrate the Organization
+
+Use the `MigrateOrganization` RPC on AdminService to move the organization to the target region. This handles data transfer and routing updates atomically via a saga:
 
 ```bash
-grpcurl -plaintext target-region-ledger:50051 \
-  -d '{"name": "migrating_org"}' \
-  ledger.v1.AdminService/CreateOrganization
+grpcurl -plaintext ledger:50051 \
+  -d '{
+    "slug": {"slug": 7890123456},
+    "target_region": "REGION_US_WEST_OR"
+  }' \
+  ledger.v1.AdminService/MigrateOrganization
 ```
 
-### 2. Export Data from Source
+If the source region is a protected region (mandatory in-country storage), you must acknowledge the residency downgrade:
 
 ```bash
-# Export all entities and relationships
-grpcurl -plaintext source-region-ledger:50051 \
-  -d '{"organization_slug": {"slug": 7890123456}}' \
-  ledger.v1.ReadService/ExportOrganization > export.json
+grpcurl -plaintext ledger:50051 \
+  -d '{
+    "slug": {"slug": 7890123456},
+    "target_region": "REGION_US_WEST_OR",
+    "acknowledge_residency_downgrade": true
+  }' \
+  ledger.v1.AdminService/MigrateOrganization
 ```
 
-### 3. Import to Target
+Writes to the organization are rejected during migration.
+
+### 2. Verify Integrity
+
+After migration completes, verify data integrity in the target region:
 
 ```bash
-# Import to new region
-grpcurl -plaintext target-region-ledger:50051 \
-  -d @export.json \
-  ledger.v1.WriteService/ImportOrganization
-```
-
-### 4. Update Routing
-
-Update Control's routing table to point to new region.
-
-### 5. Verify and Cleanup
-
-```bash
-# Verify data integrity
-grpcurl -plaintext target-region-ledger:50051 \
-  -d '{"organization_slug": {"slug": 1234567890}}' \
+grpcurl -plaintext ledger:50051 \
+  -d '{"organization": {"slug": 7890123456}, "vault": {"slug": 7180591718400}, "full_check": true}' \
   ledger.v1.AdminService/CheckIntegrity
-
-# Delete from source (after verification period)
-grpcurl -plaintext source-region-ledger:50051 \
-  -d '{"organization_slug": {"slug": 7890123456}}' \
-  ledger.v1.AdminService/DeleteOrganization
 ```
 
 ## Cost Considerations
