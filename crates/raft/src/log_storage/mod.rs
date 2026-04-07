@@ -492,8 +492,26 @@ mod tests {
             },
             _ => panic!("expected Recovering health status"),
         }
+    }
 
-        // Test recovery attempt 2 (circuit breaker)
+    #[tokio::test]
+    async fn test_update_vault_health_recovery_escalates_attempt_count() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let mut state = store.applied_state.write();
+
+        // Start with a vault already in recovery attempt 1
+        state.vault_health.insert(
+            (OrganizationId::new(1), VaultId::new(1)),
+            VaultHealthStatus::Recovering {
+                attempt: 1,
+                started_at: chrono::Utc::now().timestamp(),
+            },
+        );
+
+        // Escalate to recovery attempt 2
         let request = LedgerRequest::UpdateVaultHealth {
             organization: OrganizationId::new(1),
             vault: VaultId::new(1),

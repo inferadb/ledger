@@ -646,11 +646,6 @@ mod tests {
     }
 
     #[test]
-    fn test_min_nodes_per_protected_region_constant() {
-        assert_eq!(MIN_NODES_PER_PROTECTED_REGION, 3);
-    }
-
-    #[test]
     fn test_group_membership_members() {
         let mut groups = GroupMembership::new();
 

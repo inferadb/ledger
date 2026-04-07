@@ -763,34 +763,6 @@ mod tests {
     }
 
     #[test]
-    fn test_index_key_format() {
-        let user_id = 42i64;
-        let idx_key = format!("_idx:member:user:{}", user_id);
-        assert_eq!(idx_key, "_idx:member:user:42");
-    }
-
-    #[test]
-    fn test_user_key_parsing() {
-        let key = "user:123";
-        let user_id = key.strip_prefix("user:").and_then(|s| s.parse::<i64>().ok());
-        assert_eq!(user_id, Some(123));
-    }
-
-    #[test]
-    fn test_user_key_parsing_non_numeric() {
-        let key = "user:abc";
-        let user_id = key.strip_prefix("user:").and_then(|s| s.parse::<i64>().ok());
-        assert!(user_id.is_none());
-    }
-
-    #[test]
-    fn test_user_key_parsing_wrong_prefix() {
-        let key = "member:123";
-        let user_id = key.strip_prefix("user:").and_then(|s| s.parse::<i64>().ok());
-        assert!(user_id.is_none());
-    }
-
-    #[test]
     fn test_deleting_status_detected() {
         let user_data = serde_json::json!({
             "id": 1,
@@ -826,20 +798,6 @@ mod tests {
         });
         let user_id = membership.get("user_id").and_then(|v| v.as_i64());
         assert!(user_id.is_none());
-    }
-
-    #[test]
-    fn test_cleanup_client_id_round_trip() {
-        let client_id = ClientId::new(CLEANUP_CLIENT_ID);
-        let s: &str = client_id.as_ref();
-        assert_eq!(s, CLEANUP_CLIENT_ID);
-    }
-
-    #[test]
-    fn test_empty_deleted_users_returns_no_orphans() {
-        let deleted_users: HashSet<i64> = HashSet::new();
-        // The function short-circuits when deleted_users is empty
-        assert!(deleted_users.is_empty());
     }
 
     #[test]
@@ -913,23 +871,6 @@ mod tests {
         });
         let user_id = membership.get("user_id").and_then(|v| v.as_i64());
         assert!(user_id.is_none());
-    }
-
-    #[test]
-    fn test_system_organization_skipped() {
-        // Verify the skip logic: organization 0 is skipped
-        let org_id = SYSTEM_ORGANIZATION_ID;
-        assert_eq!(org_id, OrganizationId::new(0));
-    }
-
-    #[test]
-    fn test_pagination_break_condition() {
-        // When batch_len < MAX_BATCH_SIZE, pagination breaks
-        let batch_len = 500;
-        assert!(batch_len < MAX_BATCH_SIZE);
-
-        let batch_len = MAX_BATCH_SIZE;
-        assert!(batch_len >= MAX_BATCH_SIZE);
     }
 
     /// Verifies pagination in user listing handles large datasets correctly.

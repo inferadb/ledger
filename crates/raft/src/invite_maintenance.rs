@@ -691,14 +691,6 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_result_debug_format() {
-        let result = InviteMaintenanceResult { invitations_expired: 10, invitations_reaped: 5 };
-        let debug = format!("{:?}", result);
-        assert!(debug.contains("invitations_expired: 10"));
-        assert!(debug.contains("invitations_reaped: 5"));
-    }
-
-    #[test]
     fn retention_window_calculation() {
         let retention = chrono::Duration::days(RETENTION_DAYS);
         let now = Utc::now();
@@ -710,22 +702,6 @@ mod tests {
 
         // Created long ago: past retention window
         assert!(now >= created_long_ago + retention);
-    }
-
-    #[test]
-    fn pending_entries_count_within_max() {
-        let entries: Vec<u32> = (0..150).collect();
-        let pending: Vec<&u32> = entries.iter().take(MAX_EXPIRATIONS_PER_CYCLE).collect();
-        // 150 < 200, so we get all 150
-        assert_eq!(pending.len(), 150);
-    }
-
-    #[test]
-    fn terminal_entries_count_within_max() {
-        let entries: Vec<u32> = (0..50).collect();
-        let capped: Vec<&u32> = entries.iter().take(MAX_DELETIONS_PER_CYCLE).collect();
-        // 50 < 100, so we get all 50
-        assert_eq!(capped.len(), 50);
     }
 
     #[test]
@@ -779,21 +755,5 @@ mod tests {
         assert!(InvitationStatus::Declined.is_terminal());
         assert!(InvitationStatus::Expired.is_terminal());
         assert!(InvitationStatus::Revoked.is_terminal());
-    }
-
-    #[test]
-    fn had_errors_accumulation() {
-        // Simulates the had_errors logic from run_cycle
-        let mut had_errors = false;
-
-        // Expiration returns (count, errors)
-        let (_, expiration_errors) = (5u64, false);
-        had_errors |= expiration_errors;
-        assert!(!had_errors);
-
-        // Reaping returns (count, errors)
-        let (_, reaping_errors) = (3u64, true);
-        had_errors |= reaping_errors;
-        assert!(had_errors);
     }
 }

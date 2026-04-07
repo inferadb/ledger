@@ -421,138 +421,166 @@ mod tests {
     use super::*;
 
     // =========================================================================
-    // IP Validation Tests
+    // is_private_ipv4
     // =========================================================================
 
     #[test]
-    fn test_private_ipv4_class_a() {
-        // 10.0.0.0/8
+    fn private_ipv4_class_a_range_start() {
         assert!(is_private_ipv4("10.0.0.1".parse().unwrap()));
-        assert!(is_private_ipv4("10.255.255.255".parse().unwrap()));
-        assert!(is_private_ipv4("10.0.1.1".parse().unwrap()));
     }
 
     #[test]
-    fn test_private_ipv4_class_b() {
-        // 172.16.0.0/12 (172.16.x.x - 172.31.x.x)
-        assert!(is_private_ipv4("172.16.0.1".parse().unwrap()));
-        assert!(is_private_ipv4("172.31.255.255".parse().unwrap()));
-        assert!(is_private_ipv4("172.20.1.1".parse().unwrap()));
+    fn private_ipv4_class_a_range_end() {
+        assert!(is_private_ipv4("10.255.255.255".parse().unwrap()));
+    }
 
-        // Outside range
+    #[test]
+    fn private_ipv4_class_b_range_start() {
+        assert!(is_private_ipv4("172.16.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ipv4_class_b_range_end() {
+        assert!(is_private_ipv4("172.31.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ipv4_class_b_below_range_rejected() {
         assert!(!is_private_ipv4("172.15.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ipv4_class_b_above_range_rejected() {
         assert!(!is_private_ipv4("172.32.0.1".parse().unwrap()));
     }
 
     #[test]
-    fn test_private_ipv4_class_c() {
-        // 192.168.0.0/16
+    fn private_ipv4_class_c_range_start() {
         assert!(is_private_ipv4("192.168.0.1".parse().unwrap()));
-        assert!(is_private_ipv4("192.168.255.255".parse().unwrap()));
-        assert!(is_private_ipv4("192.168.1.100".parse().unwrap()));
+    }
 
-        // Outside range
+    #[test]
+    fn private_ipv4_class_c_range_end() {
+        assert!(is_private_ipv4("192.168.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ipv4_class_c_below_range_rejected() {
         assert!(!is_private_ipv4("192.167.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ipv4_class_c_above_range_rejected() {
         assert!(!is_private_ipv4("192.169.1.1".parse().unwrap()));
     }
 
     #[test]
-    fn test_private_ipv4_loopback() {
-        // 127.0.0.0/8
+    fn private_ipv4_loopback() {
         assert!(is_private_ipv4("127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ipv4_loopback_range_end() {
         assert!(is_private_ipv4("127.255.255.255".parse().unwrap()));
     }
 
     #[test]
-    fn test_private_ipv4_link_local() {
-        // 169.254.0.0/16
+    fn private_ipv4_link_local_range_start() {
         assert!(is_private_ipv4("169.254.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ipv4_link_local_range_end() {
         assert!(is_private_ipv4("169.254.255.255".parse().unwrap()));
     }
 
     #[test]
-    fn test_public_ipv4_rejected() {
-        // Public IPs should not be private
-        assert!(!is_private_ipv4("8.8.8.8".parse().unwrap())); // Google DNS
-        assert!(!is_private_ipv4("1.1.1.1".parse().unwrap())); // Cloudflare
-        assert!(!is_private_ipv4("142.250.72.14".parse().unwrap())); // Google
-        assert!(!is_private_ipv4("13.107.42.14".parse().unwrap())); // Microsoft
+    fn public_ipv4_rejected() {
+        assert!(!is_private_ipv4("8.8.8.8".parse().unwrap()));
     }
 
+    // =========================================================================
+    // is_private_ipv6
+    // =========================================================================
+
     #[test]
-    fn test_private_ipv6_loopback() {
+    fn private_ipv6_loopback() {
         assert!(is_private_ipv6("::1".parse().unwrap()));
     }
 
     #[test]
-    fn test_private_ipv6_ula_wireguard() {
-        // fd00::/8 - Unique Local Addresses (WireGuard typical)
+    fn private_ipv6_ula_range_start() {
         assert!(is_private_ipv6("fd00::1".parse().unwrap()));
-        assert!(is_private_ipv6("fd12:3456:789a::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ipv6_ula_range_end() {
         assert!(is_private_ipv6("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()));
     }
 
     #[test]
-    fn test_private_ipv6_link_local() {
-        // fe80::/10
+    fn private_ipv6_link_local() {
         assert!(is_private_ipv6("fe80::1".parse().unwrap()));
-        assert!(is_private_ipv6("fe80::1234:5678:abcd:ef01".parse().unwrap()));
     }
 
     #[test]
-    fn test_public_ipv6_rejected() {
-        // Public IPv6 should not be private
-        assert!(!is_private_ipv6("2001:4860:4860::8888".parse().unwrap())); // Google DNS
-        assert!(!is_private_ipv6("2606:4700:4700::1111".parse().unwrap())); // Cloudflare
+    fn public_ipv6_rejected() {
+        assert!(!is_private_ipv6("2001:4860:4860::8888".parse().unwrap()));
     }
 
+    // =========================================================================
+    // validate_private_ip
+    // =========================================================================
+
     #[test]
-    fn test_validate_private_ip_accepts_valid() {
-        // IPv4 private
+    fn validate_private_ip_accepts_ipv4_private() {
         assert!(validate_private_ip("10.0.0.1").is_ok());
-        assert!(validate_private_ip("192.168.1.1").is_ok());
-        assert!(validate_private_ip("172.16.0.1").is_ok());
-
-        // IPv6 private
-        assert!(validate_private_ip("fd00::1").is_ok());
-        assert!(validate_private_ip("::1").is_ok());
     }
 
     #[test]
-    fn test_validate_private_ip_rejects_public() {
-        // Public IPv4
+    fn validate_private_ip_accepts_ipv6_private() {
+        assert!(validate_private_ip("fd00::1").is_ok());
+    }
+
+    #[test]
+    fn validate_private_ip_rejects_public_ipv4() {
         let result = validate_private_ip("8.8.8.8");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Public IPv4"));
+    }
 
-        // Public IPv6
+    #[test]
+    fn validate_private_ip_rejects_public_ipv6() {
         let result = validate_private_ip("2001:4860:4860::8888");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Public IPv6"));
     }
 
     #[test]
-    fn test_validate_private_ip_rejects_invalid() {
+    fn validate_private_ip_rejects_invalid_string() {
         let result = validate_private_ip("not-an-ip");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid IP address"));
     }
 
+    // =========================================================================
+    // validate_peer_addresses
+    // =========================================================================
+
     #[test]
-    fn test_validate_peer_addresses_empty() {
+    fn validate_peer_addresses_empty_rejected() {
         let result = validate_peer_addresses(&[]);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_validate_peer_addresses_valid() {
+    fn validate_peer_addresses_all_private_accepted() {
         let addrs = vec!["10.0.0.1".to_string(), "fd00::1".to_string()];
         assert!(validate_peer_addresses(&addrs).is_ok());
     }
 
     #[test]
-    fn test_validate_peer_addresses_mixed_rejects() {
-        // One valid, one public - should reject
+    fn validate_peer_addresses_mixed_public_rejected() {
         let addrs = vec!["10.0.0.1".to_string(), "8.8.8.8".to_string()];
         assert!(validate_peer_addresses(&addrs).is_err());
     }

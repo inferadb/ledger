@@ -2259,7 +2259,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_organization_member_serialization_roundtrip() {
+    fn test_add_organization_member_request_serialization_roundtrip() {
         let request = LedgerRequest::AddOrganizationMember {
             organization: OrganizationId::new(5),
             user: UserId::new(42),
@@ -2277,7 +2277,10 @@ mod tests {
             },
             _ => panic!("unexpected variant"),
         }
+    }
 
+    #[test]
+    fn test_organization_member_added_response_serialization_roundtrip() {
         let response = LedgerResponse::OrganizationMemberAdded {
             organization_id: OrganizationId::new(5),
             already_member: true,

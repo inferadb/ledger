@@ -897,27 +897,45 @@ mod tests {
     }
 
     #[test]
-    fn test_local_backend() {
+    fn test_local_backend_store_and_load_roundtrip() {
         let temp = TempDir::new().expect("create temp dir");
         let backend = LocalBackend::new(temp.path().join("snapshots"), 10);
 
-        // Initially empty
-        assert!(!backend.exists(100).unwrap());
-        assert!(backend.list().unwrap().is_empty());
-
-        // Store a snapshot
         let snapshot = create_test_snapshot(100);
         backend.store(&snapshot).unwrap();
 
-        // Now exists
-        assert!(backend.exists(100).unwrap());
-        assert_eq!(backend.list().unwrap(), vec![100]);
-
-        // Load it back
         let loaded = backend.load(100).unwrap();
         assert_eq!(loaded.region_height(), 100);
+    }
 
-        // Delete it
+    #[test]
+    fn test_local_backend_exists_reflects_stored_snapshots() {
+        let temp = TempDir::new().expect("create temp dir");
+        let backend = LocalBackend::new(temp.path().join("snapshots"), 10);
+
+        assert!(!backend.exists(100).unwrap());
+
+        backend.store(&create_test_snapshot(100)).unwrap();
+        assert!(backend.exists(100).unwrap());
+    }
+
+    #[test]
+    fn test_local_backend_list_returns_stored_heights() {
+        let temp = TempDir::new().expect("create temp dir");
+        let backend = LocalBackend::new(temp.path().join("snapshots"), 10);
+
+        assert!(backend.list().unwrap().is_empty());
+
+        backend.store(&create_test_snapshot(100)).unwrap();
+        assert_eq!(backend.list().unwrap(), vec![100]);
+    }
+
+    #[test]
+    fn test_local_backend_delete_removes_snapshot() {
+        let temp = TempDir::new().expect("create temp dir");
+        let backend = LocalBackend::new(temp.path().join("snapshots"), 10);
+
+        backend.store(&create_test_snapshot(100)).unwrap();
         backend.delete(100).unwrap();
         assert!(!backend.exists(100).unwrap());
     }
@@ -1311,27 +1329,37 @@ mod tests {
     }
 
     #[test]
-    fn test_object_storage_backend_test_roundtrip() {
+    fn test_object_storage_backend_store_and_load_roundtrip() {
         let backend = ObjectStorageBackend::new_test("bucket".to_string(), "prefix".to_string());
-        assert_eq!(backend.tier(), StorageTier::Warm);
 
-        // Initially empty
-        assert!(!backend.exists(100).unwrap());
-        assert!(backend.list().unwrap().is_empty());
-
-        // Store
         let snapshot = create_test_snapshot(100);
         backend.store(&snapshot).unwrap();
 
-        // Exists
-        assert!(backend.exists(100).unwrap());
-        assert_eq!(backend.list().unwrap(), vec![100]);
-
-        // Load
         let loaded = backend.load(100).unwrap();
         assert_eq!(loaded.region_height(), 100);
+    }
 
-        // Delete
+    #[test]
+    fn test_object_storage_backend_reports_warm_tier() {
+        let backend = ObjectStorageBackend::new_test("bucket".to_string(), "prefix".to_string());
+        assert_eq!(backend.tier(), StorageTier::Warm);
+    }
+
+    #[test]
+    fn test_object_storage_backend_exists_reflects_stored() {
+        let backend = ObjectStorageBackend::new_test("bucket".to_string(), "prefix".to_string());
+
+        assert!(!backend.exists(100).unwrap());
+
+        backend.store(&create_test_snapshot(100)).unwrap();
+        assert!(backend.exists(100).unwrap());
+    }
+
+    #[test]
+    fn test_object_storage_backend_delete_removes_snapshot() {
+        let backend = ObjectStorageBackend::new_test("bucket".to_string(), "prefix".to_string());
+
+        backend.store(&create_test_snapshot(100)).unwrap();
         backend.delete(100).unwrap();
         assert!(!backend.exists(100).unwrap());
         assert!(backend.list().unwrap().is_empty());
@@ -1356,13 +1384,6 @@ mod tests {
 
         let heights = backend.list().unwrap();
         assert_eq!(heights, vec![100, 200, 300]);
-    }
-
-    #[test]
-    fn test_storage_tier_equality() {
-        assert_eq!(StorageTier::Hot, StorageTier::Hot);
-        assert_ne!(StorageTier::Hot, StorageTier::Warm);
-        assert_ne!(StorageTier::Warm, StorageTier::Cold);
     }
 
     /// Tests tiered manager with real object storage backend (local filesystem).

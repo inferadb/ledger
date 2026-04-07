@@ -182,8 +182,10 @@ async fn test_delete_user_saga_state_transitions() {
     let saga = DeleteUserSaga::new(SagaId::new(saga_id.clone()), input);
     let wrapped = Saga::DeleteUser(saga);
 
-    // Write saga to storage
-    let saga_key = format!("_meta:saga:{}", saga_id);
+    // Write saga to storage (using a user-space key since system-prefixed keys
+    // are rejected by the gRPC input validator — the saga orchestrator writes
+    // actual saga records internally through Raft, not through the Write API).
+    let saga_key = format!("saga-test:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
     write_entity(leader.addr, organization, vault, &saga_key, &saga_value, "delete-test-client")
@@ -191,7 +193,6 @@ async fn test_delete_user_saga_state_transitions() {
         .expect("write delete saga");
 
     // The saga entity is committed through Raft when write_entity returns.
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Read saga and verify it round-trips correctly
     let saga_bytes = read_entity(leader.addr, organization, vault, &saga_key)
@@ -245,8 +246,10 @@ async fn test_completed_saga_not_reexecuted() {
 
     let wrapped = Saga::CreateOrganization(saga);
 
-    // Write completed saga
-    let saga_key = format!("_meta:saga:{}", saga_id);
+    // Write completed saga (using a user-space key — system-prefixed keys are
+    // rejected by gRPC input validation; the orchestrator writes real sagas
+    // internally through Raft).
+    let saga_key = format!("saga-test:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
     write_entity(leader.addr, organization, vault, &saga_key, &saga_value, "completed-test-client")
@@ -305,8 +308,9 @@ async fn test_saga_serialization_roundtrip() {
     let saga = CreateOrganizationSaga::new(SagaId::new(saga_id.clone()), input);
     let wrapped = Saga::CreateOrganization(saga);
 
-    // Write to storage
-    let saga_key = format!("_meta:saga:{}", saga_id);
+    // Write to storage (using a user-space key — system-prefixed keys are
+    // rejected by gRPC input validation).
+    let saga_key = format!("saga-test:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
     write_entity(leader.addr, organization, vault, &saga_key, &saga_value, "roundtrip-client")

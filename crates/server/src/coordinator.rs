@@ -238,19 +238,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_bootstrap_decision_debug() {
-        let decision = BootstrapDecision::Bootstrap {
-            initial_members: vec![
-                (100, "127.0.0.1:50051".to_string()),
-                (200, "127.0.0.1:50052".to_string()),
-            ],
-        };
-        let debug_str = format!("{:?}", decision);
-        assert!(debug_str.contains("Bootstrap"));
-        assert!(debug_str.contains("100"));
-    }
-
-    #[test]
     fn test_coordinator_error_display() {
         let timeout_err = CoordinatorError::Timeout { message: "test timeout".to_string() };
         assert_eq!(timeout_err.to_string(), "bootstrap timeout: test timeout");

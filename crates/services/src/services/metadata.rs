@@ -128,7 +128,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_response_with_correlation_injects_metadata() {
+    fn response_with_correlation_injects_metadata() {
         let request_id = uuid::Uuid::new_v4();
         let response = response_with_correlation("body", &request_id, "trace-abc");
 
@@ -138,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn test_status_with_correlation_injects_metadata_and_details() {
+    fn status_with_correlation_injects_metadata_and_details() {
         let request_id = uuid::Uuid::new_v4();
         let status = Status::invalid_argument("bad field");
         let enriched = status_with_correlation(status, &request_id, "trace-123");
@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn test_status_with_correlation_preserves_existing_details() {
+    fn status_with_correlation_preserves_existing_details() {
         let request_id = uuid::Uuid::new_v4();
 
         // Pre-build a status with custom details
@@ -181,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn test_status_with_correlation_unavailable_is_retryable() {
+    fn status_with_correlation_unavailable_is_retryable() {
         let request_id = uuid::Uuid::new_v4();
         let status = Status::unavailable("leader unknown");
         let enriched = status_with_correlation(status, &request_id, "t");
@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn test_status_with_correlation_resource_exhausted_is_retryable() {
+    fn status_with_correlation_resource_exhausted_is_retryable() {
         let request_id = uuid::Uuid::new_v4();
         let status = Status::resource_exhausted("rate limited");
         let enriched = status_with_correlation(status, &request_id, "t");
@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn test_status_with_correlation_deadline_exceeded_is_retryable() {
+    fn status_with_correlation_deadline_exceeded_is_retryable() {
         let request_id = uuid::Uuid::new_v4();
         let status = Status::deadline_exceeded("timed out");
         let enriched = status_with_correlation(status, &request_id, "t");
@@ -211,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn test_status_with_correlation_internal_not_retryable() {
+    fn status_with_correlation_internal_not_retryable() {
         let request_id = uuid::Uuid::new_v4();
         let status = Status::internal("unexpected");
         let enriched = status_with_correlation(status, &request_id, "t");

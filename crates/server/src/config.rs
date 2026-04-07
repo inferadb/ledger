@@ -720,7 +720,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config() {
+    fn default_config_has_expected_field_values() {
         let config = Config::default();
         assert_eq!(config.bootstrap_expect(), 3);
         assert_eq!(config.cluster, Some(3));
@@ -730,12 +730,16 @@ mod tests {
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.peers_ttl_secs, 3600);
         assert!(config.peers.is_none());
-        assert!(!config.is_single_node());
-        assert!(!config.is_join_mode());
-        // Default is ephemeral (no data_dir) and localhost-only
+        assert!(config.data_dir.is_none());
+    }
+
+    #[test]
+    fn default_config_is_ephemeral_and_localhost() {
+        let config = Config::default();
         assert!(config.is_ephemeral());
         assert!(config.is_localhost_only());
-        assert!(config.data_dir.is_none());
+        assert!(!config.is_single_node());
+        assert!(!config.is_join_mode());
     }
 
     #[test]
@@ -762,22 +766,25 @@ mod tests {
     }
 
     #[test]
-    fn test_config_validate_cluster_size() {
-        // Valid: cluster >= 2
+    fn validate_accepts_cluster_size_at_least_two() {
         let config = Config { cluster: Some(3), ..Config::default() };
         assert!(config.validate().is_ok());
 
         let config = Config { cluster: Some(5), ..Config::default() };
         assert!(config.validate().is_ok());
+    }
 
-        // Invalid: cluster < 2
+    #[test]
+    fn validate_rejects_cluster_size_below_two() {
         let config = Config { cluster: Some(1), ..Config::default() };
         assert!(config.validate().is_err());
 
         let config = Config { cluster: Some(0), ..Config::default() };
         assert!(config.validate().is_err());
+    }
 
-        // Valid: no cluster specified (uses default 3)
+    #[test]
+    fn validate_accepts_no_cluster_using_default() {
         let config = Config { cluster: None, ..Config::default() };
         assert!(config.validate().is_ok());
     }
@@ -801,16 +808,17 @@ mod tests {
     }
 
     #[test]
-    fn test_is_localhost_only() {
-        // Localhost addresses
+    fn is_localhost_only_true_for_loopback_addresses() {
         let config =
             Config { listen_addr: "127.0.0.1:50051".parse().unwrap(), ..Config::default() };
         assert!(config.is_localhost_only());
 
         let config = Config { listen_addr: "[::1]:50051".parse().unwrap(), ..Config::default() };
         assert!(config.is_localhost_only());
+    }
 
-        // Non-localhost addresses
+    #[test]
+    fn is_localhost_only_false_for_non_loopback_addresses() {
         let config = Config { listen_addr: "0.0.0.0:50051".parse().unwrap(), ..Config::default() };
         assert!(!config.is_localhost_only());
 
@@ -991,12 +999,6 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
-    #[test]
-    fn test_config_includes_logging() {
-        let config = Config::default();
-        assert!(config.validate().is_ok());
-    }
-
     // === OTEL Config Tests ===
 
     #[test]
@@ -1091,13 +1093,6 @@ mod tests {
     #[test]
     fn test_otel_transport_default() {
         assert_eq!(OtelTransport::default(), OtelTransport::Grpc);
-    }
-
-    #[test]
-    fn test_logging_config_includes_otel() {
-        let config = LoggingConfig::default();
-        assert!(!config.otel.enabled);
-        assert!(config.validate().is_ok());
     }
 
     #[test]

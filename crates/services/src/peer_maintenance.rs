@@ -83,7 +83,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_interval() {
+    fn default_interval_is_five_minutes() {
         assert_eq!(DEFAULT_MAINTENANCE_INTERVAL.as_secs(), 5 * 60);
     }
 }

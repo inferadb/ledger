@@ -255,19 +255,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_expired_list_produces_no_operations() {
-        let expired: Vec<(String, u64)> = Vec::new();
-        let operations: Vec<Operation> = expired
-            .iter()
-            .map(|(key, expired_at)| Operation::ExpireEntity {
-                key: key.clone(),
-                expired_at: *expired_at,
-            })
-            .collect();
-        assert!(operations.is_empty());
-    }
-
-    #[test]
     fn expiry_filtering_logic() {
         // Simulate the filtering from find_expired_entities
         let now = 5000u64;
@@ -285,16 +272,6 @@ mod tests {
 
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].0, b"expired".to_vec());
-    }
-
-    #[test]
-    fn batch_size_limits_expired_results() {
-        // Verify that take(max_batch_size) limits output
-        let many_expired: Vec<(String, u64)> =
-            (0..2000).map(|i| (format!("key:{i}"), 1000u64)).collect();
-
-        let capped: Vec<_> = many_expired.iter().take(MAX_BATCH_SIZE).collect();
-        assert_eq!(capped.len(), 1000);
     }
 
     #[test]

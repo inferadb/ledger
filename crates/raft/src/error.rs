@@ -440,8 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_error_maps_to_internal() {
-        // Storage errors are always internal — they indicate a node-level failure
+    fn test_snapshot_helper_maps_to_failed_precondition() {
         let status: tonic::Status = ServiceError::snapshot("storage test").into();
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
     }

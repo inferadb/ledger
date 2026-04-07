@@ -502,13 +502,6 @@ mod tests {
         }
 
         #[test]
-        fn strategy_produces_valid_entities(entity in arb_entity()) {
-            // Entity key may be empty (arb_small_value generates 0..32 bytes)
-            let _ = entity.version;
-            let _ = entity.expires_at;
-        }
-
-        #[test]
         fn strategy_produces_valid_relationships(rel in arb_relationship()) {
             prop_assert!(rel.resource.contains(':'));
             prop_assert!(!rel.relation.is_empty());
@@ -525,11 +518,6 @@ mod tests {
         fn strategy_produces_valid_vault_blocks(block in arb_vault_block()) {
             prop_assert!(block.header.organization.value() > 0);
             prop_assert!(block.header.vault.value() > 0);
-        }
-
-        #[test]
-        fn strategy_produces_valid_region_blocks(block in arb_region_block()) {
-            prop_assert!(!block.vault_entries.is_empty() || block.vault_entries.is_empty());
         }
 
         #[test]

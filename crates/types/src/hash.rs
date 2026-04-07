@@ -402,19 +402,19 @@ mod tests {
     use crate::types::{OrganizationId, VaultId};
 
     #[test]
-    fn test_empty_hash_is_sha256_of_empty() {
+    fn empty_hash_is_sha256_of_empty() {
         let computed = sha256(&[]);
         assert_eq!(computed, EMPTY_HASH);
         assert_ne!(EMPTY_HASH, ZERO_HASH);
     }
 
     #[test]
-    fn test_zero_hash_is_all_zeros() {
+    fn zero_hash_is_all_zeros() {
         assert_eq!(ZERO_HASH, [0u8; 32]);
     }
 
     #[test]
-    fn test_sha256_basic() {
+    fn sha256_known_vector() {
         // SHA-256("hello")
         let hash = sha256(b"hello");
         assert_eq!(
@@ -424,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sha256_concat() {
+    fn sha256_concat_equals_sha256_of_concatenated_hashes() {
         let h1 = sha256(b"a");
         let h2 = sha256(b"b");
         let combined = sha256_concat(&[h1, h2]);
@@ -442,7 +442,7 @@ mod tests {
     /// to produce a different state root — the foundation of state divergence
     /// detection between leader and followers.
     #[test]
-    fn test_bit_flip_detected_via_state_root_mismatch() {
+    fn bit_flip_detected_via_state_root_mismatch() {
         let mut bucket_roots = [EMPTY_HASH; 256];
 
         // Populate some buckets (simulating entities in those buckets)
@@ -469,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_eq_constant_time() {
+    fn hash_eq_constant_time() {
         let a = sha256(b"test");
         let b = sha256(b"test");
         let c = sha256(b"other");
@@ -479,13 +479,13 @@ mod tests {
     }
 
     #[test]
-    fn test_bucket_hasher_empty() {
+    fn bucket_hasher_empty_produces_empty_hash() {
         let hasher = BucketHasher::new();
         assert_eq!(hasher.finalize(), EMPTY_HASH);
     }
 
     #[test]
-    fn test_bucket_hasher_with_entity() {
+    fn bucket_hasher_with_entity_produces_non_empty_hash() {
         let mut hasher = BucketHasher::new();
         hasher.add_entity(&Entity {
             key: b"test_key".to_vec(),
@@ -500,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bucket_id_distribution() {
+    fn bucket_id_distributes_keys_across_256_buckets() {
         // Verify keys distribute across buckets
         let mut buckets = [0u32; 256];
         for i in 0..10000 {
@@ -518,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn test_block_hash_deterministic() {
+    fn block_hash_deterministic() {
         let header = BlockHeader {
             height: 100,
             organization: OrganizationId::new(1),
@@ -537,13 +537,13 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_merkle_root_empty() {
+    fn tx_merkle_root_empty() {
         let root = compute_tx_merkle_root(&[]);
         assert_eq!(root, EMPTY_HASH);
     }
 
     #[test]
-    fn test_tx_merkle_root_single() {
+    fn tx_merkle_root_single_equals_tx_hash() {
         let tx = Transaction {
             id: [0u8; 16],
             client_id: "client1".into(),
@@ -558,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_merkle_root_two() {
+    fn tx_merkle_root_two_equals_sha256_concat_of_hashes() {
         let tx1 = Transaction {
             id: [1u8; 16],
             client_id: "client1".into(),
@@ -581,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_merkle_root_three_consistent_with_merkle_module() {
+    fn tx_merkle_root_three_consistent_with_merkle_module() {
         // Verify tx merkle root uses the same implementation as merkle.rs
         let tx1 = Transaction {
             id: [1u8; 16],
@@ -617,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_merkle_root_deterministic() {
+    fn tx_merkle_root_deterministic() {
         let tx = Transaction {
             id: [42u8; 16],
             client_id: "test".into(),
@@ -632,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chain_commitment_empty() {
+    fn chain_commitment_empty() {
         let commitment = compute_chain_commitment(&[], 0, 0);
         assert_eq!(commitment.accumulated_header_hash, EMPTY_HASH);
         assert_eq!(commitment.state_root_accumulator, EMPTY_HASH);
@@ -641,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chain_commitment_single_block() {
+    fn chain_commitment_single_block() {
         let header = BlockHeader {
             height: 1,
             organization: OrganizationId::new(1),
@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chain_commitment_multiple_blocks() {
+    fn chain_commitment_multiple_blocks() {
         let headers: Vec<BlockHeader> = (1..=3)
             .map(|i| BlockHeader {
                 height: i,
@@ -703,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chain_commitment_deterministic() {
+    fn chain_commitment_deterministic() {
         let headers: Vec<BlockHeader> = (1..=5)
             .map(|i| BlockHeader {
                 height: i,
@@ -726,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_entry_hash_deterministic() {
+    fn vault_entry_hash_deterministic() {
         let entry = crate::types::VaultEntry {
             organization: OrganizationId::new(1),
             vault: VaultId::new(2),
@@ -744,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_entry_hash_differs_on_any_field_change() {
+    fn vault_entry_hash_differs_on_any_field_change() {
         let base = crate::types::VaultEntry {
             organization: OrganizationId::new(1),
             vault: VaultId::new(2),
@@ -779,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_hash_with_set_entity_operation() {
+    fn tx_hash_with_set_entity_operation() {
         let tx = Transaction {
             id: [1u8; 16],
             client_id: "c".into(),
@@ -800,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_hash_with_all_condition_types() {
+    fn tx_hash_distinct_per_condition_type() {
         let make_tx = |cond: Option<crate::types::SetCondition>| Transaction {
             id: [1u8; 16],
             client_id: "c".into(),
@@ -831,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_hash_with_relationship_operations() {
+    fn tx_hash_with_relationship_operations() {
         let tx = Transaction {
             id: [1u8; 16],
             client_id: "c".into(),
@@ -856,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_hash_with_delete_and_expire_operations() {
+    fn tx_hash_delete_and_expire_produce_distinct_hashes() {
         let tx_delete = Transaction {
             id: [1u8; 16],
             client_id: "c".into(),
@@ -884,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bucket_hasher_multiple_entities() {
+    fn bucket_hasher_order_dependent() {
         let mut hasher = BucketHasher::new();
         hasher.add_entity(&Entity {
             key: b"key1".to_vec(),
@@ -921,13 +921,13 @@ mod tests {
     }
 
     #[test]
-    fn test_bucket_hasher_default() {
+    fn bucket_hasher_default_produces_empty_hash() {
         let hasher = BucketHasher::default();
         assert_eq!(hasher.finalize(), EMPTY_HASH);
     }
 
     #[test]
-    fn test_block_hash_differs_on_field_changes() {
+    fn block_hash_differs_on_field_changes() {
         let base = BlockHeader {
             height: 100,
             organization: OrganizationId::new(1),
@@ -959,14 +959,14 @@ mod tests {
     }
 
     #[test]
-    fn test_sha256_concat_empty() {
+    fn sha256_concat_empty_equals_empty_hash() {
         let result = sha256_concat(&[]);
         // SHA-256 of empty input
         assert_eq!(result, EMPTY_HASH);
     }
 
     #[test]
-    fn test_sha256_concat_single() {
+    fn sha256_concat_single_differs_from_input() {
         let h = sha256(b"test");
         let result = sha256_concat(&[h]);
         // SHA-256(h) should differ from h itself

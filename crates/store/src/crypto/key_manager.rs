@@ -1005,33 +1005,21 @@ mod tests {
     // ─── EnvKeyManager parsing tests ────────────────────────
 
     #[test]
-    fn test_parse_env_key_us_east_va_v1() {
-        let result = EnvKeyManager::parse_env_key("US_EAST_VA_V1");
-        assert_eq!(result, Some((Region::US_EAST_VA, 1)));
-    }
+    fn parse_env_key_extracts_region_and_version() {
+        let cases: &[(&str, Option<(Region, u32)>)] = &[
+            ("US_EAST_VA_V1", Some((Region::US_EAST_VA, 1))),
+            ("DE_CENTRAL_FRANKFURT_V3", Some((Region::DE_CENTRAL_FRANKFURT, 3))),
+            ("GLOBAL_V1", Some((Region::GLOBAL, 1))),
+            ("GLOBAL_V0", Some((Region::GLOBAL, 0))),
+            ("GLOBAL_V999", Some((Region::GLOBAL, 999))),
+            ("INVALID_REGION_V1", None),
+            ("US_EAST_VA", None),
+            ("GLOBAL_Vabc", None),
+        ];
 
-    #[test]
-    fn test_parse_env_key_de_central_frankfurt_v3() {
-        let result = EnvKeyManager::parse_env_key("DE_CENTRAL_FRANKFURT_V3");
-        assert_eq!(result, Some((Region::DE_CENTRAL_FRANKFURT, 3)));
-    }
-
-    #[test]
-    fn test_parse_env_key_global_v1() {
-        let result = EnvKeyManager::parse_env_key("GLOBAL_V1");
-        assert_eq!(result, Some((Region::GLOBAL, 1)));
-    }
-
-    #[test]
-    fn test_parse_env_key_invalid_region() {
-        let result = EnvKeyManager::parse_env_key("INVALID_REGION_V1");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_parse_env_key_no_version() {
-        let result = EnvKeyManager::parse_env_key("US_EAST_VA");
-        assert!(result.is_none());
+        for (input, expected) in cases {
+            assert_eq!(EnvKeyManager::parse_env_key(input), *expected, "parse_env_key({input:?})");
+        }
     }
 
     #[test]
@@ -1585,12 +1573,6 @@ mod tests {
     }
 
     #[test]
-    fn test_in_memory_key_manager_default() {
-        let manager = InMemoryKeyManager::default();
-        assert!(manager.current_rmk(Region::GLOBAL).is_err());
-    }
-
-    #[test]
     fn test_in_memory_key_manager_generate_for_regions() {
         let manager =
             InMemoryKeyManager::generate_for_regions(&[Region::GLOBAL, Region::US_EAST_VA]);
@@ -1682,25 +1664,23 @@ mod tests {
     // ─── hex_digit tests ───────────────────────────────────────
 
     #[test]
-    fn test_hex_digit_lowercase() {
-        assert_eq!(hex_digit(b'0'), Some(0));
-        assert_eq!(hex_digit(b'9'), Some(9));
-        assert_eq!(hex_digit(b'a'), Some(10));
-        assert_eq!(hex_digit(b'f'), Some(15));
-    }
+    fn hex_digit_maps_ascii_to_nibble() {
+        let cases: &[(u8, Option<u8>)] = &[
+            (b'0', Some(0)),
+            (b'9', Some(9)),
+            (b'a', Some(10)),
+            (b'f', Some(15)),
+            (b'A', Some(10)),
+            (b'F', Some(15)),
+            (b'g', None),
+            (b'G', None),
+            (b' ', None),
+            (b'\0', None),
+        ];
 
-    #[test]
-    fn test_hex_digit_uppercase() {
-        assert_eq!(hex_digit(b'A'), Some(10));
-        assert_eq!(hex_digit(b'F'), Some(15));
-    }
-
-    #[test]
-    fn test_hex_digit_invalid() {
-        assert_eq!(hex_digit(b'g'), None);
-        assert_eq!(hex_digit(b'G'), None);
-        assert_eq!(hex_digit(b' '), None);
-        assert_eq!(hex_digit(b'\0'), None);
+        for &(input, expected) in cases {
+            assert_eq!(hex_digit(input), expected, "hex_digit({input:#04x})");
+        }
     }
 
     // ─── EnvKeyManager list_versions tests ─────────────────────
@@ -1774,25 +1754,7 @@ mod tests {
         assert!(versions.is_empty());
     }
 
-    // ─── EnvKeyManager parse_env_key edge cases ────────────────
-
-    #[test]
-    fn test_parse_env_key_version_zero() {
-        let result = EnvKeyManager::parse_env_key("GLOBAL_V0");
-        assert_eq!(result, Some((Region::GLOBAL, 0)));
-    }
-
-    #[test]
-    fn test_parse_env_key_high_version() {
-        let result = EnvKeyManager::parse_env_key("GLOBAL_V999");
-        assert_eq!(result, Some((Region::GLOBAL, 999)));
-    }
-
-    #[test]
-    fn test_parse_env_key_non_numeric_version() {
-        let result = EnvKeyManager::parse_env_key("GLOBAL_Vabc");
-        assert!(result.is_none());
-    }
+    // (parse_env_key edge cases consolidated into table-driven test above)
 
     // ─── VersionSidecarEntry tests ─────────────────────────────
 

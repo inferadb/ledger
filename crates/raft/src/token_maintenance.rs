@@ -338,20 +338,6 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_result_debug_format() {
-        let result = MaintenanceResult {
-            expired_tokens_deleted: 3,
-            signing_keys_revoked: 1,
-            onboarding_codes_deleted: 0,
-            onboarding_accounts_deleted: 0,
-            totp_challenges_deleted: 0,
-        };
-        let debug = format!("{:?}", result);
-        assert!(debug.contains("expired_tokens_deleted: 3"));
-        assert!(debug.contains("signing_keys_revoked: 1"));
-    }
-
-    #[test]
     fn constants_are_reasonable() {
         assert_eq!(DEFAULT_MAINTENANCE_INTERVAL, Duration::from_secs(300));
         // 5-minute interval is appropriate for token lifecycle

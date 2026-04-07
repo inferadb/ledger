@@ -2571,7 +2571,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_vault_block_hash_deterministic() {
+    fn vault_block_hash_deterministic() {
         // Same input should always produce the same hash
         let entry = VaultEntry {
             organization: DomainOrganizationId::new(1),
@@ -2590,7 +2590,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_block_hash_different_for_different_inputs() {
+    fn vault_block_hash_different_for_different_inputs() {
         let entry1 = VaultEntry {
             organization: DomainOrganizationId::new(1),
             vault: DomainVaultId::new(2),
@@ -2618,7 +2618,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_block_hash_different_state_root() {
+    fn vault_block_hash_different_state_root() {
         let entry1 = VaultEntry {
             organization: DomainOrganizationId::new(1),
             vault: DomainVaultId::new(2),
@@ -2646,7 +2646,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_block_hash_chain_continuity() {
+    fn vault_block_hash_chain_continuity() {
         // Simulate a chain of blocks
         let entry1 = VaultEntry {
             organization: DomainOrganizationId::new(1),
@@ -2694,7 +2694,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_block_hash_includes_all_fields() {
+    fn vault_block_hash_includes_all_fields() {
         let base_entry = VaultEntry {
             organization: DomainOrganizationId::new(1),
             vault: DomainVaultId::new(2),

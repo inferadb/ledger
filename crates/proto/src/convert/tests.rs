@@ -15,13 +15,14 @@ use super::*;
 use crate::proto;
 
 // -------------------------------------------------------------------------
-// Vote conversion tests
+// Vote conversion tests (LedgerNodeId)
 // -------------------------------------------------------------------------
 
 #[test]
-fn test_vote_to_proto_uncommitted() {
+fn vote_uncommitted_ledger_node_id_to_proto() {
+    use inferadb_ledger_types::LedgerNodeId;
     use openraft::Vote;
-    let vote = Vote::new(5, 42);
+    let vote: Vote<LedgerNodeId> = Vote::new(5, 42);
     let proto: proto::RaftVote = (&vote).into();
 
     assert_eq!(proto.term, 5);
@@ -30,9 +31,10 @@ fn test_vote_to_proto_uncommitted() {
 }
 
 #[test]
-fn test_vote_to_proto_committed() {
+fn vote_committed_ledger_node_id_to_proto() {
+    use inferadb_ledger_types::LedgerNodeId;
     use openraft::Vote;
-    let vote = Vote::new_committed(10, 99);
+    let vote: Vote<LedgerNodeId> = Vote::new_committed(10, 99);
     let proto: proto::RaftVote = (&vote).into();
 
     assert_eq!(proto.term, 10);
@@ -41,7 +43,7 @@ fn test_vote_to_proto_committed() {
 }
 
 #[test]
-fn test_proto_to_vote_uncommitted() {
+fn proto_to_vote_uncommitted_ledger_node_id() {
     use inferadb_ledger_types::LedgerNodeId;
     use openraft::Vote;
     let proto = proto::RaftVote { term: 7, node_id: 123, committed: false };
@@ -53,7 +55,7 @@ fn test_proto_to_vote_uncommitted() {
 }
 
 #[test]
-fn test_proto_to_vote_committed() {
+fn proto_to_vote_committed_ledger_node_id() {
     use inferadb_ledger_types::LedgerNodeId;
     use openraft::Vote;
     let proto = proto::RaftVote { term: 15, node_id: 456, committed: true };
@@ -65,11 +67,10 @@ fn test_proto_to_vote_committed() {
 }
 
 #[test]
-fn test_vote_roundtrip() {
+fn vote_uncommitted_ledger_node_id_roundtrip() {
     use inferadb_ledger_types::LedgerNodeId;
     use openraft::Vote;
-    // Uncommitted roundtrip
-    let original = Vote::new(100, 200);
+    let original: Vote<LedgerNodeId> = Vote::new(100, 200);
     let proto: proto::RaftVote = (&original).into();
     let recovered: Vote<LedgerNodeId> = proto.into();
 
@@ -79,18 +80,22 @@ fn test_vote_roundtrip() {
         recovered.leader_id.voted_for().unwrap_or(0)
     );
     assert_eq!(original.committed, recovered.committed);
+}
 
-    // Committed roundtrip
-    let original_committed = Vote::new_committed(50, 60);
-    let proto_committed: proto::RaftVote = (&original_committed).into();
-    let recovered_committed: Vote<LedgerNodeId> = proto_committed.into();
+#[test]
+fn vote_committed_ledger_node_id_roundtrip() {
+    use inferadb_ledger_types::LedgerNodeId;
+    use openraft::Vote;
+    let original: Vote<LedgerNodeId> = Vote::new_committed(50, 60);
+    let proto: proto::RaftVote = (&original).into();
+    let recovered: Vote<LedgerNodeId> = proto.into();
 
-    assert_eq!(original_committed.leader_id.term, recovered_committed.leader_id.term);
+    assert_eq!(original.leader_id.term, recovered.leader_id.term);
     assert_eq!(
-        original_committed.leader_id.voted_for().unwrap_or(0),
-        recovered_committed.leader_id.voted_for().unwrap_or(0)
+        original.leader_id.voted_for().unwrap_or(0),
+        recovered.leader_id.voted_for().unwrap_or(0)
     );
-    assert_eq!(original_committed.committed, recovered_committed.committed);
+    assert_eq!(original.committed, recovered.committed);
 }
 
 // -------------------------------------------------------------------------

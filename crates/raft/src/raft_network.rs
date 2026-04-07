@@ -414,26 +414,4 @@ mod tests {
         assert!(!factory_no_trace.trace_raft_rpcs);
         assert_eq!(factory_no_trace.region, Some(inferadb_ledger_types::Region::GLOBAL));
     }
-
-    #[test]
-    fn test_endpoint_format() {
-        // Reproduces the endpoint formatting used in get_client and transfer code
-        let addr = "127.0.0.1:50051";
-        let endpoint = format!("http://{}", addr);
-        assert_eq!(endpoint, "http://127.0.0.1:50051");
-    }
-
-    #[test]
-    fn test_endpoint_format_ipv6() {
-        let addr = "[::1]:50051";
-        let endpoint = format!("http://{}", addr);
-        assert_eq!(endpoint, "http://[::1]:50051");
-    }
-
-    #[test]
-    fn test_endpoint_format_hostname() {
-        let addr = "node1.example.com:50051";
-        let endpoint = format!("http://{}", addr);
-        assert_eq!(endpoint, "http://node1.example.com:50051");
-    }
 }

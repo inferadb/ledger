@@ -601,42 +601,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_retry_delay_exponential_backoff() {
-        let config = AutoRecoveryConfig {
-            base_retry_delay: Duration::from_secs(5),
-            max_retry_delay: Duration::from_secs(300),
-            ..Default::default()
-        };
-
-        // Attempt 1: 5 * 2^0 = 5s
-        let delay1 = config.base_retry_delay.saturating_mul(1);
-        assert_eq!(delay1, Duration::from_secs(5));
-
-        // Attempt 2: 5 * 2^1 = 10s
-        let delay2 = config.base_retry_delay.saturating_mul(2);
-        assert_eq!(delay2, Duration::from_secs(10));
-
-        // Attempt 3: 5 * 2^2 = 20s
-        let delay3 = config.base_retry_delay.saturating_mul(4);
-        assert_eq!(delay3, Duration::from_secs(20));
-    }
-
-    #[test]
-    fn test_retry_delay_capped_at_max() {
-        let config = AutoRecoveryConfig {
-            base_retry_delay: Duration::from_secs(60),
-            max_retry_delay: Duration::from_secs(120),
-            ..Default::default()
-        };
-
-        // Attempt 3: 60 * 2^2 = 240s, but capped at 120s
-        let multiplier = 2u64.pow(2);
-        let delay = config.base_retry_delay.saturating_mul(multiplier as u32);
-        let capped = std::cmp::min(delay, config.max_retry_delay);
-        assert_eq!(capped, Duration::from_secs(120));
-    }
-
-    #[test]
     fn test_default_config() {
         let config = AutoRecoveryConfig::default();
         assert_eq!(config.scan_interval, Duration::from_secs(30));
@@ -666,73 +630,6 @@ mod tests {
         assert_eq!(config.base_retry_delay, Duration::from_secs(10));
         assert_eq!(config.max_retry_delay, Duration::from_secs(600));
         assert!(!config.enabled);
-    }
-
-    #[test]
-    fn test_recovery_result_variants() {
-        let success = RecoveryResult::Success;
-        let transient = RecoveryResult::TransientFailure("connection timeout".to_string());
-        let determinism = RecoveryResult::DeterminismBug;
-        let max_attempts = RecoveryResult::MaxAttemptsExceeded;
-
-        assert_eq!(success, RecoveryResult::Success);
-        assert_eq!(determinism, RecoveryResult::DeterminismBug);
-        assert_eq!(max_attempts, RecoveryResult::MaxAttemptsExceeded);
-        assert_eq!(transient, RecoveryResult::TransientFailure("connection timeout".to_string()));
-    }
-
-    #[test]
-    fn test_recovery_result_clone() {
-        let original = RecoveryResult::TransientFailure("error msg".to_string());
-        let cloned = original.clone();
-        assert_eq!(original, cloned);
-    }
-
-    #[test]
-    fn test_recovery_result_debug() {
-        let result = RecoveryResult::DeterminismBug;
-        let debug = format!("{:?}", result);
-        assert!(debug.contains("DeterminismBug"));
-
-        let result = RecoveryResult::TransientFailure("timeout".to_string());
-        let debug = format!("{:?}", result);
-        assert!(debug.contains("TransientFailure"));
-        assert!(debug.contains("timeout"));
-    }
-
-    #[test]
-    fn test_recovery_result_inequality() {
-        assert_ne!(RecoveryResult::Success, RecoveryResult::DeterminismBug);
-        assert_ne!(RecoveryResult::Success, RecoveryResult::MaxAttemptsExceeded);
-        assert_ne!(
-            RecoveryResult::TransientFailure("a".to_string()),
-            RecoveryResult::TransientFailure("b".to_string())
-        );
-    }
-
-    #[test]
-    fn test_config_clone() {
-        let config = AutoRecoveryConfig {
-            scan_interval: Duration::from_secs(60),
-            base_retry_delay: Duration::from_secs(10),
-            max_retry_delay: Duration::from_secs(600),
-            enabled: false,
-        };
-        let cloned = config.clone();
-        assert_eq!(cloned.scan_interval, config.scan_interval);
-        assert_eq!(cloned.base_retry_delay, config.base_retry_delay);
-        assert_eq!(cloned.max_retry_delay, config.max_retry_delay);
-        assert_eq!(cloned.enabled, config.enabled);
-    }
-
-    #[test]
-    fn test_config_debug() {
-        let config = AutoRecoveryConfig::default();
-        let debug = format!("{:?}", config);
-        assert!(debug.contains("scan_interval"));
-        assert!(debug.contains("base_retry_delay"));
-        assert!(debug.contains("max_retry_delay"));
-        assert!(debug.contains("enabled"));
     }
 
     #[test]

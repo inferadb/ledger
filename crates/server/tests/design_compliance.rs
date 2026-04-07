@@ -134,8 +134,11 @@ async fn test_idempotency_key_reuse_detection() {
 }
 
 /// Tests that two writes to the same vault with unique idempotency keys both succeed.
+///
+/// Verifies that the server accepts multiple writes to the same vault when
+/// each uses a distinct idempotency key (no false-positive dedup detection).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_same_vault_two_writes() {
+async fn test_distinct_idempotency_keys_both_succeed() {
     let cluster = TestCluster::new(1).await;
     let _leader_id = cluster.wait_for_leader().await;
 
@@ -174,9 +177,7 @@ async fn test_same_vault_two_writes() {
 
     let resp1 = write_client.write(request1).await.expect("write 1");
     match resp1.into_inner().result {
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
-            println!("Write 1 succeeded");
-        },
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {},
         other => panic!("write 1 should succeed, got: {:?}", other),
     }
 
@@ -206,208 +207,8 @@ async fn test_same_vault_two_writes() {
 
     let resp2 = write_client.write(request2).await.expect("write 2");
     match resp2.into_inner().result {
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
-            println!("Write 2 succeeded");
-        },
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {},
         other => panic!("write 2 should succeed, got: {:?}", other),
-    }
-}
-
-/// Tests writing only to vault 2 (no vault 1 involved).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_only_vault_2() {
-    let cluster = TestCluster::new(1).await;
-    let _leader_id = cluster.wait_for_leader().await;
-
-    let leader = cluster.leader().expect("should have leader");
-
-    // Create organization and vault
-    let organization =
-        create_organization(leader.addr, "only-v2-ns", leader).await.expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
-
-    let mut write_client =
-        common::create_write_client(leader.addr).await.expect("connect to leader");
-
-    // Write to vault
-    let request1 = inferadb_ledger_proto::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "only-v2".to_string() }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
-        operations: vec![inferadb_ledger_proto::proto::Operation {
-            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                inferadb_ledger_proto::proto::SetEntity {
-                    key: "v2-key".to_string(),
-                    value: b"v2-val".to_vec(),
-                    expires_at: None,
-                    condition: None,
-                },
-            )),
-        }],
-        include_tx_proof: false,
-        caller: None,
-    };
-
-    let resp1 = write_client.write(request1).await.expect("write v2 first");
-    match resp1.into_inner().result {
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
-            println!("Write to vault (first) succeeded");
-        },
-        other => panic!("vault write 1 should succeed, got: {:?}", other),
-    }
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Second write to same vault
-    let request2 = inferadb_ledger_proto::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "only-v2".to_string() }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
-        operations: vec![inferadb_ledger_proto::proto::Operation {
-            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                inferadb_ledger_proto::proto::SetEntity {
-                    key: "v2-key-2".to_string(),
-                    value: b"v2-val-2".to_vec(),
-                    expires_at: None,
-                    condition: None,
-                },
-            )),
-        }],
-        include_tx_proof: false,
-        caller: None,
-    };
-
-    let resp2 = write_client.write(request2).await.expect("write v2 second");
-    match resp2.into_inner().result {
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
-            println!("Write to vault (second) succeeded");
-        },
-        other => panic!("vault write 2 should succeed, got: {:?}", other),
-    }
-}
-
-/// Tests writing to vault 2 first, then vault 1, then vault 2 again.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_vault_2_first_then_1_then_2() {
-    let cluster = TestCluster::new(1).await;
-    let _leader_id = cluster.wait_for_leader().await;
-
-    let leader = cluster.leader().expect("should have leader");
-
-    // Create organization and two vaults
-    let organization = create_organization(leader.addr, "vault-order-ns", leader)
-        .await
-        .expect("create organization");
-    let vault1 = create_vault(leader.addr, organization).await.expect("create vault 1");
-    let vault2 = create_vault(leader.addr, organization).await.expect("create vault 2");
-
-    let mut write_client =
-        common::create_write_client(leader.addr).await.expect("connect to leader");
-
-    // Write to vault 2 first
-    let request1 = inferadb_ledger_proto::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_proto::proto::ClientId {
-            id: "vault-order-test".to_string(),
-        }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault2.value() }),
-        operations: vec![inferadb_ledger_proto::proto::Operation {
-            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                inferadb_ledger_proto::proto::SetEntity {
-                    key: "v2-key".to_string(),
-                    value: b"v2-val".to_vec(),
-                    expires_at: None,
-                    condition: None,
-                },
-            )),
-        }],
-        include_tx_proof: false,
-        caller: None,
-    };
-
-    let resp1 = write_client.write(request1).await.expect("write v2 first");
-    match resp1.into_inner().result {
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
-            println!("Write to vault 2 succeeded");
-        },
-        other => panic!("vault 2 write 1 should succeed, got: {:?}", other),
-    }
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Write to vault 1
-    let request2 = inferadb_ledger_proto::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_proto::proto::ClientId {
-            id: "vault-order-test".to_string(),
-        }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault1.value() }),
-        operations: vec![inferadb_ledger_proto::proto::Operation {
-            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                inferadb_ledger_proto::proto::SetEntity {
-                    key: "v1-key".to_string(),
-                    value: b"v1-val".to_vec(),
-                    expires_at: None,
-                    condition: None,
-                },
-            )),
-        }],
-        include_tx_proof: false,
-        caller: None,
-    };
-
-    let resp2 = write_client.write(request2).await.expect("write v1");
-    match resp2.into_inner().result {
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
-            println!("Write to vault 1 succeeded");
-        },
-        other => panic!("vault 1 write 1 should succeed, got: {:?}", other),
-    }
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Write to vault 2 again
-    let request3 = inferadb_ledger_proto::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_proto::proto::ClientId {
-            id: "vault-order-test".to_string(),
-        }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault2.value() }),
-        operations: vec![inferadb_ledger_proto::proto::Operation {
-            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                inferadb_ledger_proto::proto::SetEntity {
-                    key: "v2-key-2".to_string(),
-                    value: b"v2-val-2".to_vec(),
-                    expires_at: None,
-                    condition: None,
-                },
-            )),
-        }],
-        include_tx_proof: false,
-        caller: None,
-    };
-
-    let resp3 = write_client.write(request3).await.expect("write v2 again");
-    match resp3.into_inner().result {
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
-            println!("Write to vault 2 (again) succeeded");
-        },
-        other => panic!("vault 2 write 2 should succeed, got: {:?}", other),
     }
 }
 
@@ -457,7 +258,7 @@ async fn test_two_vault_server_assigned_sequences() {
     let resp1 = write_client.write(request1).await.expect("write to vault 1");
     let v1_seq1 = match resp1.into_inner().result {
         Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
-            println!("Write to vault 1 succeeded, assigned_sequence={}", s.assigned_sequence);
+            // assigned_sequence verified in assertions below
             s.assigned_sequence
         },
         other => panic!("vault 1 write 1 should succeed, got: {:?}", other),
@@ -491,7 +292,7 @@ async fn test_two_vault_server_assigned_sequences() {
     let resp2 = write_client.write(request2).await.expect("write to vault 2");
     let v2_seq1 = match resp2.into_inner().result {
         Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
-            println!("Write to vault 2 succeeded, assigned_sequence={}", s.assigned_sequence);
+            // assigned_sequence verified in assertions below
             s.assigned_sequence
         },
         other => panic!("vault 2 write 1 should succeed, got: {:?}", other),
@@ -525,10 +326,7 @@ async fn test_two_vault_server_assigned_sequences() {
     let resp3 = write_client.write(request3).await.expect("write to vault 2 second");
     let v2_seq2 = match resp3.into_inner().result {
         Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
-            println!(
-                "Write to vault 2 (second) succeeded, assigned_sequence={}",
-                s.assigned_sequence
-            );
+            // assigned_sequence verified in assertions below
             s.assigned_sequence
         },
         other => panic!("vault 2 write 2 should succeed, got: {:?}", other),

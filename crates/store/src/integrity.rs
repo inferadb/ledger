@@ -423,34 +423,6 @@ mod tests {
     }
 
     #[test]
-    fn test_scrub_result_default() {
-        let result = ScrubResult::default();
-        assert_eq!(result.pages_checked, 0);
-        assert_eq!(result.checksum_errors, 0);
-        assert_eq!(result.structural_errors, 0);
-        assert!(result.errors.is_empty());
-    }
-
-    #[test]
-    fn test_scrub_error_fields() {
-        let error = ScrubError {
-            page_id: 42,
-            table_name: Some("test_table"),
-            description: "test error".to_string(),
-        };
-        assert_eq!(error.page_id, 42);
-        assert_eq!(error.table_name, Some("test_table"));
-        assert_eq!(error.description, "test error");
-    }
-
-    #[test]
-    fn test_scrub_error_without_table_name() {
-        let error =
-            ScrubError { page_id: 1, table_name: None, description: "orphan page".to_string() };
-        assert!(error.table_name.is_none());
-    }
-
-    #[test]
     fn test_btree_invariants_with_branch_nodes() {
         let db = Database::open_in_memory().unwrap();
 
@@ -525,10 +497,9 @@ mod tests {
     }
 
     #[test]
-    fn test_scrub_corrupted_page_reports_read_error() {
+    fn test_verify_checksums_valid_pages_after_insert() {
         let db = Database::open_in_memory().unwrap();
 
-        // Insert data
         {
             let mut txn = db.write().unwrap();
             txn.insert::<Entities>(&b"k1".to_vec(), &b"v1".to_vec()).unwrap();
@@ -536,13 +507,10 @@ mod tests {
         }
 
         let scrubber = IntegrityScrubber::new(&db);
-
-        // Verify checksums for a range of pages including allocated ones
         let total = db.total_page_count();
         let page_ids: Vec<PageId> = (0..total).collect();
         let result = scrubber.verify_page_checksums(&page_ids);
 
-        // All valid pages should pass
         assert!(result.pages_checked > 0);
         assert_eq!(result.checksum_errors, 0, "errors: {:?}", result.errors);
     }
@@ -615,36 +583,5 @@ mod tests {
             "structural errors: {:?}",
             invariant_result.errors
         );
-    }
-
-    #[test]
-    fn test_scrub_result_debug_format() {
-        let result = ScrubResult {
-            pages_checked: 10,
-            checksum_errors: 2,
-            structural_errors: 1,
-            errors: vec![ScrubError {
-                page_id: 5,
-                table_name: Some("entities"),
-                description: "test".to_string(),
-            }],
-        };
-        let debug_str = format!("{result:?}");
-        assert!(debug_str.contains("pages_checked: 10"));
-        assert!(debug_str.contains("checksum_errors: 2"));
-    }
-
-    #[test]
-    fn test_scrub_error_debug_and_clone() {
-        let error = ScrubError {
-            page_id: 42,
-            table_name: Some("test"),
-            description: "test error".to_string(),
-        };
-        let cloned = error.clone();
-        assert_eq!(cloned.page_id, 42);
-        assert_eq!(cloned.description, "test error");
-        let debug = format!("{error:?}");
-        assert!(debug.contains("42"));
     }
 }

@@ -715,23 +715,22 @@ mod tests {
     }
 
     #[test]
-    fn test_health_state_is_accepting_proposals() {
+    fn test_accepting_proposals_only_in_ready_phase() {
         let state = HealthState::new();
-        // Starting: not accepting
-        assert!(!state.is_accepting_proposals());
-        // Ready: accepting
+        assert!(!state.is_accepting_proposals(), "Starting phase rejects proposals");
+
         assert!(state.mark_ready());
-        assert!(state.is_accepting_proposals());
-        // Draining: not accepting
+        assert!(state.is_accepting_proposals(), "Ready phase accepts proposals");
+
         assert!(state.mark_draining());
-        assert!(!state.is_accepting_proposals());
-        // ShuttingDown: not accepting
+        assert!(!state.is_accepting_proposals(), "Draining phase rejects proposals");
+
         state.mark_shutting_down();
-        assert!(!state.is_accepting_proposals());
+        assert!(!state.is_accepting_proposals(), "ShuttingDown phase rejects proposals");
     }
 
     #[test]
-    fn test_node_phase_from_u8_draining() {
+    fn test_node_phase_from_u8_known_values() {
         assert_eq!(NodePhase::from_u8(2), NodePhase::Draining);
         assert_eq!(NodePhase::from_u8(3), NodePhase::ShuttingDown);
     }

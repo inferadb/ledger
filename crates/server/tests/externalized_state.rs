@@ -340,10 +340,9 @@ async fn test_idempotency_dedup_same_key_returns_cached() {
         other => panic!("first write should succeed, got: {:?}", other),
     };
 
-    // Wait for state to be applied.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
     // Retry with the same idempotency key and same payload.
+    // On a single-node cluster the write response above guarantees the entry
+    // is applied, so the moka cache (or replicated state) will catch the dup.
     let retry = proto::WriteRequest {
         client_id: Some(proto::ClientId { id: "dedup-client".to_string() }),
         idempotency_key: shared_key,

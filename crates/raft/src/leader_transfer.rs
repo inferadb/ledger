@@ -346,29 +346,37 @@ mod tests {
     }
 
     #[test]
-    fn test_transfer_lock_prevents_concurrent() {
-        let lock = AtomicBool::new(true); // already locked
-        let result = lock.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire);
-        assert!(result.is_err());
+    fn test_not_leader_error_display() {
+        let err = LeaderTransferError::NotLeader;
+        assert_eq!(err.to_string(), "Not the current leader");
     }
 
     #[test]
-    fn test_error_display() {
-        let err = LeaderTransferError::NotLeader;
-        assert_eq!(err.to_string(), "Not the current leader");
-
+    fn test_no_target_error_display() {
         let err = LeaderTransferError::NoTarget;
         assert_eq!(err.to_string(), "No eligible transfer target");
+    }
 
+    #[test]
+    fn test_transfer_in_progress_error_display() {
         let err = LeaderTransferError::TransferInProgress;
         assert_eq!(err.to_string(), "Leader transfer already in progress");
+    }
 
+    #[test]
+    fn test_replication_timeout_error_display() {
         let err = LeaderTransferError::ReplicationTimeout;
         assert_eq!(err.to_string(), "Replication to target did not catch up within timeout");
+    }
 
+    #[test]
+    fn test_target_rejected_error_display() {
         let err = LeaderTransferError::TargetRejected { message: "stale term".to_string() };
         assert_eq!(err.to_string(), "Target rejected election trigger: stale term");
+    }
 
+    #[test]
+    fn test_timeout_error_display() {
         let err = LeaderTransferError::Timeout { timeout: Duration::from_secs(10) };
         assert_eq!(err.to_string(), "Transfer timed out \u{2014} leader did not change within 10s");
     }
@@ -473,16 +481,6 @@ mod tests {
     }
 
     #[test]
-    fn test_error_is_display_and_debug() {
-        let err = LeaderTransferError::NotLeader;
-        // Verify both Display and Debug are implemented
-        let display = format!("{}", err);
-        let debug = format!("{:?}", err);
-        assert!(!display.is_empty());
-        assert!(!debug.is_empty());
-    }
-
-    #[test]
     fn test_transfer_guard_set_false_even_when_already_false() {
         let flag = AtomicBool::new(false);
         {
@@ -490,19 +488,6 @@ mod tests {
         }
         // Still false after drop
         assert!(!flag.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn test_compare_exchange_semantics() {
-        let lock = AtomicBool::new(false);
-
-        // First attempt: success (false -> true)
-        let result = lock.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire);
-        assert_eq!(result, Ok(false));
-
-        // Second attempt: failure (expected false, found true)
-        let result = lock.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire);
-        assert_eq!(result, Err(true));
     }
 
     #[test]

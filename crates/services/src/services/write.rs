@@ -1699,28 +1699,28 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_valid_set_entity_passes_validation() {
+    fn valid_set_entity_passes_validation() {
         let config = ValidationConfig::default();
         let ops = vec![make_set_entity("user:123", b"data")];
         assert!(validate_proto_operations(&ops, &config).is_ok());
     }
 
     #[test]
-    fn test_valid_delete_entity_passes_validation() {
+    fn valid_delete_entity_passes_validation() {
         let config = ValidationConfig::default();
         let ops = vec![make_delete_entity("user:123")];
         assert!(validate_proto_operations(&ops, &config).is_ok());
     }
 
     #[test]
-    fn test_valid_relationship_passes_validation() {
+    fn valid_relationship_passes_validation() {
         let config = ValidationConfig::default();
         let ops = vec![make_create_relationship("doc:456", "viewer", "user:123")];
         assert!(validate_proto_operations(&ops, &config).is_ok());
     }
 
     #[test]
-    fn test_empty_key_returns_invalid_argument() {
+    fn empty_key_returns_invalid_argument() {
         let config = ValidationConfig::default();
         let ops = vec![make_set_entity("", b"data")];
         let err = validate_proto_operations(&ops, &config).unwrap_err();
@@ -1729,7 +1729,7 @@ mod tests {
     }
 
     #[test]
-    fn test_key_with_invalid_chars_returns_invalid_argument() {
+    fn key_with_invalid_chars_returns_invalid_argument() {
         let config = ValidationConfig::default();
         let ops = vec![make_set_entity("user 123", b"data")];
         let err = validate_proto_operations(&ops, &config).unwrap_err();
@@ -1737,7 +1737,7 @@ mod tests {
     }
 
     #[test]
-    fn test_key_exceeding_max_size_returns_invalid_argument() {
+    fn key_exceeding_max_size_returns_invalid_argument() {
         let config = ValidationConfig::builder().max_key_bytes(10).build().unwrap();
         let ops = vec![make_set_entity(&"a".repeat(11), b"data")];
         let err = validate_proto_operations(&ops, &config).unwrap_err();
@@ -1746,7 +1746,7 @@ mod tests {
     }
 
     #[test]
-    fn test_value_exceeding_max_size_returns_invalid_argument() {
+    fn value_exceeding_max_size_returns_invalid_argument() {
         let config = ValidationConfig::builder().max_value_bytes(4).build().unwrap();
         let ops = vec![make_set_entity("key", &[0u8; 5])];
         let err = validate_proto_operations(&ops, &config).unwrap_err();

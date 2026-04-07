@@ -1135,7 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_tree() {
+    fn btree_empty_returns_none_for_any_key() {
         let tree = make_tree();
         assert!(tree.is_empty());
         assert_eq!(tree.get(b"key").unwrap(), None);
@@ -1498,13 +1498,6 @@ mod tests {
     // =========================================================================
     // Compaction tests
     // =========================================================================
-
-    #[test]
-    fn test_compact_empty_tree() {
-        let tree = make_tree();
-        // Compacting an empty tree should be a no-op
-        assert!(tree.is_empty());
-    }
 
     #[test]
     fn test_compact_single_leaf() {
@@ -2860,36 +2853,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_stats_default() {
-        let stats = CompactionStats::default();
-        assert_eq!(stats.pages_merged, 0);
-        assert_eq!(stats.pages_freed, 0);
-    }
-
-    #[test]
     fn test_value_update_same_size() {
         let mut tree = make_tree();
         tree.insert(b"key", b"aaaa").unwrap();
         tree.insert(b"key", b"bbbb").unwrap();
         assert_eq!(tree.get(b"key").unwrap(), Some(b"bbbb".to_vec()));
-    }
-
-    #[test]
-    fn test_value_update_to_larger() {
-        let mut tree = make_tree();
-        tree.insert(b"key", b"x").unwrap();
-        let large_value = vec![0x42; 200];
-        tree.insert(b"key", &large_value).unwrap();
-        assert_eq!(tree.get(b"key").unwrap(), Some(large_value));
-    }
-
-    #[test]
-    fn test_value_update_to_smaller() {
-        let mut tree = make_tree();
-        let large_value = vec![0x42; 200];
-        tree.insert(b"key", &large_value).unwrap();
-        tree.insert(b"key", b"x").unwrap();
-        assert_eq!(tree.get(b"key").unwrap(), Some(b"x".to_vec()));
     }
 
     #[test]

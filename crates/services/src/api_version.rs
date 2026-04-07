@@ -148,19 +148,19 @@ mod tests {
     }
 
     #[test]
-    fn test_matching_version_passes() {
+    fn matching_version_passes() {
         let request = request_with_version("1");
         assert!(validate_api_version(&request).is_ok());
     }
 
     #[test]
-    fn test_missing_version_defaults_to_v1() {
+    fn missing_version_defaults_to_v1() {
         let request = tonic::Request::new(());
         assert!(validate_api_version(&request).is_ok());
     }
 
     #[test]
-    fn test_version_above_current_rejected() {
+    fn version_above_current_rejected() {
         let request = request_with_version("2");
         let err = validate_api_version(&request).unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
@@ -169,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn test_version_zero_rejected() {
+    fn version_zero_rejected() {
         let request = request_with_version("0");
         let err = validate_api_version(&request).unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn test_non_numeric_version_rejected() {
+    fn non_numeric_version_rejected() {
         let request = request_with_version("abc");
         let err = validate_api_version(&request).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -185,14 +185,14 @@ mod tests {
     }
 
     #[test]
-    fn test_negative_version_rejected() {
+    fn negative_version_rejected() {
         let request = request_with_version("-1");
         let err = validate_api_version(&request).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
     #[test]
-    fn test_empty_version_rejected() {
+    fn empty_version_rejected() {
         // Empty header value is not valid for tonic metadata, but test the parse path
         let request = request_with_version("0");
         let err = validate_api_version(&request).unwrap_err();
@@ -200,20 +200,20 @@ mod tests {
     }
 
     #[test]
-    fn test_interceptor_passes_valid_request() {
+    fn interceptor_passes_valid_request() {
         let request = request_with_version("1");
         assert!(api_version_interceptor(request).is_ok());
     }
 
     #[test]
-    fn test_interceptor_rejects_invalid_version() {
+    fn interceptor_rejects_invalid_version() {
         let request = request_with_version("99");
         let err = api_version_interceptor(request).unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     }
 
     #[test]
-    fn test_constants_are_consistent() {
+    fn constants_are_consistent() {
         assert_eq!(CURRENT_API_VERSION, 1);
         assert_eq!(MIN_SUPPORTED_API_VERSION, 1);
         // Compile-time guarantee: min <= current
@@ -221,21 +221,21 @@ mod tests {
     }
 
     #[test]
-    fn test_version_with_whitespace_rejected() {
+    fn version_with_whitespace_rejected() {
         let request = request_with_version("1 ");
         let err = validate_api_version(&request).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
     #[test]
-    fn test_version_with_decimal_rejected() {
+    fn version_with_decimal_rejected() {
         let request = request_with_version("1.0");
         let err = validate_api_version(&request).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
     #[test]
-    fn test_error_messages_are_actionable() {
+    fn error_messages_are_actionable() {
         let request = request_with_version("99");
         let err = validate_api_version(&request).unwrap_err();
         // Error message should tell user what to do

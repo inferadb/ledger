@@ -462,25 +462,6 @@ mod tests {
     }
 
     #[test]
-    fn peer_info_equality() {
-        let peer1 = PeerInfo {
-            node_id: "node-1".to_string(),
-            addresses: vec!["10.0.0.1".to_string()],
-            grpc_port: 5000,
-            last_seen: None,
-        };
-
-        let peer2 = PeerInfo {
-            node_id: "node-1".to_string(),
-            addresses: vec!["10.0.0.1".to_string()],
-            grpc_port: 5000,
-            last_seen: None,
-        };
-
-        assert_eq!(peer1, peer2);
-    }
-
-    #[test]
     fn discovery_service_creation() {
         let pool = ConnectionPool::new(test_config());
         let config = test_discovery_config();

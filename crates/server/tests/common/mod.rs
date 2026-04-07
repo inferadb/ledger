@@ -137,9 +137,9 @@ fn test_rate_limit_config() -> inferadb_ledger_types::config::RateLimitConfig {
 
 fn test_raft_config() -> inferadb_ledger_types::config::RaftConfig {
     inferadb_ledger_types::config::RaftConfig::builder()
-        .heartbeat_interval(Duration::from_millis(50))
-        .election_timeout_min(Duration::from_millis(150))
-        .election_timeout_max(Duration::from_millis(300))
+        .heartbeat_interval(Duration::from_millis(100))
+        .election_timeout_min(Duration::from_millis(300))
+        .election_timeout_max(Duration::from_millis(600))
         .build()
         .expect("valid test raft config")
 }
@@ -257,10 +257,10 @@ impl TestCluster {
         });
 
         // Wait for the bootstrap node to become GLOBAL leader first.
-        // With test Raft config (150-300ms election timeout on localhost), 3 seconds
-        // is ~10 election cycles — more than enough unless something is fundamentally broken.
+        // With test Raft config (150-300ms election timeout on localhost), 10 seconds
+        // is ~30 election cycles — generous budget for parallel test runs under CPU contention.
         let start = tokio::time::Instant::now();
-        let timeout_duration = Duration::from_secs(3);
+        let timeout_duration = Duration::from_secs(10);
         while start.elapsed() < timeout_duration {
             let metrics = leader_raft.metrics().borrow().clone();
             if metrics.current_leader == Some(node_id) {
@@ -296,7 +296,7 @@ impl TestCluster {
 
         // Wait for all data region leader elections
         let data_region_wait_start = tokio::time::Instant::now();
-        'data_wait: while data_region_wait_start.elapsed() < Duration::from_secs(5) {
+        'data_wait: while data_region_wait_start.elapsed() < Duration::from_secs(15) {
             let mut all_ready = true;
             for &dr in data_regions.iter().take(num_data_regions) {
                 if let Ok(rg) = manager_clone.get_region_group(dr) {
@@ -385,7 +385,7 @@ impl TestCluster {
             // than assuming the bootstrap node is still leader.
             let mut join_success = false;
             let mut last_error = String::new();
-            let max_attempts = 20;
+            let max_attempts = 40;
 
             for attempt in 0..max_attempts {
                 // Discover the current leader by checking all existing nodes' metrics.

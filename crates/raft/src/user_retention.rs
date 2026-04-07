@@ -268,18 +268,4 @@ mod tests {
         // User deleted 1 day ago should NOT be expired
         assert!(now < expiry, "recently deleted user should not be expired");
     }
-
-    #[test]
-    fn test_user_status_filtering() {
-        // Only Deleting status users are eligible for erasure
-        assert_eq!(UserStatus::Deleting, UserStatus::Deleting);
-        assert_ne!(UserStatus::Active, UserStatus::Deleting);
-    }
-
-    #[test]
-    fn test_tick_interval_from_config() {
-        let config = UserRetentionConfig { interval_secs: 3600, batch_size: 100 };
-        let tick_interval = std::time::Duration::from_secs(config.interval_secs);
-        assert_eq!(tick_interval, std::time::Duration::from_secs(3600));
-    }
 }

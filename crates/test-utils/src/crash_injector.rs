@@ -396,20 +396,6 @@ mod tests {
     }
 
     #[test]
-    fn test_crash_point_equality() {
-        assert_eq!(CrashPoint::BeforeFirstSync, CrashPoint::BeforeFirstSync);
-        assert_ne!(CrashPoint::BeforeFirstSync, CrashPoint::AfterFirstSync);
-        assert_ne!(CrashPoint::DuringGodByteFlip, CrashPoint::DuringPageWrite);
-    }
-
-    #[test]
-    fn test_crash_point_debug() {
-        let point = CrashPoint::AfterSecondSync;
-        let debug = format!("{point:?}");
-        assert!(debug.contains("AfterSecondSync"));
-    }
-
-    #[test]
     fn test_page_write_threshold_zero_crashes_immediately() {
         let injector = CrashInjector::new(CrashPoint::DuringPageWrite);
         injector.arm();

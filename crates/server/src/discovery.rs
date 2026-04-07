@@ -362,13 +362,6 @@ mod tests {
         assert!(matches!(result, Err(DiscoveryError::CacheExpired)));
     }
 
-    #[test]
-    fn test_config_discovery_defaults() {
-        let config = Config::default();
-        assert!(config.peers.is_none());
-        assert_eq!(config.peers_ttl_secs, 3600);
-    }
-
     #[tokio::test]
     async fn test_resolve_with_no_discovery_configured() {
         let config = Config { data_dir: Some(PathBuf::from("/tmp/test")), ..Config::default() };
@@ -376,35 +369,6 @@ mod tests {
         // With no discovery sources configured, should return empty
         let addresses = resolve_bootstrap_peers(&config).await;
         assert!(addresses.is_empty());
-    }
-
-    #[test]
-    fn test_discovered_node_struct() {
-        let node = DiscoveredNode {
-            node_id: 12345,
-            addr: "192.168.1.1:50051".parse().expect("valid addr"),
-            is_cluster_member: false,
-            term: 0,
-        };
-
-        assert_eq!(node.node_id, 12345);
-        assert_eq!(node.addr.port(), 50051);
-        assert!(!node.is_cluster_member);
-        assert_eq!(node.term, 0);
-    }
-
-    #[test]
-    fn test_discovered_node_cluster_member() {
-        let node = DiscoveredNode {
-            node_id: 67890,
-            addr: "10.0.0.1:8080".parse().expect("valid addr"),
-            is_cluster_member: true,
-            term: 42,
-        };
-
-        assert_eq!(node.node_id, 67890);
-        assert!(node.is_cluster_member);
-        assert_eq!(node.term, 42);
     }
 
     #[tokio::test]

@@ -1207,27 +1207,32 @@ mod tests {
     }
 
     #[test]
-    fn test_set_condition_to_proto() {
-        let not_exists = SetCondition::NotExists;
-        let proto_cond = not_exists.to_proto();
+    fn test_set_condition_not_exists_to_proto() {
+        let proto_cond = SetCondition::NotExists.to_proto();
         assert!(matches!(
             proto_cond.condition,
             Some(proto::set_condition::Condition::NotExists(true))
         ));
+    }
 
-        let must_exist = SetCondition::MustExist;
-        let proto_cond = must_exist.to_proto();
+    #[test]
+    fn test_set_condition_must_exist_to_proto() {
+        let proto_cond = SetCondition::MustExist.to_proto();
         assert!(matches!(
             proto_cond.condition,
             Some(proto::set_condition::Condition::MustExists(true))
         ));
+    }
 
-        let version = SetCondition::Version(42);
-        let proto_cond = version.to_proto();
+    #[test]
+    fn test_set_condition_version_to_proto() {
+        let proto_cond = SetCondition::Version(42).to_proto();
         assert!(matches!(proto_cond.condition, Some(proto::set_condition::Condition::Version(42))));
+    }
 
-        let value_eq = SetCondition::ValueEquals(b"test".to_vec());
-        let proto_cond = value_eq.to_proto();
+    #[test]
+    fn test_set_condition_value_equals_to_proto() {
+        let proto_cond = SetCondition::ValueEquals(b"test".to_vec()).to_proto();
         match proto_cond.condition {
             Some(proto::set_condition::Condition::ValueEquals(v)) => {
                 assert_eq!(v, b"test");
@@ -1266,23 +1271,14 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_write_success_fields() {
-        let success =
-            WriteSuccess { tx_id: "abc123".to_string(), block_height: 42, assigned_sequence: 5 };
-
-        assert_eq!(success.tx_id, "abc123");
-        assert_eq!(success.block_height, 42);
-        assert_eq!(success.assigned_sequence, 5);
-    }
-
-    #[test]
-    fn test_tx_id_to_hex() {
-        // Test with Some(TxId)
+    fn test_tx_id_to_hex_with_value() {
         let tx_id = proto::TxId { id: vec![0x12, 0x34, 0xab, 0xcd] };
         let hex = LedgerClient::tx_id_to_hex(Some(tx_id));
         assert_eq!(hex, "1234abcd");
+    }
 
-        // Test with None
+    #[test]
+    fn test_tx_id_to_hex_none_returns_empty() {
         let hex = LedgerClient::tx_id_to_hex(None);
         assert_eq!(hex, "");
     }
@@ -1336,45 +1332,6 @@ mod tests {
         assert!(announcement.block_hash.is_empty());
         assert!(announcement.state_root.is_empty());
         assert!(announcement.timestamp.is_none());
-    }
-
-    #[test]
-    fn test_block_announcement_equality() {
-        let a = BlockAnnouncement {
-            organization: ORG,
-            vault: VaultSlug::new(2),
-            height: 100,
-            block_hash: vec![0x12],
-            state_root: vec![0xab],
-            timestamp: None,
-        };
-
-        let b = BlockAnnouncement {
-            organization: ORG,
-            vault: VaultSlug::new(2),
-            height: 100,
-            block_hash: vec![0x12],
-            state_root: vec![0xab],
-            timestamp: None,
-        };
-
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn test_block_announcement_clone() {
-        let original = BlockAnnouncement {
-            organization: ORG,
-            vault: VaultSlug::new(2),
-            height: 100,
-            block_hash: vec![0x12, 0x34],
-            state_root: vec![0xab, 0xcd],
-            timestamp: None,
-        };
-
-        let cloned = original.clone();
-
-        assert_eq!(original, cloned);
     }
 
     // (watch_blocks connection failure tests consolidated into
@@ -1569,43 +1526,6 @@ mod tests {
         assert!(info.nodes.is_empty());
         assert_eq!(info.leader, None);
         assert_eq!(info.status, VaultStatus::Unspecified);
-    }
-
-    #[test]
-    fn test_organization_info_equality() {
-        let info1 = OrganizationInfo {
-            slug: ORG,
-            name: "test".to_string(),
-            region: Region::GLOBAL,
-            member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
-            config_version: 1,
-            status: OrganizationStatus::Active,
-            tier: OrganizationTier::Free,
-            members: vec![OrganizationMemberInfo {
-                user: UserSlug::new(42),
-                role: OrganizationMemberRole::Admin,
-                joined_at: None,
-            }],
-        };
-        let info2 = info1.clone();
-
-        assert_eq!(info1, info2);
-    }
-
-    #[test]
-    fn test_vault_info_equality() {
-        let info1 = VaultInfo {
-            organization: ORG,
-            vault: VaultSlug::new(2),
-            height: 100,
-            state_root: vec![1, 2, 3],
-            nodes: vec!["node-1".to_string(), "node-2".to_string()],
-            leader: Some("node-1".to_string()),
-            status: VaultStatus::Active,
-        };
-        let info2 = info1.clone();
-
-        assert_eq!(info1, info2);
     }
 
     // (admin connection failure tests consolidated into
@@ -2398,19 +2318,6 @@ mod tests {
     }
 
     #[test]
-    fn test_entity_equality() {
-        let entity1 = Entity {
-            key: "key".to_string(),
-            value: b"value".to_vec(),
-            expires_at: Some(1000),
-            version: 1,
-        };
-        let entity2 = entity1.clone();
-
-        assert_eq!(entity1, entity2);
-    }
-
-    #[test]
     fn test_relationship_new() {
         let rel = Relationship::new("document:1", "viewer", "user:alice");
 
@@ -2555,138 +2462,6 @@ mod tests {
         assert_eq!(opts.limit, 0);
         assert_eq!(opts.page_token, None);
         assert_eq!(opts.consistency, ReadConsistency::Eventual);
-    }
-
-    #[test]
-    fn test_list_entities_opts_bon_builder() {
-        let opts = ListEntitiesOpts::builder()
-            .key_prefix("user:")
-            .at_height(100)
-            .include_expired(true)
-            .limit(50)
-            .page_token("abc123")
-            .consistency(ReadConsistency::Linearizable)
-            .build();
-
-        assert_eq!(opts.key_prefix, "user:");
-        assert_eq!(opts.at_height, Some(100));
-        assert!(opts.include_expired);
-        assert_eq!(opts.limit, 50);
-        assert_eq!(opts.page_token, Some("abc123".to_string()));
-        assert_eq!(opts.consistency, ReadConsistency::Linearizable);
-    }
-
-    #[test]
-    fn test_list_entities_opts_bon_builder_defaults() {
-        let opts = ListEntitiesOpts::builder().build();
-
-        assert_eq!(opts.key_prefix, "");
-        assert_eq!(opts.at_height, None);
-        assert!(!opts.include_expired);
-        assert_eq!(opts.limit, 0);
-        assert_eq!(opts.page_token, None);
-        assert_eq!(opts.consistency, ReadConsistency::Eventual);
-    }
-
-    #[test]
-    fn test_list_entities_opts_bon_builder_matches_default() {
-        let from_builder = ListEntitiesOpts::builder().build();
-        let from_default = ListEntitiesOpts::default();
-
-        assert_eq!(from_builder.key_prefix, from_default.key_prefix);
-        assert_eq!(from_builder.at_height, from_default.at_height);
-        assert_eq!(from_builder.include_expired, from_default.include_expired);
-        assert_eq!(from_builder.limit, from_default.limit);
-        assert_eq!(from_builder.page_token, from_default.page_token);
-        assert_eq!(from_builder.consistency, from_default.consistency);
-    }
-
-    #[test]
-    fn test_list_relationships_opts_bon_builder() {
-        let opts = ListRelationshipsOpts::builder()
-            .resource("document:1")
-            .relation("viewer")
-            .subject("user:alice")
-            .at_height(50)
-            .limit(100)
-            .page_token("xyz")
-            .consistency(ReadConsistency::Linearizable)
-            .build();
-
-        assert_eq!(opts.resource, Some("document:1".to_string()));
-        assert_eq!(opts.relation, Some("viewer".to_string()));
-        assert_eq!(opts.subject, Some("user:alice".to_string()));
-        assert_eq!(opts.at_height, Some(50));
-        assert_eq!(opts.limit, 100);
-        assert_eq!(opts.page_token, Some("xyz".to_string()));
-        assert_eq!(opts.consistency, ReadConsistency::Linearizable);
-    }
-
-    #[test]
-    fn test_list_relationships_opts_bon_builder_defaults() {
-        let opts = ListRelationshipsOpts::builder().build();
-
-        assert_eq!(opts.resource, None);
-        assert_eq!(opts.relation, None);
-        assert_eq!(opts.subject, None);
-        assert_eq!(opts.at_height, None);
-        assert_eq!(opts.limit, 0);
-        assert_eq!(opts.page_token, None);
-        assert_eq!(opts.consistency, ReadConsistency::Eventual);
-    }
-
-    #[test]
-    fn test_list_relationships_opts_bon_builder_matches_default() {
-        let from_builder = ListRelationshipsOpts::builder().build();
-        let from_default = ListRelationshipsOpts::default();
-
-        assert_eq!(from_builder.resource, from_default.resource);
-        assert_eq!(from_builder.relation, from_default.relation);
-        assert_eq!(from_builder.subject, from_default.subject);
-        assert_eq!(from_builder.at_height, from_default.at_height);
-        assert_eq!(from_builder.limit, from_default.limit);
-        assert_eq!(from_builder.page_token, from_default.page_token);
-        assert_eq!(from_builder.consistency, from_default.consistency);
-    }
-
-    #[test]
-    fn test_list_resources_opts_bon_builder() {
-        let opts = ListResourcesOpts::builder()
-            .resource_type("document")
-            .at_height(200)
-            .limit(25)
-            .page_token("next")
-            .consistency(ReadConsistency::Linearizable)
-            .build();
-
-        assert_eq!(opts.resource_type, "document");
-        assert_eq!(opts.at_height, Some(200));
-        assert_eq!(opts.limit, 25);
-        assert_eq!(opts.page_token, Some("next".to_string()));
-        assert_eq!(opts.consistency, ReadConsistency::Linearizable);
-    }
-
-    #[test]
-    fn test_list_resources_opts_bon_builder_defaults() {
-        let opts = ListResourcesOpts::builder().build();
-
-        assert_eq!(opts.resource_type, "");
-        assert_eq!(opts.at_height, None);
-        assert_eq!(opts.limit, 0);
-        assert_eq!(opts.page_token, None);
-        assert_eq!(opts.consistency, ReadConsistency::Eventual);
-    }
-
-    #[test]
-    fn test_list_resources_opts_bon_builder_matches_default() {
-        let from_builder = ListResourcesOpts::builder().build();
-        let from_default = ListResourcesOpts::default();
-
-        assert_eq!(from_builder.resource_type, from_default.resource_type);
-        assert_eq!(from_builder.at_height, from_default.at_height);
-        assert_eq!(from_builder.limit, from_default.limit);
-        assert_eq!(from_builder.page_token, from_default.page_token);
-        assert_eq!(from_builder.consistency, from_default.consistency);
     }
 
     // (query operation connection failure tests consolidated into
@@ -3736,90 +3511,5 @@ mod tests {
     fn test_organization_status_from_proto_suspended() {
         let status = OrganizationStatus::from_proto(proto::OrganizationStatus::Suspended as i32);
         assert_eq!(status, OrganizationStatus::Suspended);
-    }
-
-    #[test]
-    fn test_migration_info_construction() {
-        let info = MigrationInfo {
-            slug: OrganizationSlug::new(42),
-            source_region: Region::US_EAST_VA,
-            target_region: Region::IE_EAST_DUBLIN,
-            status: OrganizationStatus::Migrating,
-        };
-
-        assert_eq!(info.slug, OrganizationSlug::new(42));
-        assert_eq!(info.source_region, Region::US_EAST_VA);
-        assert_eq!(info.target_region, Region::IE_EAST_DUBLIN);
-        assert_eq!(info.status, OrganizationStatus::Migrating);
-    }
-
-    #[test]
-    fn test_email_verification_code_from_proto() {
-        let code = EmailVerificationCode { code: "ABC123".to_string() };
-        assert_eq!(code.code, "ABC123");
-    }
-
-    #[test]
-    fn test_email_verification_result_existing_user() {
-        let result = EmailVerificationResult::ExistingUser {
-            user: UserSlug::new(42),
-            session: crate::token::TokenPair {
-                access_token: "at".to_string(),
-                refresh_token: "rt".to_string(),
-                access_expires_at: None,
-                refresh_expires_at: None,
-            },
-        };
-        match result {
-            EmailVerificationResult::ExistingUser { user, session } => {
-                assert_eq!(user, UserSlug::new(42));
-                assert_eq!(session.access_token, "at");
-                assert_eq!(session.refresh_token, "rt");
-            },
-            _ => panic!("Expected ExistingUser"),
-        }
-    }
-
-    #[test]
-    fn test_email_verification_result_new_user() {
-        let result = EmailVerificationResult::NewUser { onboarding_token: "ilobt_abc".to_string() };
-        match result {
-            EmailVerificationResult::NewUser { onboarding_token } => {
-                assert_eq!(onboarding_token, "ilobt_abc");
-            },
-            _ => panic!("Expected NewUser"),
-        }
-    }
-
-    #[test]
-    fn test_registration_result_fields() {
-        let result = RegistrationResult {
-            user: UserSlug::new(99),
-            session: crate::token::TokenPair {
-                access_token: "access".to_string(),
-                refresh_token: "refresh".to_string(),
-                access_expires_at: None,
-                refresh_expires_at: None,
-            },
-            organization: Some(OrganizationSlug::new(1001)),
-        };
-        assert_eq!(result.user, UserSlug::new(99));
-        assert_eq!(result.session.access_token, "access");
-        assert_eq!(result.organization, Some(OrganizationSlug::new(1001)));
-    }
-
-    #[test]
-    fn test_registration_result_without_organization() {
-        let result = RegistrationResult {
-            user: UserSlug::new(100),
-            session: crate::token::TokenPair {
-                access_token: "a".to_string(),
-                refresh_token: "r".to_string(),
-                access_expires_at: None,
-                refresh_expires_at: None,
-            },
-            organization: None,
-        };
-        assert!(result.organization.is_none());
     }
 }

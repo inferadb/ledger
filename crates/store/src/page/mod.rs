@@ -318,14 +318,6 @@ mod tests {
     }
 
     #[test]
-    fn test_page_debug_format() {
-        let page = Page::new(3, DEFAULT_PAGE_SIZE, PageType::BTreeLeaf, 7);
-        let debug_str = format!("{page:?}");
-        assert!(debug_str.contains("Page"));
-        assert!(debug_str.contains("id: 3"));
-    }
-
-    #[test]
     fn test_page_header_flags_preserved() {
         let header = PageHeader {
             page_type: PageType::BTreeLeaf,

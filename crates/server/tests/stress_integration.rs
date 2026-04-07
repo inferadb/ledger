@@ -204,21 +204,11 @@ async fn test_snapshot_20_orgs_5_vaults_round_trip() {
     let synced = cluster.wait_for_sync(Duration::from_secs(30)).await;
     assert!(synced, "cluster should sync after bulk creation");
 
-    // Verify all organizations exist on a follower by checking we can create a
-    // client and read state. Since followers replicate via log entries (or
-    // snapshot if they fall behind), confirming the last org exists on a
-    // follower validates the replication path.
+    // Verify replication by writing to the last org on the leader, then reading
+    // from a follower. Followers receive state via log entries or snapshot transfer.
     let follower = cluster.followers().into_iter().next().expect("should have follower");
-
-    // Verify org count by checking the last org slug resolves.
     let last_org = *organizations.last().unwrap();
-    let vault_result = create_vault(follower.addr, last_org).await;
-    // Followers can't create vaults (only leader can propose), but we can verify
-    // state by reading. Let's use admin API to list instead.
-    // Since we can't directly list orgs via proto, verify by reading entities
-    // on a vault we wrote to earlier on the leader.
 
-    // Write to the last org's first vault on the leader, then read from follower.
     let last_vault = create_vault(leader.addr, last_org).await.expect("create extra vault");
     write_entity(leader.addr, last_org, last_vault, "snap-verify", b"snap-value", "snap-client")
         .await
@@ -234,10 +224,6 @@ async fn test_snapshot_20_orgs_5_vaults_round_trip() {
         Some(b"snap-value".to_vec()),
         "follower should have replicated state for last org"
     );
-
-    // Suppress unused variable warning — vault_result check is intentionally omitted
-    // since followers return leadership-related errors for write proposals.
-    drop(vault_result);
 }
 
 // =============================================================================
@@ -483,9 +469,11 @@ async fn test_snapshot_determinism_all_nodes_identical_state() {
 // Large Batch Writes (from leader_failover)
 // =============================================================================
 
-/// Tests that large batches of writes are applied correctly.
+/// Tests that a batch of writes across 3 nodes is replicated and readable on all
+/// nodes. Validates the end-to-end write+replication+read path under moderate
+/// load (500 keys) rather than raw scale (see `stress_scale.rs` for 10K+).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_large_batch_writes() {
+async fn test_batch_writes_replicated_to_all_nodes() {
     let cluster = TestCluster::new(3).await;
     let leader_id = cluster.wait_for_leader().await;
 
@@ -500,8 +488,9 @@ async fn test_large_batch_writes() {
 
     let client_id = format!("batch-test-{}", leader_id);
 
-    // Write 100 keys
-    let num_keys = 100u64;
+    // Write 500 keys — enough to exercise replication meaningfully without
+    // approaching the 10K+ scale tests in stress_scale.rs.
+    let num_keys = 500u64;
     for i in 0..num_keys {
         let key = format!("batch-key-{:04}", i);
         let value = format!("batch-value-{:04}", i);

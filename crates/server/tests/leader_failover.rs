@@ -219,11 +219,13 @@ async fn test_read_consistency_after_leader_change() {
     }
 }
 
-/// Tests that writes to a 3-node cluster succeed with 2 nodes available.
+/// Tests that sequential writes to a 3-node cluster are all readable.
 ///
-/// This tests fault tolerance: a 3-node cluster can tolerate 1 failure.
+/// Verifies that multiple writes through the leader are committed and
+/// readable back, confirming the basic consensus pipeline works under
+/// a standard 3-node quorum.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_writes_succeed_with_one_node_down() {
+async fn test_sequential_writes_readable_on_three_node_cluster() {
     let cluster = TestCluster::new(3).await;
     let leader_id = cluster.wait_for_leader().await;
 
@@ -234,26 +236,19 @@ async fn test_writes_succeed_with_one_node_down() {
         create_organization(leader.addr, "one-down-ns", leader).await.expect("create organization");
     let vault = create_vault(leader.addr, organization).await.expect("create vault");
 
-    // Write through the leader (all 3 nodes up)
+    // Write through the leader
     let mut client = create_write_client(leader.addr).await.expect("connect to leader");
 
     let client_id = format!("test-client-{}", leader_id);
-    let write_req =
-        make_write_request(organization, vault, "before-failure", b"value1", &client_id);
-
+    let write_req = make_write_request(organization, vault, "key-1", b"value1", &client_id);
     client.write(write_req).await.expect("write should succeed");
 
-    // Note: In this test, we're not actually killing a node, but the write
-    // should succeed even if one follower is slow/unavailable, as long as
-    // the leader and one follower form a majority.
-
-    // Write again - should still succeed
-    let write_req = make_write_request(organization, vault, "after-check", b"value2", &client_id);
+    let write_req = make_write_request(organization, vault, "key-2", b"value2", &client_id);
     client.write(write_req).await.expect("write should succeed");
 
     // Verify both writes are readable
-    let value1 = read_entity(leader.addr, organization, vault, "before-failure").await;
-    let value2 = read_entity(leader.addr, organization, vault, "after-check").await;
+    let value1 = read_entity(leader.addr, organization, vault, "key-1").await;
+    let value2 = read_entity(leader.addr, organization, vault, "key-2").await;
 
     assert_eq!(value1, Some(b"value1".to_vec()));
     assert_eq!(value2, Some(b"value2".to_vec()));

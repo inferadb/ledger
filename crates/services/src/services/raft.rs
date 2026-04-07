@@ -344,7 +344,7 @@ mod tests {
 
     /// Vote request with missing vote field → INVALID_ARGUMENT.
     #[tokio::test]
-    async fn test_byzantine_vote_missing_vote_field() {
+    async fn byzantine_vote_missing_vote_field() {
         let (service, _mgr, _id, _dir) = create_test_service().await;
 
         let request = Request::new(RaftVoteRequest { vote: None, last_log_id: None, region: None });
@@ -356,7 +356,7 @@ mod tests {
 
     /// AppendEntries with missing vote field → INVALID_ARGUMENT.
     #[tokio::test]
-    async fn test_byzantine_append_entries_missing_vote_field() {
+    async fn byzantine_append_entries_missing_vote_field() {
         let (service, _mgr, _id, _dir) = create_test_service().await;
 
         let request = Request::new(RaftAppendEntriesRequest {
@@ -374,7 +374,7 @@ mod tests {
 
     /// InstallSnapshot with missing meta field → INVALID_ARGUMENT.
     #[tokio::test]
-    async fn test_byzantine_snapshot_missing_meta_field() {
+    async fn byzantine_snapshot_missing_meta_field() {
         let (service, _mgr, _id, _dir) = create_test_service().await;
 
         let request = Request::new(RaftInstallSnapshotRequest {
@@ -393,7 +393,7 @@ mod tests {
 
     /// InstallSnapshot with missing membership in meta → INVALID_ARGUMENT.
     #[tokio::test]
-    async fn test_byzantine_snapshot_missing_membership() {
+    async fn byzantine_snapshot_missing_membership() {
         let (service, _mgr, _id, _dir) = create_test_service().await;
 
         let request = Request::new(RaftInstallSnapshotRequest {
@@ -420,7 +420,7 @@ mod tests {
 
     /// Stale-term AppendEntries should be rejected or return higher vote.
     #[tokio::test]
-    async fn test_byzantine_stale_term_append_entries() {
+    async fn byzantine_stale_term_append_entries() {
         let (service, _mgr, _id, _dir) = create_test_service().await;
 
         let request = Request::new(RaftAppendEntriesRequest {
@@ -443,7 +443,7 @@ mod tests {
 
     /// Garbage (non-deserializable) log entries should be silently dropped.
     #[tokio::test]
-    async fn test_byzantine_garbage_log_entries() {
+    async fn byzantine_garbage_log_entries() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
         let current_term = get_term(&mgr, Region::GLOBAL);
         let applied_before = get_applied(&mgr, Region::GLOBAL);
@@ -475,7 +475,7 @@ mod tests {
 
     /// Conflicting prev_log_id (non-existent index) → conflict response.
     #[tokio::test]
-    async fn test_byzantine_conflicting_prev_log_id() {
+    async fn byzantine_conflicting_prev_log_id() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
         let current_term = get_term(&mgr, Region::GLOBAL);
 
@@ -503,7 +503,7 @@ mod tests {
 
     /// High-term vote request should not crash the node.
     #[tokio::test]
-    async fn test_byzantine_high_term_vote_request() {
+    async fn byzantine_high_term_vote_request() {
         let (service, mgr, _id, _dir) = create_test_service().await;
 
         let request = Request::new(RaftVoteRequest {
@@ -539,7 +539,7 @@ mod tests {
 
     /// Competing vote in the same term should be handled gracefully.
     #[tokio::test]
-    async fn test_byzantine_competing_vote_same_term() {
+    async fn byzantine_competing_vote_same_term() {
         let (service, mgr, _id, _dir) = create_test_service().await;
         let current_term = get_term(&mgr, Region::GLOBAL);
 
@@ -561,7 +561,7 @@ mod tests {
 
     /// Corrupted snapshot data should not corrupt node state.
     #[tokio::test]
-    async fn test_byzantine_corrupted_snapshot_data() {
+    async fn byzantine_corrupted_snapshot_data() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
         let current_term = get_term(&mgr, Region::GLOBAL);
         let applied_before = get_applied(&mgr, Region::GLOBAL);
@@ -596,7 +596,7 @@ mod tests {
 
     /// Forged membership containing attacker nodes.
     #[tokio::test]
-    async fn test_byzantine_forged_membership_in_snapshot() {
+    async fn byzantine_forged_membership_in_snapshot() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
         let current_term = get_term(&mgr, Region::GLOBAL);
 
@@ -630,7 +630,7 @@ mod tests {
 
     /// Snapshot with impossibly high log index.
     #[tokio::test]
-    async fn test_byzantine_snapshot_future_log_index() {
+    async fn byzantine_snapshot_future_log_index() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
         let current_term = get_term(&mgr, Region::GLOBAL);
 
@@ -664,7 +664,7 @@ mod tests {
 
     /// Replayed AppendEntries from a stale term should be rejected.
     #[tokio::test]
-    async fn test_byzantine_replay_old_term_entries() {
+    async fn byzantine_replay_old_term_entries() {
         let (service, mgr, _id, _dir) = create_test_service().await;
         let current_term = get_term(&mgr, Region::GLOBAL);
         let applied_before = get_applied(&mgr, Region::GLOBAL);
@@ -699,7 +699,7 @@ mod tests {
 
     /// Replayed AppendEntries at already-committed log index.
     #[tokio::test]
-    async fn test_byzantine_replay_committed_index() {
+    async fn byzantine_replay_committed_index() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
         let current_term = get_term(&mgr, Region::GLOBAL);
 
@@ -724,7 +724,7 @@ mod tests {
 
     /// u64::MAX term vote should not crash or overflow.
     #[tokio::test]
-    async fn test_byzantine_max_term_vote() {
+    async fn byzantine_max_term_vote() {
         let (service, mgr, _id, _dir) = create_test_service().await;
 
         let request = Request::new(RaftVoteRequest {
@@ -743,7 +743,7 @@ mod tests {
 
     /// Empty snapshot with done=true should not corrupt state.
     #[tokio::test]
-    async fn test_byzantine_empty_snapshot_marked_done() {
+    async fn byzantine_empty_snapshot_marked_done() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
         let current_term = get_term(&mgr, Region::GLOBAL);
         let applied_before = get_applied(&mgr, Region::GLOBAL);
@@ -777,7 +777,7 @@ mod tests {
 
     /// Out-of-order snapshot chunks should be handled gracefully.
     #[tokio::test]
-    async fn test_byzantine_out_of_order_snapshot_chunks() {
+    async fn byzantine_out_of_order_snapshot_chunks() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
         let current_term = get_term(&mgr, Region::GLOBAL);
 
@@ -806,7 +806,7 @@ mod tests {
 
     /// Oversized snapshot chunk should not cause OOM.
     #[tokio::test]
-    async fn test_byzantine_oversized_snapshot_chunk() {
+    async fn byzantine_oversized_snapshot_chunk() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
         let current_term = get_term(&mgr, Region::GLOBAL);
 
@@ -839,7 +839,7 @@ mod tests {
 
     /// Unknown region value → INVALID_ARGUMENT error.
     #[tokio::test]
-    async fn test_byzantine_multi_region_invalid_region() {
+    async fn byzantine_multi_region_invalid_region() {
         let (service, _mgr, _id, _dir) = create_test_service().await;
 
         let request = Request::new(RaftAppendEntriesRequest {
@@ -857,7 +857,7 @@ mod tests {
 
     /// Missing region defaults to GLOBAL (system).
     #[tokio::test]
-    async fn test_byzantine_multi_region_default_routing() {
+    async fn byzantine_multi_region_default_routing() {
         let (service, _mgr, _id, _dir) = create_test_service().await;
 
         // Request without region and missing vote → should route to GLOBAL
@@ -875,7 +875,7 @@ mod tests {
 
     /// Malformed messages to a specific data region → still rejected properly.
     #[tokio::test]
-    async fn test_byzantine_multi_region_malformed_to_global_region() {
+    async fn byzantine_multi_region_malformed_to_global_region() {
         let (service, _mgr, _id, _dir) = create_test_service().await;
 
         let request = Request::new(RaftVoteRequest {
@@ -895,7 +895,7 @@ mod tests {
 
     /// Sequential Byzantine attacks should not corrupt cumulative state.
     #[tokio::test]
-    async fn test_byzantine_cluster_integrity_after_attacks() {
+    async fn byzantine_cluster_integrity_after_attacks() {
         let (service, mgr, node_id, _dir) = create_test_service().await;
         let current_term = get_term(&mgr, Region::GLOBAL);
         let initial_applied = get_applied(&mgr, Region::GLOBAL);

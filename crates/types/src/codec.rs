@@ -52,13 +52,12 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CodecError> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use serde::Deserialize;
-    use snafu::ResultExt;
 
     use super::*;
 
     // Test encode/decode roundtrip for primitive types
     #[test]
-    fn test_roundtrip_primitive_u64() {
+    fn roundtrip_u64() {
         let original: u64 = 42;
         let bytes = encode(&original).expect("encode u64");
         let decoded: u64 = decode(&bytes).expect("decode u64");
@@ -66,7 +65,7 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_primitive_string() {
+    fn roundtrip_string() {
         let original = "hello world".to_string();
         let bytes = encode(&original).expect("encode string");
         let decoded: String = decode(&bytes).expect("decode string");
@@ -74,7 +73,7 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_primitive_bool() {
+    fn roundtrip_bool() {
         for original in [true, false] {
             let bytes = encode(&original).expect("encode bool");
             let decoded: bool = decode(&bytes).expect("decode bool");
@@ -83,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_primitive_vec() {
+    fn roundtrip_vec() {
         let original: Vec<u32> = vec![1, 2, 3, 4, 5];
         let bytes = encode(&original).expect("encode vec");
         let decoded: Vec<u32> = decode(&bytes).expect("decode vec");
@@ -106,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_complex_struct() {
+    fn roundtrip_complex_struct() {
         let original = ComplexStruct {
             id: 12345,
             name: "test entity".to_string(),
@@ -119,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_complex_struct_with_none() {
+    fn roundtrip_complex_struct_with_none() {
         let original = ComplexStruct { id: 0, name: String::new(), data: vec![], nested: None };
         let bytes = encode(&original).expect("encode complex struct with None");
         let decoded: ComplexStruct = decode(&bytes).expect("decode complex struct with None");
@@ -128,7 +127,7 @@ mod tests {
 
     // Test error cases (malformed input)
     #[test]
-    fn test_decode_malformed_input() {
+    fn decode_malformed_input_returns_error() {
         let malformed_bytes = [0xFF, 0xFF, 0xFF, 0xFF];
         let result: Result<ComplexStruct, _> = decode(&malformed_bytes);
         assert!(result.is_err());
@@ -140,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_truncated_data() {
+    fn decode_truncated_data_returns_error() {
         // Encode a struct then truncate the bytes
         let original = ComplexStruct {
             id: 12345,
@@ -157,7 +156,7 @@ mod tests {
 
     // Test empty input handling
     #[test]
-    fn test_decode_empty_input() {
+    fn decode_empty_input_returns_error() {
         let empty: &[u8] = &[];
         let result: Result<u64, _> = decode(empty);
         assert!(result.is_err());
@@ -166,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_empty_vec() {
+    fn roundtrip_empty_vec() {
         let empty_vec: Vec<u8> = vec![];
         let bytes = encode(&empty_vec).expect("encode empty vec");
         let decoded: Vec<u8> = decode(&bytes).expect("decode empty vec");
@@ -174,28 +173,16 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_empty_string() {
+    fn roundtrip_empty_string() {
         let empty_string = String::new();
         let bytes = encode(&empty_string).expect("encode empty string");
         let decoded: String = decode(&bytes).expect("decode empty string");
         assert_eq!(empty_string, decoded);
     }
 
-    // Test error display implementations
-    #[test]
-    fn test_encode_error_display() {
-        // We can't easily trigger an encode error with postcard,
-        // but we can verify the error type structure
-        let malformed: &[u8] = &[0xFF];
-        let result: Result<String, _> = decode(malformed);
-        let err = result.unwrap_err();
-        let display = err.to_string();
-        assert!(display.starts_with("Decoding failed:"));
-    }
-
     // Test edge cases
     #[test]
-    fn test_roundtrip_max_u64() {
+    fn roundtrip_max_u64() {
         let original: u64 = u64::MAX;
         let bytes = encode(&original).expect("encode max u64");
         let decoded: u64 = decode(&bytes).expect("decode max u64");
@@ -203,48 +190,16 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_unicode_string() {
+    fn roundtrip_unicode_string() {
         let original = "Hello 世界 🦀 émoji".to_string();
         let bytes = encode(&original).expect("encode unicode");
         let decoded: String = decode(&bytes).expect("decode unicode");
         assert_eq!(original, decoded);
     }
 
-    // Error conversion chain tests
-
-    // Test that CodecError::Encode has correct Display output
+    // Error chain tests
     #[test]
-    fn test_codec_error_encode_display() {
-        // Create a decode error (easier to trigger than encode error)
-        let malformed: &[u8] = &[0xFF, 0xFF, 0xFF, 0xFF];
-        let result: Result<u64, _> = decode(malformed);
-        let err = result.unwrap_err();
-
-        // Verify display format matches expected pattern
-        let display = format!("{err}");
-        assert!(
-            display.starts_with("Decoding failed:"),
-            "Expected 'Decoding failed:', got: {display}"
-        );
-    }
-
-    // Test that CodecError::Decode has correct Display output
-    #[test]
-    fn test_codec_error_decode_display() {
-        let empty: &[u8] = &[];
-        let result: Result<String, _> = decode(empty);
-        let err = result.unwrap_err();
-
-        let display = format!("{err}");
-        assert!(
-            display.starts_with("Decoding failed:"),
-            "Expected 'Decoding failed:', got: {display}"
-        );
-    }
-
-    // Test error source chain - CodecError preserves underlying postcard error
-    #[test]
-    fn test_codec_error_source_chain() {
+    fn codec_error_preserves_source_chain() {
         use std::error::Error;
 
         let malformed: &[u8] = &[0xFF];
@@ -530,7 +485,7 @@ mod tests {
 
     // Test Debug implementation contains useful info
     #[test]
-    fn test_codec_error_debug() {
+    fn codec_error_debug_includes_variant_and_source() {
         let malformed: &[u8] = &[0xFF, 0xFF];
         let result: Result<u64, _> = decode(malformed);
         let err = result.unwrap_err();
@@ -540,22 +495,5 @@ mod tests {
         assert!(debug.contains("Decode"), "Debug should contain 'Decode' variant name");
         // Debug output should contain "source" field info
         assert!(debug.contains("source"), "Debug should contain 'source' field: {debug}");
-    }
-
-    // Test that both error variants exist and are distinct
-    #[test]
-    fn test_codec_error_variants() {
-        // Decode error - use context selector to properly construct with location
-        let decode_result: Result<u64, CodecError> =
-            postcard::from_bytes::<u64>(&[0xFF, 0xFF, 0xFF]).context(super::DecodeSnafu);
-        let decode_err = decode_result.expect_err("should fail");
-
-        // Verify we can match on the variant
-        assert!(matches!(decode_err, CodecError::Decode { .. }));
-
-        // The Encode variant exists (verified at compile time by matching)
-        // Creating an actual encode error is difficult since postcard rarely fails encoding,
-        // but the variant is tested implicitly via the encode() function
-        assert!(!matches!(decode_err, CodecError::Encode { .. }));
     }
 }

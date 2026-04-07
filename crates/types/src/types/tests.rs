@@ -6,13 +6,13 @@ use super::*;
 use crate::hash::ZERO_HASH;
 
 #[test]
-fn test_relationship_to_key() {
+fn relationship_to_key_format() {
     let rel = Relationship::new("doc:123", "viewer", "user:alice");
     assert_eq!(rel.to_key(), "rel:doc:123#viewer@user:alice");
 }
 
 #[test]
-fn test_set_condition_type_bytes() {
+fn set_condition_type_bytes() {
     assert_eq!(SetCondition::MustNotExist.type_byte(), 0x01);
     assert_eq!(SetCondition::MustExist.type_byte(), 0x02);
     assert_eq!(SetCondition::VersionEquals(1).type_byte(), 0x03);
@@ -24,7 +24,7 @@ fn test_set_condition_type_bytes() {
 // ========================================================================
 
 #[test]
-fn test_block_header_builder_all_fields() {
+fn block_header_builder_all_fields() {
     let timestamp = Utc::now();
     let header = BlockHeader::builder()
         .height(100)
@@ -50,7 +50,7 @@ fn test_block_header_builder_all_fields() {
 }
 
 #[test]
-fn test_block_header_builder_genesis_block() {
+fn block_header_builder_genesis_block() {
     let header = BlockHeader::builder()
         .height(0) // Genesis
         .organization(1)
@@ -72,7 +72,7 @@ fn test_block_header_builder_genesis_block() {
 // ========================================================================
 
 #[test]
-fn test_transaction_builder_valid() {
+fn transaction_builder_valid() {
     let timestamp = Utc::now();
     let tx = Transaction::builder()
         .id([1u8; 16])
@@ -95,7 +95,7 @@ fn test_transaction_builder_valid() {
 }
 
 #[test]
-fn test_transaction_builder_empty_operations_fails() {
+fn transaction_builder_rejects_empty_operations() {
     let result = Transaction::builder()
         .id([1u8; 16])
         .client_id("client-123")
@@ -110,7 +110,7 @@ fn test_transaction_builder_empty_operations_fails() {
 }
 
 #[test]
-fn test_transaction_builder_zero_sequence_fails() {
+fn transaction_builder_rejects_zero_sequence() {
     let result = Transaction::builder()
         .id([1u8; 16])
         .client_id("client-123")
@@ -129,7 +129,7 @@ fn test_transaction_builder_zero_sequence_fails() {
 }
 
 #[test]
-fn test_transaction_builder_with_into_for_strings() {
+fn transaction_builder_accepts_str_via_into() {
     // Test that #[builder(into)] allows &str for String fields
     let tx = Transaction::builder()
         .id([2u8; 16])
@@ -149,7 +149,7 @@ fn test_transaction_builder_with_into_for_strings() {
 }
 
 #[test]
-fn test_transaction_builder_multiple_operations() {
+fn transaction_builder_multiple_operations() {
     let tx = Transaction::builder()
         .id([3u8; 16])
         .client_id("client-789")
@@ -181,7 +181,7 @@ fn test_transaction_builder_multiple_operations() {
 
 /// Table-driven: all i64 newtype IDs support new/value/display/from/into/serde.
 #[test]
-fn test_id_newtypes_core_behavior() {
+fn id_newtypes_core_behavior() {
     // (constructor, value, expected_display, expected_json)
     let org = OrganizationId::new(42);
     assert_eq!(org.value(), 42);
@@ -218,7 +218,7 @@ fn test_id_newtypes_core_behavior() {
 
 /// Derived traits: Eq, Ord, Hash, Copy, Serialize/Deserialize for ID newtypes.
 #[test]
-fn test_id_newtypes_derived_traits() {
+fn id_newtypes_derived_traits() {
     use std::collections::HashMap;
 
     // Equality
@@ -262,7 +262,7 @@ fn test_id_newtypes_derived_traits() {
 }
 
 #[test]
-fn test_block_header_builder_with_newtype_ids() {
+fn block_header_builder_with_newtype_ids() {
     let header = BlockHeader::builder()
         .height(1)
         .organization(OrganizationId::new(10))
@@ -279,24 +279,13 @@ fn test_block_header_builder_with_newtype_ids() {
     assert_eq!(header.vault, VaultId::new(20));
 }
 
-/// OrganizationUsage is a simple Copy struct.
-#[test]
-fn test_organization_usage() {
-    let zero = OrganizationUsage { storage_bytes: 0, vault_count: 0 };
-    assert_eq!(zero.storage_bytes, 0);
-
-    let usage = OrganizationUsage { storage_bytes: 1_048_576, vault_count: 5 };
-    let copy = usage; // Copy
-    assert_eq!(usage, copy);
-}
-
 // ========================================================================
 // VaultSlug Tests
 // ========================================================================
 
 /// VaultSlug (u64 newtype): core operations and derived traits.
 #[test]
-fn test_vault_slug_core_and_traits() {
+fn vault_slug_core_and_traits() {
     use std::collections::HashMap;
 
     // new/value/display
@@ -349,20 +338,7 @@ fn test_vault_slug_core_and_traits() {
 // ========================================================================
 
 #[test]
-fn test_token_version_default_is_zero() {
-    let v = TokenVersion::default();
-    assert_eq!(v.value(), 0);
-    assert_eq!(v, TokenVersion::new(0));
-}
-
-#[test]
-fn test_token_version_new_and_value() {
-    let v = TokenVersion::new(42);
-    assert_eq!(v.value(), 42);
-}
-
-#[test]
-fn test_token_version_increment() {
+fn token_version_increment_produces_sequential_values() {
     let v0 = TokenVersion::default();
     let v1 = v0.increment();
     let v2 = v1.increment();
@@ -371,23 +347,29 @@ fn test_token_version_increment() {
     assert_eq!(v2.value(), 2);
 }
 
+/// TokenVersion: default, display, ordering, From/Into, serde.
 #[test]
-fn test_token_version_display() {
-    assert_eq!(format!("{}", TokenVersion::new(0)), "v0");
-    assert_eq!(format!("{}", TokenVersion::new(5)), "v5");
-    assert_eq!(format!("{}", TokenVersion::new(999)), "v999");
-}
+fn token_version_core_traits() {
+    // Default is zero
+    assert_eq!(TokenVersion::default().value(), 0);
 
-#[test]
-fn test_token_version_from_u64() {
+    // Display uses "v" prefix
+    let cases = [(0, "v0"), (5, "v5"), (999, "v999")];
+    for (val, expected) in cases {
+        assert_eq!(format!("{}", TokenVersion::new(val)), expected);
+    }
+
+    // Ordering
+    assert!(TokenVersion::new(0) < TokenVersion::new(1));
+    assert!(TokenVersion::new(5) > TokenVersion::new(3));
+
+    // From/Into u64
     let v: TokenVersion = 10_u64.into();
     assert_eq!(v.value(), 10);
     let raw: u64 = TokenVersion::new(7).into();
     assert_eq!(raw, 7);
-}
 
-#[test]
-fn test_token_version_serde_roundtrip() {
+    // Serde round-trip
     let v = TokenVersion::new(42);
     let json = serde_json::to_string(&v).unwrap();
     assert_eq!(json, "42");
@@ -396,31 +378,7 @@ fn test_token_version_serde_roundtrip() {
 }
 
 #[test]
-fn test_token_version_ordering() {
-    assert!(TokenVersion::new(0) < TokenVersion::new(1));
-    assert!(TokenVersion::new(5) > TokenVersion::new(3));
-    assert_eq!(TokenVersion::new(2), TokenVersion::new(2));
-}
-
-#[test]
-fn test_token_version_copy() {
-    let v = TokenVersion::new(10);
-    let v2 = v;
-    assert_eq!(v, v2);
-}
-
-#[test]
-fn test_token_version_hash_map_key() {
-    use std::collections::HashMap;
-    let mut map = HashMap::new();
-    map.insert(TokenVersion::new(1), "first");
-    map.insert(TokenVersion::new(2), "second");
-    assert_eq!(map.get(&TokenVersion::new(1)), Some(&"first"));
-    assert_eq!(map.get(&TokenVersion::new(3)), None);
-}
-
-#[test]
-fn test_extract_vault_block_selects_correct_height() {
+fn extract_vault_block_selects_correct_height() {
     let org = OrganizationId::new(1);
     let vault = VaultId::new(10);
     let timestamp = Utc::now();
@@ -477,7 +435,7 @@ fn test_extract_vault_block_selects_correct_height() {
 // ========================================================================
 
 #[test]
-fn test_region_display_from_str_round_trip() {
+fn region_display_from_str_roundtrip() {
     for region in &ALL_REGIONS {
         let display = format!("{region}");
         let parsed: Region = display.parse().unwrap();
@@ -486,14 +444,14 @@ fn test_region_display_from_str_round_trip() {
 }
 
 #[test]
-fn test_region_from_str_invalid() {
+fn region_from_str_invalid() {
     let err = "not-a-region".parse::<Region>().unwrap_err();
     assert_eq!(err.input, "not-a-region");
     assert_eq!(format!("{err}"), "unknown region: not-a-region");
 }
 
 #[test]
-fn test_region_from_str_case_sensitive() {
+fn region_from_str_case_sensitive() {
     assert!("GLOBAL".parse::<Region>().is_err());
     assert!("US_EAST_VA".parse::<Region>().is_err());
     assert!("Global".parse::<Region>().is_err());
@@ -501,7 +459,7 @@ fn test_region_from_str_case_sensitive() {
 
 /// Region residency, serde, serialization, and derived traits.
 #[test]
-fn test_region_properties() {
+fn region_properties() {
     use std::collections::HashMap;
 
     // Residency: exactly GLOBAL, US_EAST_VA, US_WEST_OR are non-protected

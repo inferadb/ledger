@@ -311,19 +311,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_region_context_fields() {
-        // Just verify the struct has the expected fields
-        // (actual testing requires full Raft setup)
-        let _: fn(RegionContext) = |ctx| {
-            let _ = ctx.raft;
-            let _ = ctx.state;
-            let _ = ctx.block_archive;
-            let _ = ctx.applied_state;
-        };
-    }
-
-    #[test]
-    fn test_remote_region_info_fields() {
+    fn remote_region_info_stores_fields_correctly() {
         let routing = RoutingInfo {
             region: Region::US_EAST_VA,
             member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
@@ -344,14 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_result_local_debug() {
-        // Verify Debug impl works for Local variant pattern match
-        let result: Result<ResolveResult, Status> = Err(Status::not_found("test"));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_resolve_result_remote_variant() {
+    fn resolve_result_remote_variant_stores_fields() {
         let routing = RoutingInfo {
             region: Region::IE_EAST_DUBLIN,
             member_nodes: vec!["192.168.1.1:50051".to_string()],
@@ -377,13 +358,13 @@ mod tests {
     }
 
     #[test]
-    fn test_region_resolver_trait_is_object_safe() {
+    fn region_resolver_trait_is_object_safe() {
         // Verify RegionResolver is object-safe (can be used as dyn trait)
         fn _check_trait_impl<T: RegionResolver>(_: &T) {}
     }
 
     #[test]
-    fn test_region_context_debug() {
+    fn remote_region_info_debug_output() {
         // Verify our custom Debug impl compiles and works
         let debug_output = format!(
             "{:?}",
@@ -401,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_result_debug() {
+    fn resolve_result_debug_output() {
         // Verify Debug impl for RemoteRegionInfo (ResolveResult::Remote)
         let routing = RoutingInfo {
             region: Region::US_EAST_VA,
@@ -423,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_region_resolver_local_region() {
+    fn multi_region_resolver_returns_configured_local_region() {
         // RegionResolverService delegates local_region() to RaftManager.
         // Verify the accessor exists and returns the manager's local_region.
         // Full integration test requires async Raft setup; here we test the
@@ -441,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_region_resolver_supports_forwarding() {
+    fn multi_region_resolver_supports_forwarding() {
         use inferadb_ledger_raft::raft_manager::{RaftManager, RaftManagerConfig};
         use inferadb_ledger_test_utils::TestDir;
 
@@ -454,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn test_single_region_resolver_does_not_support_forwarding() {
+    fn default_resolver_does_not_support_forwarding() {
         // Default trait implementation returns false
         struct FakeResolver;
         impl RegionResolver for FakeResolver {
@@ -471,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_resolve_with_forward_delegates_to_resolve() {
+    fn default_resolve_with_forward_delegates_to_resolve() {
         // Default trait impl wraps resolve() result in Local variant.
         struct AlwaysErrorResolver;
         impl RegionResolver for AlwaysErrorResolver {

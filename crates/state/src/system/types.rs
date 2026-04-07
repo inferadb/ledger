@@ -1413,26 +1413,6 @@ mod tests {
         assert_eq!(provisioning_bytes[0], 1, "Provisioning must be variant index 1");
     }
 
-    #[test]
-    fn test_email_hash_entry_active_ne_provisioning() {
-        let active = EmailHashEntry::Active(UserId::new(1));
-        let provisioning = EmailHashEntry::Provisioning(ProvisioningReservation {
-            user_id: UserId::new(1),
-            organization_id: OrganizationId::new(1),
-        });
-        assert_ne!(active, provisioning);
-    }
-
-    #[test]
-    fn test_provisioning_reservation_fields() {
-        let reservation = ProvisioningReservation {
-            user_id: UserId::new(99),
-            organization_id: OrganizationId::new(55),
-        };
-        assert_eq!(reservation.user_id, UserId::new(99));
-        assert_eq!(reservation.organization_id, OrganizationId::new(55));
-    }
-
     // ========================================================================
     // PendingEmailVerification tests
     // ========================================================================
@@ -1453,23 +1433,6 @@ mod tests {
         assert_eq!(deserialized, record);
     }
 
-    #[test]
-    fn test_pending_email_verification_fields() {
-        let now = Utc::now();
-        let record = PendingEmailVerification {
-            code_hash: [0xFF; 32],
-            region: Region::IE_EAST_DUBLIN,
-            expires_at: now,
-            attempts: 3,
-            rate_limit_count: 2,
-            rate_limit_window_start: now,
-        };
-        assert_eq!(record.code_hash, [0xFF; 32]);
-        assert_eq!(record.region, Region::IE_EAST_DUBLIN);
-        assert_eq!(record.attempts, 3);
-        assert_eq!(record.rate_limit_count, 2);
-    }
-
     // ========================================================================
     // OnboardingAccount tests
     // ========================================================================
@@ -1486,23 +1449,6 @@ mod tests {
         let bytes = postcard::to_allocvec(&account).unwrap();
         let deserialized: OnboardingAccount = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(deserialized, account);
-    }
-
-    #[test]
-    fn test_onboarding_account_no_pii_fields() {
-        // Verify the struct contains NO PII fields — email, name, and
-        // organization_name are intentionally excluded. This test documents
-        // the invariant as a compile-time-visible assertion.
-        let now = Utc::now();
-        let account = OnboardingAccount {
-            token_hash: [0; 32],
-            region: Region::US_EAST_VA,
-            expires_at: now,
-            created_at: now,
-        };
-        // Only structural fields — no email, no name, no organization_name
-        assert_eq!(account.token_hash, [0; 32]);
-        assert_eq!(account.region, Region::US_EAST_VA);
     }
 
     #[test]

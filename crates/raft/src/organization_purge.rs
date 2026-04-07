@@ -458,31 +458,6 @@ mod tests {
     }
 
     #[test]
-    fn test_priority_set_operations() {
-        // Verify HashSet behavior used in run_cycle for priority retries
-        let mut priority: HashSet<OrganizationId> = HashSet::new();
-        let org1 = OrganizationId::new(1);
-        let org2 = OrganizationId::new(2);
-
-        priority.insert(org1);
-        priority.insert(org2);
-        assert_eq!(priority.len(), 2);
-
-        priority.remove(&org1);
-        assert_eq!(priority.len(), 1);
-        assert!(priority.contains(&org2));
-        assert!(!priority.contains(&org1));
-    }
-
-    #[test]
-    fn test_config_clone() {
-        let config = OrganizationPurgeConfig { interval_secs: 7200, batch_size: 25 };
-        let cloned = config.clone();
-        assert_eq!(cloned.interval_secs, config.interval_secs);
-        assert_eq!(cloned.batch_size, config.batch_size);
-    }
-
-    #[test]
     fn test_retention_window_calculation() {
         use inferadb_ledger_types::Region;
 
@@ -502,62 +477,10 @@ mod tests {
     }
 
     #[test]
-    fn test_priority_set_dedup() {
-        let mut priority: HashSet<OrganizationId> = HashSet::new();
-        let org = OrganizationId::new(5);
-        priority.insert(org);
-        priority.insert(org);
-        assert_eq!(priority.len(), 1);
-    }
-
-    #[test]
-    fn test_priority_snapshot_independence() {
-        // Verify snapshot is independent from the live set
-        let mut priority: HashSet<OrganizationId> = HashSet::new();
-        priority.insert(OrganizationId::new(1));
-        priority.insert(OrganizationId::new(2));
-
-        let snapshot: Vec<OrganizationId> = priority.iter().copied().collect();
-        priority.remove(&OrganizationId::new(1));
-
-        // Snapshot should still have both
-        assert_eq!(snapshot.len(), 2);
-        // Live set has only one
-        assert_eq!(priority.len(), 1);
-    }
-
-    #[test]
-    fn test_config_debug() {
-        let config = OrganizationPurgeConfig::default();
-        let debug = format!("{:?}", config);
-        assert!(debug.contains("interval_secs"));
-        assert!(debug.contains("batch_size"));
-    }
-
-    #[test]
     fn test_backoff_no_overflow_at_max_retries() {
         // Verify the last retry attempt doesn't overflow
         let last_attempt = MAX_RETRIES - 1;
         let delay = BACKOFF_BASE * BACKOFF_MULTIPLIER.pow(last_attempt);
         assert_eq!(delay, Duration::from_millis(2500));
-    }
-
-    #[test]
-    fn test_remaining_retries_calculation() {
-        for attempt in 0..MAX_RETRIES {
-            let remaining = MAX_RETRIES - attempt - 1;
-            if attempt == MAX_RETRIES - 1 {
-                assert_eq!(remaining, 0);
-            } else {
-                assert!(remaining > 0);
-            }
-        }
-    }
-
-    #[test]
-    fn test_tick_interval_from_config() {
-        let config = OrganizationPurgeConfig { interval_secs: 7200, batch_size: 10 };
-        let tick = std::time::Duration::from_secs(config.interval_secs);
-        assert_eq!(tick, std::time::Duration::from_secs(7200));
     }
 }

@@ -248,16 +248,24 @@ async fn test_backup_list_with_limit() {
         backup_ids.push(backup.backup_id);
     }
 
-    // Wait for all backup jobs to complete and metadata to be fully persisted.
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    // Poll until all 3 backup jobs have completed and metadata is persisted.
+    let all = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let backups = list_backups(leader.addr, 0).await.expect("list all");
+            if backups.len() >= 3 {
+                return backups;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .expect("all 3 backups should appear within timeout");
+
+    assert!(all.len() >= 3, "should have at least 3 backups, got {}", all.len());
 
     // List with limit=2 should return at most 2
     let limited = list_backups(leader.addr, 2).await.expect("list limited");
     assert!(limited.len() <= 2, "limit should be respected, got {}", limited.len());
-
-    // List with limit=0 (all) should return at least 3
-    let all = list_backups(leader.addr, 0).await.expect("list all");
-    assert!(all.len() >= 3, "should have at least 3 backups, got {}", all.len());
 }
 
 /// Tests that backup produces a valid checksum.

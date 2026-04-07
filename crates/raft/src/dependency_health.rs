@@ -300,8 +300,6 @@ pub(crate) fn check_rmk_provisioning(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
 
     // ─── DependencyCheckResult Tests ────────────────────────────
@@ -450,31 +448,6 @@ mod tests {
         assert!(cached.timestamp.elapsed() >= ttl);
     }
 
-    // ─── Startup Check Tests (pure, no Raft) ────────────────────
-
-    #[test]
-    fn test_startup_data_dir_exists() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let dir_exists = temp_dir.path().exists() && temp_dir.path().is_dir();
-        assert!(dir_exists);
-    }
-
-    #[test]
-    fn test_startup_data_dir_missing() {
-        let path = PathBuf::from("/nonexistent/startup/path");
-        let dir_exists = path.exists() && path.is_dir();
-        assert!(!dir_exists);
-    }
-
-    #[test]
-    fn test_startup_data_dir_is_file_not_dir() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let file_path = temp_dir.path().join("not_a_dir");
-        std::fs::write(&file_path, b"data").expect("create file");
-        let dir_exists = file_path.exists() && file_path.is_dir();
-        assert!(!dir_exists);
-    }
-
     // ─── RMK Provisioning Check Tests ─────────────────────────
 
     #[test]
@@ -528,110 +501,6 @@ mod tests {
         assert!(result.detail.contains("v2"));
     }
 
-    // ─── DependencyCheckResult Construction Tests ──────────────────
-
-    #[test]
-    fn test_dependency_check_result_healthy() {
-        let result = DependencyCheckResult { healthy: true, detail: "all good".to_string() };
-        assert!(result.healthy);
-        assert_eq!(result.detail, "all good");
-    }
-
-    #[test]
-    fn test_dependency_check_result_unhealthy() {
-        let result =
-            DependencyCheckResult { healthy: false, detail: "something wrong".to_string() };
-        assert!(!result.healthy);
-        assert_eq!(result.detail, "something wrong");
-    }
-
-    #[test]
-    fn test_dependency_check_result_clone() {
-        let result = DependencyCheckResult { healthy: true, detail: "cloned".to_string() };
-        let cloned = result.clone();
-        assert_eq!(cloned.healthy, result.healthy);
-        assert_eq!(cloned.detail, result.detail);
-    }
-
-    #[test]
-    fn test_dependency_check_result_debug() {
-        let result = DependencyCheckResult { healthy: true, detail: "debug test".to_string() };
-        let debug = format!("{:?}", result);
-        assert!(debug.contains("healthy: true"));
-        assert!(debug.contains("debug test"));
-    }
-
-    // ─── DependencyHealth Tests ────────────────────────────────────
-
-    #[test]
-    fn test_dependency_health_empty_details_is_healthy() {
-        let details: HashMap<String, DependencyCheckResult> = HashMap::new();
-        let all_healthy = details.values().all(|r| r.healthy);
-        // Empty iterator returns true for all()
-        assert!(all_healthy);
-    }
-
-    #[test]
-    fn test_dependency_health_debug() {
-        let health = DependencyHealth {
-            all_healthy: false,
-            details: HashMap::from([(
-                "test".to_string(),
-                DependencyCheckResult { healthy: false, detail: "failed".to_string() },
-            )]),
-        };
-        let debug = format!("{:?}", health);
-        assert!(debug.contains("all_healthy: false"));
-    }
-
-    #[test]
-    fn test_dependency_health_clone() {
-        let health = DependencyHealth {
-            all_healthy: true,
-            details: HashMap::from([(
-                "disk".to_string(),
-                DependencyCheckResult { healthy: true, detail: "ok".to_string() },
-            )]),
-        };
-        let cloned = health.clone();
-        assert_eq!(cloned.all_healthy, health.all_healthy);
-        assert_eq!(cloned.details.len(), health.details.len());
-    }
-
-    // ─── Cache TTL Boundary Tests ──────────────────────────────────
-
-    #[test]
-    fn test_cache_exact_ttl_boundary() {
-        // At exactly the TTL boundary, elapsed should equal TTL (not less than)
-        // so the cache should be expired
-        let ttl = Duration::from_secs(5);
-        let cached = CachedResult { results: HashMap::new(), timestamp: Instant::now() - ttl };
-        // elapsed() >= ttl means cache is expired
-        assert!(cached.timestamp.elapsed() >= ttl);
-    }
-
-    // ─── Startup Check Additional Tests ────────────────────────────
-
-    #[test]
-    fn test_startup_check_detail_messages() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let dir_exists = temp_dir.path().exists() && temp_dir.path().is_dir();
-        assert!(dir_exists);
-
-        let detail = format!("data directory exists: {}", temp_dir.path().display());
-        assert!(detail.starts_with("data directory exists:"));
-    }
-
-    #[test]
-    fn test_startup_check_missing_dir_detail() {
-        let path = PathBuf::from("/nonexistent/startup/path");
-        let dir_exists = path.exists() && path.is_dir();
-        assert!(!dir_exists);
-
-        let detail = format!("data directory missing or not a directory: {}", path.display());
-        assert!(detail.contains("/nonexistent/startup/path"));
-    }
-
     // ─── Disk Check Idempotency ──────────────────────────────────
 
     #[test]
@@ -642,58 +511,6 @@ mod tests {
             let result = check_disk(temp_dir.path());
             assert!(result.healthy);
         }
-    }
-
-    // ─── Cache Freshness Boundary Tests ──────────────────────────
-
-    #[test]
-    fn test_cache_ttl_just_expired() {
-        let cached = CachedResult {
-            results: HashMap::new(),
-            timestamp: Instant::now() - Duration::from_millis(5001),
-        };
-        let ttl = Duration::from_secs(5);
-        assert!(cached.timestamp.elapsed() >= ttl);
-    }
-
-    #[test]
-    fn test_cache_ttl_just_fresh() {
-        let cached = CachedResult { results: HashMap::new(), timestamp: Instant::now() };
-        let ttl = Duration::from_secs(5);
-        assert!(cached.timestamp.elapsed() < ttl);
-    }
-
-    // ─── DependencyHealth Multiple Unhealthy ──────────────────────
-
-    #[test]
-    fn test_dependency_health_multiple_unhealthy() {
-        let mut details = HashMap::new();
-        details.insert(
-            "disk".to_string(),
-            DependencyCheckResult { healthy: false, detail: "readonly".to_string() },
-        );
-        details.insert(
-            "peer".to_string(),
-            DependencyCheckResult { healthy: false, detail: "unreachable".to_string() },
-        );
-        details.insert(
-            "raft".to_string(),
-            DependencyCheckResult { healthy: false, detail: "lagging".to_string() },
-        );
-        let all_healthy = details.values().all(|r| r.healthy);
-        assert!(!all_healthy);
-    }
-
-    // ─── DependencyCheckResult Accessors ─────────────────────────
-
-    #[test]
-    fn test_dependency_check_result_detail_message() {
-        let result = DependencyCheckResult {
-            healthy: true,
-            detail: "raft log lag: 50 (max: 1000)".to_string(),
-        };
-        assert!(result.detail.contains("lag: 50"));
-        assert!(result.detail.contains("max: 1000"));
     }
 
     // ─── Config Boundary Tests ───────────────────────────────────

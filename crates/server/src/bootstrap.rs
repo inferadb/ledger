@@ -1073,28 +1073,49 @@ mod tests {
     // =================================================================
 
     #[test]
-    fn test_bootstrap_error_display() {
+    fn bootstrap_error_display_database() {
         let err = BootstrapError::Database { message: "disk full".to_string() };
         assert_eq!(err.to_string(), "database error: disk full");
+    }
 
+    #[test]
+    fn bootstrap_error_display_storage() {
         let err = BootstrapError::Storage { message: "corrupt".to_string() };
         assert_eq!(err.to_string(), "storage error: corrupt");
+    }
 
+    #[test]
+    fn bootstrap_error_display_raft() {
         let err = BootstrapError::Raft { message: "term mismatch".to_string() };
         assert_eq!(err.to_string(), "raft error: term mismatch");
+    }
 
+    #[test]
+    fn bootstrap_error_display_initialize() {
         let err = BootstrapError::Initialize { message: "failed".to_string() };
         assert_eq!(err.to_string(), "initialization error: failed");
+    }
 
+    #[test]
+    fn bootstrap_error_display_node_id() {
         let err = BootstrapError::NodeId { message: "bad id".to_string() };
         assert_eq!(err.to_string(), "node id error: bad id");
+    }
 
+    #[test]
+    fn bootstrap_error_display_timeout() {
         let err = BootstrapError::Timeout { message: "30s elapsed".to_string() };
         assert_eq!(err.to_string(), "bootstrap timeout: 30s elapsed");
+    }
 
+    #[test]
+    fn bootstrap_error_display_config() {
         let err = BootstrapError::Config { message: "bad cluster size".to_string() };
         assert_eq!(err.to_string(), "configuration error: bad cluster size");
+    }
 
+    #[test]
+    fn bootstrap_error_display_server() {
         let err = BootstrapError::Server { message: "bind failed".to_string() };
         assert_eq!(err.to_string(), "server error: bind failed");
     }

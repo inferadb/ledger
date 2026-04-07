@@ -272,11 +272,14 @@ async fn test_10k_writes_replicated_state_roots_match() {
     assert_eq!(last, Some(b"data-9999".to_vec()));
 }
 
-/// Exercises the apply loop throughput with 10 organizations, 50 vaults, and
-/// 2K client sequences. Validates that multi-org/vault write distribution
+/// Exercises the apply loop with 10 organizations, 50 vaults, and 2K writes
+/// using unique client IDs. Validates that multi-org/vault write distribution
 /// works correctly with externalized state persistence.
+///
+/// Success criteria: all 2K writes complete within 120 seconds and spot-check
+/// reads return correct values.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_apply_loop_throughput_10_orgs_50_vaults() {
+async fn test_multi_org_vault_write_distribution_2k_entities() {
     let cluster = TestCluster::new(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
@@ -311,10 +314,28 @@ async fn test_apply_loop_throughput_10_orgs_50_vaults() {
     }
     let elapsed = start.elapsed();
 
-    println!("2K writes across 10 orgs / 50 vaults completed in {:?}", elapsed);
+    let throughput = 2_000.0 / elapsed.as_secs_f64();
+    println!(
+        "2K writes across 10 orgs / 50 vaults completed in {:.1}s ({:.0} ops/sec)",
+        elapsed.as_secs_f64(),
+        throughput,
+    );
 
-    // Spot-check a few entries.
-    let (org, vault) = targets[0];
-    let value = read_entity(leader.addr, org, vault, "tp-key-0").await;
-    assert_eq!(value, Some(b"tp-val-0".to_vec()));
+    // Bound: 2K sequential writes should finish well within 120 seconds even in
+    // debug builds under CI load. This catches regressions that tank apply throughput.
+    assert!(elapsed < Duration::from_secs(120), "2K writes took {:?}, expected < 120s", elapsed);
+
+    // Spot-check entries from multiple organizations to verify cross-org writes.
+    let (org_first, vault_first) = targets[0];
+    let value = read_entity(leader.addr, org_first, vault_first, "tp-key-0").await;
+    assert_eq!(value, Some(b"tp-val-0".to_vec()), "first org/vault entry should be readable");
+
+    let last_idx = 1_999;
+    let (org_last, vault_last) = targets[last_idx % targets.len()];
+    let value = read_entity(leader.addr, org_last, vault_last, &format!("tp-key-{last_idx}")).await;
+    assert_eq!(
+        value,
+        Some(format!("tp-val-{last_idx}").into_bytes()),
+        "last entry should be readable on its assigned org/vault"
+    );
 }

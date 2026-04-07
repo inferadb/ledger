@@ -41,11 +41,11 @@ test-ff:
 # Parallelism is capped at 8 to avoid resource contention (each test spawns
 # 1-3 Raft nodes with their own tokio runtimes, file backends, and gRPC servers).
 test-integration:
-    cargo +{{rust}} test -p inferadb-ledger-server --test integration -- --test-threads=8
+    cargo +{{rust}} test -p inferadb-ledger-server --test integration -- --test-threads=4
 
 # Run integration tests with fail-fast — stops after first failure for faster iteration.
 test-integration-ff:
-    cargo +{{rust}} test -p inferadb-ledger-server --test integration -- --test-threads=8 --fail-fast
+    cargo +{{rust}} test -p inferadb-ledger-server --test integration -- --test-threads=4 --fail-fast
 
 # Run stress/scale tests — heavy workloads for throughput and scale validation
 test-stress:

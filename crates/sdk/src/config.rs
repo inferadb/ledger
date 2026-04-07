@@ -623,7 +623,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_valid_config() {
+    fn test_builder_produces_config_with_defaults() {
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")

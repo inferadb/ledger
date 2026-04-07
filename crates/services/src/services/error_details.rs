@@ -40,7 +40,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_error_details_basic() {
+    fn build_error_details_basic() {
         let details =
             build_error_details(3203, false, None, HashMap::new(), Some("Fix parameters"));
         assert_eq!(details.error_code, "3203");
@@ -51,7 +51,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_error_details_with_retry_and_context() {
+    fn build_error_details_with_retry_and_context() {
         let mut context = HashMap::new();
         context.insert("organization".to_owned(), "42".to_owned());
 
@@ -64,7 +64,7 @@ mod tests {
     }
 
     #[test]
-    fn test_error_details_encode_decode_roundtrip() {
+    fn error_details_encode_decode_roundtrip() {
         let mut context = HashMap::new();
         context.insert("key".to_owned(), "value".to_owned());
 
@@ -81,7 +81,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_error_details_all_fields_populated() {
+    fn build_error_details_all_fields_populated() {
         let mut context = HashMap::new();
         context.insert("organization".to_owned(), "42".to_owned());
         context.insert("level".to_owned(), "backpressure".to_owned());
@@ -103,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_error_details_empty_details() {
+    fn build_error_details_empty_details() {
         let details = build_error_details(0, false, None, HashMap::new(), None);
 
         let encoded = details.encode_to_vec();

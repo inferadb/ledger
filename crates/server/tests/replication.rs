@@ -173,9 +173,12 @@ async fn test_follower_state_consistency() {
     }
 }
 
-/// Tests replication continues after a brief network delay.
+/// Tests that replication succeeds when writes are spaced apart in time.
+///
+/// Verifies that the replication pipeline handles non-contiguous writes
+/// (with idle time between them) without losing data.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_replication_after_delay() {
+async fn test_replication_with_idle_gap_between_writes() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
 

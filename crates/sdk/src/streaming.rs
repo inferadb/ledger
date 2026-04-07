@@ -403,30 +403,6 @@ mod tests {
     }
 
     #[test]
-    fn test_backoff_calculation() {
-        let policy = RetryPolicy {
-            max_attempts: 5,
-            initial_backoff: Duration::from_millis(100),
-            max_backoff: Duration::from_secs(10),
-            multiplier: 2.0,
-            jitter: 0.0, // No jitter for deterministic test
-            total_timeout: None,
-        };
-
-        // We can't easily test backoff_duration without a full stream setup
-        // due to the type parameters, so we'll test apply_jitter separately
-        // and verify the backoff logic via integration tests.
-
-        // Test that apply_jitter with 0 factor returns unchanged duration
-        let dur = Duration::from_millis(100);
-        assert_eq!(apply_jitter(dur, 0.0), dur);
-
-        // Verify policy values are correct
-        assert_eq!(policy.initial_backoff, Duration::from_millis(100));
-        assert_eq!(policy.max_backoff, Duration::from_secs(10));
-    }
-
-    #[test]
     fn test_apply_jitter_within_bounds() {
         let dur = Duration::from_millis(100);
         let factor = 0.25;
@@ -578,24 +554,6 @@ mod tests {
         assert_eq!(tracker.position(), u64::MAX);
     }
 
-    #[test]
-    fn test_height_tracker_clone() {
-        let mut tracker = HeightTracker::new(5);
-        let announcement = proto::BlockAnnouncement {
-            organization: Some(proto::OrganizationSlug { slug: 1 }),
-            vault: Some(proto::VaultSlug { slug: 0 }),
-            height: 10,
-            block_hash: None,
-            state_root: None,
-            timestamp: None,
-        };
-        tracker.update(&announcement);
-
-        let cloned = tracker.clone();
-        assert_eq!(cloned.last_height(), 10);
-        assert_eq!(cloned.position(), 11);
-    }
-
     // =========================================================================
     // apply_jitter edge cases
     // =========================================================================
@@ -613,20 +571,5 @@ mod tests {
         // Negative factor should be clamped to 0
         let result = apply_jitter(dur, -0.5);
         assert_eq!(result, dur);
-    }
-
-    // =========================================================================
-    // CountTracker tests
-    // =========================================================================
-
-    #[test]
-    fn test_count_tracker_clone() {
-        let mut tracker = CountTracker::new();
-        tracker.update(&1);
-        tracker.update(&2);
-
-        let cloned = tracker.clone();
-        assert_eq!(cloned.count(), 2);
-        assert_eq!(cloned.position(), 2);
     }
 }

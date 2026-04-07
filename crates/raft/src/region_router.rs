@@ -994,13 +994,19 @@ mod tests {
     }
 
     #[test]
-    fn test_routing_error_display() {
+    fn test_routing_error_display_org_not_found() {
         let e = RoutingError::OrganizationNotFound { organization: OrganizationId::new(42) };
         assert!(format!("{e}").contains("42"));
+    }
 
+    #[test]
+    fn test_routing_error_display_no_available_nodes() {
         let e = RoutingError::NoAvailableNodes { region: Region::GLOBAL };
         assert!(format!("{e}").contains("no available nodes"));
+    }
 
+    #[test]
+    fn test_routing_error_display_connection_failed() {
         let e = RoutingError::ConnectionFailed {
             region: Region::US_EAST_VA,
             message: "timeout".to_string(),

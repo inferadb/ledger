@@ -352,15 +352,22 @@ async fn test_orphan_cleanup_with_concurrent_jobs() {
         .await
         .expect("create organization");
 
-    // Allow GLOBAL Raft propagation to all nodes before creating vault
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait for GLOBAL Raft propagation to all nodes before creating vault
+    assert!(
+        cluster.wait_for_sync(Duration::from_secs(10)).await,
+        "cluster should sync after organization creation"
+    );
 
     // Create vault
     let _vault = create_vault(leader.addr, organization).await.expect("create vault");
 
-    // Let all background jobs run concurrently for a bit
-    // OrphanCleanup, TtlGC, SagaOrchestrator, AutoRecovery, LearnerRefresh
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Wait for vault creation to propagate, then let background jobs run
+    // at least one cycle (OrphanCleanup, TtlGC, SagaOrchestrator, AutoRecovery, LearnerRefresh).
+    assert!(
+        cluster.wait_for_sync(Duration::from_secs(10)).await,
+        "cluster should sync after vault creation"
+    );
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Verify cluster is still healthy
     let leader_id = cluster.wait_for_leader().await;
