@@ -1,96 +1,52 @@
-# InferaDB Ledger Documentation
+# InferaDB Ledger — Operator Documentation
 
-Blockchain database for cryptographically verifiable authorization.
+Guides for deploying, configuring, monitoring, and maintaining InferaDB Ledger.
 
-## Getting Started
+## Understanding Ledger
 
-- [Quickstart](quickstart.md) - Run Ledger locally in 5 minutes
-- [Architecture](DESIGN.md) - System design and data model
-- [FAQ](faq.md) - Common questions answered
+- [Architecture overview](overview.md) — what Ledger is, how its components fit together
+- [FAQ](faq.md) — trust model, Raft consensus, organizations, vaults
 
-## Client API
+## Deploying
 
-- [Rust SDK](client/sdk.md) - Comprehensive SDK guide with TLS, retries, streaming, tracing
-- [API Overview](client/api.md) - Read/write operations, pagination, verification
-- [Idempotency](client/idempotency.md) - Sequence tracking and retry semantics
-- [AdminService](client/admin.md) - Organization, vault, and cluster management
-- [HealthService](client/health.md) - Liveness and readiness checks
-- [SystemDiscoveryService](client/discovery.md) - Peer discovery and bootstrap
-- [Error Reference](client/errors.md) - Error codes and handling patterns
+- [Deployment guide](operations/deployment.md) — production deployment patterns
+- [Production tutorial](operations/production-deployment-tutorial.md) — step-by-step Kubernetes deployment
+- [Configuration reference](operations/configuration.md) — CLI flags and environment variables
+- [Security](operations/security.md) — trust model, TLS, encryption at rest
+- [Multi-region](operations/multi-region.md) — geographic distribution and data residency
+- [Region management](operations/region-management.md) — organization-to-region routing
+- [Data residency](operations/data-residency-architecture.md) — PII isolation and compliance
 
-## Architecture
+## Monitoring
 
-- [Audit Protocol](architecture/audit-protocol.md) - Centralized audit architecture and event protocol
+- [Metrics reference](operations/metrics-reference.md) — all Prometheus metrics
+- [Logging](operations/logging.md) — canonical log lines, structured fields
+- [Events](operations/events.md) — audit event system, event catalog, retention
+- [Alerting](operations/alerting.md) — Prometheus alerting rules and thresholds
+- [Dashboard templates](operations/dashboards/) — Grafana, Kibana, Datadog
+- [SLI/SLO reference](operations/slo.md) — service level indicators and objectives
+- [Organization metrics](operations/organization-metrics.md) — per-tenant resource tracking
+- [Background jobs](operations/background-jobs.md) — job observability and health
+- [Capacity planning](operations/capacity-planning.md) — sizing and resource estimation
 
-## Operations
+## Maintaining
 
-### Deployment
+- [Troubleshooting](operations/troubleshooting.md) — common issues and solutions
+- [Vault repair](operations/vault-repair.md) — recovering diverged vaults
+- [API versioning](operations/api-versioning.md) — version negotiation and compatibility
 
-- [Deployment Guide](operations/deployment.md) - Production deployment patterns
-- [Production Tutorial](operations/production-deployment-tutorial.md) - Step-by-step Kubernetes deployment
-- [Configuration](operations/configuration.md) - Environment variables reference
-- [Security](operations/security.md) - Trust model and network security
-- [Multi-Region](operations/multi-region.md) - Geographic distribution
-- [Region Management](operations/region-management.md) - Organization-to-region routing
+## Runbooks
 
-### Monitoring
+- [Rolling upgrade](operations/runbooks/rolling-upgrade.md)
+- [Backup verification](operations/runbooks/backup-verification.md)
+- [Disaster recovery](operations/runbooks/disaster-recovery.md)
+- [Key provisioning](operations/runbooks/key-provisioning.md)
+- [Scaling](operations/runbooks/scaling.md)
 
-- [Events](operations/events.md) - Audit event system, event catalog, configuration
-- [Logging](operations/logging.md) - Request-level JSON logging with 50+ fields
-- [Dashboard Templates](operations/dashboards/) - Pre-built Grafana, Kibana, Datadog dashboards
-- [Metrics Reference](operations/metrics-reference.md) - All Prometheus metrics
-- [Alerting Guide](operations/alerting.md) - Prometheus alerting rules
-- [Capacity Planning](operations/capacity-planning.md) - Sizing and scaling
+## Quick reference
 
-### Runbooks
-
-- [Upgrade Runbook](operations/runbooks/rolling-upgrade.md) - Version upgrade procedures
-- [Backup Verification](operations/runbooks/backup-verification.md) - Backup testing
-- [Disaster Recovery](operations/runbooks/disaster-recovery.md) - Recovery procedures
-- [Troubleshooting](operations/troubleshooting.md) - Common issues and solutions
-
-## Internals
-
-Implementation details for contributors and advanced operators.
-
-- [Consensus](internals/consensus.md) - Raft integration, write/read paths, batching
-- [Raft Protocol](internals/raft-protocol.md) - Node-to-node gRPC protocol
-- [Storage](internals/storage.md) - Directory layout, database schemas, snapshots
-- [Discovery](internals/discovery.md) - Peer discovery implementation
-
-## Development
-
-- [Architecture](development/architecture.md) - Crate structure and code organization
-- [Testing Guide](development/testing.md) - Test categories and commands
-- [Debugging Guide](development/debugging.md) - Logging, profiling, common issues
-- [Events](development/events.md) - Audit events SDK guide, query patterns, ingestion
-- [Logging](development/logging.md) - Adding request logging to new services
-- [Release Process](development/release.md) - Versioning and publishing
-- [Contributing](CONTRIBUTING.md) - Development workflow
-
-## Quick Reference
-
-| Task               | Command                                                                       |
-| ------------------ | ----------------------------------------------------------------------------- |
-| Start single node  | `inferadb-ledger --single --data /tmp/ledger`                                 |
-| Health check       | `grpcurl -plaintext localhost:50051 ledger.v1.HealthService/Check`            |
-| List organizations | `grpcurl -plaintext localhost:50051 ledger.v1.AdminService/ListOrganizations` |
-| View metrics       | `curl localhost:9090/metrics`                                                 |
-
-## gRPC Services
-
-| Service                  | Purpose                                                    |
-| ------------------------ | ---------------------------------------------------------- |
-| `ReadService`            | Query entities, relationships, state                       |
-| `WriteService`           | Create/update entities and relationships                   |
-| `AdminService`           | Cluster management, configuration, backups                 |
-| `OrganizationService`    | Organization CRUD, members, teams                          |
-| `VaultService`           | Vault CRUD and health                                      |
-| `UserService`            | User accounts, emails, verification                        |
-| `AppService`             | Application management, credentials, connections           |
-| `TokenService`           | JWT token lifecycle (sessions, vault tokens, signing keys) |
-| `InvitationService`      | Organization invitation lifecycle                          |
-| `EventsService`          | Audit event queries and ingestion                          |
-| `HealthService`          | Liveness, readiness, and dependency checks                 |
-| `SystemDiscoveryService` | Peer discovery and cluster bootstrap                       |
-| `RaftService`            | Node-to-node Raft consensus RPCs                           |
+| Task              | Command                                                            |
+| ----------------- | ------------------------------------------------------------------ |
+| Start single node | `inferadb-ledger --single --data /tmp/ledger`                      |
+| Health check      | `grpcurl -plaintext localhost:50051 ledger.v1.HealthService/Check` |
+| View metrics      | `curl localhost:9090/metrics`                                      |

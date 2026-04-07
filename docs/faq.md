@@ -10,7 +10,7 @@ Ledger runs within a secure network perimeter (WireGuard, VPC) and trusts all in
 
 However, Ledger **is** the JWT signing authority for the platform — its TokenService issues, validates, and revokes JWTs consumed by Engine and Control for end-user authentication. The distinction: Ledger doesn't authenticate _who is calling it_, but it _issues the tokens_ that authenticate end users elsewhere.
 
-See [Security](operations/security.md) for the trust model and [INTEGRATION.md](../INTEGRATION.md) for the JWT integration guide.
+See [Security](operations/security.md) for the trust model.
 
 ### How does Ledger relate to Engine and Control?
 
@@ -83,7 +83,6 @@ For manual backup, trigger a snapshot:
 
 ```bash
 grpcurl -plaintext localhost:50051 \
-  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
   ledger.v1.AdminService/CreateSnapshot
 ```
 
@@ -140,7 +139,7 @@ Yes. All read operations accept an optional `height` parameter:
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "key": "user:alice", "height": "100"}' \
+  -d '{"organization_slug": {"slug": 1234567890}, "key": "user:alice", "height": "100"}' \
   localhost:50051 ledger.v1.ReadService/Read
 ```
 
@@ -155,25 +154,6 @@ State roots enable:
 - Detecting divergence across replicas
 - Generating and verifying Merkle proofs
 - Cryptographic audit trails
-
-### How do sequence numbers work?
-
-Each client tracks a sequence number that must increment with each write:
-
-1. Client calls `GetClientState` to get `last_committed_sequence`
-2. Next write uses `last_committed_sequence + 1`
-3. If write fails and retried, use the same sequence number
-
-This ensures exactly-once semantics. The idempotency cache detects retries with the same sequence.
-
-### What happens if I send the wrong sequence number?
-
-| Scenario               | Error                                           |
-| ---------------------- | ----------------------------------------------- |
-| `sequence == expected` | Success                                         |
-| `sequence < expected`  | Idempotency cache hit (returns cached response) |
-| `sequence > expected`  | `SEQUENCE_GAP` error                            |
-| `sequence == 0`        | Invalid (sequences start at 1)                  |
 
 ## Performance
 
@@ -242,26 +222,8 @@ For persistent logging, configure a log aggregator (Loki, CloudWatch, etc.).
 
 ```bash
 grpcurl -plaintext \
-  -d '{"organization_slug": {"id": "1"}, "vault": {"slug": "7180591718400"}}' \
+  -d '{"organization_slug": {"slug": 1234567890}, "vault": {"slug": 7180591718400}}' \
   localhost:50051 ledger.v1.ReadService/GetTip
 ```
 
 If successful, the vault is operational. If it returns `VAULT_UNAVAILABLE`, the vault has diverged and needs recovery.
-
-## Compatibility
-
-### What Rust version is required?
-
-Rust 1.92+ (2024 edition) for building from source.
-
-### What gRPC clients are supported?
-
-Any gRPC client that supports protobuf. Ledger exposes a standard gRPC API defined in `proto/ledger/v1/`.
-
-### Is there a Go/Python/JavaScript SDK?
-
-No. Ledger is intended for use only by Engine and Control, which use the Rust SDK. Direct client access is not supported by design.
-
-### Can I use Ledger without Engine/Control?
-
-Technically yes, but not recommended. Ledger provides low-level storage primitives without semantic understanding of authorization. Engine provides the policy evaluation and graph traversal that make the data useful.
