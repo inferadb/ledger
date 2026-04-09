@@ -94,7 +94,7 @@ pub fn validate_rmk_provisioning(
 
     for region in regions {
         let versions = manager.list_versions(region).map_err(|_| Error::Encryption {
-            reason: format!("Failed to list RMK versions for region {region}"),
+            reason: format!("Failed to list RMK versions for region {region}").into(),
         })?;
 
         if versions.is_empty() {
@@ -102,7 +102,8 @@ pub fn validate_rmk_provisioning(
                 reason: format!(
                     "No RMK versions provisioned for required region {region}. \
                      Node region {node_region} requires keys for this region."
-                ),
+                )
+                .into(),
             });
         }
 
@@ -113,7 +114,8 @@ pub fn validate_rmk_provisioning(
                     "No active RMK version for required region {region}. \
                      Found {} version(s) but none are active.",
                     versions.len()
-                ),
+                )
+                .into(),
             });
         }
 
@@ -128,7 +130,8 @@ pub fn validate_rmk_provisioning(
                         "RMK v{} for region {region} is listed as {:?} but failed to load: {e}. \
                          Provision this key version before joining the cluster.",
                         info.version, info.status
-                    ),
+                    )
+                    .into(),
                 });
             }
         }
@@ -212,7 +215,7 @@ impl FileKeyManager {
     /// Loads raw key bytes from a file.
     fn load_key_file(&self, path: &Path) -> Result<[u8; 32]> {
         let data = fs::read(path).map_err(|_| Error::Encryption {
-            reason: format!("Failed to read key file: {}", path.display()),
+            reason: format!("Failed to read key file: {}", path.display()).into(),
         })?;
 
         if data.len() != 32 {
@@ -221,7 +224,8 @@ impl FileKeyManager {
                     "Key file {} has {} bytes, expected 32",
                     path.display(),
                     data.len()
-                ),
+                )
+                .into(),
             });
         }
 
@@ -257,11 +261,11 @@ impl FileKeyManager {
             return Ok(None);
         }
         let data = fs::read_to_string(&path).map_err(|_| Error::Encryption {
-            reason: format!("Failed to read versions.json: {}", path.display()),
+            reason: format!("Failed to read versions.json: {}", path.display()).into(),
         })?;
         let entries: Vec<VersionSidecarEntry> =
             serde_json::from_str(&data).map_err(|e| Error::Encryption {
-                reason: format!("Invalid versions.json at {}: {e}", path.display()),
+                reason: format!("Invalid versions.json at {}: {e}", path.display()).into(),
             })?;
         Ok(Some(entries))
     }
@@ -270,10 +274,10 @@ impl FileKeyManager {
     fn write_versions_json(&self, region: Region, entries: &[VersionSidecarEntry]) -> Result<()> {
         let path = self.sidecar_path(region);
         let data = serde_json::to_string_pretty(entries).map_err(|e| Error::Encryption {
-            reason: format!("Failed to serialize versions.json: {e}"),
+            reason: format!("Failed to serialize versions.json: {e}").into(),
         })?;
         fs::write(&path, data).map_err(|_| Error::Encryption {
-            reason: format!("Failed to write versions.json: {}", path.display()),
+            reason: format!("Failed to write versions.json: {}", path.display()).into(),
         })?;
         Ok(())
     }
@@ -290,12 +294,12 @@ impl FileKeyManager {
 
         let mut versions = Vec::new();
         let entries = fs::read_dir(&region_dir).map_err(|_| Error::Encryption {
-            reason: format!("Failed to read key directory: {}", region_dir.display()),
+            reason: format!("Failed to read key directory: {}", region_dir.display()).into(),
         })?;
 
         for entry in entries {
             let entry = entry.map_err(|_| Error::Encryption {
-                reason: "Failed to read directory entry".to_string(),
+                reason: "Failed to read directory entry".into(),
             })?;
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
@@ -343,7 +347,7 @@ impl RegionKeyManager for FileKeyManager {
             .filter(|e| e.status == RmkStatus::Active)
             .max_by_key(|e| e.version)
             .ok_or_else(|| Error::Encryption {
-                reason: format!("No active RMK versions found for region {region}"),
+                reason: format!("No active RMK versions found for region {region}").into(),
             })?;
         let path = self.key_path(region, active.version);
         let key = self.load_key_file(&path)?;
@@ -387,13 +391,13 @@ impl RegionKeyManager for FileKeyManager {
         // Create directory if needed
         let region_dir = self.key_dir.join(region.as_str());
         fs::create_dir_all(&region_dir).map_err(|_| Error::Encryption {
-            reason: format!("Failed to create key directory: {}", region_dir.display()),
+            reason: format!("Failed to create key directory: {}", region_dir.display()).into(),
         })?;
 
         // Write key file
         let path = self.key_path(region, new_version);
         fs::write(&path, key).map_err(|_| Error::Encryption {
-            reason: format!("Failed to write key file: {}", path.display()),
+            reason: format!("Failed to write key file: {}", path.display()).into(),
         })?;
 
         // Set restrictive permissions
@@ -417,14 +421,14 @@ impl RegionKeyManager for FileKeyManager {
         let path = self.key_path(region, version);
         if !path.exists() {
             return Err(Error::Encryption {
-                reason: format!("RMK version {version} not found for region {region}"),
+                reason: format!("RMK version {version} not found for region {region}").into(),
             });
         }
 
         // Rename to .decommissioned to prevent loading
         let decommissioned_path = path.with_extension("key.decommissioned");
         fs::rename(&path, &decommissioned_path).map_err(|_| Error::Encryption {
-            reason: format!("Failed to decommission key: {}", path.display()),
+            reason: format!("Failed to decommission key: {}", path.display()).into(),
         })?;
 
         // Update sidecar
@@ -457,7 +461,8 @@ impl RegionKeyManager for FileKeyManager {
                             entry.version,
                             entry.status,
                             path.display()
-                        ),
+                        )
+                        .into(),
                     });
                 }
             }
@@ -470,7 +475,8 @@ impl RegionKeyManager for FileKeyManager {
         let unwrapped = unwrap_dek(&wrapped, &rmk)?;
         if test_dek.as_bytes() != unwrapped.as_bytes() {
             return Err(Error::Encryption {
-                reason: format!("Health check failed: wrap/unwrap mismatch for region {region}"),
+                reason: format!("Health check failed: wrap/unwrap mismatch for region {region}")
+                    .into(),
             });
         }
         Ok(())
@@ -572,17 +578,18 @@ impl RegionKeyManager for EnvKeyManager {
     fn current_rmk(&self, region: Region) -> Result<RegionMasterKey> {
         let versions = self.versions_for(region);
         let version = versions.last().copied().ok_or_else(|| Error::Encryption {
-            reason: format!("No RMK env vars found for region {region}"),
+            reason: format!("No RMK env vars found for region {region}").into(),
         })?;
         let key = self.keys.get(&(region, version)).ok_or_else(|| Error::Encryption {
-            reason: format!("RMK v{version} not found for region {region}"),
+            reason: format!("RMK v{version} not found for region {region}").into(),
         })?;
         Ok(RegionMasterKey::new(version, *key))
     }
 
     fn rmk_by_version(&self, region: Region, version: u32) -> Result<RegionMasterKey> {
         let key = self.keys.get(&(region, version)).ok_or_else(|| Error::Encryption {
-            reason: format!("RMK v{version} not found for region {region} (env var not set)"),
+            reason: format!("RMK v{version} not found for region {region} (env var not set)")
+                .into(),
         })?;
         Ok(RegionMasterKey::new(version, *key))
     }
@@ -605,7 +612,7 @@ impl RegionKeyManager for EnvKeyManager {
         Err(Error::Encryption {
             reason: "EnvKeyManager does not support runtime rotation. \
                      Set a new LEDGER_RMK_{REGION}_V{N} env var and restart."
-                .to_string(),
+                .into(),
         })
     }
 
@@ -613,7 +620,7 @@ impl RegionKeyManager for EnvKeyManager {
         Err(Error::Encryption {
             reason: "EnvKeyManager does not support decommission. \
                      Remove the env var and restart."
-                .to_string(),
+                .into(),
         })
     }
 
@@ -626,7 +633,8 @@ impl RegionKeyManager for EnvKeyManager {
         let unwrapped = unwrap_dek(&wrapped, &rmk)?;
         if test_dek.as_bytes() != unwrapped.as_bytes() {
             return Err(Error::Encryption {
-                reason: format!("Health check failed: wrap/unwrap mismatch for region {region}"),
+                reason: format!("Health check failed: wrap/unwrap mismatch for region {region}")
+                    .into(),
             });
         }
         Ok(())
@@ -710,7 +718,8 @@ impl SecretsManagerKeyManager {
                 reason: format!(
                     "No secret path configured for region {region}. \
                      Add it to region_secret_paths in SecretsManagerConfig."
-                ),
+                )
+                .into(),
             }
         })
     }
@@ -724,7 +733,8 @@ impl SecretsManagerKeyManager {
                 reason: format!(
                     "Secret at {path} v{version} has {} bytes, expected 32",
                     bytes.len()
-                ),
+                )
+                .into(),
             });
         }
         let mut key = [0u8; 32];
@@ -743,7 +753,7 @@ impl RegionKeyManager for SecretsManagerKeyManager {
         let path = self.secret_path(region)?;
         let versions = self.client.list_secret_versions(path)?;
         let version = versions.last().copied().ok_or_else(|| Error::Encryption {
-            reason: format!("No secret versions found at {path} for region {region}"),
+            reason: format!("No secret versions found at {path} for region {region}").into(),
         })?;
 
         // Check cache first
@@ -825,7 +835,8 @@ impl RegionKeyManager for SecretsManagerKeyManager {
         let unwrapped = unwrap_dek(&wrapped, &rmk)?;
         if test_dek.as_bytes() != unwrapped.as_bytes() {
             return Err(Error::Encryption {
-                reason: format!("Health check failed: wrap/unwrap mismatch for region {region}"),
+                reason: format!("Health check failed: wrap/unwrap mismatch for region {region}")
+                    .into(),
             });
         }
         Ok(())
@@ -893,27 +904,23 @@ impl Default for InMemoryKeyManager {
 impl RegionKeyManager for InMemoryKeyManager {
     fn current_rmk(&self, region: Region) -> Result<RegionMasterKey> {
         let version = self.highest_version(region).ok_or_else(|| Error::Encryption {
-            reason: format!("No RMK configured for region {region}"),
+            reason: format!("No RMK configured for region {region}").into(),
         })?;
         self.rmk_by_version(region, version)
     }
 
     fn rmk_by_version(&self, region: Region, version: u32) -> Result<RegionMasterKey> {
-        let keys = self
-            .keys
-            .read()
-            .map_err(|_| Error::Encryption { reason: "RwLock poisoned".to_string() })?;
+        let keys =
+            self.keys.read().map_err(|_| Error::Encryption { reason: "RwLock poisoned".into() })?;
         let key = keys.get(&(region, version)).ok_or_else(|| Error::Encryption {
-            reason: format!("No RMK for region {region} version {version}"),
+            reason: format!("No RMK for region {region} version {version}").into(),
         })?;
         Ok(RegionMasterKey::new(version, *key))
     }
 
     fn list_versions(&self, region: Region) -> Result<Vec<RmkVersionInfo>> {
-        let keys = self
-            .keys
-            .read()
-            .map_err(|_| Error::Encryption { reason: "RwLock poisoned".to_string() })?;
+        let keys =
+            self.keys.read().map_err(|_| Error::Encryption { reason: "RwLock poisoned".into() })?;
         let mut versions: Vec<u32> =
             keys.keys().filter(|(r, _)| *r == region).map(|(_, v)| *v).collect();
         versions.sort_unstable();
@@ -941,12 +948,12 @@ impl RegionKeyManager for InMemoryKeyManager {
         let mut keys = self
             .keys
             .write()
-            .map_err(|_| Error::Encryption { reason: "RwLock poisoned".to_string() })?;
+            .map_err(|_| Error::Encryption { reason: "RwLock poisoned".into() })?;
         if keys.remove(&(region, version)).is_some() {
             Ok(())
         } else {
             Err(Error::Encryption {
-                reason: format!("No RMK for region {region} version {version}"),
+                reason: format!("No RMK for region {region} version {version}").into(),
             })
         }
     }
@@ -1310,11 +1317,11 @@ mod tests {
     impl SecretsClient for MockSecretsClient {
         fn fetch_secret(&self, path: &str, version: u32) -> Result<Vec<u8>> {
             let secrets = self.secrets.lock().unwrap();
-            let entries = secrets
-                .get(path)
-                .ok_or_else(|| Error::Encryption { reason: format!("No secret at path {path}") })?;
+            let entries = secrets.get(path).ok_or_else(|| Error::Encryption {
+                reason: format!("No secret at path {path}").into(),
+            })?;
             let (_, value) = entries.iter().find(|(v, _)| *v == version).ok_or_else(|| {
-                Error::Encryption { reason: format!("No version {version} at path {path}") }
+                Error::Encryption { reason: format!("No version {version} at path {path}").into() }
             })?;
             Ok(value.clone())
         }
@@ -1337,9 +1344,9 @@ mod tests {
 
         fn decommission_secret_version(&self, path: &str, version: u32) -> Result<()> {
             let mut secrets = self.secrets.lock().unwrap();
-            let entries = secrets
-                .get_mut(path)
-                .ok_or_else(|| Error::Encryption { reason: format!("No secret at path {path}") })?;
+            let entries = secrets.get_mut(path).ok_or_else(|| Error::Encryption {
+                reason: format!("No secret at path {path}").into(),
+            })?;
             entries.retain(|(v, _)| *v != version);
             Ok(())
         }

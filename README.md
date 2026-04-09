@@ -12,7 +12,7 @@
 > [!IMPORTANT]
 > Under active development. Not production-ready.
 
-**[InferaDB](https://inferadb.com) Ledger is a distributed database purpose-built for authorization.** Every permission change is committed to an append-only blockchain, replicated via Raft consensus, and independently verifiable by clients through Merkle proofs — giving you a tamper-proof record of who had access to what, when. Ledger is the storage layer behind [InferaDB Engine](https://github.com/inferadb/engine) and [InferaDB Control](https://github.com/inferadb/control).
+**[InferaDB](https://inferadb.com) Ledger is a distributed database purpose-built for authorization.** Every permission change is committed to an append-only blockchain, replicated via a custom multi-shard Raft consensus engine, and independently verifiable by clients through Merkle proofs — giving you a tamper-proof record of who had access to what, when. Ledger is the storage layer behind [InferaDB Engine](https://github.com/inferadb/engine) and [InferaDB Control](https://github.com/inferadb/control).
 
 - [Features](#features)
 - [Quick Start](#quick-start)
@@ -24,45 +24,61 @@
 
 ## Features
 
-- **Tamper-Proof Authorization History** — Every permission change is committed to a per-vault blockchain. Not even database administrators can retroactively alter who had access to what, when.
-- **Client-Side Proof Verification** — Clients receive Merkle proofs with every read and can verify authorization decisions independently, without trusting the server.
-- **Data Residency** — Pin authorization data to geographic regions. Nodes only join Raft groups for their assigned region, keeping data within jurisdictional boundaries.
-- **Tenant Isolation** — Per-organization, per-vault security boundaries. Each vault maintains its own blockchain — one tenant's data can never leak into another's.
-- **Immediate Consistency** — Raft consensus ensures permission changes are visible cluster-wide before the write returns. No stale reads on authorization decisions.
-- **Sub-Millisecond Reads** — B+ tree indexes serve lookups without touching the Merkle layer. Cryptographic verification adds no overhead to the hot path.
+- **Tamper-Proof Authorization History** — Every permission change is committed to a per-vault blockchain with consensus-verified block hashes. Not even database administrators can retroactively alter who had access to what, when.
+- **Client-Side Proof Verification** — Clients receive Merkle proofs with every read and can verify authorization decisions independently, without trusting the server. Proofs are pre-computed during apply for near-instant verified reads.
+- **Custom Consensus Engine** — Purpose-built multi-shard Raft engine with an event-driven reactor, pipelined replication, zero-copy rkyv serialization, and batched I/O across shards. Single WAL fsync on the consensus critical path.
+- **Data Residency** — Pin authorization data to geographic regions. Nodes only join Raft groups for their assigned region, keeping data within jurisdictional boundaries. Automatic region shard creation and membership management.
+- **Tenant Isolation** — Per-organization, per-vault security boundaries with per-vault WAL frame encryption (AES-256-GCM). Each vault maintains its own blockchain — one tenant's data can never leak into another's.
+- **Immediate Consistency** — Raft consensus ensures permission changes are visible cluster-wide before the write returns. Closed timestamps enable zero-hop follower reads for bounded-staleness queries.
+- **Sub-Millisecond Reads** — B+ tree indexes serve lookups without touching the Merkle layer. Leader lease reads at ~50ns, follower closed-timestamp reads at ~100ns.
 
 ## Quick Start
 
-**Development or single-server deployment:**
+**Start a node:**
 
 ```bash
-inferadb-ledger --data /var/lib/ledger --single
+inferadb-ledger start --data /var/lib/ledger --listen 0.0.0.0:9090
 ```
 
-**Production cluster (run on each of 3 nodes):**
+**Bootstrap the cluster (once, from any machine):**
 
 ```bash
-inferadb-ledger --data /var/lib/ledger --cluster 3 --peers ledger.example.com
+inferadb-ledger init --host node1:9090
 ```
 
-For clusters, `--peers` tells each node how to find the others. Pass one of:
+**Add more nodes:**
 
-- **DNS domain** (e.g., `ledger.example.com`) — looks up A records
-- **File path** (e.g., `/var/lib/ledger/peers.json`) — reads addresses from JSON
+```bash
+inferadb-ledger start \
+  --data /var/lib/ledger \
+  --listen 0.0.0.0:9090 \
+  --join node1:9090
+```
+
+Nodes discover each other via `--join` seed addresses. The cluster manages membership automatically — new nodes are added as learners and promoted to voters once caught up. On restart, only `--data` is required; peer addresses are read from persisted Raft membership state.
+
+**Data residency (regulated regions):**
+
+```bash
+inferadb-ledger start \
+  --data /var/lib/ledger \
+  --join node1:9090 \
+  --region ie-east-dublin
+```
 
 See the [deployment guide](docs/operations/deployment.md) for multi-node setup, Kubernetes, adding/removing nodes, backup, and recovery.
 
 ## Configuration
 
-| CLI         | Purpose                                                                                                | Default           |
-| ----------- | ------------------------------------------------------------------------------------------------------ | ----------------- |
-| `--listen`  | Bind address for gRPC API                                                                              | `127.0.0.1:50051` |
-| `--data`    | Persistent [storage](docs/internals/storage.md#directory-layout) (logs, state, snapshots)              | _(ephemeral)_     |
-| `--single`  | Development or single-server deployment ([details](docs/operations/deployment.md#single-node-cluster)) |                   |
-| `--join`    | Add this server to an existing cluster ([details](docs/operations/deployment.md#adding-a-node))        |                   |
-| `--cluster` | Start a new N-node cluster ([details](docs/operations/deployment.md#multi-node-cluster-3-nodes))       | `3`               |
-| `--peers`   | How to [find other nodes](docs/operations/deployment.md#discovery-options): DNS domain or file path    | _(disabled)_      |
-| `--region`  | Geographic [region](docs/operations/deployment.md) for data residency (`us-east-va`, `ie-east-dublin`) | `global`          |
+| CLI           | Purpose                                                                                                  | Default         |
+| ------------- | -------------------------------------------------------------------------------------------------------- | --------------- |
+| `--data`      | Persistent [storage](docs/internals/storage.md#directory-layout) (WAL, state, snapshots)                 | _(ephemeral)_   |
+| `--listen`    | Bind address for gRPC API                                                                                | `0.0.0.0:9090`  |
+| `--join`      | Seed addresses for [discovery](docs/operations/deployment.md#discovery-options) (comma-separated)        | _(none)_        |
+| `--region`    | Regulated data residency [regions](docs/operations/deployment.md) this node serves (comma-separated)     | _(none)_        |
+| `--advertise` | Address advertised to peers ([details](docs/operations/deployment.md#advertise-address))                 | _(auto-detect)_ |
+
+On restart, only `--data` is required. All other flags are persisted on first boot and ignored on subsequent starts.
 
 See [Configuration Reference](docs/operations/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
 

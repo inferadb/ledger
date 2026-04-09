@@ -719,7 +719,7 @@ impl ValidationConfig {
 
 /// Default saga orchestrator poll interval in seconds.
 const fn default_saga_poll_interval_secs() -> u64 {
-    30
+    2
 }
 
 /// Configuration for the saga orchestrator background job.
@@ -732,14 +732,14 @@ const fn default_saga_poll_interval_secs() -> u64 {
 /// ```no_run
 /// # use inferadb_ledger_types::config::SagaConfig;
 /// let config = SagaConfig::default();
-/// assert_eq!(config.poll_interval_secs, 30);
+/// assert_eq!(config.poll_interval_secs, 2);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SagaConfig {
     /// Interval between saga poll cycles in seconds.
     ///
     /// Each cycle scans for pending sagas and executes the next step.
-    /// Must be >= 1. Default: 30.
+    /// Must be >= 1. Default: 2.
     #[serde(default = "default_saga_poll_interval_secs")]
     pub poll_interval_secs: u64,
 }
@@ -856,6 +856,72 @@ impl MigrationConfig {
         if self.timeout_secs < 60 {
             return Err(ConfigError::Validation {
                 message: "migration timeout_secs must be >= 60".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Hibernation Configuration
+// =============================================================================
+
+/// Default for whether hibernation is enabled.
+fn default_hibernate_enabled() -> bool {
+    true
+}
+
+/// Default idle timeout before a region group hibernates.
+fn default_hibernate_idle_timeout_secs() -> u64 {
+    60
+}
+
+/// Configuration for Raft group hibernation.
+///
+/// When enabled, background jobs for idle region groups are stopped after
+/// `idle_timeout_secs` of inactivity, then restarted on the next request.
+/// The Raft instance itself remains alive — only background jobs are paused.
+///
+/// The system region (`GLOBAL`) is never hibernated.
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::HibernateConfig;
+/// let config = HibernateConfig::default();
+/// assert!(config.enabled);
+/// assert_eq!(config.idle_timeout_secs, 60);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HibernateConfig {
+    /// Whether hibernation is enabled.
+    #[serde(default = "default_hibernate_enabled")]
+    pub enabled: bool,
+
+    /// Seconds of inactivity before a group hibernates.
+    ///
+    /// Must be >= 10. Default: 60.
+    #[serde(default = "default_hibernate_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+}
+
+impl Default for HibernateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_hibernate_enabled(),
+            idle_timeout_secs: default_hibernate_idle_timeout_secs(),
+        }
+    }
+}
+
+impl HibernateConfig {
+    /// Validates the configuration values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if `idle_timeout_secs` is less than 10.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.idle_timeout_secs < 10 {
+            return Err(ConfigError::Validation {
+                message: "hibernate idle_timeout_secs must be >= 10".to_string(),
             });
         }
         Ok(())
@@ -1155,7 +1221,7 @@ mod tests {
     fn saga_config_default_valid() {
         let config = SagaConfig::default();
         assert!(config.validate().is_ok());
-        assert_eq!(config.poll_interval_secs, 30);
+        assert_eq!(config.poll_interval_secs, 2);
     }
 
     #[test]
@@ -1201,6 +1267,46 @@ mod tests {
     fn migration_config_at_minimum_succeeds() {
         let mut config = MigrationConfig::default();
         config.timeout_secs = 60;
+        assert!(config.validate().is_ok());
+    }
+
+    // HibernateConfig tests
+
+    #[test]
+    fn hibernate_config_default_valid() {
+        let config = HibernateConfig::default();
+        assert!(config.validate().is_ok());
+        assert!(config.enabled);
+        assert_eq!(config.idle_timeout_secs, 60);
+    }
+
+    #[test]
+    fn hibernate_config_below_minimum_fails() {
+        let mut config = HibernateConfig::default();
+        config.idle_timeout_secs = 9;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn hibernate_config_at_minimum_succeeds() {
+        let mut config = HibernateConfig::default();
+        config.idle_timeout_secs = 10;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn hibernate_config_serde_roundtrip() {
+        let config = HibernateConfig { enabled: false, idle_timeout_secs: 120 };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: HibernateConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn hibernate_config_serde_defaults() {
+        let config: HibernateConfig = serde_json::from_str("{}").unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.idle_timeout_secs, 60);
         assert!(config.validate().is_ok());
     }
 }

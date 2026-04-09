@@ -2591,6 +2591,39 @@ pub struct LeaveClusterResponse {
     #[prost(string, tag = "2")]
     pub message: ::prost::alloc::string::String,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetDecommissionStatusRequest {
+    #[prost(uint64, tag = "1")]
+    pub node_id: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DataRegionReplica {
+    #[prost(string, tag = "1")]
+    pub region: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub role: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetDecommissionStatusResponse {
+    #[prost(string, tag = "1")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "2")]
+    pub remaining: ::prost::alloc::vec::Vec<DataRegionReplica>,
+    #[prost(bool, tag = "3")]
+    pub global_removed: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CheckPeerLivenessRequest {
+    #[prost(uint64, tag = "1")]
+    pub target_node_id: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CheckPeerLivenessResponse {
+    #[prost(bool, tag = "1")]
+    pub reachable: bool,
+    #[prost(uint64, tag = "2")]
+    pub last_seen_ago_ms: u64,
+}
 /// Get current cluster membership.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetClusterInfoRequest {}
@@ -2623,6 +2656,28 @@ pub struct GetNodeInfoResponse {
     /// Current Raft term (0 if not in cluster).
     #[prost(uint64, tag = "4")]
     pub term: u64,
+    /// Cluster ID (0 if uninitialized).
+    #[prost(uint64, tag = "5")]
+    pub cluster_id: u64,
+    /// Node lifecycle state: "uninitialized" or "running".
+    #[prost(string, tag = "6")]
+    pub state: ::prost::alloc::string::String,
+}
+/// Request to initialize a new cluster (empty - no parameters needed).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InitClusterRequest {}
+/// Response from cluster initialization.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InitClusterResponse {
+    /// True if this call performed the initialization.
+    #[prost(bool, tag = "1")]
+    pub initialized: bool,
+    /// The cluster's unique identifier.
+    #[prost(uint64, tag = "2")]
+    pub cluster_id: u64,
+    /// True if the cluster was already initialized (idempotent case).
+    #[prost(bool, tag = "3")]
+    pub already_initialized: bool,
 }
 /// A member of the Raft cluster.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -3918,6 +3973,131 @@ pub struct TriggerElectionResponse {
     pub accepted: bool,
     #[prost(string, tag = "2")]
     pub message: ::prost::alloc::string::String,
+}
+/// ReadIndex request: follower asks leader to confirm committed index.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReadIndexRequest {
+    /// Region for multi-region routing (defaults to GLOBAL).
+    #[prost(string, tag = "1")]
+    pub region: ::prost::alloc::string::String,
+}
+/// ReadIndex response: leader returns its committed index and term.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReadIndexResponse {
+    #[prost(uint64, tag = "1")]
+    pub committed_index: u64,
+    #[prost(uint64, tag = "2")]
+    pub leader_term: u64,
+}
+/// Batched cross-group Raft request.
+/// Contains multiple per-group messages coalesced into a single RPC call.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BatchRaftRequest {
+    #[prost(message, repeated, tag = "1")]
+    pub entries: ::prost::alloc::vec::Vec<BatchRaftEntry>,
+}
+/// A single entry within a batched Raft request.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BatchRaftEntry {
+    /// Region for routing to the correct Raft group.
+    #[prost(enumeration = "Region", optional, tag = "1")]
+    pub region: ::core::option::Option<i32>,
+    /// The Raft message to deliver. Currently only AppendEntries is batched;
+    /// Vote and InstallSnapshot remain individual RPCs.
+    #[prost(oneof = "batch_raft_entry::Message", tags = "2")]
+    pub message: ::core::option::Option<batch_raft_entry::Message>,
+}
+/// Nested message and enum types in `BatchRaftEntry`.
+pub mod batch_raft_entry {
+    /// The Raft message to deliver. Currently only AppendEntries is batched;
+    /// Vote and InstallSnapshot remain individual RPCs.
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Message {
+        #[prost(message, tag = "2")]
+        AppendEntries(super::RaftAppendEntriesRequest),
+    }
+}
+/// Batched cross-group Raft response.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BatchRaftResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub responses: ::prost::alloc::vec::Vec<BatchRaftEntryResponse>,
+}
+/// Response for a single entry within a batched Raft request.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BatchRaftEntryResponse {
+    #[prost(oneof = "batch_raft_entry_response::Response", tags = "1")]
+    pub response: ::core::option::Option<batch_raft_entry_response::Response>,
+}
+/// Nested message and enum types in `BatchRaftEntryResponse`.
+pub mod batch_raft_entry_response {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Response {
+        #[prost(message, tag = "1")]
+        AppendEntries(super::RaftAppendEntriesResponse),
+    }
+}
+/// Request to forward a consensus engine message.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConsensusForwardRequest {
+    /// Shard (consensus group) this message targets.
+    #[prost(uint64, tag = "1")]
+    pub shard_id: u64,
+    /// Node ID of the sender.
+    #[prost(uint64, tag = "2")]
+    pub from_node: u64,
+    /// Region the shard belongs to.
+    #[prost(enumeration = "Region", optional, tag = "3")]
+    pub region: ::core::option::Option<i32>,
+    /// Postcard-serialized consensus Message.
+    #[prost(bytes = "vec", tag = "4")]
+    pub payload: ::prost::alloc::vec::Vec<u8>,
+    /// gRPC address of the sender (e.g. "127.0.0.1:50051").
+    /// Enables the receiver to auto-register a return transport channel
+    /// for consensus responses when the sender is not yet known.
+    #[prost(string, tag = "5")]
+    pub from_address: ::prost::alloc::string::String,
+    /// Cluster ID for cross-cluster message rejection.
+    /// Receivers reject messages from different clusters.
+    #[prost(uint64, tag = "6")]
+    pub cluster_id: u64,
+}
+/// Empty response for fire-and-forget consensus message forwarding.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConsensusForwardResponse {}
+/// Request to forward a regional proposal to the data region leader.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ForwardRegionalProposalRequest {
+    /// Target data region.
+    #[prost(enumeration = "Region", optional, tag = "1")]
+    pub region: ::core::option::Option<i32>,
+    /// Postcard-serialized LedgerRequest.
+    #[prost(bytes = "vec", tag = "2")]
+    pub request_payload: ::prost::alloc::vec::Vec<u8>,
+    /// Caller identity (user slug or 0 for system).
+    #[prost(uint64, tag = "3")]
+    pub caller: u64,
+    /// Proposal timeout in milliseconds.
+    #[prost(uint32, tag = "4")]
+    pub timeout_ms: u32,
+}
+/// Response from a forwarded regional proposal.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ForwardRegionalProposalResponse {
+    /// Postcard-serialized LedgerResponse.
+    #[prost(bytes = "vec", tag = "1")]
+    pub response_payload: ::prost::alloc::vec::Vec<u8>,
+    /// gRPC status code (0 = OK).
+    #[prost(int32, tag = "2")]
+    pub status_code: i32,
+    /// Error message (empty if OK).
+    #[prost(string, tag = "3")]
+    pub error_message: ::prost::alloc::string::String,
+    /// Last committed index on the leader after the proposal was applied.
+    /// The forwarding node uses this to wait for local replication before
+    /// returning, ensuring subsequent local reads see the written data.
+    #[prost(uint64, tag = "4")]
+    pub committed_index: u64,
 }
 /// Request to initiate email blinding key rotation.
 /// The new key version must be pre-provisioned in the external key source.
@@ -9802,7 +9982,8 @@ pub mod admin_service_client {
                 .insert(GrpcMethod::new("ledger.v1.AdminService", "JoinCluster"));
             self.inner.unary(req, path, codec).await
         }
-        /// Gracefully leave the cluster. Node is removed from Raft membership.
+        /// Initiates graceful decommission. Sets NodeStatus to Decommissioning.
+        /// The DR scheduler drains replicas asynchronously. Poll GetDecommissionStatus for progress.
         pub async fn leave_cluster(
             &mut self,
             request: impl tonic::IntoRequest<super::LeaveClusterRequest>,
@@ -9825,6 +10006,59 @@ pub mod admin_service_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("ledger.v1.AdminService", "LeaveCluster"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Returns decommission progress for a node.
+        pub async fn get_decommission_status(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetDecommissionStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetDecommissionStatusResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/GetDecommissionStatus",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.AdminService", "GetDecommissionStatus"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Checks whether this node has recently heard from a target peer.
+        /// Used by the GLOBAL leader for quorum-based dead node detection.
+        pub async fn check_peer_liveness(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CheckPeerLivenessRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CheckPeerLivenessResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/CheckPeerLiveness",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "CheckPeerLiveness"));
             self.inner.unary(req, path, codec).await
         }
         /// Get current cluster membership information.
@@ -9877,6 +10111,34 @@ pub mod admin_service_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("ledger.v1.AdminService", "GetNodeInfo"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Initialize a new cluster. One-time operation per cluster lifetime.
+        /// Creates the GLOBAL shard with all known peers as voters, generates a
+        /// cluster_id, and transitions the node from Uninitialized to Running.
+        /// Idempotent: returns AlreadyInitialized if the cluster was already created.
+        pub async fn init_cluster(
+            &mut self,
+            request: impl tonic::IntoRequest<super::InitClusterRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::InitClusterResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/InitCluster",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "InitCluster"));
             self.inner.unary(req, path, codec).await
         }
         /// Transfer leadership to a specific node before shutdown or maintenance.
@@ -10359,12 +10621,30 @@ pub mod admin_service_server {
             tonic::Response<super::JoinClusterResponse>,
             tonic::Status,
         >;
-        /// Gracefully leave the cluster. Node is removed from Raft membership.
+        /// Initiates graceful decommission. Sets NodeStatus to Decommissioning.
+        /// The DR scheduler drains replicas asynchronously. Poll GetDecommissionStatus for progress.
         async fn leave_cluster(
             &self,
             request: tonic::Request<super::LeaveClusterRequest>,
         ) -> std::result::Result<
             tonic::Response<super::LeaveClusterResponse>,
+            tonic::Status,
+        >;
+        /// Returns decommission progress for a node.
+        async fn get_decommission_status(
+            &self,
+            request: tonic::Request<super::GetDecommissionStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetDecommissionStatusResponse>,
+            tonic::Status,
+        >;
+        /// Checks whether this node has recently heard from a target peer.
+        /// Used by the GLOBAL leader for quorum-based dead node detection.
+        async fn check_peer_liveness(
+            &self,
+            request: tonic::Request<super::CheckPeerLivenessRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CheckPeerLivenessResponse>,
             tonic::Status,
         >;
         /// Get current cluster membership information.
@@ -10383,6 +10663,17 @@ pub mod admin_service_server {
             request: tonic::Request<super::GetNodeInfoRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetNodeInfoResponse>,
+            tonic::Status,
+        >;
+        /// Initialize a new cluster. One-time operation per cluster lifetime.
+        /// Creates the GLOBAL shard with all known peers as voters, generates a
+        /// cluster_id, and transitions the node from Uninitialized to Running.
+        /// Idempotent: returns AlreadyInitialized if the cluster was already created.
+        async fn init_cluster(
+            &self,
+            request: tonic::Request<super::InitClusterRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::InitClusterResponse>,
             tonic::Status,
         >;
         /// Transfer leadership to a specific node before shutdown or maintenance.
@@ -10708,6 +10999,101 @@ pub mod admin_service_server {
                     };
                     Box::pin(fut)
                 }
+                "/ledger.v1.AdminService/GetDecommissionStatus" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetDecommissionStatusSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::GetDecommissionStatusRequest>
+                    for GetDecommissionStatusSvc<T> {
+                        type Response = super::GetDecommissionStatusResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetDecommissionStatusRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::get_decommission_status(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetDecommissionStatusSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/CheckPeerLiveness" => {
+                    #[allow(non_camel_case_types)]
+                    struct CheckPeerLivenessSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::CheckPeerLivenessRequest>
+                    for CheckPeerLivenessSvc<T> {
+                        type Response = super::CheckPeerLivenessResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CheckPeerLivenessRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::check_peer_liveness(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CheckPeerLivenessSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 "/ledger.v1.AdminService/GetClusterInfo" => {
                     #[allow(non_camel_case_types)]
                     struct GetClusterInfoSvc<T: AdminService>(pub Arc<T>);
@@ -10783,6 +11169,51 @@ pub mod admin_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetNodeInfoSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/InitCluster" => {
+                    #[allow(non_camel_case_types)]
+                    struct InitClusterSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::InitClusterRequest>
+                    for InitClusterSvc<T> {
+                        type Response = super::InitClusterResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::InitClusterRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::init_cluster(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = InitClusterSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -18959,6 +19390,114 @@ pub mod raft_service_client {
                 .insert(GrpcMethod::new("ledger.v1.RaftService", "TriggerElection"));
             self.inner.unary(req, path, codec).await
         }
+        /// Query committed index for follower ReadIndex protocol.
+        /// Followers call this on the leader to confirm the committed index,
+        /// then wait locally for their applied index to catch up.
+        pub async fn read_index(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ReadIndexRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ReadIndexResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.RaftService/ReadIndex",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.RaftService", "ReadIndex"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Batched cross-group message delivery.
+        /// Coalesces AppendEntries messages for multiple Raft groups into a single RPC call,
+        /// reducing per-message overhead for multi-group deployments.
+        pub async fn batch_send(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BatchRaftRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::BatchRaftResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.RaftService/BatchSend",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.RaftService", "BatchSend"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Forward a consensus engine message to a peer node.
+        pub async fn forward_consensus(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ConsensusForwardRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ConsensusForwardResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.RaftService/ForwardConsensus",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.RaftService", "ForwardConsensus"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Forward a regional proposal to the data region leader.
+        /// Called when a node receives a write for a data region it doesn't lead.
+        /// The leader proposes locally and returns the result.
+        pub async fn forward_regional_proposal(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ForwardRegionalProposalRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ForwardRegionalProposalResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.RaftService/ForwardRegionalProposal",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.RaftService", "ForwardRegionalProposal"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -19006,6 +19545,44 @@ pub mod raft_service_server {
             request: tonic::Request<super::TriggerElectionRequest>,
         ) -> std::result::Result<
             tonic::Response<super::TriggerElectionResponse>,
+            tonic::Status,
+        >;
+        /// Query committed index for follower ReadIndex protocol.
+        /// Followers call this on the leader to confirm the committed index,
+        /// then wait locally for their applied index to catch up.
+        async fn read_index(
+            &self,
+            request: tonic::Request<super::ReadIndexRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ReadIndexResponse>,
+            tonic::Status,
+        >;
+        /// Batched cross-group message delivery.
+        /// Coalesces AppendEntries messages for multiple Raft groups into a single RPC call,
+        /// reducing per-message overhead for multi-group deployments.
+        async fn batch_send(
+            &self,
+            request: tonic::Request<super::BatchRaftRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::BatchRaftResponse>,
+            tonic::Status,
+        >;
+        /// Forward a consensus engine message to a peer node.
+        async fn forward_consensus(
+            &self,
+            request: tonic::Request<super::ConsensusForwardRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ConsensusForwardResponse>,
+            tonic::Status,
+        >;
+        /// Forward a regional proposal to the data region leader.
+        /// Called when a node receives a write for a data region it doesn't lead.
+        /// The leader proposes locally and returns the result.
+        async fn forward_regional_proposal(
+            &self,
+            request: tonic::Request<super::ForwardRegionalProposalRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ForwardRegionalProposalResponse>,
             tonic::Status,
         >;
     }
@@ -19252,6 +19829,192 @@ pub mod raft_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = TriggerElectionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.RaftService/ReadIndex" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReadIndexSvc<T: RaftService>(pub Arc<T>);
+                    impl<
+                        T: RaftService,
+                    > tonic::server::UnaryService<super::ReadIndexRequest>
+                    for ReadIndexSvc<T> {
+                        type Response = super::ReadIndexResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ReadIndexRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RaftService>::read_index(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReadIndexSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.RaftService/BatchSend" => {
+                    #[allow(non_camel_case_types)]
+                    struct BatchSendSvc<T: RaftService>(pub Arc<T>);
+                    impl<
+                        T: RaftService,
+                    > tonic::server::UnaryService<super::BatchRaftRequest>
+                    for BatchSendSvc<T> {
+                        type Response = super::BatchRaftResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::BatchRaftRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RaftService>::batch_send(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = BatchSendSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.RaftService/ForwardConsensus" => {
+                    #[allow(non_camel_case_types)]
+                    struct ForwardConsensusSvc<T: RaftService>(pub Arc<T>);
+                    impl<
+                        T: RaftService,
+                    > tonic::server::UnaryService<super::ConsensusForwardRequest>
+                    for ForwardConsensusSvc<T> {
+                        type Response = super::ConsensusForwardResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ConsensusForwardRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RaftService>::forward_consensus(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ForwardConsensusSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.RaftService/ForwardRegionalProposal" => {
+                    #[allow(non_camel_case_types)]
+                    struct ForwardRegionalProposalSvc<T: RaftService>(pub Arc<T>);
+                    impl<
+                        T: RaftService,
+                    > tonic::server::UnaryService<super::ForwardRegionalProposalRequest>
+                    for ForwardRegionalProposalSvc<T> {
+                        type Response = super::ForwardRegionalProposalResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::ForwardRegionalProposalRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RaftService>::forward_regional_proposal(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ForwardRegionalProposalSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

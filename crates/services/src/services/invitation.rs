@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tonic::{Request, Response, Status};
 
-use super::{service_infra::ServiceContext, slug_resolver::SlugResolver};
+use super::{error_classify, service_infra::ServiceContext, slug_resolver::SlugResolver};
 use crate::proto_compat;
 
 /// Maximum pending invitations per email across all organizations.
@@ -77,16 +77,15 @@ impl InvitationService {
     /// Resolves an `InviteSlug` to an `InviteIndexEntry` via the GLOBAL index.
     fn resolve_invite_slug(&self, slug: InviteSlug) -> Result<Option<InviteIndexEntry>, Status> {
         let key = SystemKeys::invite_slug_index_key(slug);
-        let entity = self.ctx.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).map_err(|e| {
-            tracing::error!(error = %e, "Failed to read invite slug index");
-            Status::internal("Internal error")
-        })?;
+        let entity = self
+            .ctx
+            .state
+            .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
+            .map_err(|e| error_classify::storage_error(&e))?;
         match entity {
             Some(e) => {
-                let entry: InviteIndexEntry = decode(&e.value).map_err(|e| {
-                    tracing::error!(error = %e, "Failed to decode invite index");
-                    Status::internal("Internal error")
-                })?;
+                let entry: InviteIndexEntry =
+                    decode(&e.value).map_err(|e| error_classify::serialization_error(&e))?;
                 Ok(Some(entry))
             },
             None => Ok(None),
@@ -104,10 +103,7 @@ impl InvitationService {
             .ctx
             .state
             .list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, SCAN_CEILING + 1)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to scan email hash index");
-                Status::internal("Internal error")
-            })?;
+            .map_err(|e| error_classify::storage_error(&e))?;
 
         if entities.len() > SCAN_CEILING {
             metrics::counter!("ledger_invitation_scan_ceiling_breached_total").increment(1);
@@ -141,10 +137,7 @@ impl InvitationService {
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let registry = sys_svc
             .get_organization(org_id)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read org registry");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::storage_error(&e))?
             .ok_or_else(|| Status::not_found("Organization not found"))?;
         Ok(registry.region)
     }
@@ -158,16 +151,13 @@ impl InvitationService {
         let region = self.org_region(org_id)?;
         let state = self.ctx.regional_state(region)?;
         let key = SystemKeys::invite_key(org_id, invite_id);
-        let entity = state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).map_err(|e| {
-            tracing::error!(error = %e, "Failed to read invitation");
-            Status::internal("Internal error")
-        })?;
+        let entity = state
+            .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
+            .map_err(|e| error_classify::storage_error(&e))?;
         match entity {
             Some(e) => {
-                let inv: OrganizationInvitation = decode(&e.value).map_err(|e| {
-                    tracing::error!(error = %e, "Failed to decode invitation");
-                    Status::internal("Internal error")
-                })?;
+                let inv: OrganizationInvitation =
+                    decode(&e.value).map_err(|e| error_classify::serialization_error(&e))?;
                 Ok(Some(inv))
             },
             None => Ok(None),
@@ -228,10 +218,8 @@ impl InvitationService {
         blinding_key: &EmailBlindingKey,
     ) -> Result<Vec<String>, Status> {
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
-        let emails = sys_svc.get_user_emails(user_id).map_err(|e| {
-            tracing::error!(error = %e, "Failed to read user emails");
-            Status::internal("Internal error")
-        })?;
+        let emails =
+            sys_svc.get_user_emails(user_id).map_err(|e| error_classify::storage_error(&e))?;
         Ok(emails
             .iter()
             .filter(|e| e.verified_at.is_some())
@@ -270,11 +258,11 @@ impl InvitationService {
         let mut matched: Option<InviteEmailEntry> = None;
         for hmac in user_hmacs {
             let key = SystemKeys::invite_email_hash_index_key(hmac, invite_id);
-            let entity =
-                self.ctx.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).map_err(|e| {
-                    tracing::error!(error = %e, "Failed to read email hash index");
-                    Status::internal("Internal error")
-                })?;
+            let entity = self
+                .ctx
+                .state
+                .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
+                .map_err(|e| error_classify::storage_error(&e))?;
             if matched.is_none()
                 && let Some(e) = entity
                 && let Ok(entry) = decode::<InviteEmailEntry>(&e.value)
@@ -591,10 +579,9 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
 
         // 8. Existing member check with timing equalization
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
-        let email_hash_entry = sys_svc.get_email_hash(&invitee_email_hmac).map_err(|e| {
-            tracing::error!(error = %e, "Failed to read email hash");
-            Status::internal("Internal error")
-        })?;
+        let email_hash_entry = sys_svc
+            .get_email_hash(&invitee_email_hmac)
+            .map_err(|e| error_classify::storage_error(&e))?;
 
         // Always read organization members (timing equalization)
         let org = self
@@ -673,11 +660,10 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         }
 
         // 10. Generate token and slug
-        let invite_slug =
-            InviteSlug::new(inferadb_ledger_types::snowflake::generate().map_err(|e| {
-                tracing::error!(error = %e, "Failed to generate slug");
-                Status::internal("Internal error")
-            })?);
+        let invite_slug = InviteSlug::new(
+            inferadb_ledger_types::snowflake::generate()
+                .map_err(|e| error_classify::internal_error("id-generation", &e))?,
+        );
         let (raw_token, token_hash) = Self::generate_token();
 
         // 11. GLOBAL proposal
@@ -801,10 +787,7 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         let prefix = SystemKeys::invite_prefix(org_id);
         let entities = state
             .list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, MAX_LIST_INVITATIONS)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to list invitations");
-                Status::internal("Internal error")
-            })?;
+            .map_err(|e| error_classify::storage_error(&e))?;
 
         let now = Utc::now();
         let mut invitations: Vec<(u64, proto::Invitation)> = Vec::new();
@@ -1296,12 +1279,12 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
 mod tests {
     use std::sync::Arc;
 
+    use arc_swap::ArcSwap;
     use inferadb_ledger_proto::proto::{
         self, invitation_service_server::InvitationService as InvitationServiceTrait,
     };
     use inferadb_ledger_raft::log_storage::AppliedState;
     use inferadb_ledger_test_utils::TestDir;
-    use parking_lot::RwLock;
     use tonic::Request;
 
     use super::*;
@@ -1309,7 +1292,7 @@ mod tests {
 
     /// Creates an `InvitationService` backed by a [`MockProposalService`].
     fn make_invitation_service()
-    -> (super::InvitationService, Arc<MockProposalService>, Arc<RwLock<AppliedState>>, TestDir)
+    -> (super::InvitationService, Arc<MockProposalService>, Arc<ArcSwap<AppliedState>>, TestDir)
     {
         let temp = TestDir::new();
         let mock = Arc::new(MockProposalService::new());

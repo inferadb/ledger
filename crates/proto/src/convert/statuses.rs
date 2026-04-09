@@ -175,10 +175,53 @@ impl From<&EventEntry> for proto::EventEntry {
     }
 }
 
-/// Converts an owned domain [`EventEntry`] to its protobuf representation.
+/// Converts an owned domain [`EventEntry`] to its protobuf representation,
+/// moving fields instead of cloning.
 impl From<EventEntry> for proto::EventEntry {
     fn from(entry: EventEntry) -> Self {
-        (&entry).into()
+        let proto_outcome = proto::EventOutcome::from(&entry.outcome);
+
+        let (error_code, error_detail, denial_reason) = match entry.outcome {
+            EventOutcome::Success => (None, None, None),
+            EventOutcome::Failed { code, detail } => (Some(code), Some(detail), None),
+            EventOutcome::Denied { reason } => (None, None, Some(reason)),
+        };
+
+        let (emission_path, node_id) = match entry.emission {
+            EventEmission::ApplyPhase => (proto::EventEmissionPath::EmissionPathApplyPhase, None),
+            EventEmission::HandlerPhase { node_id } => {
+                (proto::EventEmissionPath::EmissionPathHandlerPhase, Some(node_id))
+            },
+        };
+
+        proto::EventEntry {
+            event_id: entry.event_id.to_vec(),
+            source_service: entry.source_service,
+            event_type: entry.event_type,
+            timestamp: Some(datetime_to_proto_timestamp(&entry.timestamp)),
+            scope: proto::EventScope::from(entry.scope).into(),
+            action: entry.action.as_str().to_string(),
+            emission_path: emission_path.into(),
+            principal: entry.principal,
+            organization: Some(proto::OrganizationSlug {
+                slug: entry
+                    .organization
+                    .map(|s| s.value())
+                    .unwrap_or(entry.organization_id.value() as u64),
+            }),
+            vault: entry.vault.map(|s| proto::VaultSlug { slug: s.value() }),
+            outcome: proto_outcome.into(),
+            error_code,
+            error_detail,
+            denial_reason,
+            details: entry.details.into_iter().collect(),
+            block_height: entry.block_height,
+            node_id,
+            trace_id: entry.trace_id,
+            correlation_id: entry.correlation_id,
+            operations_count: entry.operations_count,
+            expires_at: entry.expires_at,
+        }
     }
 }
 
@@ -268,12 +311,81 @@ impl TryFrom<&proto::EventEntry> for EventEntry {
     }
 }
 
-/// Converts an owned protobuf [`EventEntry`](proto::EventEntry) to the domain type.
+/// Converts an owned protobuf [`EventEntry`](proto::EventEntry) to the domain type,
+/// moving fields instead of cloning.
 impl TryFrom<proto::EventEntry> for EventEntry {
     type Error = Status;
 
     fn try_from(proto_entry: proto::EventEntry) -> Result<Self, Self::Error> {
-        Self::try_from(&proto_entry)
+        let event_id: [u8; 16] = proto_entry
+            .event_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("event_id must be exactly 16 bytes"))?;
+
+        let timestamp = proto_entry
+            .timestamp
+            .as_ref()
+            .map(proto_timestamp_to_datetime)
+            .unwrap_or(DateTime::UNIX_EPOCH);
+
+        let scope = proto::EventScope::try_from(proto_entry.scope)
+            .unwrap_or(proto::EventScope::Unspecified)
+            .into();
+
+        let action: EventAction = proto_entry.action.parse().map_err(|_: String| {
+            Status::invalid_argument(format!("unknown action: {}", proto_entry.action))
+        })?;
+
+        let outcome = match proto::EventOutcome::try_from(proto_entry.outcome)
+            .unwrap_or(proto::EventOutcome::Unspecified)
+        {
+            proto::EventOutcome::Success | proto::EventOutcome::Unspecified => {
+                EventOutcome::Success
+            },
+            proto::EventOutcome::Failed => EventOutcome::Failed {
+                code: proto_entry.error_code.unwrap_or_default(),
+                detail: proto_entry.error_detail.unwrap_or_default(),
+            },
+            proto::EventOutcome::Denied => {
+                EventOutcome::Denied { reason: proto_entry.denial_reason.unwrap_or_default() }
+            },
+        };
+
+        let emission = match proto::EventEmissionPath::try_from(proto_entry.emission_path)
+            .unwrap_or(proto::EventEmissionPath::EmissionPathUnspecified)
+        {
+            proto::EventEmissionPath::EmissionPathApplyPhase
+            | proto::EventEmissionPath::EmissionPathUnspecified => EventEmission::ApplyPhase,
+            proto::EventEmissionPath::EmissionPathHandlerPhase => {
+                EventEmission::HandlerPhase { node_id: proto_entry.node_id.unwrap_or(0) }
+            },
+        };
+
+        let organization = proto_entry.organization.as_ref().map(|o| OrganizationSlug::new(o.slug));
+        let organization_id =
+            OrganizationId::new(organization.map(|s| s.value()).unwrap_or(0) as i64);
+
+        Ok(EventEntry {
+            expires_at: proto_entry.expires_at,
+            event_id,
+            source_service: proto_entry.source_service,
+            event_type: proto_entry.event_type,
+            timestamp,
+            scope,
+            action,
+            emission,
+            principal: proto_entry.principal,
+            organization_id,
+            organization,
+            vault: proto_entry.vault.as_ref().map(|v| VaultSlug::new(v.slug)),
+            outcome,
+            details: proto_entry.details.into_iter().collect(),
+            block_height: proto_entry.block_height,
+            trace_id: proto_entry.trace_id,
+            correlation_id: proto_entry.correlation_id,
+            operations_count: proto_entry.operations_count,
+        })
     }
 }
 

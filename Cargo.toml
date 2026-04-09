@@ -10,6 +10,7 @@ members = [
     "crates/server",
     "crates/sdk",
     "crates/test-utils",
+    "crates/consensus",
 ]
 
 [workspace.package]
@@ -22,7 +23,7 @@ authors = ["InferaDB Contributors"]
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full", "test-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
 
@@ -37,10 +38,6 @@ tonic-reflection = "0.14"
 prost = "0.14"
 prost-types = "0.14"
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout"] }
-
-# Raft consensus
-openraft = { version = "0.9", features = ["serde", "tracing-log", "loosen-follower-log-revert", "single-term-leader"] }
-validit = "0.2"
 
 # Crypto
 sha1 = "0.11"
@@ -66,6 +63,7 @@ async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 postcard = { version = "1", features = ["alloc"] }
+rkyv = { version = "0.8", features = ["alloc", "bytecheck"] }
 schemars = "1"
 
 # Error handling
@@ -78,6 +76,7 @@ rayon = "1.10"
 # Concurrency
 parking_lot = "0.12"
 arc-swap = "1"
+im = { version = "15", features = ["serde"] }
 dashmap = "6"
 
 # Caching
@@ -147,6 +146,7 @@ inferadb-ledger-test-utils = { path = "crates/test-utils" }
 # Hashing (for inferadb-ledger-store)
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }
 byteorder = "1"
+crc32fast = "1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -170,9 +170,3 @@ debug = true
 
 [profile.test]
 opt-level = 1
-
-# openraft 0.9's Valid<T> wrapper validates full RaftState on every
-# Deref/DerefMut, adding overhead that causes leader election timeouts
-# in failover tests. Disable debug assertions for openraft only.
-[profile.test.package.openraft]
-debug-assertions = false

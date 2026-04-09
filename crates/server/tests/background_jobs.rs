@@ -17,11 +17,11 @@
 use std::time::Duration;
 
 use inferadb_ledger_proto::proto;
-use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_types::OrganizationSlug;
 
 use crate::common::{
     ExternalCluster, create_health_client_from_url, create_organization_client_from_url,
-    create_vault_client_from_url,
+    create_user_client_from_url, create_vault_client_from_url,
 };
 
 /// Skip macro: returns early if no external cluster is available.
@@ -38,6 +38,93 @@ macro_rules! require_cluster {
             },
         }
     };
+}
+
+/// Creates a user and organization via the onboarding flow.
+///
+/// Uses the three-phase onboarding pipeline (InitiateEmailVerification →
+/// VerifyEmailCode → CompleteRegistration) to create a valid admin user and
+/// organization. Retries across all cluster endpoints to handle data region
+/// creation and leader election timing. Returns `(org_slug, user_slug)`.
+async fn setup_user_and_org(cluster: &ExternalCluster) -> (OrganizationSlug, u64) {
+    let email = format!("test-{}@example.com", uuid::Uuid::new_v4());
+    let region = 10; // REGION_US_EAST_VA
+
+    // Phase 1: Initiate email verification — retry across endpoints because
+    // the first call may create the data region (UNAVAILABLE until leader elected).
+    let mut code = String::new();
+    let mut working_endpoint = String::new();
+    for _attempt in 0..30 {
+        for ep in cluster.endpoints() {
+            let mut client = match create_user_client_from_url(ep).await {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            match client
+                .initiate_email_verification(proto::InitiateEmailVerificationRequest {
+                    email: email.clone(),
+                    region,
+                })
+                .await
+            {
+                Ok(resp) => {
+                    code = resp.into_inner().code;
+                    working_endpoint = ep.to_string();
+                    break;
+                },
+                Err(e)
+                    if e.code() == tonic::Code::Unavailable
+                        || e.code() == tonic::Code::Internal =>
+                {
+                    continue;
+                },
+                Err(e) => panic!("initiate email verification: {e}"),
+            }
+        }
+        if !code.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(
+        !code.is_empty(),
+        "initiate email verification: all endpoints failed after 30 attempts"
+    );
+
+    let endpoint = &working_endpoint;
+    let mut user_client =
+        create_user_client_from_url(endpoint).await.expect("connect to user service");
+
+    // Phase 2: Verify email code → get onboarding token
+    let verify_resp = user_client
+        .verify_email_code(proto::VerifyEmailCodeRequest { email: email.clone(), code, region })
+        .await
+        .expect("verify email code")
+        .into_inner();
+
+    let onboarding_token = match verify_resp.result.expect("verify should return result") {
+        proto::verify_email_code_response::Result::NewUser(session) => session.onboarding_token,
+        other => panic!("expected NewUser result, got {other:?}"),
+    };
+
+    // Phase 3: Complete registration → creates user + organization
+    let org_name = format!("test-org-{}", uuid::Uuid::new_v4());
+    let reg_resp = user_client
+        .complete_registration(proto::CompleteRegistrationRequest {
+            onboarding_token,
+            email,
+            region,
+            name: "Test Admin".to_string(),
+            organization_name: org_name,
+        })
+        .await
+        .expect("complete registration")
+        .into_inner();
+
+    let org_slug = reg_resp.organization.expect("org slug in response").slug;
+    let user_slug = reg_resp.user.expect("user in response").slug.expect("user slug").slug;
+
+    (OrganizationSlug::new(org_slug), user_slug)
 }
 
 // ============================================================================
@@ -89,40 +176,15 @@ async fn test_vault_health_tracking() {
     let cluster = require_cluster!();
 
     let leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
-    let mut org_client =
-        create_organization_client_from_url(&leader_ep).await.expect("connect to organization");
     let mut vault_client =
         create_vault_client_from_url(&leader_ep).await.expect("connect to vault");
 
-    let ns_name = format!("test-health-{}", uuid::Uuid::new_v4());
+    // Create user + organization via onboarding flow
+    let (organization, user_slug) = setup_user_and_org(&cluster).await;
 
-    // Create organization
-    let ns_response = org_client
-        .create_organization(proto::CreateOrganizationRequest {
-            name: ns_name,
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            caller: None,
-        })
-        .await
-        .expect("create organization");
-
-    let organization =
-        ns_response.into_inner().slug.map(|n| OrganizationSlug::new(n.slug)).unwrap();
-
-    // Create vault
-    let vault_response = vault_client
-        .create_vault(proto::CreateVaultRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-            replication_factor: 0,
-            initial_nodes: vec![],
-            retention_policy: None,
-            caller: None,
-        })
-        .await
-        .expect("create vault");
-
-    let vault = vault_response.into_inner().vault.map(|v| VaultSlug::new(v.slug)).unwrap();
+    // Create vault (retries until org provisioning completes)
+    let vault =
+        crate::common::create_vault_with_retry(&mut vault_client, organization, user_slug).await;
     assert!(vault.value() > 0, "vault should have valid ID");
 
     // Wait for auto-recovery job to potentially scan the new vault
@@ -202,45 +264,46 @@ async fn test_voter_detection() {
 async fn test_learner_cache_initialization() {
     let cluster = require_cluster!();
 
-    let leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
+    let _leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
 
-    // Create an organization via the leader
-    let mut org_client =
-        create_organization_client_from_url(&leader_ep).await.expect("connect to organization");
+    // Create user + organization via onboarding flow
+    let (organization, user_slug) = setup_user_and_org(&cluster).await;
 
-    let ns_name = format!("test-cache-{}", uuid::Uuid::new_v4());
+    // Wait for provisioning saga and replication
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
-    let ns_response = org_client
-        .create_organization(proto::CreateOrganizationRequest {
-            name: ns_name.clone(),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            caller: None,
-        })
-        .await
-        .expect("create organization");
-
-    let organization =
-        ns_response.into_inner().slug.map(|n| OrganizationSlug::new(n.slug)).unwrap();
-
-    // Wait for replication
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Verify organization is readable from every endpoint
+    // Verify organization is readable from every endpoint (retry for replication lag)
     for endpoint in cluster.endpoints() {
         let mut client =
             create_organization_client_from_url(endpoint).await.expect("connect to organization");
 
-        let response = client
-            .get_organization(proto::GetOrganizationRequest {
-                slug: Some(proto::OrganizationSlug { slug: organization.value() }),
-                caller: None,
-            })
-            .await
-            .unwrap_or_else(|e| panic!("get_organization from {} failed: {}", endpoint, e));
+        let mut response = None;
+        for attempt in 0..15 {
+            match client
+                .get_organization(proto::GetOrganizationRequest {
+                    slug: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    caller: Some(proto::UserSlug { slug: user_slug }),
+                })
+                .await
+            {
+                Ok(r) => {
+                    response = Some(r);
+                    break;
+                },
+                Err(e) if e.message().contains("not found") && attempt < 14 => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                },
+                Err(e) => panic!("get_organization from {} failed: {}", endpoint, e),
+            }
+        }
+        let response = response.unwrap_or_else(|| {
+            panic!("get_organization from {} timed out after retries", endpoint)
+        });
 
         let ns = response.into_inner();
-        assert_eq!(ns.name, ns_name, "organization name should match on {}", endpoint);
+        // Organization name is PII (Pattern 2), only available from the regional node.
+        // On non-leader replicas it may be empty — just verify the org exists.
+        assert!(ns.slug.is_some(), "organization slug should be present on {}", endpoint);
     }
 }
 
@@ -257,36 +320,14 @@ async fn test_concurrent_background_jobs() {
     let leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
 
     // Create some activity to exercise background jobs
-    let mut org_client =
-        create_organization_client_from_url(&leader_ep).await.expect("connect to organization");
     let mut vault_client =
         create_vault_client_from_url(&leader_ep).await.expect("connect to vault");
 
-    let ns_name = format!("test-concurrent-{}", uuid::Uuid::new_v4());
+    // Create user + organization via onboarding flow
+    let (organization, user_slug) = setup_user_and_org(&cluster).await;
 
-    let ns_response = org_client
-        .create_organization(proto::CreateOrganizationRequest {
-            name: ns_name,
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            caller: None,
-        })
-        .await
-        .expect("create organization");
-
-    let organization =
-        ns_response.into_inner().slug.map(|n| OrganizationSlug::new(n.slug)).unwrap();
-
-    let _vault_response = vault_client
-        .create_vault(proto::CreateVaultRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-            replication_factor: 0,
-            initial_nodes: vec![],
-            retention_policy: None,
-            caller: None,
-        })
-        .await
-        .expect("create vault");
+    let _vault =
+        crate::common::create_vault_with_retry(&mut vault_client, organization, user_slug).await;
 
     // Let background jobs run
     tokio::time::sleep(Duration::from_secs(1)).await;

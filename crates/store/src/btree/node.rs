@@ -81,6 +81,7 @@ pub enum SearchResult {
 
 impl SearchResult {
     /// Returns the index, whether found or not.
+    #[inline]
     pub fn index(&self) -> usize {
         match self {
             SearchResult::Found(i) | SearchResult::NotFound(i) => *i,
@@ -88,6 +89,7 @@ impl SearchResult {
     }
 
     /// Returns true if the key was found.
+    #[inline]
     pub fn is_found(&self) -> bool {
         matches!(self, SearchResult::Found(_))
     }
@@ -172,6 +174,7 @@ impl<'a> LeafNode<'a> {
     }
 
     /// Returns the number of cells in this node.
+    #[inline]
     pub fn cell_count(&self) -> u16 {
         u16::from_le_bytes(
             self.page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2].try_into().unwrap(),
@@ -181,6 +184,7 @@ impl<'a> LeafNode<'a> {
     /// Returns the contiguous free space between the cell pointer array and the cell content area.
     ///
     /// Does not account for reclaimable space from deleted cells.
+    #[inline]
     pub fn free_space(&self) -> usize {
         let free_start = u16::from_le_bytes(
             self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
@@ -193,12 +197,14 @@ impl<'a> LeafNode<'a> {
     }
 
     /// Returns a cell pointer (offset into page where cell data is stored).
+    #[inline]
     fn cell_ptr(&self, index: usize) -> usize {
         let ptr_offset = LEAF_CELL_PTRS_OFFSET + index * CELL_PTR_SIZE;
         u16::from_le_bytes(self.page.data[ptr_offset..ptr_offset + 2].try_into().unwrap()) as usize
     }
 
     /// Sets a cell pointer.
+    #[inline]
     fn set_cell_ptr(&mut self, index: usize, offset: usize) {
         let ptr_offset = LEAF_CELL_PTRS_OFFSET + index * CELL_PTR_SIZE;
         self.page.data[ptr_offset..ptr_offset + 2].copy_from_slice(&(offset as u16).to_le_bytes());
@@ -206,6 +212,7 @@ impl<'a> LeafNode<'a> {
     }
 
     /// Returns the key at a given index.
+    #[inline]
     pub fn key(&self, index: usize) -> &[u8] {
         let cell_offset = self.cell_ptr(index);
         let key_len =
@@ -215,6 +222,7 @@ impl<'a> LeafNode<'a> {
     }
 
     /// Returns the value at a given index.
+    #[inline]
     pub fn value(&self, index: usize) -> &[u8] {
         let cell_offset = self.cell_ptr(index);
         let key_len =
@@ -227,6 +235,7 @@ impl<'a> LeafNode<'a> {
     }
 
     /// Returns key and value at a given index.
+    #[inline]
     pub fn get(&self, index: usize) -> (&[u8], &[u8]) {
         (self.key(index), self.value(index))
     }
@@ -256,11 +265,13 @@ impl<'a> LeafNode<'a> {
     }
 
     /// Calculates the space needed for a key-value pair.
+    #[inline]
     pub fn cell_size(key: &[u8], value: &[u8]) -> usize {
         CELL_PTR_SIZE + 2 + 2 + key.len() + value.len() // ptr + key_len + val_len + key + value
     }
 
     /// Checks if there's room for a new cell.
+    #[inline]
     pub fn can_insert(&self, key: &[u8], value: &[u8]) -> bool {
         self.free_space() >= Self::cell_size(key, value)
     }
@@ -278,7 +289,7 @@ impl<'a> LeafNode<'a> {
         let count = self.cell_count() as usize;
         if index > count {
             return Err(Error::Corrupted {
-                reason: format!("leaf insert index {index} exceeds cell count {count}"),
+                reason: format!("leaf insert index {index} exceeds cell count {count}").into(),
             });
         }
 
@@ -384,7 +395,7 @@ impl<'a> LeafNode<'a> {
         let count = self.cell_count() as usize;
         if index >= count {
             return Err(Error::Corrupted {
-                reason: format!("leaf delete index {index} out of bounds (count {count})"),
+                reason: format!("leaf delete index {index} out of bounds (count {count})").into(),
             });
         }
 
@@ -417,6 +428,7 @@ impl<'a> LeafNode<'a> {
     }
 
     /// Returns the next leaf page ID in the linked list (0 = no next leaf).
+    #[inline]
     pub fn next_leaf(&self) -> PageId {
         u64::from_le_bytes(
             self.page.data[NEXT_LEAF_OFFSET..NEXT_LEAF_OFFSET + 8].try_into().unwrap(),
@@ -424,6 +436,7 @@ impl<'a> LeafNode<'a> {
     }
 
     /// Sets the next leaf page ID in the linked list (0 = no next leaf).
+    #[inline]
     pub fn set_next_leaf(&mut self, page_id: PageId) {
         self.page.data[NEXT_LEAF_OFFSET..NEXT_LEAF_OFFSET + 8]
             .copy_from_slice(&page_id.to_le_bytes());
@@ -431,11 +444,13 @@ impl<'a> LeafNode<'a> {
     }
 
     /// Returns the underlying page.
+    #[inline]
     pub fn page(&self) -> &Page {
         self.page
     }
 
     /// Returns the page ID.
+    #[inline]
     pub fn page_id(&self) -> PageId {
         self.page.id
     }
@@ -489,6 +504,7 @@ impl<'a> BranchNode<'a> {
     }
 
     /// Returns the number of cells (separator keys) in this node.
+    #[inline]
     pub fn cell_count(&self) -> u16 {
         u16::from_le_bytes(
             self.page.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2].try_into().unwrap(),
@@ -496,6 +512,7 @@ impl<'a> BranchNode<'a> {
     }
 
     /// Returns the rightmost child page ID.
+    #[inline]
     pub fn rightmost_child(&self) -> PageId {
         u64::from_le_bytes(
             self.page.data[RIGHTMOST_CHILD_OFFSET..RIGHTMOST_CHILD_OFFSET + 8].try_into().unwrap(),
@@ -503,6 +520,7 @@ impl<'a> BranchNode<'a> {
     }
 
     /// Sets the rightmost child page ID.
+    #[inline]
     pub fn set_rightmost_child(&mut self, page_id: PageId) {
         self.page.data[RIGHTMOST_CHILD_OFFSET..RIGHTMOST_CHILD_OFFSET + 8]
             .copy_from_slice(&page_id.to_le_bytes());
@@ -510,6 +528,7 @@ impl<'a> BranchNode<'a> {
     }
 
     /// Returns the contiguous free space between the cell pointer array and the cell content area.
+    #[inline]
     pub fn free_space(&self) -> usize {
         let free_start = u16::from_le_bytes(
             self.page.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
@@ -522,12 +541,14 @@ impl<'a> BranchNode<'a> {
     }
 
     /// Returns a cell pointer.
+    #[inline]
     fn cell_ptr(&self, index: usize) -> usize {
         let ptr_offset = BRANCH_CELL_PTRS_OFFSET + index * CELL_PTR_SIZE;
         u16::from_le_bytes(self.page.data[ptr_offset..ptr_offset + 2].try_into().unwrap()) as usize
     }
 
     /// Sets a cell pointer.
+    #[inline]
     fn set_cell_ptr(&mut self, index: usize, offset: usize) {
         let ptr_offset = BRANCH_CELL_PTRS_OFFSET + index * CELL_PTR_SIZE;
         self.page.data[ptr_offset..ptr_offset + 2].copy_from_slice(&(offset as u16).to_le_bytes());
@@ -535,6 +556,7 @@ impl<'a> BranchNode<'a> {
     }
 
     /// Returns the separator key at a given index.
+    #[inline]
     pub fn key(&self, index: usize) -> &[u8] {
         let cell_offset = self.cell_ptr(index);
         let key_len =
@@ -544,12 +566,14 @@ impl<'a> BranchNode<'a> {
     }
 
     /// Returns the child page ID at a given index (left child of separator key).
+    #[inline]
     pub fn child(&self, index: usize) -> PageId {
         let cell_offset = self.cell_ptr(index);
         u64::from_le_bytes(self.page.data[cell_offset + 2..cell_offset + 2 + 8].try_into().unwrap())
     }
 
     /// Sets the child page ID at a given index.
+    #[inline]
     pub fn set_child(&mut self, index: usize, child: PageId) {
         let cell_offset = self.cell_ptr(index);
         self.page.data[cell_offset + 2..cell_offset + 2 + 8].copy_from_slice(&child.to_le_bytes());
@@ -576,11 +600,13 @@ impl<'a> BranchNode<'a> {
     }
 
     /// Calculates the space needed for a separator entry.
+    #[inline]
     pub fn cell_size(key: &[u8]) -> usize {
         CELL_PTR_SIZE + 2 + 8 + key.len() // ptr + key_len + child_page + key
     }
 
     /// Checks if there's room for a new cell.
+    #[inline]
     pub fn can_insert(&self, key: &[u8]) -> bool {
         self.free_space() >= Self::cell_size(key)
     }
@@ -595,7 +621,7 @@ impl<'a> BranchNode<'a> {
         let count = self.cell_count() as usize;
         if index > count {
             return Err(Error::Corrupted {
-                reason: format!("branch insert index {index} exceeds cell count {count}"),
+                reason: format!("branch insert index {index} exceeds cell count {count}").into(),
             });
         }
 
@@ -662,7 +688,7 @@ impl<'a> BranchNode<'a> {
         let count = self.cell_count() as usize;
         if index >= count {
             return Err(Error::Corrupted {
-                reason: format!("branch delete index {index} out of bounds (count {count})"),
+                reason: format!("branch delete index {index} out of bounds (count {count})").into(),
             });
         }
 
@@ -692,11 +718,13 @@ impl<'a> BranchNode<'a> {
     }
 
     /// Returns the underlying page.
+    #[inline]
     pub fn page(&self) -> &Page {
         self.page
     }
 
     /// Returns the page ID.
+    #[inline]
     pub fn page_id(&self) -> PageId {
         self.page.id
     }
@@ -732,6 +760,7 @@ impl<'a> LeafNodeRef<'a> {
     }
 
     /// Returns the next leaf page ID in the linked list (0 = no next leaf).
+    #[inline]
     pub fn next_leaf(&self) -> PageId {
         u64::from_le_bytes(self.data[NEXT_LEAF_OFFSET..NEXT_LEAF_OFFSET + 8].try_into().unwrap())
     }
@@ -744,17 +773,20 @@ impl<'a> LeafNodeRef<'a> {
     }
 
     /// Returns the number of cells.
+    #[inline]
     pub fn cell_count(&self) -> u16 {
         u16::from_le_bytes(self.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2].try_into().unwrap())
     }
 
     /// Returns a cell pointer.
+    #[inline]
     fn cell_ptr(&self, index: usize) -> usize {
         let ptr_offset = LEAF_CELL_PTRS_OFFSET + index * CELL_PTR_SIZE;
         u16::from_le_bytes(self.data[ptr_offset..ptr_offset + 2].try_into().unwrap()) as usize
     }
 
     /// Returns the key at a given index.
+    #[inline]
     pub fn key(&self, index: usize) -> &[u8] {
         let cell_offset = self.cell_ptr(index);
         let key_len =
@@ -764,6 +796,7 @@ impl<'a> LeafNodeRef<'a> {
     }
 
     /// Returns the value at a given index.
+    #[inline]
     pub fn value(&self, index: usize) -> &[u8] {
         let cell_offset = self.cell_ptr(index);
         let key_len =
@@ -802,6 +835,7 @@ impl<'a> LeafNodeRef<'a> {
     /// Returns the contiguous free space between the cell pointer array and the cell content area.
     ///
     /// Does not account for reclaimable space from deleted cells.
+    #[inline]
     pub fn free_space(&self) -> usize {
         let free_start = u16::from_le_bytes(
             self.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
@@ -814,6 +848,7 @@ impl<'a> LeafNodeRef<'a> {
     }
 
     /// Checks if there's room for a new cell.
+    #[inline]
     pub fn can_insert(&self, key: &[u8], value: &[u8]) -> bool {
         // Cell size: ptr(2) + key_len(2) + val_len(2) + key + value
         let cell_size = CELL_PTR_SIZE + 2 + 2 + key.len() + value.len();
@@ -844,11 +879,13 @@ impl<'a> BranchNodeRef<'a> {
     }
 
     /// Returns the number of cells.
+    #[inline]
     pub fn cell_count(&self) -> u16 {
         u16::from_le_bytes(self.data[CELL_COUNT_OFFSET..CELL_COUNT_OFFSET + 2].try_into().unwrap())
     }
 
     /// Returns the rightmost child.
+    #[inline]
     pub fn rightmost_child(&self) -> PageId {
         u64::from_le_bytes(
             self.data[RIGHTMOST_CHILD_OFFSET..RIGHTMOST_CHILD_OFFSET + 8].try_into().unwrap(),
@@ -856,12 +893,14 @@ impl<'a> BranchNodeRef<'a> {
     }
 
     /// Returns a cell pointer.
+    #[inline]
     fn cell_ptr(&self, index: usize) -> usize {
         let ptr_offset = BRANCH_CELL_PTRS_OFFSET + index * CELL_PTR_SIZE;
         u16::from_le_bytes(self.data[ptr_offset..ptr_offset + 2].try_into().unwrap()) as usize
     }
 
     /// Returns the key at a given index.
+    #[inline]
     pub fn key(&self, index: usize) -> &[u8] {
         let cell_offset = self.cell_ptr(index);
         let key_len =
@@ -871,6 +910,7 @@ impl<'a> BranchNodeRef<'a> {
     }
 
     /// Returns the child page ID at a given index.
+    #[inline]
     pub fn child(&self, index: usize) -> PageId {
         let cell_offset = self.cell_ptr(index);
         u64::from_le_bytes(self.data[cell_offset + 2..cell_offset + 2 + 8].try_into().unwrap())
@@ -891,6 +931,7 @@ impl<'a> BranchNodeRef<'a> {
     }
 
     /// Returns the contiguous free space between the cell pointer array and the cell content area.
+    #[inline]
     pub fn free_space(&self) -> usize {
         let free_start = u16::from_le_bytes(
             self.data[FREE_START_OFFSET..FREE_START_OFFSET + 2].try_into().unwrap(),
@@ -903,6 +944,7 @@ impl<'a> BranchNodeRef<'a> {
     }
 
     /// Checks if there's room for a new cell.
+    #[inline]
     pub fn can_insert(&self, key: &[u8]) -> bool {
         // Cell size: ptr(2) + key_len(2) + child_page(8) + key
         let cell_size = CELL_PTR_SIZE + 2 + 8 + key.len();

@@ -67,7 +67,7 @@ impl PageHeader {
     /// Returns an error if the page type byte is invalid.
     pub fn from_bytes(buf: &[u8]) -> Result<Self> {
         if buf.len() < PAGE_HEADER_SIZE {
-            return Err(Error::Corrupted { reason: "Page header too short".to_string() });
+            return Err(Error::Corrupted { reason: "Page header too short".into() });
         }
 
         Ok(Self {

@@ -68,19 +68,21 @@ cargo +nightly fuzz run fuzz_proto_convert --fuzz-dir fuzz
 cargo +nightly fuzz run fuzz_postcard_codec --fuzz-dir fuzz -- -max_total_time=300
 
 # Run all targets as a smoke test (60 seconds each)
-for target in fuzz_proto_convert fuzz_postcard_codec fuzz_btree_keys fuzz_pagination_token; do
+for target in fuzz_proto_convert fuzz_postcard_codec fuzz_btree_keys fuzz_pagination_token fuzz_wal_frames fuzz_rkyv_entries; do
     cargo +nightly fuzz run "$target" --fuzz-dir fuzz -- -max_total_time=60
 done
 ```
 
 ### Fuzz Targets
 
-| Target                  | Attack Surface                           |
-| ----------------------- | ---------------------------------------- |
-| `fuzz_proto_convert`    | Protobuf deserialization (gRPC requests) |
-| `fuzz_postcard_codec`   | Postcard codec for domain types          |
-| `fuzz_btree_keys`       | B+ tree key encoding/decoding, varint    |
-| `fuzz_pagination_token` | HMAC-signed pagination token parsing     |
+| Target                  | Attack Surface                                       |
+| ----------------------- | ---------------------------------------------------- |
+| `fuzz_proto_convert`    | Protobuf deserialization (gRPC requests)             |
+| `fuzz_postcard_codec`   | Postcard codec for domain types                      |
+| `fuzz_btree_keys`       | B+ tree key encoding/decoding, varint                |
+| `fuzz_pagination_token` | HMAC-signed pagination token parsing                 |
+| `fuzz_wal_frames`       | WAL frame parsing, CRC validation, crash recovery    |
+| `fuzz_rkyv_entries`     | rkyv archived entry deserialization and validation    |
 
 ### Investigating Crashes
 
@@ -115,12 +117,14 @@ just test-proptest 50000
 
 ### Test Suites
 
-| Suite              | Crate   | Properties                                                                                                                                                            |
-| ------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Codec roundtrip    | `types` | Encode/decode cycle preserves all serializable types (Operation, Entity, Relationship, Transaction, BlockHeader, VaultBlock, VaultEntry, ShardBlock, ChainCommitment) |
-| Merkle proofs      | `types` | Valid proofs always verify, tampered proofs never verify, wrong roots never verify, root computation is deterministic                                                 |
-| B+ tree invariants | `store` | Inserted keys retrievable, iteration returns sorted keys, deletes remove only target keys, updates overwrite correctly, get/iteration consistency                     |
-| Raft log ordering  | `raft`  | Monotonically increasing indices, non-decreasing terms, LogId ordering consistency, no gaps within terms, LedgerRequest serialization roundtrip                       |
+| Suite                  | Crate       | Properties                                                                                                                                                            |
+| ---------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Codec roundtrip        | `types`     | Encode/decode cycle preserves all serializable types (Operation, Entity, Relationship, Transaction, BlockHeader, VaultBlock, VaultEntry, ShardBlock, ChainCommitment) |
+| Merkle proofs          | `types`     | Valid proofs always verify, tampered proofs never verify, wrong roots never verify, root computation is deterministic                                                 |
+| B+ tree invariants     | `store`     | Inserted keys retrievable, iteration returns sorted keys, deletes remove only target keys, updates overwrite correctly, get/iteration consistency                     |
+| Consensus determinism  | `consensus` | Same operations on two independent engines produce identical state, encrypted WAL roundtrips correctly, block hashes are deterministic across nodes                   |
+| WAL integrity          | `consensus` | Frame write/read roundtrip, segment rotation preserves entries, CRC catches corruption, crash recovery replays correctly                                              |
+| Split/merge roundtrip  | `consensus` | Split followed by merge preserves all data, router updates are consistent, organization boundaries are respected                                                      |
 
 ### Writing New Property Tests
 
@@ -132,6 +136,34 @@ just test-proptest 50000
 ### CI
 
 Property tests run at default iterations (256) on every PR via the standard CI workflow. A dedicated nightly workflow (`.github/workflows/proptest.yml`) runs 10,000 iterations per test to catch rare edge cases.
+
+## Simulation Testing
+
+The consensus engine uses deterministic simulation testing. All nondeterminism (time, randomness, disk I/O) is abstracted behind injectable traits (`Clock`, `RngSource`, `WalBackend`), enabling reproducible multi-node tests in a single process.
+
+### Running Simulation Tests
+
+```bash
+# Run all simulation tests (default: 1000 seeds)
+cargo +1.92 test -p inferadb-ledger-consensus --test simulation
+
+# Run a specific simulation scenario
+cargo +1.92 test -p inferadb-ledger-consensus --test simulation linearizability
+
+# Reproduce a failing seed
+cargo +1.92 test -p inferadb-ledger-consensus --test simulation -- --seed 42
+```
+
+### Simulation Scenarios
+
+| Scenario         | What it tests                                                        |
+| ---------------- | -------------------------------------------------------------------- |
+| `linearizability`| Stale reads, partition recovery, lease expiry under network faults   |
+| `split_merge`    | Split/merge under crash, partition, clock skew                       |
+| `durability`     | WAL corruption, sync failures, recovery paths                        |
+| `closed_ts`      | Closed timestamp correctness under leader transitions                |
+
+Each test runs thousands of seeded iterations with fault injection (partitions, crashes, clock skew, slow disk). A failing test produces a seed that reproduces the exact failure.
 
 ## Review Process
 

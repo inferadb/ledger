@@ -21,12 +21,11 @@ use chrono::{DateTime, Utc};
 use inferadb_ledger_state::{Snapshot, SnapshotError, SnapshotManager};
 use inferadb_ledger_store::{Database, StorageBackend, TableId};
 use inferadb_ledger_types::{Hash, Region, config::BackupConfig, hash::sha256};
-use openraft::Raft;
 use snafu::{ResultExt, Snafu};
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
-use crate::{LedgerNodeId, types::LedgerTypeConfig};
+use crate::consensus_handle::ConsensusHandle;
 
 /// Backup file extension.
 const BACKUP_EXT: &str = ".backup";
@@ -948,11 +947,9 @@ pub fn record_pre_erasure_backup_count(region: &str, count: u64) {
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct BackupJob {
-    /// Raft consensus handle for verifying leadership and triggering snapshots.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// This node's ID.
-    node_id: LedgerNodeId,
-    /// Snapshot manager for reading Raft snapshots.
+    /// Consensus handle for verifying leadership.
+    handle: Arc<ConsensusHandle>,
+    /// Snapshot manager for reading snapshots.
     snapshot_manager: Arc<SnapshotManager>,
     /// Backup manager for file operations.
     backup_manager: Arc<BackupManager>,
@@ -970,8 +967,7 @@ impl BackupJob {
                 ticker.tick().await;
 
                 // Only the leader creates backups
-                let metrics = self.raft.metrics().borrow().clone();
-                if metrics.current_leader != Some(self.node_id) {
+                if !self.handle.is_leader() {
                     debug!("Not leader, skipping backup cycle");
                     continue;
                 }
@@ -979,14 +975,18 @@ impl BackupJob {
                 let cycle_start = Instant::now();
                 info!("Starting automated backup");
 
-                // Trigger a Raft snapshot to ensure latest state is on disk
-                if let Err(e) = self.raft.trigger().snapshot().await {
-                    let duration = cycle_start.elapsed().as_secs_f64();
-                    warn!(error = %e, duration_secs = duration, "Failed to trigger snapshot for backup");
-                    record_backup_failed();
-                    crate::metrics::record_background_job_duration("backup", duration);
-                    crate::metrics::record_background_job_run("backup", "failure");
-                    continue;
+                // Trigger a snapshot to ensure the latest committed state
+                // is persisted to disk before creating the backup.
+                match self.handle.trigger_snapshot().await {
+                    Ok((idx, _term)) if idx > 0 => {
+                        info!(last_included_index = idx, "Snapshot triggered for backup");
+                    },
+                    Ok(_) => {
+                        info!("No new snapshot needed (commit index unchanged)");
+                    },
+                    Err(e) => {
+                        warn!(error = %e, "Snapshot trigger failed; using latest available snapshot");
+                    },
                 }
 
                 // Load the latest snapshot from disk

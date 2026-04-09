@@ -31,7 +31,7 @@ use inferadb_ledger_types::{
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use super::slug_resolver::SlugResolver;
+use super::{error_classify, slug_resolver::SlugResolver};
 
 /// Default limit for `ListEvents` when the request specifies 0.
 const DEFAULT_LIMIT: usize = 100;
@@ -97,7 +97,7 @@ fn timestamp_to_ns(ts: &Option<prost_types::Timestamp>, default: u64) -> u64 {
 
 /// Computes a deterministic query hash from filter parameters.
 fn compute_filter_hash(filter: &Option<proto::EventFilter>) -> [u8; 8] {
-    let mut params = String::new();
+    let mut params = String::with_capacity(256);
     if let Some(f) = filter {
         if let Some(st) = &f.start_time {
             params.push_str(&format!("start:{}.{},", st.seconds, st.nanos));
@@ -232,10 +232,7 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         };
 
         // Read from events database
-        let txn = self.events_db.read().map_err(|e| {
-            tracing::error!(error = %e, "Events database error");
-            Status::internal("Internal error")
-        })?;
+        let txn = self.events_db.read().map_err(|e| error_classify::storage_error(&e))?;
 
         // We need to over-fetch because in-memory filtering may discard some entries.
         // Fetch in batches until we have enough matching entries or run out.
@@ -247,10 +244,7 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         loop {
             let (batch, next_cursor) =
                 EventStore::list(&txn, org_id, start_ns, end_ns, batch_size, cursor.as_deref())
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "Events query error");
-                        Status::internal("Internal error")
-                    })?;
+                    .map_err(|e| error_classify::storage_error(&e))?;
 
             if batch.is_empty() {
                 break;
@@ -282,7 +276,10 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         // Build next page token from the last returned entry
         let next_page_token = if has_more {
             result_entries.last().map(|entry| {
-                let ts_ns = entry.timestamp.timestamp_nanos_opt().unwrap_or(0) as u64;
+                let ts_ns = entry.timestamp.timestamp_nanos_opt().unwrap_or_else(|| {
+                    tracing::warn!(timestamp = ?entry.timestamp, "Timestamp nanos overflow — using max sentinel");
+                    i64::MAX
+                }) as u64;
                 let key = inferadb_ledger_state::encode_event_key(
                     entry.organization_id,
                     ts_ns,
@@ -338,18 +335,13 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         }
 
         // O(log n) index lookup: (org_id, event_id) → primary key → entry.
-        let txn = self.events_db.read().map_err(|e| {
-            tracing::error!(error = %e, "Events database error");
-            Status::internal("Internal error")
-        })?;
+        let txn = self.events_db.read().map_err(|e| error_classify::storage_error(&e))?;
 
         let mut event_id_arr = [0u8; 16];
         event_id_arr.copy_from_slice(&req.event_id);
 
-        let found = EventStore::get_by_id(&txn, org_id, &event_id_arr).map_err(|e| {
-            tracing::error!(error = %e, "Events query error");
-            Status::internal("Internal error")
-        })?;
+        let found = EventStore::get_by_id(&txn, org_id, &event_id_arr)
+            .map_err(|e| error_classify::storage_error(&e))?;
 
         match found {
             Some(entry) => {
@@ -385,10 +377,7 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         let start_ns = timestamp_to_ns(&req.filter.as_ref().and_then(|f| f.start_time), 0);
         let end_ns = timestamp_to_ns(&req.filter.as_ref().and_then(|f| f.end_time), u64::MAX);
 
-        let txn = self.events_db.read().map_err(|e| {
-            tracing::error!(error = %e, "Events database error");
-            Status::internal("Internal error")
-        })?;
+        let txn = self.events_db.read().map_err(|e| error_classify::storage_error(&e))?;
 
         // If no filters beyond time range, use the fast count path
         let has_memory_filters = req.filter.as_ref().is_some_and(|f| {
@@ -402,10 +391,7 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
 
         let count = if !has_memory_filters && start_ns == 0 && end_ns == u64::MAX {
             // Fast path: count all events for the org
-            EventStore::count(&txn, org_id).map_err(|e| {
-                tracing::error!(error = %e, "Events count error");
-                Status::internal("Internal error")
-            })?
+            EventStore::count(&txn, org_id).map_err(|e| error_classify::storage_error(&e))?
         } else {
             // Slow path: scan with filters
             let mut count = 0u64;
@@ -415,10 +401,7 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
             loop {
                 let (batch, next_cursor) =
                     EventStore::list(&txn, org_id, start_ns, end_ns, batch_size, cursor.as_deref())
-                        .map_err(|e| {
-                            tracing::error!(error = %e, "Events count error");
-                            Status::internal("Internal error")
-                        })?;
+                        .map_err(|e| error_classify::storage_error(&e))?;
 
                 if batch.is_empty() {
                     break;
@@ -689,22 +672,14 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         let rejected_count = rejections.len() as u32;
 
         if !accepted_entries.is_empty() {
-            let mut txn = self.events_db.write().map_err(|e| {
-                tracing::error!(error = %e, "Events write transaction failed");
-                Status::internal("Internal error")
-            })?;
+            let mut txn = self.events_db.write().map_err(|e| error_classify::storage_error(&e))?;
 
             for entry in &accepted_entries {
-                EventStore::write(&mut txn, entry).map_err(|e| {
-                    tracing::error!(error = %e, "Event write failed");
-                    Status::internal("Internal error")
-                })?;
+                EventStore::write(&mut txn, entry)
+                    .map_err(|e| error_classify::storage_error(&e))?;
             }
 
-            txn.commit().map_err(|e| {
-                tracing::error!(error = %e, "Events transaction commit failed");
-                Status::internal("Internal error")
-            })?;
+            txn.commit().map_err(|e| error_classify::storage_error(&e))?;
 
             // Emit per-event metrics
             for entry in &accepted_entries {
@@ -750,7 +725,8 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
-    use chrono::{TimeZone, Utc};
+    use arc_swap::ArcSwap;
+    use chrono::{DateTime, TimeZone, Utc};
     use inferadb_ledger_proto::proto::events_service_server::EventsService as EventsServiceProto;
     use inferadb_ledger_raft::{
         event_writer::IngestionRateLimiter,
@@ -765,14 +741,13 @@ mod tests {
             IngestionConfig,
         },
     };
-    use parking_lot::RwLock;
 
     use super::*;
 
     fn make_test_service() -> EventsService<InMemoryBackend> {
         let events_db = EventsDatabase::open_in_memory().expect("open");
         let state = AppliedState::default();
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
 
         EventsService::builder()
             .events_db(events_db)
@@ -792,7 +767,7 @@ mod tests {
             OrganizationId::new(org_id),
             inferadb_ledger_types::OrganizationSlug::new(slug),
         );
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
 
         EventsService::builder()
             .events_db(events_db)
@@ -822,7 +797,7 @@ mod tests {
             OrganizationId::new(org_id),
             inferadb_ledger_types::OrganizationSlug::new(slug),
         );
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         let rate_limit = ingestion.ingest_rate_limit_per_source;
         let config = EventConfig { ingestion, ..EventConfig::default() };
 
@@ -864,7 +839,10 @@ mod tests {
             event_id,
             source_service: "ledger".to_string(),
             event_type: format!("ledger.{}", action.as_str()),
-            timestamp: Utc.timestamp_opt(timestamp_secs, 0).unwrap(),
+            timestamp: Utc
+                .timestamp_opt(timestamp_secs, 0)
+                .single()
+                .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
             scope: if org_id == 0 { EventScope::System } else { EventScope::Organization },
             action,
             emission: EventEmission::ApplyPhase,
@@ -1079,7 +1057,7 @@ mod tests {
         state
             .id_to_slug
             .insert(OrganizationId::new(2), inferadb_ledger_types::OrganizationSlug::new(200));
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
 
         let service = EventsService::builder()
             .events_db(events_db)
@@ -1187,7 +1165,7 @@ mod tests {
         state
             .id_to_slug
             .insert(OrganizationId::new(2), inferadb_ledger_types::OrganizationSlug::new(200));
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
 
         let service = EventsService::builder()
             .events_db(events_db)

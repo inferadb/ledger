@@ -25,6 +25,8 @@ mod events_keys;
 mod indexes;
 mod keys;
 mod relationship;
+/// In-memory hash index for O(1) relationship existence checks.
+pub mod relationship_index;
 mod shard;
 mod snapshot;
 mod state;
@@ -49,6 +51,7 @@ pub use events_keys::encode_event_key;
 pub use indexes::IndexManager;
 pub use keys::{StorageKey, decode_storage_key, encode_index_key, encode_storage_key};
 pub use relationship::RelationshipStore;
+pub use relationship_index::RelationshipIndex;
 pub use shard::ShardManager;
 pub use snapshot::{
     Snapshot, SnapshotChainParams, SnapshotError, SnapshotManager, SnapshotStateData,

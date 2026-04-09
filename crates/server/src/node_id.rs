@@ -115,6 +115,7 @@ pub fn load_or_generate_node_id(data_dir: &Path) -> Result<u64, NodeIdError> {
 /// # Errors
 ///
 /// Returns an error if the file cannot be written.
+#[cfg(test)]
 pub fn write_node_id(data_dir: &Path, node_id: u64) -> Result<(), NodeIdError> {
     let path = data_dir.join("node_id");
     let path_str = path.display().to_string();

@@ -27,19 +27,19 @@ use std::{
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{ClientId, Operation, OrganizationId, Transaction, VaultId};
-use openraft::Raft;
 use snafu::GenerateImplicitData;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::{
+    consensus_handle::ConsensusHandle,
     error::OrphanCleanupError,
     log_storage::AppliedStateAccessor,
     metrics::{
         record_background_job_duration, record_background_job_items, record_background_job_run,
     },
     trace_context::TraceContext,
-    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig, RaftPayload},
+    types::{LedgerRequest, RaftPayload},
 };
 
 /// Default interval between cleanup cycles (1 hour).
@@ -64,10 +64,8 @@ const SYSTEM_VAULT_ID: VaultId = VaultId::new(0);
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct OrphanCleanupJob<B: StorageBackend + 'static> {
-    /// Raft consensus handle for proposing cleanup operations.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// This node's ID.
-    node_id: LedgerNodeId,
+    /// Consensus handle for proposing cleanup operations.
+    handle: Arc<ConsensusHandle>,
     /// The shared state layer (internally thread-safe via inferadb-ledger-store MVCC).
     state: Arc<StateLayer<B>>,
     /// Accessor for applied state (organization registry).
@@ -83,8 +81,7 @@ pub struct OrphanCleanupJob<B: StorageBackend + 'static> {
 impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
     /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader == Some(self.node_id)
+        self.handle.is_leader()
     }
 
     /// Returns all deleted user IDs from `_system` organization.
@@ -258,7 +255,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             request_hash: 0,
         };
 
-        self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
+        self.handle.propose(RaftPayload::system(request)).await.map_err(|e| {
             OrphanCleanupError::OrphanRaftWrite {
                 message: format!("{:?}", e),
                 backtrace: snafu::Backtrace::generate(),
@@ -393,12 +390,12 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
+    use arc_swap::ArcSwap;
     use inferadb_ledger_state::StateLayer;
     use inferadb_ledger_store::InMemoryBackend;
     use inferadb_ledger_types::{
         Operation, OrganizationId, OrganizationSlug, Region, VaultId, VaultSlug,
     };
-    use parking_lot::RwLock;
 
     use super::*;
     use crate::log_storage::{AppliedState, AppliedStateAccessor, OrganizationMeta, VaultMeta};
@@ -421,7 +418,7 @@ mod tests {
         for vault in vaults {
             state.vaults.insert((vault.organization, vault.vault), vault);
         }
-        AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)))
+        AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)))
     }
 
     #[test]

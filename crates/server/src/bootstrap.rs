@@ -1,39 +1,35 @@
-//! Cluster bootstrap and initialization.
+//! Two-phase cluster bootstrap: start and init.
 //!
-//! Provides functions to:
-//! - Resume from persisted Raft state (existing node restart)
-//! - Bootstrap a new cluster (single-node or coordinated multi-node)
+//! Provides the `bootstrap_node` function which handles two distinct paths:
+//!
+//! - **Restart** (cluster_id file exists): loads cluster state, starts all background jobs, and
+//!   marks the node as ready.
+//! - **Fresh node** (no cluster_id file): starts the system region and gRPC server but does NOT
+//!   start background jobs or mark ready. The node waits for an `InitCluster` RPC (or shutdown
+//!   signal) to complete initialization.
 
 use std::{
-    collections::BTreeMap,
-    net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_raft::{
-    AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, EventsGarbageCollector,
-    GrpcRaftNetworkFactory, HotKeyDetector, IntegrityScrubberJob, InviteMaintenanceJob,
-    LearnerRefreshJob, LedgerNodeId, LedgerTypeConfig, OrganizationPurgeJob, OrphanCleanupJob,
-    PostErasureCompactionJob, RaftLogStore, RaftManager, RaftManagerConfig, RateLimiter,
-    ResourceMetricsCollector, RuntimeConfigHandle, SagaOrchestrator, TokenMaintenanceJob,
-    TtlGarbageCollector,
-    event_writer::{EventHandle, EventWriter},
+    AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, ConsensusHandle,
+    EventsGarbageCollector, HotKeyDetector, IntegrityScrubberJob, InviteMaintenanceJob,
+    LearnerRefreshJob, OrganizationPurgeJob, OrphanCleanupJob, PostErasureCompactionJob,
+    RaftManager, RaftManagerConfig, RateLimiter, RegionConfig, RegionStorageManager,
+    ResourceMetricsCollector, RuntimeConfigHandle, SagaOrchestrator, SagaOrchestratorHandle,
+    TokenMaintenanceJob, TtlGarbageCollector, event_writer::EventHandle,
+    log_storage::AppliedStateAccessor,
 };
 use inferadb_ledger_services::LedgerServer;
 use inferadb_ledger_state::{
-    BlockArchive, LocalBackend, ObjectStorageBackend, SnapshotManager, StateLayer,
+    BlockArchive, EventsDatabase, LocalBackend, ObjectStorageBackend, SnapshotManager, StateLayer,
     TieredSnapshotManager,
 };
 use inferadb_ledger_store::FileBackend;
-use openraft::{BasicNode, Raft, storage::Adaptor};
-use tokio::sync::broadcast;
 
-use crate::{
-    config::Config,
-    coordinator::{BootstrapDecision, coordinate_bootstrap},
-};
+use crate::config::Config;
 
 /// Errors during cluster bootstrap, including database, Raft, and coordination failures.
 #[derive(Debug, snafu::Snafu)]
@@ -91,12 +87,11 @@ pub enum BootstrapError {
 /// Holds ownership of all node resources after a successful bootstrap.
 ///
 /// Some fields are not directly accessed but are retained for ownership semantics:
-/// - `raft` and `state`: Maintain Arc reference counts for shared state
+/// - `state`: Maintains Arc reference count for shared state
 /// - Handle fields: Keep background tasks alive and allow graceful shutdown
 pub struct BootstrappedNode {
-    /// Raft consensus instance (retained for reference counting).
-    #[allow(dead_code)] // retained to maintain Arc reference count for shared Raft state
-    pub raft: Arc<Raft<LedgerTypeConfig>>,
+    /// Consensus handle for background jobs and graceful shutdown.
+    pub handle: Arc<ConsensusHandle>,
     /// The shared state layer (internally thread-safe via inferadb-ledger-store MVCC).
     #[allow(dead_code)] // retained to maintain Arc reference count for shared state layer
     pub state: Arc<StateLayer<FileBackend>>,
@@ -160,17 +155,20 @@ pub struct BootstrappedNode {
     pub snapshot_demotion_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-/// Bootstraps a new cluster, joins an existing one, or resumes from saved state.
+/// Bootstraps the node using the two-phase start+init pattern.
 ///
-/// Behavior is determined automatically via coordinated bootstrap:
+/// The function detects whether this node has been initialized by checking for
+/// a `cluster_id` file in the data directory:
 ///
-/// - If the node has persisted Raft state, it resumes from that state.
-/// - If `bootstrap_expect=0`, waits to be added to existing cluster via AdminService.
-/// - If `bootstrap_expect=1`, bootstraps immediately as a single-node cluster.
-/// - Otherwise, coordinates with discovered peers using GetNodeInfo RPC:
-///   - If any peer is already a cluster member, waits to join existing cluster
-///   - If enough peers found, the node with lowest Snowflake ID bootstraps all members
-///   - If this node doesn't have lowest ID, waits to be added by the bootstrapping node
+/// - **Restart path** (cluster_id exists): Loads the cluster ID, starts the system region with
+///   persisted membership, builds the full gRPC server, starts all background jobs, and marks the
+///   node as ready.
+///
+/// - **Fresh node path** (no cluster_id): Starts the system region and gRPC server but leaves the
+///   node in an uninitialized state. Only `GetNodeInfo`, `InitCluster`, and health probes are
+///   functional. All other RPCs return `UNAVAILABLE`. If `--join` seeds are configured, a
+///   background task polls them via `GetNodeInfo`. The node waits for either an `InitCluster` RPC
+///   or the shutdown signal.
 ///
 /// # Errors
 ///
@@ -179,7 +177,7 @@ pub struct BootstrappedNode {
 /// - Node ID resolution fails
 /// - Database creation or opening fails
 /// - Raft instance creation fails
-/// - Cluster initialization or join times out
+/// - The gRPC server fails to bind
 pub async fn bootstrap_node(
     config: &Config,
     data_dir: &std::path::Path,
@@ -187,10 +185,10 @@ pub async fn bootstrap_node(
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     key_manager: Option<Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>>,
 ) -> Result<BootstrappedNode, BootstrapError> {
-    // Validate bootstrap configuration
+    // Validate configuration.
     config.validate().map_err(|e| BootstrapError::Config { message: e.to_string() })?;
 
-    // Resolve the effective node ID (manual or auto-generated Snowflake ID)
+    // Resolve the effective node ID (manual or auto-generated Snowflake ID).
     let node_id =
         config.node_id(data_dir).map_err(|e| BootstrapError::NodeId { message: e.to_string() })?;
 
@@ -205,91 +203,319 @@ pub async fn bootstrap_node(
         .detect_legacy_layout()
         .map_err(|e| BootstrapError::Database { message: e.to_string() })?;
 
-    // Open GLOBAL region databases (state.db, blocks.db, events.db under global/)
-    let region_storage = storage_manager
-        .open_region(inferadb_ledger_types::Region::GLOBAL)
-        .map_err(|e| BootstrapError::Database { message: e.to_string() })?;
-
-    // Wrap raw databases in domain-specific types
-    // StateLayer is internally thread-safe via MVCC — no external lock needed
-    let state = Arc::new(StateLayer::new(region_storage.state_db().clone()));
-    let block_archive = Arc::new(BlockArchive::new(region_storage.blocks_db().clone()));
-    let events_db = region_storage.events_db().clone();
-
-    // Create block announcements broadcast channel for real-time notifications.
-    // Buffer size of 1024 allows for burst handling during high commit rates.
-    let (block_announcements, _) = broadcast::channel::<BlockAnnouncement>(1024);
-
-    // Create EventWriter for apply-phase event persistence.
-    // The writer filters events by scope (system/organization) based on EventConfig
-    // and is called during Raft apply_to_state_machine().
-    let event_writer = EventWriter::new(Arc::clone(&events_db), config.events.clone());
-
-    let log_path = storage_manager.raft_db_path(inferadb_ledger_types::Region::GLOBAL);
-    let log_store = RaftLogStore::open(&log_path)
-        .map_err(|e| BootstrapError::Storage { message: format!("failed to open log store: {e}") })?
-        .with_state_layer(state.clone())
-        .with_block_archive(block_archive.clone())
-        .with_region_config(
-            inferadb_ledger_types::Region::GLOBAL,
-            inferadb_ledger_types::NodeId::new(node_id.to_string()),
+    // Create the RaftManager with timing parameters from config.
+    let (hb_ms, el_min_ms, el_max_ms) = if let Some(ref rc) = config.raft {
+        (
+            rc.heartbeat_interval.as_millis() as u64,
+            rc.election_timeout_min.as_millis() as u64,
+            rc.election_timeout_max.as_millis() as u64,
         )
-        .with_block_announcements(block_announcements.clone())
-        .with_event_writer(event_writer);
-
-    // Determine bootstrap behavior before log_store is consumed by Adaptor
-    let is_initialized = log_store.is_initialized();
-
-    // Get accessor and commitment buffer before log_store is consumed by Adaptor
-    let applied_state_accessor = log_store.accessor();
-    let commitment_buffer = log_store.commitment_buffer();
-
-    let network = GrpcRaftNetworkFactory::with_trace_config(config.logging.otel.trace_raft_rpcs);
-    let raft_config = if let Some(ref rc) = config.raft {
-        openraft::Config {
-            cluster_name: "ledger".to_string(),
-            heartbeat_interval: rc.heartbeat_interval.as_millis() as u64,
-            election_timeout_min: rc.election_timeout_min.as_millis() as u64,
-            election_timeout_max: rc.election_timeout_max.as_millis() as u64,
-            max_payload_entries: rc.max_entries_per_rpc,
-            snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(rc.snapshot_threshold),
-            ..Default::default()
-        }
     } else {
-        openraft::Config {
-            cluster_name: "ledger".to_string(),
-            heartbeat_interval: 150,
-            election_timeout_min: 300,
-            election_timeout_max: 600,
-            ..Default::default()
-        }
+        (150, 300, 600) // RaftManagerConfig defaults
     };
+    let raft_manager_config = RaftManagerConfig::builder()
+        .data_dir(data_dir.to_path_buf())
+        .node_id(node_id)
+        .local_region(config.region)
+        .heartbeat_interval_ms(hb_ms)
+        .election_timeout_min_ms(el_min_ms)
+        .election_timeout_max_ms(el_max_ms)
+        .build();
+    let manager = Arc::new(RaftManager::new(raft_manager_config));
 
-    // Create adaptor to split RaftStorage into log storage and state machine
-    // The Adaptor provides RaftLogStorage and RaftStateMachine from our RaftStorage impl
-    // Note: Adaptor takes ownership of the store
-    let (log_storage, state_machine) = Adaptor::new(log_store);
+    // Check whether this node has been initialized (cluster_id file exists).
+    let cluster_id = crate::cluster_id::load_cluster_id(data_dir).map_err(|e| {
+        BootstrapError::Database { message: format!("failed to load cluster_id: {e}") }
+    })?;
 
-    let raft = Raft::<LedgerTypeConfig>::new(
-        node_id,
-        Arc::new(raft_config),
-        network,
-        log_storage,
-        state_machine,
-    )
-    .await
-    .map_err(|e| BootstrapError::Raft { message: format!("failed to create raft: {e}") })?;
+    // Start the GLOBAL system region. On restart, persisted membership loads
+    // automatically. On fresh nodes, the region starts with this node as the
+    // sole member — the InitCluster handler will handle membership changes.
+    let region_config = RegionConfig::builder()
+        .region(inferadb_ledger_types::Region::GLOBAL)
+        .initial_members(vec![(node_id, config.advertise_addr())])
+        .events_config(config.events.clone())
+        .build();
+    let system_region = manager.start_system_region(region_config).await.map_err(|e| {
+        BootstrapError::Raft { message: format!("failed to start system region: {e}") }
+    })?;
 
-    let raft = Arc::new(raft);
+    // Spawn region creation handler — processes CreateDataRegion entries applied
+    // on the GLOBAL log store and starts local data regions via the RaftManager.
 
-    let block_archive_for_compactor = block_archive.clone();
-    let block_archive_for_recovery = block_archive.clone();
+    // Health flag for the region handler task. If the task exits (channel
+    // closed or unrecoverable panic), this flag is cleared. The health service
+    // checks it to report NOT_SERVING when the handler is down.
+    let region_handler_healthy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let region_handler_healthy_clone = region_handler_healthy.clone();
+
+    if let Some(mut region_rx) = system_region.take_region_creation_rx() {
+        let mgr = manager.clone();
+        let bootstrap_events_config = config.events.clone();
+        let healthy_flag = region_handler_healthy_clone;
+        tokio::spawn(async move {
+            // Each message is processed in a child task for panic isolation.
+            // If processing one message panics, tokio catches it via the
+            // JoinHandle and the loop continues with the next message.
+            while let Some((region, initial_members)) = region_rx.recv().await {
+                let mgr_clone = mgr.clone();
+                let events_clone = bootstrap_events_config.clone();
+                let result = tokio::spawn(async move {
+                    process_region_event(&mgr_clone, &events_clone, region, initial_members).await;
+                })
+                .await;
+
+                if let Err(join_err) = result
+                    && join_err.is_panic()
+                {
+                    tracing::error!(
+                        "Region handler panicked processing event — continuing with next message. \
+                         Panic: {join_err:?}"
+                    );
+                }
+            }
+            // Channel closed — mark handler as unhealthy so health service detects it.
+            healthy_flag.store(false, std::sync::atomic::Ordering::Release);
+            tracing::warn!("Region handler channel closed — handler task exiting");
+        });
+    }
+
+    let _ = region_handler_healthy;
+
+    // Shared peer liveness map — updated by the Raft service on every incoming
+    // consensus message, read by the admin service's CheckPeerLiveness RPC and
+    // the GLOBAL leader's quorum-based dead node detection task.
+    let peer_liveness: Arc<
+        parking_lot::RwLock<std::collections::HashMap<u64, std::time::Instant>>,
+    > = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
+
+    // Background DR/liveness tasks require a fully initialized node with cluster
+    // state. On fresh nodes these are deferred until after InitCluster completes
+    // (the fresh path spawns them via `start_background_jobs`).
+    if cluster_id.is_some() {
+        let bg_initial_delay = config.background_jobs.initial_delay();
+        let bg_stagger_delay = config.background_jobs.stagger_delay();
+
+        // Spawn DR checker task (1s cadence) — reactive repair for dead/decommissioning voters.
+        {
+            let mgr = manager.clone();
+            tokio::spawn(async move {
+                let mut learner_first_seen: crate::dr_scheduler::LearnerFirstSeen =
+                    std::collections::HashMap::new();
+                tokio::time::sleep(bg_initial_delay).await;
+                loop {
+                    reconcile_transport_channels(&mgr);
+                    crate::dr_scheduler::run_checker_cycle(&mgr, &mut learner_first_seen).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            });
+        }
+
+        // Spawn DR scheduler task (5s cadence) — proactive growth (learner add/promote).
+        {
+            let mgr = manager.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(bg_stagger_delay).await;
+                loop {
+                    crate::dr_scheduler::run_scheduler_cycle(&mgr).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            });
+        }
+
+        // Spawn DR membership reporter — DR leaders propose RegionMembershipReport
+        // to GLOBAL so the drain monitor can track decommission progress.
+        {
+            let mgr = manager.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(bg_stagger_delay).await;
+                loop {
+                    if let Ok(global) = mgr.system_region() {
+                        for region in mgr.list_regions() {
+                            if region == inferadb_ledger_types::Region::GLOBAL {
+                                continue;
+                            }
+                            let Ok(group) = mgr.get_region_group(region) else { continue };
+                            if !group.handle().is_leader() {
+                                continue;
+                            }
+                            let state = group.handle().shard_state();
+                            let report = inferadb_ledger_raft::types::LedgerRequest::System(
+                            inferadb_ledger_raft::types::SystemRequest::RegionMembershipReport {
+                                region,
+                                voters: state.voters.iter().map(|n| n.0).collect(),
+                                learners: state.learners.iter().map(|n| n.0).collect(),
+                                conf_epoch: state.conf_epoch,
+                            },
+                        );
+                            let _ = global
+                                .handle()
+                                .propose_and_wait(
+                                    inferadb_ledger_raft::types::RaftPayload::system(report),
+                                    std::time::Duration::from_secs(5),
+                                )
+                                .await;
+                        }
+                    }
+                    // Spec says 10s for the periodic backstop, but faster cadence (2s)
+                    // ensures the drain monitor sees fresh reports promptly when the
+                    // event-driven reporter can't reach GLOBAL (DR leader ≠ GLOBAL leader).
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            });
+        }
+
+        // Spawn drain monitor — checks decommissioning/dead nodes and removes
+        // them from GLOBAL once all DR replicas are drained.
+        {
+            let mgr = manager.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(bg_stagger_delay).await;
+                loop {
+                    if let Ok(global) = mgr.system_region()
+                        && global.handle().is_leader()
+                        && let Some(reader) = mgr.system_state_reader()
+                    {
+                        let statuses = reader.all_node_statuses();
+                        if !statuses.is_empty() {
+                            tracing::debug!(
+                                count = statuses.len(),
+                                "Drain monitor: scanning node statuses"
+                            );
+                        }
+                        for &(node_id, status) in &statuses {
+                            if status != inferadb_ledger_raft::types::NodeStatus::Decommissioning
+                                && status != inferadb_ledger_raft::types::NodeStatus::Dead
+                            {
+                                continue;
+                            }
+
+                            // Check whether this node still has DR replicas.
+                            // Deviation from spec: the spec says "check GLOBAL-stored DR membership
+                            // reports — NOT local list_regions()." However, GLOBAL-only reports lag
+                            // significantly when the DR leader ≠ GLOBAL leader (the DR leader can't
+                            // propose reports to GLOBAL as a follower). The hybrid approach — local
+                            // authoritative state for DRs where we're the leader, GLOBAL reports
+                            // for remote DRs — provides faster drain convergence while maintaining
+                            // correctness for regulated regions this node doesn't host.
+                            let mut has_replicas = false;
+                            let target = inferadb_ledger_consensus::types::NodeId(node_id);
+                            for region in mgr.list_regions() {
+                                if region == inferadb_ledger_types::Region::GLOBAL {
+                                    continue;
+                                }
+                                if let Ok(group) = mgr.get_region_group(region)
+                                    && group.handle().is_leader()
+                                {
+                                    let s = group.handle().shard_state();
+                                    if s.voters.contains(&target) || s.learners.contains(&target) {
+                                        has_replicas = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            // For DRs where we're not the leader: check GLOBAL reports.
+                            if !has_replicas {
+                                let memberships = reader.region_memberships();
+                                has_replicas = memberships
+                                    .iter()
+                                    .any(|(_, members)| members.contains(&node_id));
+                            }
+
+                            tracing::debug!(
+                                node_id,
+                                has_replicas,
+                                ?status,
+                                "Drain monitor: checking node"
+                            );
+                            if !has_replicas {
+                                tracing::info!(
+                                    node_id,
+                                    ?status,
+                                    "Drain complete — removing from GLOBAL"
+                                );
+                                // Remove from GLOBAL Raft membership. Only one
+                                // membership change at a time — skip this cycle on
+                                // conflict (the next cycle will retry).
+                                match global.handle().remove_node(node_id).await {
+                                    Ok(()) => {
+                                        // Mark as Removed in the node status store.
+                                        let set_removed =
+                                        inferadb_ledger_raft::types::LedgerRequest::System(
+                                            inferadb_ledger_raft::types::SystemRequest::SetNodeStatus {
+                                                node_id,
+                                                status:
+                                                    inferadb_ledger_raft::types::NodeStatus::Removed,
+                                            },
+                                        );
+                                        let _ = global
+                                            .handle()
+                                            .propose_and_wait(
+                                                inferadb_ledger_raft::types::RaftPayload::system(
+                                                    set_removed,
+                                                ),
+                                                std::time::Duration::from_secs(5),
+                                            )
+                                            .await;
+                                        // Continue to process remaining drainable nodes
+                                        // in the same cycle (each remove_node awaits commit).
+                                    },
+                                    Err(e) => {
+                                        let msg = e.to_string();
+                                        if !msg.contains("no-op") {
+                                            tracing::debug!(
+                                                node_id,
+                                                error = %e,
+                                                "Drain monitor: GLOBAL remove_node deferred"
+                                            );
+                                        }
+                                        // Conflict or already removed — skip this node.
+                                    },
+                                }
+                            }
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            });
+        }
+
+        // Spawn dead node detection — GLOBAL leader checks peer liveness with
+        // quorum confirmation before marking nodes Dead.
+        {
+            let mgr = manager.clone();
+            let liveness = peer_liveness.clone();
+            let liveness_config = inferadb_ledger_raft::LivenessConfig::default();
+            tokio::spawn(async move {
+                tokio::time::sleep(liveness_config.liveness_check_interval).await;
+                loop {
+                    if let Ok(global) = mgr.system_region()
+                        && global.handle().is_leader()
+                    {
+                        check_peer_liveness_quorum(&mgr, &liveness, &global, &liveness_config)
+                            .await;
+                    }
+                    tokio::time::sleep(liveness_config.liveness_check_interval).await;
+                }
+            });
+        }
+    } // end: cluster_id.is_some() guard for background tasks
+
+    // Extract components from the system region.
+    let handle = system_region.handle().clone();
+    let state = system_region.state().clone();
+    let block_archive = system_region.block_archive().clone();
+    let applied_state_accessor = system_region.applied_state().clone();
+    let consensus_transport = system_region.consensus_transport().cloned();
+    let events_db = system_region.events_db().cloned().ok_or_else(|| BootstrapError::Database {
+        message: "system region missing events_db".to_string(),
+    })?;
+
     let snapshot_dir = storage_manager.snapshot_dir(inferadb_ledger_types::Region::GLOBAL);
     let snapshot_manager = Arc::new(SnapshotManager::new(snapshot_dir.clone(), 5));
     let snapshot_manager_for_backup = snapshot_manager.clone();
 
     // Construct tiered snapshot manager wrapping the local (hot) snapshot directory.
-    // When warm_url is configured, old snapshots are periodically demoted to object storage.
     let tiered_config = config.tiered_storage.clone();
     let demote_interval_secs = tiered_config.demote_interval_secs;
     let tiered_manager: Option<Arc<TieredSnapshotManager>> =
@@ -310,12 +536,9 @@ pub async fn bootstrap_node(
         };
 
     // Create runtime config handle for hot-reloadable settings.
-    // Services read from this handle on every request via lock-free ArcSwap::load().
     let runtime_config = RuntimeConfigHandle::default();
 
     // Create backup manager if configured.
-    // The manager creates the destination directory and is shared between
-    // the admin service (on-demand RPCs) and the background job (automated backups).
     let backup_manager = config
         .backup
         .as_ref()
@@ -327,30 +550,9 @@ pub async fn bootstrap_node(
         .transpose()?;
 
     // Create handler-phase event handle for gRPC service denial recording.
-    // Shared across WriteService, AdminService, and SagaOrchestrator via Clone.
     let event_config = Arc::new(config.events.clone());
     let event_handle = EventHandle::new(Arc::clone(&events_db), event_config, node_id);
     let event_handle_for_saga = Some(event_handle.clone());
-
-    // Create RaftManager and register the externally-created system region.
-    // This bridges the existing manual bootstrap flow with the unified LedgerServer
-    // that requires a manager.
-    let raft_manager_config =
-        RaftManagerConfig::new(data_dir.to_path_buf(), node_id, config.region);
-    let manager = Arc::new(RaftManager::new(raft_manager_config));
-    manager
-        .register_external_region(
-            inferadb_ledger_types::Region::GLOBAL,
-            raft.clone(),
-            state.clone(),
-            block_archive.clone(),
-            applied_state_accessor.clone(),
-            block_announcements,
-            commitment_buffer,
-        )
-        .map_err(|e| BootstrapError::Raft {
-            message: format!("failed to register system region: {e}"),
-        })?;
 
     // Create TokenServiceConfig when a key_manager is provided (enables TokenService).
     let token_service_config =
@@ -361,8 +563,6 @@ pub async fn bootstrap_node(
         });
 
     // Create rate limiter and hot key detector.
-    // Uses config-provided limits if available, otherwise hardcoded defaults.
-    // Runtime reconfiguration updates the atomic fields via UpdateConfig RPC.
     let rate_limiter = if let Some(ref rl) = config.rate_limit {
         Arc::new(RateLimiter::new(
             rl.client_burst,
@@ -378,12 +578,11 @@ pub async fn bootstrap_node(
     let hot_key_config = inferadb_ledger_types::config::HotKeyConfig::default();
     let hot_key_detector = Arc::new(HotKeyDetector::new(&hot_key_config));
 
-    // Extract proposal_timeout from Raft config (otherwise LedgerServer uses its 30s default).
+    // Extract proposal_timeout from Raft config.
     let proposal_timeout =
         config.raft.as_ref().map(|r| r.proposal_timeout).unwrap_or(Duration::from_secs(30));
 
     // Parse email blinding key from hex if configured.
-    // When absent, onboarding RPCs (email verification, registration) return FAILED_PRECONDITION.
     let email_blinding_key = config
         .email_blinding_key
         .as_deref()
@@ -397,13 +596,29 @@ pub async fn bootstrap_node(
         })
         .transpose()?;
 
+    // Seed the peer address map with the local node's advertise address.
+    let peer_addresses = manager.peer_addresses().clone();
+    peer_addresses.insert(node_id, config.advertise_addr());
+
+    // Create init sender for fresh nodes. On restart (cluster_id exists), this
+    // is None — the AdminService init_cluster handler returns AlreadyInitialized.
+    // The watch channel receiver stays in bootstrap for the fresh path; the
+    // sender is shared with AdminService (InitCluster RPC) and seed polling.
+    let (init_tx, init_rx) = if cluster_id.is_none() {
+        let (tx, rx) = tokio::sync::watch::channel::<Option<u64>>(None);
+        (Some(Arc::new(tx)), Some(rx))
+    } else {
+        (None, None)
+    };
+
     let server = LedgerServer::builder()
         .manager(manager.clone())
         .addr(config.listen_addr)
+        .advertise_addr(config.advertise.clone())
         .max_concurrent(config.max_concurrent)
         .timeout_secs(config.timeout_secs)
         .health_state(health_state.clone())
-        .shutdown_rx(Some(shutdown_rx))
+        .shutdown_rx(Some(shutdown_rx.clone()))
         .runtime_config(Some(runtime_config.clone()))
         .organization_rate_limiter(Some(rate_limiter))
         .hot_key_detector(Some(hot_key_detector))
@@ -414,12 +629,16 @@ pub async fn bootstrap_node(
         .token_service(token_service_config)
         .proposal_timeout(proposal_timeout)
         .health_check_config(config.health_check.clone())
-        .max_read_forward_lag(config.max_read_forward_lag)
         .enable_grpc_reflection(config.enable_grpc_reflection)
         .email_blinding_key(email_blinding_key)
+        .peer_addresses(Some(peer_addresses))
+        .consensus_transport(consensus_transport.clone())
+        .init_sender(init_tx.clone())
+        .cluster_id(cluster_id)
+        .peer_liveness(Some(peer_liveness.clone()))
         .build();
-    // Wire backup support post-construction because bon's type-state builders
-    // don't support conditional field setting (each setter changes the builder type).
+
+    // Wire backup support post-construction.
     let server = if let Some(ref mgr) = backup_manager {
         server.with_backup(mgr.clone(), snapshot_manager_for_backup.clone())
     } else {
@@ -427,214 +646,482 @@ pub async fn bootstrap_node(
     };
 
     // Retain the saga cell so we can fill it after the saga orchestrator starts.
-    // The gRPC server starts before the orchestrator — handlers return UNAVAILABLE
-    // until the cell is set.
     let saga_cell = server.saga_cell();
 
-    // Start the gRPC server BEFORE coordination so peers can reach us.
-    // Services gracefully degrade on uninitialized Raft: WriteService returns
-    // UNAVAILABLE, ReadService works, HealthService reports Degraded.
+    // Start the gRPC server.
     let server_addr = config.listen_addr;
-    let server_handle =
-        tokio::spawn(async move { server.serve().await.map_err(|e| e.to_string()) });
+    let server_handle = tokio::spawn(async move {
+        match server.serve().await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                tracing::error!(error = %e, "gRPC server exited with error");
+                Err(e.to_string())
+            },
+        }
+    });
 
-    // Wait for TCP listener to bind before proceeding to coordination.
+    // Wait for TCP listener to bind before proceeding.
+    wait_for_tcp_ready(&server_handle, server_addr).await?;
+
+    if cluster_id.is_some() {
+        // === Restart path ===
+        // Node was previously initialized. Start all background jobs and mark ready.
+        tracing::info!(
+            node_id,
+            cluster_id = cluster_id.unwrap_or(0),
+            "Restarting initialized node"
+        );
+
+        let jobs = start_background_jobs(StartJobsInput {
+            config,
+            data_dir,
+            node_id,
+            health_state: &health_state,
+            handle: &handle,
+            state: &state,
+            block_archive: &block_archive,
+            applied_state_accessor: &applied_state_accessor,
+            events_db: &events_db,
+            snapshot_manager,
+            snapshot_manager_for_backup,
+            backup_manager,
+            tiered_manager,
+            demote_interval_secs,
+            event_handle_for_saga,
+            saga_cell,
+            manager: &manager,
+            key_manager,
+            storage_manager: &storage_manager,
+        })?;
+
+        health_state.mark_ready();
+        tracing::info!(node_id, "Node is ready");
+
+        Ok(BootstrappedNode {
+            handle,
+            state,
+            manager,
+            server_handle,
+            runtime_config,
+            gc_handle: jobs.gc_handle,
+            compactor_handle: jobs.compactor_handle,
+            recovery_handle: jobs.recovery_handle,
+            learner_refresh_handle: jobs.learner_refresh_handle,
+            resource_metrics_handle: jobs.resource_metrics_handle,
+            backup_handle: jobs.backup_handle,
+            events_gc_handle: jobs.events_gc_handle,
+            saga_handle: jobs.saga_handle,
+            saga_orchestrator_handle: jobs.saga_orchestrator_handle,
+            orphan_cleanup_handle: jobs.orphan_cleanup_handle,
+            integrity_scrub_handle: jobs.integrity_scrub_handle,
+            org_purge_handle: jobs.org_purge_handle,
+            token_maintenance_handle: jobs.token_maintenance_handle,
+            invite_maintenance_handle: jobs.invite_maintenance_handle,
+            post_erasure_compaction_handle: jobs.post_erasure_compaction_handle,
+            snapshot_demotion_handle: jobs.snapshot_demotion_handle,
+        })
+    } else {
+        // === Fresh node path ===
+        // Start the gRPC server but leave the node uninitialized. The node waits
+        // for an `InitCluster` RPC (or seed discovery) to generate and persist a
+        // cluster_id before starting background jobs.
+        tracing::info!(node_id, "Node started in uninitialized state");
+
+        // Extract the init channel created before the server was spawned.
+        // The sender was wired into AdminService via LedgerServer; the receiver
+        // stays here so we can wait for initialization.
+        let (init_tx, mut init_rx) = match (init_tx, init_rx) {
+            (Some(tx), Some(rx)) => (tx, rx),
+            _ => {
+                return Err(BootstrapError::Initialize {
+                    message: "init channel not created for fresh node path".to_string(),
+                });
+            },
+        };
+
+        // If --join seeds are provided, spawn a background polling loop that
+        // discovers an initialized cluster and joins it automatically.
+        if let Some(ref seeds) = config.join
+            && !seeds.is_empty()
+        {
+            let seeds_clone = seeds.clone();
+            let signal = init_tx.clone();
+            let my_addr = config.advertise_addr();
+            let handle_clone = handle.clone();
+            let consensus_transport_clone = consensus_transport.clone();
+            let data_dir_clone = data_dir.to_path_buf();
+            tokio::spawn(async move {
+                seed_polling_loop(
+                    seeds_clone,
+                    signal,
+                    node_id,
+                    my_addr,
+                    handle_clone,
+                    consensus_transport_clone,
+                    data_dir_clone,
+                )
+                .await;
+            });
+        }
+
+        // Wait for initialization (via InitCluster RPC or seed discovery) or shutdown.
+        let mut shutdown_wait = shutdown_rx.clone();
+        tokio::select! {
+            result = init_rx.wait_for(|v| v.is_some()) => {
+                match result {
+                    Ok(guard) => {
+                        if let Some(cid) = *guard {
+                            tracing::info!(node_id, cluster_id = cid, "Initialization complete");
+                        }
+                    }
+                    Err(_) => {
+                        // All senders dropped without initializing — treat as shutdown.
+                        tracing::info!(node_id, "Init channel closed before initialization");
+                        return Err(BootstrapError::Initialize {
+                            message: "init channel closed before initialization".to_string(),
+                        });
+                    }
+                }
+            }
+            _ = async { let _ = shutdown_wait.wait_for(|&v| v).await; } => {
+                tracing::info!(node_id, "Shutdown received before initialization");
+                return Err(BootstrapError::Initialize {
+                    message: "shutdown received before initialization".to_string(),
+                });
+            }
+        }
+
+        // Now start background jobs (same as restart path).
+        let jobs = start_background_jobs(StartJobsInput {
+            config,
+            data_dir,
+            node_id,
+            health_state: &health_state,
+            handle: &handle,
+            state: &state,
+            block_archive: &block_archive,
+            applied_state_accessor: &applied_state_accessor,
+            events_db: &events_db,
+            snapshot_manager,
+            snapshot_manager_for_backup,
+            backup_manager,
+            tiered_manager,
+            demote_interval_secs,
+            event_handle_for_saga,
+            saga_cell,
+            manager: &manager,
+            key_manager,
+            storage_manager: &storage_manager,
+        })?;
+
+        health_state.mark_ready();
+        tracing::info!(node_id, "Node is ready");
+
+        Ok(BootstrappedNode {
+            handle,
+            state,
+            manager,
+            server_handle,
+            runtime_config,
+            gc_handle: jobs.gc_handle,
+            compactor_handle: jobs.compactor_handle,
+            recovery_handle: jobs.recovery_handle,
+            learner_refresh_handle: jobs.learner_refresh_handle,
+            resource_metrics_handle: jobs.resource_metrics_handle,
+            backup_handle: jobs.backup_handle,
+            events_gc_handle: jobs.events_gc_handle,
+            saga_handle: jobs.saga_handle,
+            saga_orchestrator_handle: jobs.saga_orchestrator_handle,
+            orphan_cleanup_handle: jobs.orphan_cleanup_handle,
+            integrity_scrub_handle: jobs.integrity_scrub_handle,
+            org_purge_handle: jobs.org_purge_handle,
+            token_maintenance_handle: jobs.token_maintenance_handle,
+            invite_maintenance_handle: jobs.invite_maintenance_handle,
+            post_erasure_compaction_handle: jobs.post_erasure_compaction_handle,
+            snapshot_demotion_handle: jobs.snapshot_demotion_handle,
+        })
+    }
+}
+
+/// Polls seed nodes to discover an initialized cluster and join it.
+///
+/// Iterates over all seed addresses, calling `GetNodeInfo` on each. When a seed
+/// with a non-zero `cluster_id` is found, sends a `JoinCluster` RPC to that seed,
+/// persists the cluster ID locally, and signals bootstrap to proceed.
+async fn seed_polling_loop(
+    seeds: Vec<String>,
+    init_tx: Arc<tokio::sync::watch::Sender<Option<u64>>>,
+    my_node_id: u64,
+    my_address: String,
+    _handle: Arc<ConsensusHandle>,
+    consensus_transport: Option<inferadb_ledger_raft::GrpcConsensusTransport>,
+    data_dir: std::path::PathBuf,
+) {
+    use crate::discovery::parse_seed_addresses;
+
+    let addrs = parse_seed_addresses(&seeds);
+    if addrs.is_empty() {
+        tracing::warn!("No valid seed addresses parsed from --join, seed polling disabled");
+        return;
+    }
+
+    let rpc_timeout = Duration::from_secs(5);
+
+    loop {
+        for addr in &addrs {
+            let info = match crate::discovery::discover_node_info(*addr, rpc_timeout).await {
+                Some(info) if info.cluster_id != 0 => info,
+                _ => continue,
+            };
+
+            tracing::info!(
+                seed = %addr,
+                cluster_id = info.cluster_id,
+                seed_node_id = info.node_id,
+                "Discovered initialized cluster, joining"
+            );
+
+            // Register a transport channel for the seed so Raft replication can reach it.
+            if let Some(ref transport) = consensus_transport
+                && let Ok(ep) = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+            {
+                transport.set_peer(info.node_id, ep.connect_lazy());
+            }
+
+            // Send JoinCluster RPC to the seed node.
+            let endpoint = format!("http://{addr}");
+            let channel = match tonic::transport::Channel::from_shared(endpoint) {
+                Ok(ep) => match ep.connect().await {
+                    Ok(ch) => ch,
+                    Err(e) => {
+                        tracing::warn!(seed = %addr, error = %e, "Failed to connect for JoinCluster");
+                        continue;
+                    },
+                },
+                Err(e) => {
+                    tracing::warn!(seed = %addr, error = %e, "Invalid seed endpoint");
+                    continue;
+                },
+            };
+
+            let mut client =
+                inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::new(
+                    channel,
+                );
+            let join_result = client
+                .join_cluster(inferadb_ledger_proto::proto::JoinClusterRequest {
+                    node_id: my_node_id,
+                    address: my_address.clone(),
+                })
+                .await;
+
+            match join_result {
+                Ok(resp) => {
+                    let inner = resp.into_inner();
+                    if inner.success {
+                        tracing::info!(cluster_id = info.cluster_id, "Successfully joined cluster");
+                    } else if inner.message.contains("already a voter") {
+                        tracing::info!(
+                            cluster_id = info.cluster_id,
+                            "Already a member of the cluster"
+                        );
+                    } else {
+                        tracing::warn!(
+                            message = %inner.message,
+                            "JoinCluster returned non-success, retrying"
+                        );
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(seed = %addr, error = %e, "JoinCluster RPC failed, retrying");
+                    continue;
+                },
+            }
+
+            // Persist cluster_id and signal bootstrap to proceed.
+            if let Err(e) = crate::cluster_id::write_cluster_id(&data_dir, info.cluster_id) {
+                tracing::error!(error = %e, "Failed to persist cluster_id");
+            }
+            let _ = init_tx.send(Some(info.cluster_id));
+            return;
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// Waits for the gRPC server to accept TCP connections.
+///
+/// Polls the server address for up to 30 seconds. Returns an error if the
+/// server exits early (bind failure) or fails to accept connections in time.
+///
+/// The generous timeout accounts for debug-mode builds where constructing 13+
+/// gRPC services with interceptors and layers can take several seconds,
+/// especially when multiple nodes start on the same machine simultaneously.
+async fn wait_for_tcp_ready(
+    server_handle: &tokio::task::JoinHandle<Result<(), String>>,
+    server_addr: std::net::SocketAddr,
+) -> Result<(), BootstrapError> {
     let tcp_start = Instant::now();
+    let timeout = Duration::from_secs(30);
     let mut tcp_ready = false;
-    while tcp_start.elapsed() < Duration::from_secs(5) {
+    while tcp_start.elapsed() < timeout {
         if server_handle.is_finished() {
-            // Server exited early — likely a bind failure
-            let result =
-                server_handle.await.unwrap_or_else(|e| Err(format!("server task panicked: {e}")));
+            // Server exited early — likely a bind failure. We cannot await a
+            // borrowed JoinHandle, so report the early exit without consuming it.
             return Err(BootstrapError::Server {
-                message: result.err().unwrap_or_else(|| "server exited unexpectedly".to_string()),
+                message: format!("server exited before accepting connections on {server_addr}"),
             });
         }
         if tokio::net::TcpStream::connect(server_addr).await.is_ok() {
             tcp_ready = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     if !tcp_ready {
-        server_handle.abort();
         return Err(BootstrapError::Server {
-            message: format!("server did not accept TCP connections on {server_addr} within 5s"),
+            message: format!(
+                "server did not accept TCP connections on {server_addr} within {}s",
+                timeout.as_secs()
+            ),
         });
     }
+    Ok(())
+}
 
-    // Determine whether to bootstrap based on existing state and bootstrap_expect.
-    // The gRPC server is already running, so peers can reach us via GetNodeInfo.
-    let coordination_result: Result<(), BootstrapError> = async {
-        if is_initialized {
-            tracing::info!("Existing Raft state found, resuming");
-        } else if config.is_join_mode() {
-            // Join mode: wait to be added to existing cluster via AdminService
-            tracing::info!(
-                node_id,
-                "Join mode (bootstrap_expect=0): waiting to be added via AdminService"
-            );
-            // Note: We intentionally do NOT bootstrap or call discovery here.
-            // The calling code is responsible for adding this node to the cluster.
-        } else if config.is_single_node() {
-            // Single-node mode: bootstrap immediately without coordination
-            tracing::info!(node_id, "Bootstrapping single-node cluster (bootstrap_expect=1)");
-            bootstrap_cluster(&raft, node_id, &config.listen_addr).await?;
-        } else {
-            // Fresh node - use coordinated bootstrap to determine action
-            let my_address = config.listen_addr.to_string();
+/// Input parameters for starting all background jobs.
+struct StartJobsInput<'a> {
+    config: &'a Config,
+    data_dir: &'a std::path::Path,
+    node_id: u64,
+    health_state: &'a inferadb_ledger_raft::HealthState,
+    handle: &'a Arc<ConsensusHandle>,
+    state: &'a Arc<StateLayer<FileBackend>>,
+    block_archive: &'a Arc<BlockArchive<FileBackend>>,
+    applied_state_accessor: &'a AppliedStateAccessor,
+    events_db: &'a Arc<EventsDatabase<FileBackend>>,
+    snapshot_manager: Arc<SnapshotManager>,
+    snapshot_manager_for_backup: Arc<SnapshotManager>,
+    backup_manager: Option<Arc<BackupManager>>,
+    tiered_manager: Option<Arc<TieredSnapshotManager>>,
+    demote_interval_secs: u64,
+    event_handle_for_saga: Option<EventHandle<FileBackend>>,
+    saga_cell: Arc<tokio::sync::OnceCell<SagaOrchestratorHandle>>,
+    manager: &'a Arc<RaftManager>,
+    key_manager: Option<Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>>,
+    storage_manager: &'a RegionStorageManager,
+}
 
-            let decision = coordinate_bootstrap(node_id, &my_address, config)
-                .await
-                .map_err(|e| BootstrapError::Timeout { message: e.to_string() })?;
+/// Output handles from starting all background jobs.
+struct StartJobsOutput {
+    gc_handle: tokio::task::JoinHandle<()>,
+    compactor_handle: tokio::task::JoinHandle<()>,
+    recovery_handle: tokio::task::JoinHandle<()>,
+    learner_refresh_handle: tokio::task::JoinHandle<()>,
+    resource_metrics_handle: tokio::task::JoinHandle<()>,
+    backup_handle: Option<tokio::task::JoinHandle<()>>,
+    events_gc_handle: Option<tokio::task::JoinHandle<()>>,
+    saga_handle: tokio::task::JoinHandle<()>,
+    saga_orchestrator_handle: SagaOrchestratorHandle,
+    orphan_cleanup_handle: tokio::task::JoinHandle<()>,
+    integrity_scrub_handle: tokio::task::JoinHandle<()>,
+    org_purge_handle: tokio::task::JoinHandle<()>,
+    token_maintenance_handle: tokio::task::JoinHandle<()>,
+    invite_maintenance_handle: tokio::task::JoinHandle<()>,
+    post_erasure_compaction_handle: tokio::task::JoinHandle<()>,
+    snapshot_demotion_handle: Option<tokio::task::JoinHandle<()>>,
+}
 
-            match decision {
-                BootstrapDecision::Bootstrap { initial_members } => {
-                    if initial_members.len() == 1 {
-                        // Single-node bootstrap
-                        tracing::info!(node_id, "Bootstrapping new single-node cluster");
-                        bootstrap_cluster(&raft, node_id, &config.listen_addr).await?;
-                    } else {
-                        // Multi-node coordinated bootstrap - this node has lowest ID
-                        tracing::info!(
-                            node_id,
-                            member_count = initial_members.len(),
-                            "Bootstrapping new multi-node cluster (lowest ID)"
-                        );
-                        bootstrap_cluster_multi(&raft, initial_members).await?;
-                    }
-                },
-                BootstrapDecision::WaitForJoin { leader_addr } => {
-                    // Another node has the lowest ID and will bootstrap
-                    tracing::info!(
-                        node_id,
-                        leader = %leader_addr,
-                        "Waiting for cluster bootstrap by lowest-ID node"
-                    );
-                    let timeout = Duration::from_secs(config.peers_timeout_secs);
-                    let poll_interval = Duration::from_secs(config.peers_poll_secs);
-                    wait_for_cluster_join(&raft, timeout, poll_interval).await?;
-                },
-                BootstrapDecision::JoinExisting { via_peer } => {
-                    // Existing cluster found - wait to be added
-                    tracing::info!(
-                        node_id,
-                        peer = %via_peer,
-                        "Found existing cluster, waiting to be added via AdminService"
-                    );
-                    let timeout = Duration::from_secs(config.peers_timeout_secs);
-                    let poll_interval = Duration::from_secs(config.peers_poll_secs);
-                    wait_for_cluster_join(&raft, timeout, poll_interval).await?;
-                },
-            }
-        }
-        Ok(())
-    }
-    .await;
-
-    // If coordination failed, abort the server task before returning the error.
-    if let Err(e) = coordination_result {
-        server_handle.abort();
-        return Err(e);
-    }
-
-    // Register background jobs with the watchdog (if attached to health state).
-    // Each job gets an AtomicU64 handle that it writes to on every cycle.
-    // The liveness probe detects stuck jobs by checking these heartbeats.
-    let watchdog = health_state.watchdog();
+/// Starts all background jobs for an initialized node.
+///
+/// This is extracted from the main bootstrap function to share between the
+/// restart path and (in the future) the `InitCluster` handler.
+fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, BootstrapError> {
+    let watchdog = input.health_state.watchdog();
 
     let gc_handle = TtlGarbageCollector::builder()
-        .raft(raft.clone())
-        .node_id(node_id)
-        .state(state.clone())
-        .applied_state(applied_state_accessor.clone())
+        .handle(input.handle.clone())
+        .state(input.state.clone())
+        .applied_state(input.applied_state_accessor.clone())
         .watchdog_handle(watchdog.map(|w| w.register("ttl_gc", 60)))
         .build()
         .start();
     tracing::info!("Started TTL garbage collector");
 
-    // Start block compactor for COMPACTED retention mode
     let compactor_handle = BlockCompactor::builder()
-        .raft(raft.clone())
-        .node_id(node_id)
-        .block_archive(block_archive_for_compactor)
-        .applied_state(applied_state_accessor.clone())
+        .handle(input.handle.clone())
+        .block_archive(input.block_archive.clone())
+        .applied_state(input.applied_state_accessor.clone())
         .watchdog_handle(watchdog.map(|w| w.register("block_compactor", 300)))
         .build()
         .start();
     tracing::info!("Started block compactor");
 
-    // Start auto-recovery job for detecting and recovering diverged vaults
-    // Circuit breaker with bounded retries
     let recovery_handle = AutoRecoveryJob::builder()
-        .raft(raft.clone())
-        .node_id(node_id)
-        .applied_state(applied_state_accessor.clone())
-        .state(state.clone())
-        .block_archive(Some(block_archive_for_recovery))
-        .snapshot_manager(Some(snapshot_manager))
+        .handle(input.handle.clone())
+        .node_id(input.node_id)
+        .applied_state(input.applied_state_accessor.clone())
+        .state(input.state.clone())
+        .block_archive(Some(input.block_archive.clone()))
+        .snapshot_manager(Some(input.snapshot_manager))
         .watchdog_handle(watchdog.map(|w| w.register("auto_recovery", 30)))
         .build()
         .start();
     tracing::info!("Started auto-recovery job with snapshot support");
 
-    // Start learner refresh job for keeping learner state synchronized
-    // Background polling of voters for fresh state
     let learner_refresh_handle = LearnerRefreshJob::builder()
-        .raft(raft.clone())
-        .node_id(node_id)
-        .applied_state(applied_state_accessor.clone())
+        .handle(input.handle.clone())
+        .applied_state(input.applied_state_accessor.clone())
+        .peer_addresses(Some(input.manager.peer_addresses().clone()))
         .watchdog_handle(watchdog.map(|w| w.register("learner_refresh", 5)))
         .build()
         .start();
     tracing::info!("Started learner refresh job");
 
-    // Start resource saturation metrics collector
     let snapshot_dir_for_metrics =
-        storage_manager.snapshot_dir(inferadb_ledger_types::Region::GLOBAL);
+        input.storage_manager.snapshot_dir(inferadb_ledger_types::Region::GLOBAL);
     let resource_metrics_handle = ResourceMetricsCollector::builder()
-        .state(state.clone())
-        .data_dir(data_dir.to_path_buf())
+        .state(input.state.clone())
+        .data_dir(input.data_dir.to_path_buf())
         .snapshot_dir(snapshot_dir_for_metrics)
-        .region(config.region.as_str())
+        .region(input.config.region.as_str())
         .watchdog_handle(watchdog.map(|w| w.register("resource_metrics", 30)))
         .build()
         .start();
     tracing::info!("Started resource metrics collector");
 
-    // Start automated backup job if configured and enabled
-    let backup_handle =
-        if let (Some(backup_config), Some(mgr)) = (config.backup.as_ref(), backup_manager) {
-            if backup_config.enabled {
-                let job = BackupJob::builder()
-                    .raft(raft.clone())
-                    .node_id(node_id)
-                    .snapshot_manager(snapshot_manager_for_backup)
-                    .backup_manager(mgr)
-                    .interval(Duration::from_secs(backup_config.interval_secs))
-                    .build();
-                let handle = job.start();
-                tracing::info!(
-                    interval_secs = backup_config.interval_secs,
-                    destination = %backup_config.destination,
-                    retention = backup_config.retention_count,
-                    "Started automated backup job"
-                );
-                Some(handle)
-            } else {
-                tracing::info!("Backup configured but not enabled, skipping automated backup job");
-                None
-            }
+    let backup_handle = if let (Some(backup_config), Some(mgr)) =
+        (input.config.backup.as_ref(), input.backup_manager)
+    {
+        if backup_config.enabled {
+            let job = BackupJob::builder()
+                .handle(input.handle.clone())
+                .snapshot_manager(input.snapshot_manager_for_backup)
+                .backup_manager(mgr)
+                .interval(Duration::from_secs(backup_config.interval_secs))
+                .build();
+            let handle = job.start();
+            tracing::info!(
+                interval_secs = backup_config.interval_secs,
+                destination = %backup_config.destination,
+                retention = backup_config.retention_count,
+                "Started automated backup job"
+            );
+            Some(handle)
         } else {
+            tracing::info!("Backup configured but not enabled, skipping automated backup job");
             None
-        };
+        }
+    } else {
+        None
+    };
 
-    // Start events garbage collector for TTL-based event expiry.
-    // Runs on ALL nodes (not leader-only) because events.db is node-local.
-    let events_gc_handle = if config.events.enabled {
+    let events_gc_handle = if input.config.events.enabled {
         let gc = EventsGarbageCollector::builder()
-            .events_db(events_db)
-            .config(config.events.clone())
+            .events_db(input.events_db.clone())
+            .config(input.config.events.clone())
             .watchdog_handle(watchdog.map(|w| w.register("events_gc", 300)))
             .build();
         let handle = gc.start();
@@ -644,96 +1131,76 @@ pub async fn bootstrap_node(
         None
     };
 
-    // Start saga orchestrator for cross-organization operations (leader-only)
     let (saga_handle, saga_orchestrator_handle) = SagaOrchestrator::builder()
-        .raft(raft.clone())
-        .node_id(node_id)
-        .state(state.clone())
-        .event_handle(event_handle_for_saga)
-        .interval(Duration::from_secs(config.saga.poll_interval_secs))
+        .handle(input.handle.clone())
+        .node_id(input.node_id)
+        .state(input.state.clone())
+        .event_handle(input.event_handle_for_saga)
+        .interval(Duration::from_secs(input.config.saga.poll_interval_secs))
         .watchdog_handle(watchdog.map(|w| w.register("saga_orchestrator", 60)))
-        .manager(Some(manager.clone()))
-        .key_manager(key_manager)
+        .manager(Some(input.manager.clone()))
+        .key_manager(input.key_manager)
         .build()
         .start();
     tracing::info!("Started saga orchestrator");
-    // Fill the saga cell so service handlers can submit sagas.
-    let _ = saga_cell.set(saga_orchestrator_handle.clone());
+    let _ = input.saga_cell.set(saga_orchestrator_handle.clone());
 
-    // Start orphan cleanup job for removing stale membership records (leader-only)
     let orphan_cleanup_handle = OrphanCleanupJob::builder()
-        .raft(raft.clone())
-        .node_id(node_id)
-        .state(state.clone())
-        .applied_state(applied_state_accessor)
-        .interval(Duration::from_secs(config.cleanup.interval_secs))
+        .handle(input.handle.clone())
+        .state(input.state.clone())
+        .applied_state(input.applied_state_accessor.clone())
+        .interval(Duration::from_secs(input.config.cleanup.interval_secs))
         .watchdog_handle(watchdog.map(|w| w.register("orphan_cleanup", 7200)))
         .build()
         .start();
     tracing::info!("Started orphan cleanup job");
 
-    // Start integrity scrubber for background page checksum verification (all nodes)
     let integrity_scrub_handle = IntegrityScrubberJob::builder()
-        .state(state.clone())
-        .interval(Duration::from_secs(config.integrity.scrub_interval_secs))
-        .pages_per_cycle_percent(config.integrity.pages_per_cycle_percent)
+        .state(input.state.clone())
+        .interval(Duration::from_secs(input.config.integrity.scrub_interval_secs))
+        .pages_per_cycle_percent(input.config.integrity.pages_per_cycle_percent)
         .watchdog_handle(watchdog.map(|w| w.register("integrity_scrub", 7200)))
         .build()
         .start();
     tracing::info!("Started integrity scrubber");
 
-    // Start organization purge job for removing soft-deleted organizations
-    // after their retention cooldown expires (leader-only)
     let org_purge_handle = OrganizationPurgeJob::builder()
-        .raft(raft.clone())
-        .node_id(node_id)
-        .state(state.clone())
-        .manager(Some(manager.clone()))
+        .handle(input.handle.clone())
+        .state(input.state.clone())
+        .manager(Some(input.manager.clone()))
         .watchdog_handle(watchdog.map(|w| w.register("org_purge", 7200)))
         .build()
         .start();
     tracing::info!("Started organization purge job");
 
-    // Start token maintenance job for expired token cleanup and signing key lifecycle
     let token_maintenance_handle = TokenMaintenanceJob::builder()
-        .raft(raft.clone())
-        .node_id(node_id)
-        .state(state.clone())
-        .interval(Duration::from_secs(config.token_maintenance_interval_secs))
+        .handle(input.handle.clone())
+        .state(input.state.clone())
+        .interval(Duration::from_secs(input.config.token_maintenance_interval_secs))
         .watchdog_handle(watchdog.map(|w| w.register("token_maintenance", 600)))
         .build()
         .start();
     tracing::info!("Started token maintenance job");
 
-    // Start invite maintenance job for invitation expiration and retention reaping
     let invite_maintenance_handle = InviteMaintenanceJob::builder()
-        .raft(raft.clone())
-        .node_id(node_id)
-        .state(state.clone())
-        .manager(Some(manager.clone()))
+        .handle(input.handle.clone())
+        .state(input.state.clone())
+        .manager(Some(input.manager.clone()))
         .watchdog_handle(watchdog.map(|w| w.register("invite_maintenance", 600)))
         .build()
         .start();
     tracing::info!("Started invite maintenance job");
 
-    // Start post-erasure compaction job to enforce maximum Raft log retention.
-    // Triggers proactive snapshots on all Raft groups (GLOBAL + regional) when
-    // time since last snapshot exceeds the configured threshold, ensuring
-    // encrypted PII entries are compacted within the retention window.
     let post_erasure_compaction_handle = PostErasureCompactionJob::builder()
-        .node_id(node_id)
-        .raft(raft.clone())
-        .manager(Some(manager.clone()))
+        .handle(input.handle.clone())
+        .manager(Some(input.manager.clone()))
         .watchdog_handle(watchdog.map(|w| w.register("post_erasure_compaction", 600)))
         .build()
         .start();
     tracing::info!("Started post-erasure compaction job");
 
-    // Start snapshot demotion task if warm tier is configured.
-    // Periodically moves old snapshots from local SSD to object storage.
-    // S3 unavailability degrades gracefully: logs the error and retries next cycle.
-    let snapshot_demotion_handle = tiered_manager.map(|mgr| {
-        let interval = Duration::from_secs(demote_interval_secs);
+    let snapshot_demotion_handle = input.tiered_manager.map(|mgr| {
+        let interval = Duration::from_secs(input.demote_interval_secs);
         let handle = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             loop {
@@ -752,15 +1219,14 @@ pub async fn bootstrap_node(
                 }
             }
         });
-        tracing::info!(interval_secs = demote_interval_secs, "Started snapshot demotion task");
+        tracing::info!(
+            interval_secs = input.demote_interval_secs,
+            "Started snapshot demotion task"
+        );
         handle
     });
 
-    Ok(BootstrappedNode {
-        raft,
-        state,
-        manager,
-        server_handle,
+    Ok(StartJobsOutput {
         gc_handle,
         compactor_handle,
         recovery_handle,
@@ -768,7 +1234,6 @@ pub async fn bootstrap_node(
         resource_metrics_handle,
         backup_handle,
         events_gc_handle,
-        runtime_config,
         saga_handle,
         saga_orchestrator_handle,
         orphan_cleanup_handle,
@@ -779,107 +1244,6 @@ pub async fn bootstrap_node(
         post_erasure_compaction_handle,
         snapshot_demotion_handle,
     })
-}
-
-/// Bootstraps a new single-node cluster with this node as the initial member.
-///
-/// Additional nodes can join dynamically via discovery.
-async fn bootstrap_cluster(
-    raft: &Raft<LedgerTypeConfig>,
-    node_id: u64,
-    listen_addr: &SocketAddr,
-) -> Result<(), BootstrapError> {
-    let mut members: BTreeMap<LedgerNodeId, BasicNode> = BTreeMap::new();
-    members.insert(node_id, BasicNode { addr: listen_addr.to_string() });
-
-    raft.initialize(members).await.map_err(|e| BootstrapError::Initialize {
-        message: format!("failed to initialize: {e}"),
-    })?;
-
-    tracing::info!(node_id = node_id, "Bootstrapped new single-node cluster");
-
-    Ok(())
-}
-
-/// Bootstraps a new cluster with multiple initial members.
-///
-/// This is used during coordinated bootstrap when multiple nodes start simultaneously.
-/// The node with the lowest Snowflake ID calls this with all discovered members.
-///
-/// # Arguments
-///
-/// * `raft` - The Raft instance to initialize
-/// * `initial_members` - List of (node_id, address) pairs for all initial members
-async fn bootstrap_cluster_multi(
-    raft: &Raft<LedgerTypeConfig>,
-    initial_members: Vec<(u64, String)>,
-) -> Result<(), BootstrapError> {
-    let mut members: BTreeMap<LedgerNodeId, BasicNode> = BTreeMap::new();
-    for (node_id, addr) in &initial_members {
-        members.insert(*node_id, BasicNode { addr: addr.clone() });
-    }
-
-    let member_ids: Vec<u64> = initial_members.iter().map(|(id, _)| *id).collect();
-    raft.initialize(members).await.map_err(|e| BootstrapError::Initialize {
-        message: format!("failed to initialize: {e}"),
-    })?;
-
-    tracing::info!(members = ?member_ids, "Bootstrapped new multi-node cluster");
-
-    Ok(())
-}
-
-/// Waits for this node to be added to the cluster by another node.
-///
-/// This is used during coordinated bootstrap when this node is not the lowest-ID
-/// node. The lowest-ID node will bootstrap and then add other members via Raft.
-///
-/// # Arguments
-///
-/// * `raft` - The Raft instance to check for membership
-/// * `timeout` - Maximum time to wait before giving up
-/// * `poll_interval` - How often to check cluster membership status
-///
-/// # Returns
-///
-/// Returns `Ok(())` when the node becomes a cluster member, or `Err(Timeout)` if
-/// the timeout expires before joining.
-async fn wait_for_cluster_join(
-    raft: &Raft<LedgerTypeConfig>,
-    timeout: Duration,
-    poll_interval: Duration,
-) -> Result<(), BootstrapError> {
-    let start = Instant::now();
-
-    loop {
-        if start.elapsed() > timeout {
-            return Err(BootstrapError::Timeout {
-                message: format!("timed out waiting to join cluster after {}s", timeout.as_secs()),
-            });
-        }
-
-        let metrics = raft.metrics().borrow().clone();
-
-        // Check if we're now part of a cluster (have a leader or are in voter set)
-        let has_leader = metrics.current_leader.is_some();
-        let is_voter = metrics.membership_config.membership().voter_ids().count() > 0;
-
-        if has_leader || is_voter {
-            tracing::info!(
-                leader = ?metrics.current_leader,
-                term = metrics.current_term,
-                "Successfully joined cluster"
-            );
-            return Ok(());
-        }
-
-        tracing::debug!(
-            elapsed_secs = start.elapsed().as_secs(),
-            timeout_secs = timeout.as_secs(),
-            "Waiting to be added to cluster"
-        );
-        tokio::time::sleep(poll_interval).await;
-    }
 }
 
 /// Parses a hex-encoded 32-byte key string into a fixed-size byte array.
@@ -898,6 +1262,216 @@ fn parse_hex_key(hex_str: &str) -> Result<[u8; 32], String> {
     Ok(bytes)
 }
 
+/// Processes a single region event from the GLOBAL apply worker channel.
+///
+/// Handles `CreateDataRegion` entries (starts local data regions via the
+/// `RaftManager`) and transport reconciliation signals. Extracted from the
+/// region handler task loop so each event can be individually isolated
+/// with `catch_unwind`.
+async fn process_region_event(
+    mgr: &inferadb_ledger_raft::RaftManager,
+    events_config: &inferadb_ledger_types::events::EventConfig,
+    region: inferadb_ledger_types::Region,
+    initial_members: Vec<(u64, String)>,
+) {
+    // Sentinel: Region::GLOBAL signals a transport reconciliation.
+    if region == inferadb_ledger_types::Region::GLOBAL {
+        if let Some((_, tag)) = initial_members.first()
+            && tag == "reconcile_transport"
+        {
+            reconcile_transport_channels(mgr);
+        }
+        return;
+    }
+
+    if mgr.has_region(region) {
+        return;
+    }
+
+    let region_config = inferadb_ledger_raft::RegionConfig::builder()
+        .region(region)
+        .initial_members(initial_members)
+        .events_config(events_config.clone())
+        .build();
+    match mgr.start_data_region(region_config).await {
+        Ok(_) => {
+            tracing::info!(region = region.as_str(), "Data region created via Raft consensus");
+            reconcile_transport_channels(mgr);
+        },
+        Err(e) => {
+            tracing::warn!(
+                region = region.as_str(),
+                error = %e,
+                "Failed to create data region from Raft consensus"
+            );
+        },
+    }
+}
+
+/// Ensures all regions' consensus transports have channels to known peers.
+///
+/// Iterates all peer addresses and registers transport channels for any peers
+/// that are missing from any region's transport. This is especially important
+/// for followers that only have a channel to the leader — without channels to
+/// other voters, leader transfer elections fail (VoteRequest can't reach peers).
+fn reconcile_transport_channels(manager: &inferadb_ledger_raft::RaftManager) {
+    let peer_addrs = manager.peer_addresses().iter_peers();
+    let regions = manager.list_regions();
+
+    for region in regions {
+        let Ok(group) = manager.get_region_group(region) else { continue };
+        let Some(transport) = group.consensus_transport() else { continue };
+        let known_peers = transport.peers();
+        let local_node = group.handle().node_id();
+
+        for (node_id, addr) in &peer_addrs {
+            if *node_id == local_node || known_peers.contains(node_id) {
+                continue;
+            }
+            if let Ok(endpoint) = tonic::transport::Channel::from_shared(format!("http://{addr}")) {
+                transport.set_peer(*node_id, endpoint.connect_lazy());
+            }
+        }
+    }
+}
+
+/// Quorum-based dead node detection. For each node that the GLOBAL leader
+/// hasn't heard from within the timeout, queries other voters to confirm
+/// unreachability before marking Dead.
+async fn check_peer_liveness_quorum(
+    manager: &inferadb_ledger_raft::RaftManager,
+    local_liveness: &parking_lot::RwLock<std::collections::HashMap<u64, std::time::Instant>>,
+    global: &inferadb_ledger_raft::RegionGroup,
+    liveness_config: &inferadb_ledger_raft::LivenessConfig,
+) {
+    let Some(reader) = manager.system_state_reader() else { return };
+    let state = global.handle().shard_state();
+    let local_node_id = manager.config().node_id;
+    let dead_node_timeout = liveness_config.dead_node_timeout;
+    let now = std::time::Instant::now();
+
+    let liveness_snapshot = local_liveness.read().clone();
+
+    for voter in &state.voters {
+        let node_id = voter.0;
+        if node_id == local_node_id {
+            continue; // Never evaluate our own liveness.
+        }
+
+        // Check if we've seen this node recently.
+        let seen_recently = liveness_snapshot
+            .get(&node_id)
+            .is_some_and(|last_seen| now.duration_since(*last_seen) <= dead_node_timeout);
+        if seen_recently {
+            continue;
+        }
+
+        // Check current status — skip if already Decommissioning or Dead.
+        let status = reader.node_status(node_id);
+        if status != inferadb_ledger_raft::types::NodeStatus::Active {
+            continue;
+        }
+
+        // Quorum confirmation: query other voters.
+        let other_voters: Vec<u64> = state
+            .voters
+            .iter()
+            .map(|n| n.0)
+            .filter(|&id| id != local_node_id && id != node_id)
+            .collect();
+
+        let quorum = (state.voters.len() / 2) + 1;
+        let mut unreachable_votes = 1u32; // Count ourselves.
+        let mut reachable_votes = 0u32;
+
+        // Fan out queries concurrently with a wall-clock budget.
+        // Each task returns (voter_id, Option<bool>) so we can update liveness
+        // for voters that responded, regardless of the target's reachability.
+        let mut join_set = tokio::task::JoinSet::new();
+        let target_node_id = node_id;
+        let query_timeout = liveness_config.liveness_query_timeout;
+        for &voter_id in &other_voters {
+            if let Some(addr) = manager.peer_addresses().get(voter_id) {
+                let addr = addr.clone();
+                join_set.spawn(async move {
+                    let result =
+                        query_peer_liveness_rpc(&addr, target_node_id, query_timeout).await;
+                    (voter_id, result)
+                });
+            }
+        }
+
+        let deadline = tokio::time::Instant::now() + liveness_config.liveness_cycle_budget;
+        while let Ok(Some(result)) = tokio::time::timeout_at(deadline, join_set.join_next()).await {
+            if let Ok((responding_voter_id, Some(reachable))) = result {
+                if reachable {
+                    reachable_votes += 1;
+                } else {
+                    unreachable_votes += 1;
+                }
+                // The voter responded — update its liveness regardless of the
+                // target's reachability status. A response proves the querying
+                // voter is alive from our perspective.
+                local_liveness.write().insert(responding_voter_id, std::time::Instant::now());
+            }
+            if unreachable_votes >= quorum as u32 || reachable_votes >= quorum as u32 {
+                break;
+            }
+        }
+
+        if unreachable_votes >= quorum as u32 {
+            tracing::warn!(
+                node_id,
+                unreachable_votes,
+                reachable_votes,
+                "Quorum confirms node unreachable — marking Dead"
+            );
+            let set_dead = inferadb_ledger_raft::types::LedgerRequest::System(
+                inferadb_ledger_raft::types::SystemRequest::SetNodeStatus {
+                    node_id,
+                    status: inferadb_ledger_raft::types::NodeStatus::Dead,
+                },
+            );
+            let _ = global
+                .handle()
+                .propose_and_wait(
+                    inferadb_ledger_raft::types::RaftPayload::system(set_dead),
+                    std::time::Duration::from_secs(5),
+                )
+                .await;
+        } else {
+            tracing::info!(
+                node_id,
+                unreachable_votes,
+                reachable_votes,
+                "Node unreachable from leader but reachable from quorum — not marking Dead"
+            );
+        }
+    }
+}
+
+/// Queries a peer's `CheckPeerLiveness` RPC. Returns `Some(reachable)` or `None` on failure.
+async fn query_peer_liveness_rpc(
+    addr: &str,
+    target_node_id: u64,
+    timeout: std::time::Duration,
+) -> Option<bool> {
+    let endpoint = format!("http://{addr}");
+    let channel = tonic::transport::Channel::from_shared(endpoint).ok()?.connect_lazy();
+    let mut client =
+        inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::new(channel);
+    let response = tokio::time::timeout(
+        timeout,
+        client.check_peer_liveness(inferadb_ledger_proto::proto::CheckPeerLivenessRequest {
+            target_node_id,
+        }),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    Some(response.into_inner().reachable)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
@@ -911,6 +1485,9 @@ mod tests {
         let data_dir = temp_dir.path().to_path_buf();
         let config = Config::for_test(1, 50051, data_dir.clone());
 
+        // Write cluster_id so we take the restart path (initialized node).
+        crate::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
+
         let health = inferadb_ledger_raft::HealthState::new();
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let result = bootstrap_node(&config, &data_dir, health, rx, None).await;
@@ -922,6 +1499,9 @@ mod tests {
         let temp_dir = tempdir().expect("create temp dir");
         let data_dir = temp_dir.path().to_path_buf();
         let config = Config::for_test(1, 50052, data_dir.clone());
+
+        // Write cluster_id so we take the restart path.
+        crate::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
 
         let health = inferadb_ledger_raft::HealthState::new();
         let (_tx, rx) = tokio::sync::watch::channel(false);
@@ -953,6 +1533,9 @@ mod tests {
         let data_dir = temp_dir.path().to_path_buf();
         let mut config = Config::for_test(1, 50053, data_dir.clone());
         config.events.enabled = false;
+
+        // Write cluster_id so we take the restart path.
+        crate::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
 
         let health = inferadb_ledger_raft::HealthState::new();
         let (_tx, rx) = tokio::sync::watch::channel(false);
@@ -989,6 +1572,36 @@ mod tests {
             Ok(_) => panic!("bootstrap should fail with legacy layout"),
         };
         assert!(err.contains("Legacy flat layout"), "error should mention legacy layout: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_fresh_node_waits_for_init() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().to_path_buf();
+        let config = Config::for_test(1, 50055, data_dir.clone());
+
+        // No cluster_id file — fresh node path. Without an InitCluster RPC
+        // or seed discovery, the node blocks until shutdown is signaled.
+        let health = inferadb_ledger_raft::HealthState::new();
+        let (tx, rx) = tokio::sync::watch::channel(false);
+
+        // Signal shutdown after a short delay so the test completes.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let _ = tx.send(true);
+        });
+
+        let result = bootstrap_node(&config, &data_dir, health, rx, None).await;
+        // Fresh node now returns an error when shutdown fires before initialization.
+        match result {
+            Ok(_) => panic!("fresh node should fail when shutdown fires before init"),
+            Err(err) => {
+                assert!(
+                    err.to_string().contains("shutdown received before initialization"),
+                    "expected shutdown-before-init error, got: {err}"
+                );
+            },
+        }
     }
 
     // =================================================================
@@ -1118,39 +1731,5 @@ mod tests {
     fn bootstrap_error_display_server() {
         let err = BootstrapError::Server { message: "bind failed".to_string() };
         assert_eq!(err.to_string(), "server error: bind failed");
-    }
-
-    // =================================================================
-    // Config validation integration tests
-    // =================================================================
-
-    #[test]
-    fn test_bootstrap_config_validation_fails_with_cluster_1() {
-        let config = Config { cluster: Some(1), ..Config::default() };
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("at least 2 nodes"));
-    }
-
-    #[tokio::test]
-    async fn test_bootstrap_node_invalid_config_rejected() {
-        let temp_dir = tempdir().expect("create temp dir");
-        let data_dir = temp_dir.path().to_path_buf();
-
-        // Write a node_id so resolution doesn't fail first
-        crate::node_id::write_node_id(&data_dir, 1).expect("write node_id");
-
-        // cluster=1 fails validation
-        let config = Config { cluster: Some(1), ..Config::default() };
-        let health = inferadb_ledger_raft::HealthState::new();
-        let (_tx, rx) = tokio::sync::watch::channel(false);
-        let result = bootstrap_node(&config, &data_dir, health, rx, None).await;
-
-        match result {
-            Err(e) => {
-                let msg = e.to_string();
-                assert!(msg.contains("at least 2 nodes"), "Expected config error, got: {msg}");
-            },
-            Ok(_) => panic!("bootstrap should fail with invalid config"),
-        }
     }
 }

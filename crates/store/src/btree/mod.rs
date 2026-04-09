@@ -310,7 +310,7 @@ impl<P: PageProvider> BTree<P> {
                                     },
                                     _ => {
                                         return Err(Error::Corrupted {
-                                            reason: "key still present after delete during insert-replace".to_string(),
+                                            reason: "key still present after delete during insert-replace".into(),
                                         });
                                     },
                                 }
@@ -1000,7 +1000,7 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
         let page = self
             .current_leaf
             .as_ref()
-            .ok_or(Error::Corrupted { reason: "No current leaf in iterator".to_string() })?;
+            .ok_or(Error::Corrupted { reason: "No current leaf in iterator".into() })?;
 
         // Try to advance within current leaf
         if cursor_ops::next_in_leaf(&mut self.state.position, page)? {
@@ -1012,7 +1012,7 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
         let page = self
             .current_leaf
             .as_ref()
-            .ok_or(Error::Corrupted { reason: "No current leaf in iterator".to_string() })?;
+            .ok_or(Error::Corrupted { reason: "No current leaf in iterator".into() })?;
         let leaf = LeafNodeRef::from_page(page)?;
         let next_leaf_id = leaf.next_leaf();
 
@@ -1026,7 +1026,7 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
         let new_page = self
             .current_leaf
             .as_ref()
-            .ok_or(Error::Corrupted { reason: "No current leaf in iterator".to_string() })?;
+            .ok_or(Error::Corrupted { reason: "No current leaf in iterator".into() })?;
         cursor_ops::move_to_first_in_leaf(&mut self.state.position, new_page)?;
         Ok(self.state.position.valid)
     }
@@ -1044,7 +1044,7 @@ impl<'a, P: PageProvider> BTreeIterator<'a, P> {
         let page = self
             .current_leaf
             .as_ref()
-            .ok_or(Error::Corrupted { reason: "No current leaf".to_string() })?;
+            .ok_or(Error::Corrupted { reason: "No current leaf".into() })?;
 
         let key = cursor_ops::current_key(&self.state.position, page)?;
         let value = cursor_ops::current_value(&self.state.position, page)?;

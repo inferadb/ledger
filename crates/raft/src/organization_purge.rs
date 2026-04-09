@@ -18,11 +18,11 @@ use chrono::Utc;
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{OrganizationId, config::OrganizationPurgeConfig};
-use openraft::Raft;
 use tokio::time::{interval, sleep};
 use tracing::{debug, error, info, warn};
 
 use crate::{
+    consensus_handle::ConsensusHandle,
     metrics::{
         record_background_job_duration, record_background_job_items, record_background_job_run,
         record_org_purge_global_failure, record_org_purge_regional_failure,
@@ -30,7 +30,7 @@ use crate::{
     },
     raft_manager::RaftManager,
     trace_context::TraceContext,
-    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig, RaftPayload, SystemRequest},
+    types::{LedgerRequest, RaftPayload, SystemRequest},
 };
 
 /// Maximum number of retry attempts per purge step.
@@ -55,10 +55,8 @@ const BACKOFF_MULTIPLIER: u32 = 5;
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct OrganizationPurgeJob<B: StorageBackend + 'static> {
-    /// Raft consensus handle for leadership checks and proposals.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// This node's ID.
-    node_id: LedgerNodeId,
+    /// Consensus handle for leadership checks and proposals.
+    handle: Arc<ConsensusHandle>,
     /// State layer for scanning organization records.
     state: Arc<StateLayer<B>>,
     /// Purge job configuration.
@@ -75,18 +73,16 @@ pub struct OrganizationPurgeJob<B: StorageBackend + 'static> {
 impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
     /// Creates a purge job from a configuration struct.
     pub fn from_config(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        node_id: LedgerNodeId,
+        handle: Arc<ConsensusHandle>,
         state: Arc<StateLayer<B>>,
         config: &OrganizationPurgeConfig,
     ) -> Self {
-        Self { raft, node_id, state, config: config.clone(), manager: None, watchdog_handle: None }
+        Self { handle, state, config: config.clone(), manager: None, watchdog_handle: None }
     }
 
     /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader == Some(self.node_id)
+        self.handle.is_leader()
     }
 
     /// Proposes a REGIONAL purge with retry and backoff.
@@ -123,7 +119,14 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
                     organization: org_id,
                 });
 
-            match group.raft().client_write(RaftPayload::system(regional_request)).await {
+            match group
+                .handle()
+                .propose_and_wait(
+                    RaftPayload::system(regional_request),
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+            {
                 Ok(_) => return true,
                 Err(e) => {
                     record_org_purge_regional_failure(&region.to_string());
@@ -165,7 +168,7 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
         for attempt in 0..MAX_RETRIES {
             let request = LedgerRequest::PurgeOrganization { organization: org_id };
 
-            match self.raft.client_write(RaftPayload::system(request)).await {
+            match self.handle.propose(RaftPayload::system(request)).await {
                 Ok(_) => return true,
                 Err(e) => {
                     record_org_purge_global_failure();

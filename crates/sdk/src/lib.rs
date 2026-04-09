@@ -143,5 +143,8 @@ pub use types::{
     },
     read::{ReadConsistency, WriteSuccess},
     streaming::BlockAnnouncement,
-    verified_read::{BlockHeader, ChainProof, Direction, MerkleProof, MerkleSibling, VerifyOpts},
+    verified_read::{
+        Block, BlockHeader, ChainProof, ChainTip, Direction, HistoricalRead, MerkleProof,
+        MerkleSibling, Transaction, VerifyOpts,
+    },
 };

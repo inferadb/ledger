@@ -11,17 +11,16 @@ use std::{
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::config::BTreeCompactionConfig;
-use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::{
+    consensus_handle::ConsensusHandle,
     metrics::{
         record_background_job_duration, record_background_job_items, record_background_job_run,
         record_btree_compaction,
     },
     trace_context::TraceContext,
-    types::{LedgerNodeId, LedgerTypeConfig},
 };
 
 /// Default interval between B+ tree compaction cycles (1 hour).
@@ -38,10 +37,8 @@ const DEFAULT_MIN_FILL_FACTOR: f64 = 0.4;
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct BTreeCompactor<B: StorageBackend + 'static> {
-    /// Raft consensus handle for verifying leadership before compacting.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// This node's ID.
-    node_id: LedgerNodeId,
+    /// Consensus handle for verifying leadership before compacting.
+    handle: Arc<ConsensusHandle>,
     /// State layer providing database access.
     state: Arc<StateLayer<B>>,
     /// Minimum fill factor threshold (leaves below this are candidates for merging).
@@ -55,14 +52,12 @@ pub struct BTreeCompactor<B: StorageBackend + 'static> {
 impl<B: StorageBackend + 'static> BTreeCompactor<B> {
     /// Creates a compactor from a configuration struct.
     pub fn from_config(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        node_id: LedgerNodeId,
+        handle: Arc<ConsensusHandle>,
         state: Arc<StateLayer<B>>,
         config: &BTreeCompactionConfig,
     ) -> Self {
         Self {
-            raft,
-            node_id,
+            handle,
             state,
             min_fill_factor: config.min_fill_factor,
             interval: Duration::from_secs(config.interval_secs),
@@ -71,8 +66,7 @@ impl<B: StorageBackend + 'static> BTreeCompactor<B> {
 
     /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader == Some(self.node_id)
+        self.handle.is_leader()
     }
 
     /// Runs a single compaction cycle.

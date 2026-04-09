@@ -19,9 +19,11 @@
 //! ```
 
 mod bootstrap;
+mod cluster_id;
 mod config;
 mod coordinator;
 mod discovery;
+mod dr_scheduler;
 mod node_id;
 mod shutdown;
 
@@ -64,6 +66,47 @@ async fn main() -> Result<(), ServerError> {
                     print!("{}", config::generate_runtime_config_schema());
                     return Ok(());
                 },
+            },
+            CliCommand::Init { host } => {
+                // Connect to the target node and send InitCluster RPC.
+                let endpoint = format!("http://{}", host);
+                let channel = tonic::transport::Channel::from_shared(endpoint)
+                    .map_err(|e| {
+                        ServerError::Server(Box::new(std::io::Error::other(format!(
+                            "invalid host address '{}': {}",
+                            host, e
+                        ))))
+                    })?
+                    .connect()
+                    .await
+                    .map_err(|e| {
+                        ServerError::Server(Box::new(std::io::Error::other(format!(
+                            "failed to connect to {}: {}",
+                            host, e
+                        ))))
+                    })?;
+
+                let mut client =
+                    inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::new(
+                        channel,
+                    );
+                let response = client
+                    .init_cluster(inferadb_ledger_proto::proto::InitClusterRequest {})
+                    .await
+                    .map_err(|e| {
+                        ServerError::Server(Box::new(std::io::Error::other(format!(
+                            "InitCluster RPC failed: {}",
+                            e
+                        ))))
+                    })?;
+
+                let resp = response.into_inner();
+                if resp.already_initialized {
+                    println!("Cluster already initialized. cluster_id={}", resp.cluster_id);
+                } else {
+                    println!("Cluster initialized. cluster_id={}", resp.cluster_id);
+                }
+                return Ok(());
             },
         }
     }
@@ -119,26 +162,37 @@ async fn main() -> Result<(), ServerError> {
     let (graceful_shutdown, shutdown_rx) =
         inferadb_ledger_raft::GracefulShutdown::new(shutdown_config, health_state.clone());
 
-    let node =
-        bootstrap::bootstrap_node(&config, &data_dir, health_state.clone(), shutdown_rx, None)
-            .await
-            .map_err(ServerError::Bootstrap)?;
+    // Create in-memory key manager for DEK/signing key encryption.
+    // In production, this would be backed by a KMS. For now, generate
+    // ephemeral keys that cover all regions.
+    let key_manager: std::sync::Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager> =
+        std::sync::Arc::new(
+            inferadb_ledger_store::crypto::InMemoryKeyManager::generate_for_regions(
+                &inferadb_ledger_types::ALL_REGIONS,
+            ),
+        );
+
+    let node = bootstrap::bootstrap_node(
+        &config,
+        &data_dir,
+        health_state.clone(),
+        shutdown_rx,
+        Some(key_manager),
+    )
+    .await
+    .map_err(ServerError::Bootstrap)?;
 
     // Mark node as ready now that bootstrap is complete
     health_state.mark_ready();
 
     // Spawn shutdown handler
-    let raft_for_shutdown = node.raft.clone();
-    let graceful_shutdown = graceful_shutdown.with_raft(node.raft.clone());
+    let graceful_shutdown = graceful_shutdown.with_handle(node.handle.clone());
     let shutdown_handle = tokio::spawn(async move {
         shutdown::shutdown_signal().await;
         graceful_shutdown
             .execute(|| async move {
-                // Trigger final snapshot if leader
-                let _ = raft_for_shutdown.trigger().snapshot().await;
-                if let Err(e) = raft_for_shutdown.shutdown().await {
-                    tracing::warn!(error = %e, "Error during Raft shutdown");
-                }
+                // Consensus engine shutdown is handled by dropping the handle.
+                // No explicit snapshot trigger needed — the engine flushes on drop.
             })
             .await;
     });

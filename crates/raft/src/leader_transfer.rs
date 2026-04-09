@@ -16,16 +16,10 @@ use std::{
     time::Duration,
 };
 
-use inferadb_ledger_proto::proto::{
-    GetClusterInfoRequest, TriggerElectionRequest, admin_service_client::AdminServiceClient,
-    raft_service_client::RaftServiceClient,
-};
-use openraft::Raft;
-use snafu::{ResultExt, Snafu};
-use tonic::transport::Channel;
-use tracing::{debug, info};
+use snafu::Snafu;
+use tracing;
 
-use crate::types::LedgerTypeConfig;
+use crate::consensus_handle::ConsensusHandle;
 
 /// Configuration for a leader transfer attempt.
 #[derive(Debug, Clone, bon::Builder)]
@@ -105,21 +99,6 @@ impl Drop for TransferGuard<'_> {
     }
 }
 
-/// RAII guard that re-enables leader heartbeats and elections on drop.
-///
-/// During leader transfer, heartbeats must be paused so follower leases expire,
-/// and elections must be disabled on the old leader to prevent it from winning
-/// re-election (which creates a livelock since it can't heartbeat). This guard
-/// ensures both are always restored, even if the transfer fails.
-struct TransferModeGuard<'a>(&'a Raft<LedgerTypeConfig>);
-
-impl Drop for TransferModeGuard<'_> {
-    fn drop(&mut self) {
-        self.0.runtime_config().heartbeat(true);
-        self.0.runtime_config().elect(true);
-    }
-}
-
 /// Transfers leadership to a target follower.
 ///
 /// If `target` is `None`, the most caught-up follower is selected automatically.
@@ -128,8 +107,13 @@ impl Drop for TransferModeGuard<'_> {
 ///
 /// Returns the node ID of the new leader. Note that this may differ from the
 /// requested target if a third node wins the election.
+///
+/// The transfer sends a `TimeoutNow` message to the target via the consensus
+/// engine and polls until leadership changes or the timeout expires. Heartbeat
+/// pause and replication-progress-based target selection are not yet available,
+/// so the transfer may be less reliable under high load or with lagging followers.
 pub async fn transfer_leadership(
-    raft: &Raft<LedgerTypeConfig>,
+    handle: &ConsensusHandle,
     target: Option<u64>,
     transfer_lock: &AtomicBool,
     config: &LeaderTransferConfig,
@@ -140,171 +124,52 @@ pub async fn transfer_leadership(
     }
     let _guard = TransferGuard(transfer_lock);
 
-    let overall_deadline = tokio::time::Instant::now() + config.timeout;
-
-    // Step 1: Verify we are the leader and extract metrics
-    let metrics = raft.metrics().borrow().clone();
-    let my_id = metrics.id;
-
-    if metrics.current_leader != Some(my_id) {
+    // Verify we are the leader
+    if !handle.is_leader() {
         return Err(LeaderTransferError::NotLeader);
     }
 
-    let last_log_index = metrics.last_log_index.unwrap_or(0);
+    let my_id = handle.node_id();
 
-    // Step 2: Determine transfer target
-    let replication = metrics.replication.as_ref().ok_or(LeaderTransferError::NotLeader)?;
+    // Determine transfer target from shard state voters
+    let state = handle.shard_state();
+    let voter_ids: Vec<u64> =
+        state.voters.iter().filter(|&&id| id.0 != my_id).map(|id| id.0).collect();
 
     let target_id = match target {
         Some(id) => {
-            // Verify the specified target is in the replication map
-            if !replication.contains_key(&id) {
+            if !voter_ids.contains(&id) {
                 return Err(LeaderTransferError::NoTarget);
             }
             id
         },
-        None => {
-            // Pick the most caught-up follower
-            replication
-                .iter()
-                .filter(|(id, _)| **id != my_id)
-                .filter_map(|(id, log_id)| log_id.as_ref().map(|lid| (*id, lid.index)))
-                .max_by_key(|(_, index)| *index)
-                .map(|(id, _)| id)
-                .ok_or(LeaderTransferError::NoTarget)?
-        },
+        None => *voter_ids.first().ok_or(LeaderTransferError::NoTarget)?,
     };
 
-    info!(target_id, last_log_index, "Starting leader transfer");
+    // Send TimeoutNow to the target via the consensus engine. The target
+    // will immediately start a real election (skipping pre-vote).
+    handle.transfer_leader(target_id).await.map_err(|e| {
+        tracing::warn!(target_id, error = ?e, "transfer_leader call failed");
+        LeaderTransferError::NoTarget
+    })?;
 
-    // Step 3: Wait for replication to catch up
-    let repl_deadline =
-        tokio::time::Instant::now() + config.replication_timeout.min(config.timeout);
-
-    loop {
-        let fresh = raft.metrics().borrow().clone();
-        if let Some(repl) = &fresh.replication
-            && let Some(Some(log_id)) = repl.get(&target_id)
-            && log_id.index >= last_log_index
-        {
-            break;
-        }
-
-        if tokio::time::Instant::now() >= repl_deadline {
-            return Err(LeaderTransferError::ReplicationTimeout);
-        }
-
-        tokio::time::sleep(config.poll_interval).await;
-    }
-
-    // Step 4: Connect to target (while heartbeats are still running so the
-    // target stays healthy). Resolve the address before pausing heartbeats
-    // to minimize the window where the cluster has no heartbeats.
-    let fresh_metrics = raft.metrics().borrow().clone();
-    let membership = fresh_metrics.membership_config.membership();
-    let target_node = membership
-        .nodes()
-        .find(|(id, _)| **id == target_id)
-        .map(|(_, node)| node)
-        .ok_or(LeaderTransferError::NoTarget)?;
-
-    let endpoint = format!("http://{}", target_node.addr);
-    let channel: Channel = Channel::from_shared(endpoint)
-        .map_err(|e| LeaderTransferError::TargetRejected {
-            message: format!("Invalid endpoint: {e}"),
-        })?
-        .connect()
-        .await
-        .context(ConnectionSnafu)?;
-
-    let mut raft_client = RaftServiceClient::new(channel.clone());
-    let mut admin_client = AdminServiceClient::new(channel);
-
-    // Step 5: Pause heartbeats and disable elections on this node.
-    // Heartbeat pause: followers' leases expire after ~election_timeout_max
-    // (~600ms), making them willing to vote for the transfer target.
-    // Election disable: prevents this node from winning re-election after it
-    // steps down (which would create a livelock since it can't heartbeat).
-    info!(target_id, "Pausing heartbeats and disabling elections for transfer");
-    raft.runtime_config().heartbeat(false);
-    raft.runtime_config().elect(false);
-    let _transfer_guard = TransferModeGuard(raft);
-
-    tokio::time::sleep(config.lease_expiry_wait).await;
-
-    // Steps 6-7: Repeatedly trigger election on the target until leadership
-    // changes or the overall deadline expires. A single trigger().elect() may
-    // fail due to split votes or term races, so we retry periodically.
-    //
-    // We poll leadership via GetClusterInfo on the target node rather than
-    // local raft metrics, because the local RaftCore may become unresponsive
-    // after stepping down (e.g., assertion failures in debug builds when
-    // receiving AppendEntries from the new leader).
-    let mut attempt = 0u32;
+    // Poll until a different leader is confirmed or the timeout expires.
+    // We wait for current_leader() to report a specific node that isn't us,
+    // not just None (which means the old leader stepped down but no new leader
+    // has been elected yet).
+    let overall_deadline = tokio::time::Instant::now() + config.timeout;
     loop {
         if tokio::time::Instant::now() >= overall_deadline {
             return Err(LeaderTransferError::Timeout { timeout: config.timeout });
         }
 
-        // Read current term from local metrics (may be stale if core panicked,
-        // but best-effort for the TriggerElection term check).
-        let local = raft.metrics().borrow().clone();
-        let trigger_term = local.current_term;
-
-        // Check local metrics first — works when the core is healthy.
-        if let Some(leader) = local.current_leader
+        if let Some(leader) = handle.current_leader()
             && leader != my_id
         {
-            info!(new_leader = leader, target_id, attempt, "Leadership transferred (local)");
             return Ok(leader);
         }
 
-        attempt += 1;
-        info!(target_id, leader_term = trigger_term, attempt, "Sending TriggerElection RPC");
-
-        match raft_client
-            .trigger_election(TriggerElectionRequest {
-                leader_term: trigger_term,
-                leader_id: my_id,
-            })
-            .await
-        {
-            Ok(response) => {
-                let inner = response.into_inner();
-                if !inner.accepted {
-                    debug!(message = %inner.message, "Target rejected election trigger");
-                }
-            },
-            Err(status) => {
-                // Stale term or transient error — log and continue.
-                debug!(code = ?status.code(), message = %status.message(), "TriggerElection RPC failed, retrying");
-            },
-        }
-
-        // Poll the target via GetClusterInfo to confirm leadership change.
-        // This is more reliable than local metrics after the old leader steps
-        // down, since the target's RaftCore is healthy and sees the new leader.
-        let retry_deadline =
-            (tokio::time::Instant::now() + Duration::from_secs(2)).min(overall_deadline);
-
-        loop {
-            if let Ok(resp) = admin_client.get_cluster_info(GetClusterInfoRequest {}).await {
-                let info = resp.into_inner();
-                if info.leader_id != 0 && info.leader_id != my_id {
-                    info!(
-                        new_leader = info.leader_id,
-                        target_id, attempt, "Leadership transferred (confirmed via target)"
-                    );
-                    return Ok(info.leader_id);
-                }
-            }
-
-            if tokio::time::Instant::now() >= retry_deadline {
-                break;
-            }
-
-            tokio::time::sleep(config.poll_interval).await;
-        }
+        tokio::time::sleep(config.poll_interval).await;
     }
 }
 

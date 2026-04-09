@@ -1,35 +1,33 @@
-//! OpenRaft trait implementations for [`RaftLogStore`].
+//! Apply logic, snapshot creation, and snapshot installation for [`RaftLogStore`].
 //!
-//! Implements [`RaftLogReader`], [`RaftStorage`], and [`RaftSnapshotBuilder`]
-//! using the B-tree-backed storage engine.
+//! Contains the state machine apply path (adapted for [`CommittedEntry`]) and
+//! snapshot builder/installer. The openraft trait implementations have been
+//! removed — all consensus integration goes through [`CommittedEntry`] batches.
 
-use std::{fmt::Debug, ops::RangeBounds, sync::Arc};
+use std::sync::Arc;
 
 use chrono::DateTime;
+use inferadb_ledger_consensus::{committed::CommittedEntry, types::EntryKind};
 use inferadb_ledger_state::EventsDatabase;
 use inferadb_ledger_store::{FileBackend, TableId, tables};
 use inferadb_ledger_types::{
     AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, TeamId, TeamSlug, UserEmailId, UserId,
     decode, encode, events::EventConfig,
 };
-use openraft::{
-    Entry, EntryPayload, LogId, OptionalSend, RaftStorage, SnapshotMeta, StorageError,
-    StoredMembership, Vote,
-    storage::{LogState, RaftLogReader, RaftSnapshotBuilder, Snapshot},
-};
-use parking_lot::RwLock;
 
 use super::{
     RegionChainState,
     store::RaftLogStore,
-    types::{AppliedState, AppliedStateCore, PendingExternalWrites},
+    types::{
+        AppliedState, AppliedStateCore, LogId, PendingExternalWrites, SnapshotMeta, StoreError,
+        StoredMembership,
+    },
 };
 use crate::{
     metrics,
     snapshot::{
         SNAPSHOT_TABLE_IDS, SnapshotError, SnapshotReader, SnapshotWriter, SyncSnapshotReader,
     },
-    types::{LedgerNodeId, LedgerTypeConfig},
 };
 
 /// Version sentinel prepended to the serialized `AppliedStateCore` in the
@@ -37,151 +35,17 @@ use crate::{
 const STATE_CORE_VERSION_SENTINEL: [u8; 2] = [0x00, 0x01];
 
 // ============================================================================
-// RaftLogReader Implementation
+// Snapshot Builder
 // ============================================================================
 
-impl RaftLogReader<LedgerTypeConfig> for RaftLogStore {
-    async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + OptionalSend>(
-        &mut self,
-        range: RB,
-    ) -> Result<Vec<Entry<LedgerTypeConfig>>, StorageError<LedgerNodeId>> {
-        use std::ops::Bound;
-
-        let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
-
-        // Convert RangeBounds to start/end indices
-        let start_idx = match range.start_bound() {
-            Bound::Included(&idx) => idx,
-            Bound::Excluded(&idx) => idx.saturating_add(1),
-            Bound::Unbounded => 0,
-        };
-        let end_idx = match range.end_bound() {
-            Bound::Included(&idx) => Some(idx.saturating_add(1)),
-            Bound::Excluded(&idx) => Some(idx),
-            Bound::Unbounded => None,
-        };
-
-        // Use range iteration from inferadb-ledger-store
-        let start_key = start_idx;
-        let end_key = end_idx.unwrap_or(u64::MAX);
-
-        let iter = read_txn
-            .range::<tables::RaftLog>(Some(&start_key), Some(&end_key))
-            .map_err(|e| to_storage_error(&e))?;
-
-        let mut entries = Vec::new();
-        let mut total_bytes = 0usize;
-        let deserialize_start = std::time::Instant::now();
-
-        for (_, entry_data) in iter {
-            total_bytes += entry_data.len();
-            let entry: Entry<LedgerTypeConfig> =
-                decode(&entry_data).map_err(|e| to_serde_error(&e))?;
-            entries.push(entry);
-        }
-
-        // Record batch deserialization metrics
-        if !entries.is_empty() {
-            let deserialize_secs = deserialize_start.elapsed().as_secs_f64();
-            // Record per-entry average to make metrics comparable to encode path
-            let per_entry_secs = deserialize_secs / entries.len() as f64;
-            metrics::record_postcard_decode(per_entry_secs, "raft_entry");
-            metrics::record_serialization_bytes(
-                total_bytes / entries.len(),
-                "decode",
-                "raft_entry",
-            );
-        }
-
-        Ok(entries)
-    }
-
-    /// Returns log entries for replication.
-    ///
-    /// OpenRaft contract: this must not return empty for non-empty range.
-    /// If entries are purged, return error to trigger snapshot replication.
-    /// If entries are not yet written (race condition), wait for them.
-    async fn limited_get_log_entries(
-        &mut self,
-        start: u64,
-        end: u64,
-    ) -> Result<Vec<Entry<LedgerTypeConfig>>, StorageError<LedgerNodeId>> {
-        // Quick path: if range is empty, return empty
-        if start >= end {
-            return Ok(Vec::new());
-        }
-
-        // Retry loop for transient conditions (entries not yet visible)
-        // OpenRaft may try to replicate entries before they're fully appended,
-        // especially under high concurrent load. We retry with exponential backoff.
-        let mut attempts = 0;
-        const MAX_ATTEMPTS: u32 = 500; // 5 seconds max wait
-        const RETRY_DELAY_MS: u64 = 10;
-
-        loop {
-            let entries = self.try_get_log_entries(start..end).await?;
-
-            // Success: got entries
-            if !entries.is_empty() {
-                return Ok(entries);
-            }
-
-            // Empty result - check if purged
-            let last_purged = *self.last_purged_cache.read();
-            let purged_idx = last_purged.map_or(0, |l| l.index);
-
-            // If entries were purged, return error (need snapshot replication)
-            if start <= purged_idx {
-                return Err(StorageError::IO {
-                    source: openraft::StorageIOError::read_logs(openraft::AnyError::error(
-                        format!(
-                            "Log entries [{}, {}) purged (last_purged={}), need snapshot",
-                            start, end, purged_idx
-                        ),
-                    )),
-                });
-            }
-
-            // Not purged - might be a race condition, retry
-            attempts += 1;
-            if attempts >= MAX_ATTEMPTS {
-                // Give up and return error - something is seriously wrong
-                let last_idx = self.get_last_entry().ok().flatten().map_or(0, |e| e.log_id.index);
-                return Err(StorageError::IO {
-                    source: openraft::StorageIOError::read_logs(openraft::AnyError::error(
-                        format!(
-                            "Log entries [{}, {}) not found after {}ms (last={}, purged={})",
-                            start,
-                            end,
-                            attempts * RETRY_DELAY_MS as u32,
-                            last_idx,
-                            purged_idx
-                        ),
-                    )),
-                });
-            }
-
-            // Wait briefly for entries to appear
-            tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
-        }
-    }
-}
-
-// ============================================================================
-// RaftSnapshotBuilder Implementation
-// ============================================================================
-
-/// Builds Raft snapshots by streaming B-tree tables into compressed snapshot files.
+/// Builds a snapshot from the current state.
 ///
-/// Holds shared references to the database and state layer so that
-/// `build_snapshot()` can open a `ReadTransaction` for a consistent
-/// point-in-time view — no `AppliedState` clone needed, no in-memory
-/// state lock acquired.
+/// Created by `RaftLogStore::get_snapshot_builder()`. Contains references to
+/// the database and events layer needed for snapshot creation.
 pub struct LedgerSnapshotBuilder {
     /// Shared B-tree database (log + state tables).
     db: Arc<inferadb_ledger_store::Database<FileBackend>>,
-    /// State layer for entity/relationship storage (used during snapshot entity
-    /// restoration via `StateLayer::restore_entity()`).
+    /// State layer for entity/relationship storage.
     #[allow(dead_code)]
     state_layer: Option<Arc<inferadb_ledger_state::StateLayer<FileBackend>>>,
     /// Events database for apply-phase event snapshot (separate from main db).
@@ -190,16 +54,11 @@ pub struct LedgerSnapshotBuilder {
     event_config: Option<EventConfig>,
 }
 
-impl RaftSnapshotBuilder<LedgerTypeConfig> for LedgerSnapshotBuilder {
-    async fn build_snapshot(
-        &mut self,
-    ) -> Result<Snapshot<LedgerTypeConfig>, StorageError<LedgerNodeId>> {
-        // Extract org IDs and timestamp for per-org event range scans.
+impl LedgerSnapshotBuilder {
+    /// Builds a snapshot file and returns the file handle plus metadata.
+    pub async fn build_snapshot(&mut self) -> Result<(tokio::fs::File, SnapshotMeta), StoreError> {
         let (org_ids, last_ts) = extract_snapshot_event_context(&self.db)?;
 
-        // Collect events synchronously before entering async code.
-        // EventsDatabase contains raw pointers (!Send), so the reference
-        // must not live across await points.
         let event_entries = collect_snapshot_events(
             self.events_db.as_deref(),
             self.event_config.as_ref(),
@@ -207,11 +66,9 @@ impl RaftSnapshotBuilder<LedgerTypeConfig> for LedgerSnapshotBuilder {
             last_ts,
         );
 
-        let (file, meta) = write_snapshot_to_file(&self.db, event_entries)
+        write_snapshot_to_file(&self.db, event_entries)
             .await
-            .map_err(|e| snapshot_to_storage_error(&e))?;
-
-        Ok(Snapshot { meta, snapshot: Box::new(file) })
+            .map_err(|e| StoreError::msg(e.to_string()))
     }
 }
 
@@ -225,8 +82,7 @@ impl RaftSnapshotBuilder<LedgerTypeConfig> for LedgerSnapshotBuilder {
 /// 1. (sync) Open `ReadTransaction`, read `AppliedStateCore` + table + entity data
 /// 2. (async) Write all pre-collected data to the snapshot file via `SnapshotWriter`
 ///
-/// All data comes from a single `ReadTransaction` for transactional consistency —
-/// no in-memory `AppliedState` lock needed.
+/// All data comes from a single `ReadTransaction` for transactional consistency.
 ///
 /// Event entries must be collected by the caller before invoking this function,
 /// because `EventsDatabase` contains raw pointers (`!Send`). Passing pre-collected
@@ -234,7 +90,7 @@ impl RaftSnapshotBuilder<LedgerTypeConfig> for LedgerSnapshotBuilder {
 async fn write_snapshot_to_file(
     db: &inferadb_ledger_store::Database<FileBackend>,
     event_entries: Vec<Vec<u8>>,
-) -> Result<(tokio::fs::File, SnapshotMeta<LedgerNodeId, openraft::BasicNode>), SnapshotError> {
+) -> Result<(tokio::fs::File, SnapshotMeta), SnapshotError> {
     // --- Sync phase: collect all data from a single ReadTransaction ---
 
     let (core_bytes, last_applied, membership, snapshot_id, table_data, entity_entries) = {
@@ -366,15 +222,10 @@ async fn write_snapshot_to_file(
 
 /// Iterates all entries in a table by its runtime `TableId`, returning raw
 /// pre-encoded `(key, value)` byte pairs.
-///
-/// This uses the typed `iter` method for each known table ID. The iterator
-/// always yields `(Vec<u8>, Vec<u8>)` regardless of the table's declared
-/// key/value types, because `TableIterator::Item = (Vec<u8>, Vec<u8>)`.
 fn iter_table_raw(
     read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
     table_id: TableId,
 ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, SnapshotError> {
-    // Macro to reduce boilerplate: each table type has the same iterator pattern
     macro_rules! collect_table {
         ($table:ty) => {{
             let iter = read_txn.iter::<$table>().map_err(|e| SnapshotError::InvalidEntry {
@@ -415,7 +266,7 @@ fn iter_table_raw(
 /// the database. Used by snapshot creation to parameterize event collection.
 fn extract_snapshot_event_context(
     db: &inferadb_ledger_store::Database<FileBackend>,
-) -> Result<(Vec<inferadb_ledger_types::OrganizationId>, i64), StorageError<LedgerNodeId>> {
+) -> Result<(Vec<inferadb_ledger_types::OrganizationId>, i64), StoreError> {
     let read_txn = db.read().map_err(|e| to_storage_error(&e))?;
 
     // Extract org IDs from OrganizationMeta table
@@ -446,13 +297,7 @@ fn extract_snapshot_event_context(
 /// Collects apply-phase events from events.db for snapshot inclusion.
 ///
 /// Uses per-organization range scans with a timestamp cutoff derived from
-/// the last applied entry's deterministic timestamp. This avoids the
-/// sort-then-truncate pattern that loads all events into memory.
-///
-/// Returns serialized event entries (already postcard-encoded `EventEntry`
-/// bytes from the B-tree values). Capped by `EventConfig::max_snapshot_events`.
-/// Returns an empty vec if events are not configured or scanning fails
-/// (best-effort).
+/// the last applied entry's deterministic timestamp.
 fn collect_snapshot_events(
     events_db: Option<&EventsDatabase<FileBackend>>,
     event_config: Option<&EventConfig>,
@@ -465,9 +310,6 @@ fn collect_snapshot_events(
     let max_events = event_config.map_or(10_000, |c| c.max_snapshot_events);
     let ttl_days = event_config.map_or(90, |c| c.default_ttl_days);
 
-    // Compute cutoff: last_applied_timestamp - TTL.
-    // Events older than the TTL would be GC'd shortly after the follower joins,
-    // so excluding them from the snapshot avoids unnecessary transfer.
     let ttl_ns = i64::from(ttl_days) * 86_400 * 1_000_000_000;
     let cutoff_ns = last_applied_timestamp_ns.saturating_sub(ttl_ns).max(0) as u64;
 
@@ -503,192 +345,24 @@ fn collect_snapshot_events(
 }
 
 // ============================================================================
-// RaftStorage Implementation (deprecated but non-sealed)
+// Apply Logic (CommittedEntry-based)
 // ============================================================================
 
-#[allow(deprecated)]
-impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
-    type LogReader = Self;
-    type SnapshotBuilder = LedgerSnapshotBuilder;
-
-    async fn get_log_state(
+impl RaftLogStore {
+    /// Applies a batch of committed entries from the consensus engine.
+    ///
+    /// This is the core state machine apply path. For each entry:
+    /// - Normal entries: deserialize as `RaftPayload`, apply via `apply_request_with_events`
+    /// - Membership entries: update `state.membership`
+    ///
+    /// Returns a response for each entry in the batch.
+    pub async fn apply_committed_entries(
         &mut self,
-    ) -> Result<LogState<LedgerTypeConfig>, StorageError<LedgerNodeId>> {
-        let last_purged = *self.last_purged_cache.read();
-        let last_entry = self.get_last_entry()?;
-        let last_log_id = last_entry.map(|e| e.log_id);
-
-        Ok(LogState { last_purged_log_id: last_purged, last_log_id })
-    }
-
-    async fn get_log_reader(&mut self) -> Self::LogReader {
-        Self {
-            db: Arc::clone(&self.db),
-            vote_cache: RwLock::new(*self.vote_cache.read()),
-            last_purged_cache: RwLock::new(*self.last_purged_cache.read()),
-            applied_state: Arc::clone(&self.applied_state),
-            state_layer: self.state_layer.clone(),
-            block_archive: self.block_archive.clone(),
-            region: self.region,
-            node_id: self.node_id.clone(),
-            region_chain: RwLock::new(*self.region_chain.read()),
-            block_announcements: self.block_announcements.clone(),
-            event_writer: None,
-            client_sequence_eviction: self.client_sequence_eviction.clone(),
-            state_root_commitments: Arc::clone(&self.state_root_commitments),
-            divergence_sender: self.divergence_sender.clone(),
-        }
-    }
-
-    async fn save_vote(
-        &mut self,
-        vote: &Vote<LedgerNodeId>,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
-        let vote_data = encode(vote).map_err(|e| to_serde_error(&e))?;
-
-        let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
-        write_txn
-            .insert::<tables::RaftState>(&super::KEY_VOTE.to_string(), &vote_data)
-            .map_err(|e| to_storage_error(&e))?;
-        write_txn.commit().map_err(|e| to_storage_error(&e))?;
-
-        *self.vote_cache.write() = Some(*vote);
-        Ok(())
-    }
-
-    async fn read_vote(
-        &mut self,
-    ) -> Result<Option<Vote<LedgerNodeId>>, StorageError<LedgerNodeId>> {
-        Ok(*self.vote_cache.read())
-    }
-
-    async fn append_to_log<I>(&mut self, entries: I) -> Result<(), StorageError<LedgerNodeId>>
-    where
-        I: IntoIterator<Item = Entry<LedgerTypeConfig>> + OptionalSend,
-    {
-        let entries: Vec<_> = entries.into_iter().collect();
-        if entries.is_empty() {
-            tracing::debug!("append_to_log called with empty entries");
-            return Ok(());
-        }
-
-        let indices: Vec<u64> = entries.iter().map(|e| e.log_id.index).collect();
-        tracing::info!("append_to_log: appending entries {:?}", indices);
-
-        let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
-
-        for entry in entries {
-            let index = entry.log_id.index;
-
-            // Time postcard serialization (write path hot loop)
-            let serialize_start = std::time::Instant::now();
-            let entry_data = encode(&entry).map_err(|e| to_serde_error(&e))?;
-            let serialize_secs = serialize_start.elapsed().as_secs_f64();
-
-            // Record serialization metrics
-            metrics::record_postcard_encode(serialize_secs, "raft_entry");
-            metrics::record_serialization_bytes(entry_data.len(), "encode", "raft_entry");
-
-            write_txn
-                .insert::<tables::RaftLog>(&index, &entry_data)
-                .map_err(|e| to_storage_error(&e))?;
-        }
-
-        write_txn.commit().map_err(|e| {
-            tracing::error!("append_to_log: commit failed for entries {:?}: {:?}", indices, e);
-            to_storage_error(&e)
-        })?;
-
-        tracing::info!("append_to_log: committed entries {:?}", indices);
-        Ok(())
-    }
-
-    async fn delete_conflict_logs_since(
-        &mut self,
-        log_id: LogId<LedgerNodeId>,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
-        // First, collect keys to remove using a read transaction
-        let keys_to_remove: Vec<u64> = {
-            let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
-            let mut keys = Vec::new();
-            let iter = read_txn
-                .range::<tables::RaftLog>(Some(&log_id.index), None)
-                .map_err(|e| to_storage_error(&e))?;
-            for (key_bytes, _) in iter {
-                // Key is u64 encoded as big-endian
-                if let Ok(arr) = <[u8; 8]>::try_from(key_bytes.as_ref()) {
-                    keys.push(u64::from_be_bytes(arr));
-                }
-            }
-            keys
-        };
-
-        // Then delete in a write transaction
-        let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
-        for key in keys_to_remove {
-            write_txn.delete::<tables::RaftLog>(&key).map_err(|e| to_storage_error(&e))?;
-        }
-        write_txn.commit().map_err(|e| to_storage_error(&e))?;
-
-        Ok(())
-    }
-
-    async fn purge_logs_upto(
-        &mut self,
-        log_id: LogId<LedgerNodeId>,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
-        // First, collect keys to remove using a read transaction
-        let keys_to_remove: Vec<u64> = {
-            let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
-            let mut keys = Vec::new();
-            // Inclusive end: range from 0 to log_id.index + 1 (exclusive)
-            let end_key = log_id.index.saturating_add(1);
-            let iter = read_txn
-                .range::<tables::RaftLog>(Some(&0u64), Some(&end_key))
-                .map_err(|e| to_storage_error(&e))?;
-            for (key_bytes, _) in iter {
-                // Key is u64 encoded as big-endian
-                if let Ok(arr) = <[u8; 8]>::try_from(key_bytes.as_ref()) {
-                    keys.push(u64::from_be_bytes(arr));
-                }
-            }
-            keys
-        };
-
-        // Then delete in a write transaction
-        let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
-        for key in keys_to_remove {
-            write_txn.delete::<tables::RaftLog>(&key).map_err(|e| to_storage_error(&e))?;
-        }
-
-        // Save the last purged log ID
-        let purged_data = encode(&log_id).map_err(|e| to_serde_error(&e))?;
-        write_txn
-            .insert::<tables::RaftState>(&super::KEY_LAST_PURGED.to_string(), &purged_data)
-            .map_err(|e| to_storage_error(&e))?;
-
-        write_txn.commit().map_err(|e| to_storage_error(&e))?;
-
-        *self.last_purged_cache.write() = Some(log_id);
-        Ok(())
-    }
-
-    async fn last_applied_state(
-        &mut self,
-    ) -> Result<
-        (Option<LogId<LedgerNodeId>>, StoredMembership<LedgerNodeId, openraft::BasicNode>),
-        StorageError<LedgerNodeId>,
-    > {
-        let state = self.applied_state.read();
-        Ok((state.last_applied, state.membership.clone()))
-    }
-
-    async fn apply_to_state_machine(
-        &mut self,
-        entries: &[Entry<LedgerTypeConfig>],
-    ) -> Result<Vec<crate::types::LedgerResponse>, StorageError<LedgerNodeId>> {
+        entries: &[CommittedEntry],
+        leader_node: Option<u64>,
+    ) -> Result<Vec<crate::types::LedgerResponse>, StoreError> {
         let _span = tracing::info_span!(
-            "apply_to_state_machine",
+            "apply_committed_entries",
             entry_count = entries.len(),
             region = self.region.as_str(),
         )
@@ -696,41 +370,39 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
         let mut responses = Vec::new();
         let mut vault_entries = Vec::new();
-        let mut state = self.applied_state.write();
+        let current = self.applied_state.load_full();
+        let mut state = (*current).clone();
+
+        // Pre-decode all Normal entry payloads once. Membership entries get None.
+        // This avoids redundant deserialization — the same payload was previously
+        // decoded up to 3 times (timestamp extraction, commitment verification,
+        // and the main apply loop).
+        let decoded_payloads: Vec<Option<crate::types::RaftPayload>> = entries
+            .iter()
+            .map(|e| match &e.kind {
+                // Empty data = Raft no-op entry (§5.4.2) or barrier — skip decode.
+                EntryKind::Normal if e.data.is_empty() => None,
+                EntryKind::Normal => inferadb_ledger_types::decode(&e.data).ok(),
+                EntryKind::Membership(_) => None,
+            })
+            .collect();
 
         // Event accumulation — deterministic timestamp from leader's proposal.
-        // All replicas apply with the same timestamp, guaranteeing byte-identical
-        // event storage, B+ tree keys, and pagination cursors across the cluster.
-        //
-        // For Blank/Membership-only batches, use UNIX_EPOCH as a deterministic
-        // sentinel. No events are emitted for these entry types, so the timestamp
-        // is unused. Avoids Utc::now() non-determinism across replicas.
-        let block_timestamp = entries
+        let block_timestamp = decoded_payloads
             .last()
-            .and_then(|e| match &e.payload {
-                EntryPayload::Normal(payload) => Some(payload.proposed_at),
-                _ => None,
-            })
-            .unwrap_or(DateTime::UNIX_EPOCH);
+            .and_then(|p| p.as_ref())
+            .map_or(DateTime::UNIX_EPOCH, |p| p.proposed_at);
         let mut events = Vec::new();
         let mut op_index = 0u32;
         let mut pending = PendingExternalWrites::default();
         let ttl_days = self.event_writer.as_ref().map_or(0, |ew| ew.config().default_ttl_days);
 
-        // Get the committed_index from the last entry (for RegionBlock metadata)
-        let committed_index = entries.last().map_or(0, |e| e.log_id.index);
-        // Term is stored in the leader_id
-        let term = entries.last().map(|e| e.log_id.leader_id.term).unwrap_or(0);
+        let committed_index = entries.last().map_or(0, |e| e.index);
+        let term = entries.last().map_or(0, |e| e.term);
 
         // Read atomicity sentinel from state layer to detect entries that were
-        // already committed to the state layer DB before a crash. Entries at or
-        // before the sentinel skip state layer writes (data already persisted)
-        // but still update in-memory AppliedState for correct downstream
-        // processing.
-        //
-        // Deserialize to LogId for proper Ord comparison — postcard's varint
-        // encoding does not preserve numeric ordering in byte form.
-        let state_layer_sentinel: Option<LogId<LedgerNodeId>> = self
+        // already committed before a crash.
+        let state_layer_sentinel: Option<LogId> = self
             .state_layer
             .as_ref()
             .and_then(|sl| match sl.read_last_applied() {
@@ -748,29 +420,34 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 },
             });
 
-        for entry in entries {
+        for (entry, decoded_payload) in entries.iter().zip(decoded_payloads.into_iter()) {
+            let log_id = LogId::new(entry.term, 0, entry.index);
+
             // Verify state root commitments piggybacked from the previous batch.
-            // The leader attached its locally-computed state roots to this entry;
-            // we compare them against our own archived state roots.
-            if let EntryPayload::Normal(payload) = &entry.payload {
+            if let Some(ref payload) = decoded_payload {
                 for commitment in &payload.state_root_commitments {
                     self.verify_state_root_commitment(commitment);
                 }
             }
 
-            state.last_applied = Some(entry.log_id);
+            state.last_applied = Some(log_id);
 
-            let (response, vault_entry) = match &entry.payload {
-                EntryPayload::Blank => (crate::types::LedgerResponse::Empty, None),
-                EntryPayload::Normal(payload) => {
-                    // Serialize log_id for sentinel persistence (only needed for Normal entries)
-                    let log_id_bytes = encode(&entry.log_id).ok();
-                    let skip_state_writes = state_layer_sentinel
-                        .as_ref()
-                        .is_some_and(|sentinel| entry.log_id <= *sentinel);
+            let (response, vault_entry) = match &entry.kind {
+                EntryKind::Normal if decoded_payload.is_none() => {
+                    // No-op entry (Raft §5.4.2) or barrier — nothing to apply.
+                    (crate::types::LedgerResponse::Empty, None)
+                },
+                EntryKind::Normal => {
+                    let payload = decoded_payload.ok_or_else(|| {
+                        StoreError::msg("failed to decode Normal entry payload".to_string())
+                    })?;
+
+                    let log_id_bytes = encode(&log_id).ok();
+                    let skip_state_writes =
+                        state_layer_sentinel.as_ref().is_some_and(|sentinel| log_id <= *sentinel);
                     if skip_state_writes {
                         tracing::info!(
-                            log_id = %entry.log_id,
+                            log_id = %log_id,
                             "Skipping state layer writes for already-applied entry"
                         );
                     }
@@ -787,16 +464,20 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                         payload.caller,
                     )
                 },
-                EntryPayload::Membership(membership) => {
-                    state.membership =
-                        StoredMembership::new(Some(entry.log_id), membership.clone());
+                EntryKind::Membership(consensus_membership) => {
+                    let voter_ids = consensus_membership.voters.iter().map(|n| n.0).collect();
+                    let learner_ids = consensus_membership
+                        .learners
+                        .iter()
+                        .map(|n| n.0)
+                        .collect::<std::collections::BTreeSet<u64>>();
+                    state.membership = StoredMembership::new(Some(log_id), voter_ids, learner_ids);
                     (crate::types::LedgerResponse::Empty, None)
                 },
             };
 
             responses.push(response);
 
-            // Collect vault entries for RegionBlock creation
             if let Some(entry) = vault_entry {
                 vault_entries.push(entry);
             }
@@ -806,7 +487,6 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         if !vault_entries.is_empty() {
             let timestamp = block_timestamp;
 
-            // Read region chain state (single lock acquisition)
             let chain_state = *self.region_chain.read();
             let new_region_height = chain_state.height + 1;
 
@@ -821,12 +501,10 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 committed_index,
             };
 
-            // Store in block archive if configured
             if let Some(archive) = &self.block_archive
                 && let Err(e) = archive.append_block(&region_block)
             {
                 tracing::error!("Failed to store block: {}", e);
-                // Continue - block storage failure is logged but doesn't fail the operation
             }
 
             // Broadcast block announcements for real-time subscribers
@@ -841,8 +519,6 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                                 .map_or(entry.organization.value() as u64, |s| s.value()),
                         }),
                         vault: Some(inferadb_ledger_proto::proto::VaultSlug {
-                            // Use external slug if available (GLOBAL), otherwise fall back to
-                            // internal VaultId (REGIONAL) for announcement filtering.
                             slug: state
                                 .vault_id_to_slug
                                 .get(&entry.vault)
@@ -860,7 +536,6 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                             nanos: timestamp.timestamp_subsec_nanos() as i32,
                         }),
                     };
-                    // Ignore send errors - no receivers is valid (fire-and-forget)
                     let _ = sender.send(announcement);
                     tracing::debug!(
                         organization_id = entry.organization.value(),
@@ -886,20 +561,16 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 }
             }
 
-            // Update region chain tracking (single lock acquisition)
+            // Update region chain tracking
             let region_hash =
                 inferadb_ledger_types::sha256(&encode(&region_block).unwrap_or_default());
             *self.region_chain.write() =
                 RegionChainState { height: new_region_height, previous_hash: region_hash };
 
-            // Also update AppliedState for snapshot persistence
             state.region_height = new_region_height;
             state.previous_region_hash = region_hash;
 
             // Buffer state root commitments for piggybacked verification.
-            // Each node (leader and followers) records what it computed locally.
-            // The leader drains this buffer when constructing the next RaftPayload,
-            // allowing all nodes to cross-check state roots on the next apply.
             let commitments: Vec<crate::types::StateRootCommitment> = vault_entries
                 .iter()
                 .map(|e| crate::types::StateRootCommitment {
@@ -910,14 +581,10 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 })
                 .collect();
             if let Ok(mut buf) = self.state_root_commitments.lock() {
-                // Cap buffer at 10,000 entries to prevent unbounded growth on
-                // followers that never propose. Oldest entries are already archived
-                // in BlockArchive, so dropping them is safe.
                 const MAX_COMMITMENT_BUFFER: usize = 10_000;
                 let buf_len = buf.len();
                 let available = MAX_COMMITMENT_BUFFER.saturating_sub(buf_len);
                 if available < commitments.len() {
-                    // Drop oldest to make room
                     let to_drop = commitments.len().saturating_sub(available);
                     buf.drain(..to_drop.min(buf_len));
                 }
@@ -925,21 +592,14 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             }
         }
 
-        // Client sequence TTL eviction — deterministic from log index.
-        //
-        // Triggered when any entry in this batch has an index that is a
-        // multiple of eviction_interval. This guarantees identical eviction
-        // behavior across replicas regardless of how openraft batches entries.
+        // Client sequence TTL eviction
         let eviction_interval = self.client_sequence_eviction.eviction_interval;
         let eviction_ttl = self.client_sequence_eviction.ttl_seconds;
-        let should_evict = eviction_interval > 0
-            && entries.iter().any(|e| e.log_id.index % eviction_interval == 0);
+        let should_evict =
+            eviction_interval > 0 && entries.iter().any(|e| e.index % eviction_interval == 0);
 
         if should_evict {
             let proposed_at_secs = block_timestamp.timestamp();
-            // Collect expired entries: deterministic sort by composite key encoding
-            // ensures identical deletion order across replicas (HashMap iteration is
-            // non-deterministic in Rust).
             let mut expired_keys: Vec<(
                 (
                     inferadb_ledger_types::OrganizationId,
@@ -951,9 +611,6 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 .client_sequences
                 .iter()
                 .filter(|(_, entry)| {
-                    // Saturating subtraction: if proposed_at < last_seen (clock
-                    // regression after leader change), treat delta as 0 — skip eviction
-                    // rather than risk spurious deletes.
                     proposed_at_secs.saturating_sub(entry.last_seen) > eviction_ttl
                 })
                 .map(|(key, _)| {
@@ -963,7 +620,6 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 })
                 .collect();
 
-            // Sort by composite bytes key (matches B+ tree ordering)
             expired_keys.sort_by(|a, b| a.1.cmp(&b.1));
 
             for (map_key, bytes_key) in expired_keys {
@@ -973,11 +629,9 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         }
 
         // Record deterministic timestamp for snapshot event collection.
-        // This ensures two snapshots of the same state produce identical event
-        // sets regardless of wall-clock time.
         state.last_applied_timestamp_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
 
-        // Snapshot sequence counters into pending (once per batch, not per-operation)
+        // Snapshot sequence counters into pending
         pending
             .sequences
             .push(("organization".to_string(), state.sequences.organization.value() as u64));
@@ -999,10 +653,26 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
         // Persist core state blob + external table writes atomically
         self.save_state_core(&state, &pending)?;
-        drop(state);
 
-        // Write accumulated events to events.db (best-effort: log failures but
-        // don't fail the Raft apply — events are audit data, not consensus-critical).
+        // Capture the applied index before moving state into Arc.
+        let applied_index = state.last_applied.as_ref().map(|id| id.index);
+
+        // Atomically publish the new state for lock-free readers
+        self.applied_state.store(Arc::new(state));
+
+        // Broadcast the latest applied index for ReadIndex protocol waiters.
+        if let Some(index) = applied_index {
+            let _ = self.applied_index_tx.send(index);
+        }
+
+        // Renew leader lease only on the leader node. Followers should not
+        // maintain a valid lease — stale leases on followers could serve reads
+        // that miss the latest committed writes.
+        if leader_node == Some(self.ledger_node_id) {
+            self.leader_lease.renew();
+        }
+
+        // Write accumulated events to events.db (best-effort)
         if !events.is_empty()
             && let Some(ew) = &self.event_writer
         {
@@ -1014,7 +684,7 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                         "Apply-phase events persisted"
                     );
                 },
-                Ok(_) => {}, // All filtered by config — no-op
+                Ok(_) => {},
                 Err(e) => {
                     tracing::error!(
                         error = %e,
@@ -1028,7 +698,8 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         Ok(responses)
     }
 
-    async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
+    /// Returns a snapshot builder.
+    pub fn get_snapshot_builder(&self) -> LedgerSnapshotBuilder {
         LedgerSnapshotBuilder {
             db: Arc::clone(&self.db),
             state_layer: self.state_layer.as_ref().map(Arc::clone),
@@ -1037,114 +708,84 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         }
     }
 
-    async fn begin_receiving_snapshot(
+    /// Installs a snapshot received from the leader.
+    ///
+    /// Streams decompressed data directly into B-trees and restores the
+    /// in-memory state from the committed tables.
+    pub async fn install_snapshot(
         &mut self,
-    ) -> Result<Box<tokio::fs::File>, StorageError<LedgerNodeId>> {
-        // Create a temp file for receiving snapshot data from the leader.
-        // openraft will write the streamed chunks into this file, then pass
-        // it to install_snapshot().
-        let std_file = tempfile::tempfile().map_err(|e| {
-            StorageError::from_io_error(
-                openraft::ErrorSubject::Snapshot(None),
-                openraft::ErrorVerb::Write,
-                e,
-            )
-        })?;
-        let file = tokio::fs::File::from_std(std_file);
-        Ok(Box::new(file))
-    }
-
-    async fn install_snapshot(
-        &mut self,
-        meta: &SnapshotMeta<LedgerNodeId, openraft::BasicNode>,
+        meta: &SnapshotMeta,
         snapshot: Box<tokio::fs::File>,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         use tokio::io::AsyncSeekExt;
 
         let mut file = *snapshot;
 
-        // =============================================================
         // Async phase: verify SHA-256 checksum over compressed bytes
-        // =============================================================
-        let file_size = file
-            .seek(std::io::SeekFrom::End(0))
-            .await
-            .map_err(|e| to_io_storage_error(e, "seek to end"))?;
-        file.seek(std::io::SeekFrom::Start(0))
-            .await
-            .map_err(|e| to_io_storage_error(e, "seek to start"))?;
+        let file_size = file.seek(std::io::SeekFrom::End(0)).await.map_err(StoreError::from_io)?;
+        file.seek(std::io::SeekFrom::Start(0)).await.map_err(StoreError::from_io)?;
 
         SnapshotReader::verify_checksum(&mut file, file_size)
             .await
-            .map_err(|e| snapshot_to_storage_error(&e))?;
+            .map_err(|e| StoreError::msg(e.to_string()))?;
 
         // Convert to std::fs::File for synchronous streaming
         let std_file = file.into_std().await;
         let compressed_size = file_size - crate::snapshot::CHECKSUM_SIZE as u64;
 
-        // =============================================================
         // Sync phase: stream decompressed data directly into B-trees
-        // =============================================================
-        // Using block_in_place because:
-        // 1. WriteTransaction is !Send (RefCell/raw pointers)
-        // 2. Sync zstd::Decoder avoids async/sync boundary issues
-        // 3. No staging Vecs — entries stream directly into WriteTransaction
-
         let db = &self.db;
         let event_writer_ref = self.event_writer.as_ref();
 
         let (core, table_count, entity_count, event_count) =
-            tokio::task::block_in_place(|| -> Result<_, StorageError<LedgerNodeId>> {
+            tokio::task::block_in_place(|| -> Result<_, StoreError> {
                 use std::io::{BufReader, Read, Seek, SeekFrom};
 
                 let mut file = std_file;
-                file.seek(SeekFrom::Start(0))
-                    .map_err(|e| to_io_storage_error(e, "sync seek to start"))?;
+                file.seek(SeekFrom::Start(0)).map_err(StoreError::from_io)?;
 
-                // Create sync zstd decoder over the compressed portion
                 let reader = BufReader::new(file.take(compressed_size));
-                let mut decoder = zstd::stream::read::Decoder::new(reader)
-                    .map_err(|e| to_io_storage_error(e, "zstd decoder init"))?;
+                let mut decoder =
+                    zstd::stream::read::Decoder::new(reader).map_err(StoreError::from_io)?;
 
                 // Read header → AppliedStateCore
                 let core_bytes = SyncSnapshotReader::read_header(&mut decoder)
-                    .map_err(|e| snapshot_to_storage_error(&e))?;
-                let core: AppliedStateCore = decode(&core_bytes).map_err(|e| to_serde_error(&e))?;
+                    .map_err(|e| StoreError::msg(e.to_string()))?;
+                let core: AppliedStateCore =
+                    decode(&core_bytes).map_err(|e| StoreError::from_error(&e))?;
 
-                // Open WriteTransaction — all table + entity writes go here
+                // Open WriteTransaction
                 let mut write_txn = db.write().map_err(|e| to_storage_error(&e))?;
 
-                // Stream table entries directly into WriteTransaction
+                // Stream table entries
                 let table_count = SyncSnapshotReader::read_u32(&mut decoder)
-                    .map_err(|e| snapshot_to_storage_error(&e))?;
+                    .map_err(|e| StoreError::msg(e.to_string()))?;
 
                 for _ in 0..table_count {
                     let (table_id_u8, entry_count) =
                         SyncSnapshotReader::read_table_header(&mut decoder)
-                            .map_err(|e| snapshot_to_storage_error(&e))?;
+                            .map_err(|e| StoreError::msg(e.to_string()))?;
 
                     let table_id = TableId::from_u8(table_id_u8).ok_or_else(|| {
-                        snapshot_to_storage_error(&SnapshotError::UnknownTableId {
-                            table_id: table_id_u8,
-                        })
+                        StoreError::msg(format!("unknown table ID: {table_id_u8}"))
                     })?;
 
                     for _ in 0..entry_count {
                         let (key, value) = SyncSnapshotReader::read_kv_entry(&mut decoder)
-                            .map_err(|e| snapshot_to_storage_error(&e))?;
+                            .map_err(|e| StoreError::msg(e.to_string()))?;
                         write_txn
                             .insert_raw(table_id, &key, &value)
                             .map_err(|e| to_storage_error(&e))?;
                     }
                 }
 
-                // Stream entity entries directly into WriteTransaction
+                // Stream entity entries
                 let entity_count = SyncSnapshotReader::read_u64(&mut decoder)
-                    .map_err(|e| snapshot_to_storage_error(&e))?;
+                    .map_err(|e| StoreError::msg(e.to_string()))?;
 
                 for _ in 0..entity_count {
                     let (key, value) = SyncSnapshotReader::read_kv_entry(&mut decoder)
-                        .map_err(|e| snapshot_to_storage_error(&e))?;
+                        .map_err(|e| StoreError::msg(e.to_string()))?;
                     inferadb_ledger_state::StateLayer::restore_entity(&mut write_txn, &key, &value)
                         .map_err(|e| to_storage_error(&e))?;
                 }
@@ -1159,13 +800,12 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                     .insert::<tables::RaftState>(&super::KEY_APPLIED_STATE.to_string(), &state_data)
                     .map_err(|e| to_storage_error(&e))?;
 
-                // Atomic commit — either all writes are visible or none
+                // Atomic commit
                 write_txn.commit().map_err(|e| to_storage_error(&e))?;
 
-                // Best-effort event restoration (separate database)
-                // Stream events directly into events.db WriteTransaction — no staging Vec
+                // Best-effort event restoration
                 let event_count = SyncSnapshotReader::read_u64(&mut decoder)
-                    .map_err(|e| snapshot_to_storage_error(&e))?;
+                    .map_err(|e| StoreError::msg(e.to_string()))?;
 
                 if event_count > 0
                     && let Some(ew) = event_writer_ref
@@ -1231,11 +871,9 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
                 Ok((core, table_count, entity_count, event_count))
             })?;
 
-        // =============================================================
         // Restore in-memory state from the committed tables
-        // =============================================================
         let loaded_state = self.load_applied_state_from_db(&core)?;
-        *self.applied_state.write() = loaded_state;
+        self.applied_state.store(Arc::new(loaded_state));
 
         // Restore region chain tracking
         *self.region_chain.write() = RegionChainState {
@@ -1255,11 +893,11 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
         Ok(())
     }
 
-    async fn get_current_snapshot(
+    /// Gets the current snapshot, if any state has been applied.
+    pub async fn get_current_snapshot(
         &mut self,
-    ) -> Result<Option<Snapshot<LedgerTypeConfig>>, StorageError<LedgerNodeId>> {
-        // Check whether any state has been applied by reading from the database.
-        // This avoids acquiring the in-memory AppliedState lock.
+    ) -> Result<Option<(tokio::fs::File, SnapshotMeta)>, StoreError> {
+        // Check whether any state has been applied
         {
             let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
             let has_state = read_txn
@@ -1271,12 +909,8 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
             }
         }
 
-        // Extract org IDs and timestamp for per-org event range scans.
         let (org_ids, last_ts) = extract_snapshot_event_context(&self.db)?;
 
-        // Collect events synchronously — EventsDatabase contains raw pointers
-        // (!Send), so the Arc<EventsDatabase> reference must not live across
-        // await points.
         let event_entries = {
             let events_db = self.event_writer.as_ref().map(|ew| Arc::clone(ew.events_db()));
             let event_config = self.event_writer.as_ref().map(|ew| ew.config().clone());
@@ -1285,24 +919,18 @@ impl RaftStorage<LedgerTypeConfig> for RaftLogStore {
 
         let (file, meta) = write_snapshot_to_file(&self.db, event_entries)
             .await
-            .map_err(|e| snapshot_to_storage_error(&e))?;
+            .map_err(|e| StoreError::msg(e.to_string()))?;
 
-        Ok(Some(Snapshot { meta, snapshot: Box::new(file) }))
+        Ok(Some((file, meta)))
     }
-}
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
-impl RaftLogStore {
     /// Reconstructs the full `AppliedState` from an `AppliedStateCore` blob and
     /// the externalized B-tree tables. Used during snapshot installation to
     /// rebuild the in-memory state after table data has been committed.
     fn load_applied_state_from_db(
         &self,
         core: &AppliedStateCore,
-    ) -> Result<AppliedState, StorageError<LedgerNodeId>> {
+    ) -> Result<AppliedState, StoreError> {
         let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
 
         let mut state = AppliedState {
@@ -1388,7 +1016,7 @@ impl RaftLogStore {
             }
         }
 
-        // Load vault heights (values are postcard-encoded u64, not raw BE)
+        // Load vault heights
         let height_iter =
             read_txn.iter::<tables::VaultHeights>().map_err(|e| to_storage_error(&e))?;
         for (key_bytes, value_bytes) in height_iter {
@@ -1552,28 +1180,19 @@ impl RaftLogStore {
     }
 
     /// Verifies a leader's state root commitment against the local block archive.
-    ///
-    /// Looks up the vault entry at `(org, vault, height)` in the archive and
-    /// compares the locally-computed `state_root` against the leader's commitment.
-    /// Mismatches indicate state machine divergence (Byzantine fault).
     fn verify_state_root_commitment(&self, commitment: &crate::types::StateRootCommitment) {
         let archive = match &self.block_archive {
             Some(a) => a,
             None => return,
         };
 
-        // Find the region height containing this vault entry
         let region_height = match archive.find_region_height(
             commitment.organization,
             commitment.vault,
             commitment.vault_height,
         ) {
             Ok(Some(h)) => h,
-            Ok(None) => {
-                // Not yet archived locally (e.g., snapshot install skipped this range).
-                // Can't verify — not an error.
-                return;
-            },
+            Ok(None) => return,
             Err(e) => {
                 tracing::warn!(
                     organization = commitment.organization.value(),
@@ -1586,7 +1205,6 @@ impl RaftLogStore {
             },
         };
 
-        // Read the region block and find the matching vault entry
         let block = match archive.read_block(region_height) {
             Ok(b) => b,
             Err(e) => {
@@ -1624,7 +1242,6 @@ impl RaftLogStore {
                         commitment.vault,
                     );
 
-                    // Send divergence event to the handler task for vault halting.
                     if let Some(sender) = &self.divergence_sender {
                         let _ = sender.send(crate::types::StateRootDivergence {
                             organization: commitment.organization,
@@ -1638,9 +1255,6 @@ impl RaftLogStore {
                 return;
             }
         }
-
-        // Vault entry not found in block — possible if block was compacted.
-        // Not an error condition.
     }
 }
 
@@ -1648,34 +1262,10 @@ impl RaftLogStore {
 // Error Helpers
 // ============================================================================
 
-pub(super) fn to_storage_error<E: std::error::Error>(e: &E) -> StorageError<LedgerNodeId> {
-    StorageError::from_io_error(
-        openraft::ErrorSubject::Store,
-        openraft::ErrorVerb::Write,
-        std::io::Error::other(e.to_string()),
-    )
+pub(super) fn to_storage_error<E: std::error::Error>(e: &E) -> StoreError {
+    StoreError::from_error(e)
 }
 
-pub(super) fn to_serde_error<E: std::error::Error>(e: &E) -> StorageError<LedgerNodeId> {
-    StorageError::from_io_error(
-        openraft::ErrorSubject::Store,
-        openraft::ErrorVerb::Read,
-        std::io::Error::other(e.to_string()),
-    )
-}
-
-fn snapshot_to_storage_error(e: &SnapshotError) -> StorageError<LedgerNodeId> {
-    StorageError::from_io_error(
-        openraft::ErrorSubject::Snapshot(None),
-        openraft::ErrorVerb::Read,
-        std::io::Error::other(e.to_string()),
-    )
-}
-
-fn to_io_storage_error(e: std::io::Error, context: &str) -> StorageError<LedgerNodeId> {
-    StorageError::from_io_error(
-        openraft::ErrorSubject::Snapshot(None),
-        openraft::ErrorVerb::Read,
-        std::io::Error::other(format!("{context}: {e}")),
-    )
+pub(super) fn to_serde_error<E: std::error::Error>(e: &E) -> StoreError {
+    StoreError::from_error(e)
 }

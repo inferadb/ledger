@@ -17,6 +17,7 @@
 mod admin;
 mod app;
 mod discovery;
+pub(crate) mod error_classify;
 pub(crate) mod error_details;
 mod events;
 mod forward_client;

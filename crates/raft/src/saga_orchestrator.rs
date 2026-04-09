@@ -44,7 +44,6 @@ use inferadb_ledger_types::{
     events::{EventAction, EventOutcome},
     snowflake,
 };
-use openraft::Raft;
 use parking_lot::Mutex;
 use snafu::{GenerateImplicitData, ResultExt};
 use tokio::{sync::mpsc, time::interval};
@@ -52,6 +51,7 @@ use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
 use crate::{
+    consensus_handle::ConsensusHandle,
     error::{SagaError, SerializationSnafu, StateReadSnafu},
     event_writer::{EventHandle, HandlerPhaseEmitter},
     metrics::{
@@ -59,7 +59,7 @@ use crate::{
     },
     raft_manager::RaftManager,
     trace_context::TraceContext,
-    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig, RaftPayload, SystemRequest},
+    types::{LedgerNodeId, LedgerRequest, RaftPayload, SystemRequest},
 };
 
 /// Key prefix for saga records in _system organization.
@@ -249,9 +249,9 @@ impl SagaOrchestratorHandle {
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct SagaOrchestrator<B: StorageBackend + 'static> {
-    /// Raft consensus handle for proposing saga step operations.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// This node's ID.
+    /// Consensus handle for proposing saga step operations.
+    handle: Arc<ConsensusHandle>,
+    /// This node's ID (used for event emission).
     node_id: LedgerNodeId,
     /// The shared state layer (internally thread-safe via inferadb-ledger-store MVCC).
     state: Arc<StateLayer<B>>,
@@ -307,37 +307,157 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     /// Proposes a request to the appropriate Raft group for a given region.
     ///
     /// When `self.manager` is configured (multi-Raft), routes the request to
-    /// the region's Raft group. Falls back to `self.raft` (GLOBAL) when no
+    /// the region's Raft group. Falls back to `self.handle` (GLOBAL) when no
     /// manager is present (single-node test setups).
     async fn propose_to_region(
         &self,
         region: Region,
         request: LedgerRequest,
     ) -> std::result::Result<crate::types::LedgerResponse, SagaError> {
-        let payload = RaftPayload::system(request);
-        let result = match &self.manager {
+        let payload = RaftPayload::system(request.clone());
+        match &self.manager {
             Some(manager) => {
                 let region_group =
                     manager.get_region_group(region).map_err(|e| SagaError::SagaRaftWrite {
                         message: format!("Region {region} not active: {e}"),
                         backtrace: snafu::Backtrace::generate(),
                     })?;
-                region_group.raft().client_write(payload).await
+
+                // Try local proposal first.
+                match region_group
+                    .handle()
+                    .propose_and_wait(payload, std::time::Duration::from_secs(30))
+                    .await
+                {
+                    Ok(response) => Ok(response),
+                    Err(e) if e.to_string().contains("Not the leader") => {
+                        // Not the data region leader — forward to the actual leader.
+                        let leader_id =
+                            region_group.handle().current_leader().ok_or_else(|| {
+                                SagaError::SagaRaftWrite {
+                                    message: format!("No known leader for region {region}"),
+                                    backtrace: snafu::Backtrace::generate(),
+                                }
+                            })?;
+                        let leader_addr =
+                            manager.peer_addresses().get(leader_id).ok_or_else(|| {
+                                SagaError::SagaRaftWrite {
+                                    message: format!(
+                                        "No address for leader {leader_id} in region {region}"
+                                    ),
+                                    backtrace: snafu::Backtrace::generate(),
+                                }
+                            })?;
+
+                        let request_payload =
+                            inferadb_ledger_types::encode(&request).map_err(|e| {
+                                SagaError::SagaRaftWrite {
+                                    message: format!("serialize request: {e}"),
+                                    backtrace: snafu::Backtrace::generate(),
+                                }
+                            })?;
+                        let proto_region: inferadb_ledger_proto::proto::Region = region.into();
+
+                        // Cache the leader channel to avoid creating a new TCP
+                        // connection per saga proposal.
+                        static SAGA_CHANNEL: parking_lot::Mutex<
+                            Option<(String, tonic::transport::Channel)>,
+                        > = parking_lot::Mutex::new(None);
+                        let channel = {
+                            let cache = SAGA_CHANNEL.lock();
+                            if let Some((ref addr, ref ch)) = *cache {
+                                if addr == &leader_addr { Some(ch.clone()) } else { None }
+                            } else {
+                                None
+                            }
+                        };
+                        let channel = match channel {
+                            Some(ch) => ch,
+                            None => {
+                                let ch = tonic::transport::Channel::from_shared(format!(
+                                    "http://{leader_addr}"
+                                ))
+                                .map_err(|e| SagaError::SagaRaftWrite {
+                                    message: format!("invalid leader address: {e}"),
+                                    backtrace: snafu::Backtrace::generate(),
+                                })?
+                                .connect_lazy();
+                                let mut cache = SAGA_CHANNEL.lock();
+                                *cache = Some((leader_addr.clone(), ch.clone()));
+                                ch
+                            },
+                        };
+
+                        let mut client = inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new(channel);
+                        let resp = client
+                            .forward_regional_proposal(
+                                inferadb_ledger_proto::proto::ForwardRegionalProposalRequest {
+                                    region: Some(proto_region as i32),
+                                    request_payload,
+                                    caller: 0,
+                                    timeout_ms: 30_000,
+                                },
+                            )
+                            .await
+                            .map_err(|e| SagaError::SagaRaftWrite {
+                                message: format!("forward to leader: {e}"),
+                                backtrace: snafu::Backtrace::generate(),
+                            })?
+                            .into_inner();
+
+                        if resp.status_code != 0 {
+                            return Err(SagaError::SagaRaftWrite {
+                                message: format!("leader returned error: {}", resp.error_message),
+                                backtrace: snafu::Backtrace::generate(),
+                            });
+                        }
+
+                        // Wait for local replication so subsequent reads see the data.
+                        if resp.committed_index > 0 {
+                            let mut watch = region_group.applied_index_watch();
+                            if let Err(e) = crate::wait_for_apply(
+                                &mut watch,
+                                resp.committed_index,
+                                std::time::Duration::from_secs(5),
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    region = region.as_str(),
+                                    committed_index = resp.committed_index,
+                                    error = %e,
+                                    "Timed out waiting for local replication after forwarded saga write"
+                                );
+                            }
+                        }
+
+                        inferadb_ledger_types::decode(&resp.response_payload).map_err(|e| {
+                            SagaError::SagaRaftWrite {
+                                message: format!("deserialize forwarded response: {e}"),
+                                backtrace: snafu::Backtrace::generate(),
+                            }
+                        })
+                    },
+                    Err(e) => Err(SagaError::SagaRaftWrite {
+                        message: format!("{e:?}"),
+                        backtrace: snafu::Backtrace::generate(),
+                    }),
+                }
             },
-            None => self.raft.client_write(payload).await,
-        };
-        Ok(result
-            .map_err(|e| SagaError::SagaRaftWrite {
-                message: format!("{e:?}"),
-                backtrace: snafu::Backtrace::generate(),
-            })?
-            .data)
+            None => self
+                .handle
+                .propose_and_wait(payload, std::time::Duration::from_secs(30))
+                .await
+                .map_err(|e| SagaError::SagaRaftWrite {
+                    message: format!("{e:?}"),
+                    backtrace: snafu::Backtrace::generate(),
+                }),
+        }
     }
 
     /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader == Some(self.node_id)
+        self.handle.is_leader()
     }
 
     /// Loads all pending sagas from _system organization.
@@ -459,7 +579,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 // Step 1: Soft-delete user via SystemRequest (proper postcard encoding).
                 let request =
                     LedgerRequest::System(SystemRequest::DeleteUser { user_id: saga.input.user });
-                let result = self.raft.client_write(RaftPayload::system(request)).await;
+                let result = self
+                    .handle
+                    .propose_and_wait(
+                        RaftPayload::system(request),
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await;
 
                 match result {
                     Ok(_) => {
@@ -610,12 +736,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             request_hash: 0,
         };
 
-        self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
-            SagaError::SequenceAllocation {
+        self.handle
+            .propose_and_wait(RaftPayload::system(request), std::time::Duration::from_secs(10))
+            .await
+            .map_err(|e| SagaError::SequenceAllocation {
                 message: format!("{e:?}"),
                 backtrace: snafu::Backtrace::generate(),
-            }
-        })?;
+            })?;
 
         Ok(current)
     }
@@ -648,7 +775,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             // Migrating — instead, propose a ResumeOrganization to revert status
             let request =
                 LedgerRequest::ResumeOrganization { organization: saga.input.organization_id };
-            let _ = self.raft.client_write(RaftPayload::system(request)).await;
+            let _ = self.handle.propose(RaftPayload::system(request)).await;
 
             saga.transition(MigrateOrgSagaState::TimedOut);
             return Ok(());
@@ -662,21 +789,16 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     target_region_group: saga.input.target_region,
                 };
 
-                let result =
-                    self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
-                        SagaError::SagaRaftWrite {
-                            message: format!("{e:?}"),
-                            backtrace: snafu::Backtrace::generate(),
-                        }
+                self.handle
+                    .propose_and_wait(
+                        RaftPayload::system(request),
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
+                        message: format!("{e:?}"),
+                        backtrace: snafu::Backtrace::generate(),
                     })?;
-
-                let response = result.data;
-                if let crate::types::LedgerResponse::Error { code, message } = &response {
-                    return Err(SagaError::UnexpectedSagaResponse {
-                        code: *code,
-                        description: message.clone(),
-                    });
-                }
 
                 saga.transition(MigrateOrgSagaState::MigrationStarted);
                 info!(
@@ -744,21 +866,16 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 let request =
                     LedgerRequest::CompleteMigration { organization: saga.input.organization_id };
 
-                let result =
-                    self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
-                        SagaError::SagaRaftWrite {
-                            message: format!("{e:?}"),
-                            backtrace: snafu::Backtrace::generate(),
-                        }
+                self.handle
+                    .propose_and_wait(
+                        RaftPayload::system(request),
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
+                        message: format!("{e:?}"),
+                        backtrace: snafu::Backtrace::generate(),
                     })?;
-
-                let response = result.data;
-                if let crate::types::LedgerResponse::Error { code, message } = &response {
-                    return Err(SagaError::UnexpectedSagaResponse {
-                        code: *code,
-                        description: message.clone(),
-                    });
-                }
 
                 saga.transition(MigrateOrgSagaState::RoutingUpdated);
                 info!(
@@ -823,7 +940,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
                 region: Some(saga.input.source_region),
             });
-            let _ = self.raft.client_write(RaftPayload::system(request)).await;
+            let _ = self.handle.propose(RaftPayload::system(request)).await;
 
             saga.transition(MigrateUserSagaState::TimedOut);
             return Ok(());
@@ -837,12 +954,16 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     status: inferadb_ledger_state::system::UserDirectoryStatus::Migrating,
                     region: None, // keep current region
                 });
-                self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
-                    SagaError::SagaRaftWrite {
+                self.handle
+                    .propose_and_wait(
+                        RaftPayload::system(request),
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
                         backtrace: snafu::Backtrace::generate(),
-                    }
-                })?;
+                    })?;
 
                 saga.transition(MigrateUserSagaState::DirectoryMarkedMigrating);
                 Ok(())
@@ -867,12 +988,16 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
                     region: Some(saga.input.target_region),
                 });
-                self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
-                    SagaError::SagaRaftWrite {
+                self.handle
+                    .propose_and_wait(
+                        RaftPayload::system(request),
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
                         backtrace: snafu::Backtrace::generate(),
-                    }
-                })?;
+                    })?;
 
                 saga.transition(MigrateUserSagaState::DirectoryUpdated);
                 Ok(())
@@ -919,7 +1044,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 let hmac = hmac_hex.clone();
                 let request =
                     LedgerRequest::System(SystemRequest::RemoveEmailHash { hmac_hex: hmac });
-                let _ = self.raft.client_write(RaftPayload::system(request)).await;
+                let _ = self.handle.propose(RaftPayload::system(request)).await;
             }
             saga.transition(CreateUserSagaState::TimedOut);
             return Ok(());
@@ -942,12 +1067,16 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     hmac_hex: saga.input.hmac.clone(),
                     user_id,
                 });
-                self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
-                    SagaError::SagaRaftWrite {
+                self.handle
+                    .propose_and_wait(
+                        RaftPayload::system(request),
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
                         backtrace: snafu::Backtrace::generate(),
-                    }
-                })?;
+                    })?;
 
                 saga.transition(CreateUserSagaState::EmailReserved {
                     user_id,
@@ -970,12 +1099,16 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     slug: user_slug,
                     region: saga.input.region,
                 });
-                self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
-                    SagaError::SagaRaftWrite {
+                self.handle
+                    .propose_and_wait(
+                        RaftPayload::system(request),
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
                         backtrace: snafu::Backtrace::generate(),
-                    }
-                })?;
+                    })?;
 
                 saga.transition(CreateUserSagaState::RegionalDataWritten {
                     user_id,
@@ -998,12 +1131,16 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
                     region: Some(saga.input.region),
                 });
-                self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
-                    SagaError::SagaRaftWrite {
+                self.handle
+                    .propose_and_wait(
+                        RaftPayload::system(request),
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
                         backtrace: snafu::Backtrace::generate(),
-                    }
-                })?;
+                    })?;
 
                 saga.transition(CreateUserSagaState::Completed { user_id, user_slug });
                 info!(
@@ -1087,7 +1224,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     organization: *organization_id,
                     status: OrganizationStatus::Deleted,
                 });
-                let _ = self.raft.client_write(RaftPayload::system(request)).await;
+                let _ = self.handle.propose(RaftPayload::system(request)).await;
             }
             saga.transition(CreateOrganizationSagaState::TimedOut);
             return Ok(());
@@ -1102,15 +1239,18 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     tier: saga.input.tier,
                     admin: saga.input.admin,
                 });
-                let result =
-                    self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
-                        SagaError::SagaRaftWrite {
-                            message: format!("{e:?}"),
-                            backtrace: snafu::Backtrace::generate(),
-                        }
+                let response = self
+                    .handle
+                    .propose_and_wait(
+                        RaftPayload::system(request),
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
+                        message: format!("{e:?}"),
+                        backtrace: snafu::Backtrace::generate(),
                     })?;
 
-                let response = result.data;
                 match response {
                     crate::types::LedgerResponse::OrganizationCreated {
                         organization_id,
@@ -1199,12 +1339,16 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     organization: organization_id,
                     status: OrganizationStatus::Active,
                 });
-                self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
-                    SagaError::SagaRaftWrite {
+                self.handle
+                    .propose_and_wait(
+                        RaftPayload::system(request),
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
                         backtrace: snafu::Backtrace::generate(),
-                    }
-                })?;
+                    })?;
 
                 saga.transition(CreateOrganizationSagaState::Completed {
                     organization_id,
@@ -1274,7 +1418,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                         let request = LedgerRequest::System(SystemRequest::RemoveEmailHash {
                             hmac_hex: s.input.hmac.clone(),
                         });
-                        let _ = self.raft.client_write(RaftPayload::system(request)).await;
+                        let _ = self.handle.propose(RaftPayload::system(request)).await;
                         cleanup.push("email_hmac_removed");
                     }
 
@@ -1300,7 +1444,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                 organization: organization_id,
                                 status: OrganizationStatus::Deleted,
                             });
-                        let _ = self.raft.client_write(RaftPayload::system(request)).await;
+                        let _ = self.handle.propose(RaftPayload::system(request)).await;
                         cleanup.push("directory_marked_deleted");
                     }
 
@@ -1327,7 +1471,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     let request = LedgerRequest::System(SystemRequest::RemoveEmailHash {
                         hmac_hex: s.input.email_hmac.clone(),
                     });
-                    let _ = self.raft.client_write(RaftPayload::system(request)).await;
+                    let _ = self.handle.propose(RaftPayload::system(request)).await;
                     cleanup.push("email_hmac_removed");
 
                     // If IDs were allocated (step 0 completed), mark directories as Deleted
@@ -1338,7 +1482,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                 status: inferadb_ledger_state::system::UserDirectoryStatus::Deleted,
                                 region: None,
                             });
-                        let _ = self.raft.client_write(RaftPayload::system(user_dir_request)).await;
+                        let _ = self.handle.propose(RaftPayload::system(user_dir_request)).await;
                         cleanup.push("user_directory_marked_deleted");
 
                         let org_dir_request =
@@ -1346,7 +1490,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                 organization: organization_id,
                                 status: OrganizationStatus::Deleted,
                             });
-                        let _ = self.raft.client_write(RaftPayload::system(org_dir_request)).await;
+                        let _ = self.handle.propose(RaftPayload::system(org_dir_request)).await;
                         cleanup.push("org_directory_marked_deleted");
                     }
 
@@ -1573,15 +1717,18 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     rmk_version,
                 };
 
-                let result =
-                    self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
-                        SagaError::SagaRaftWrite {
-                            message: format!("{e:?}"),
-                            backtrace: snafu::Backtrace::generate(),
-                        }
+                let response = self
+                    .handle
+                    .propose_and_wait(
+                        RaftPayload::system(request),
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
+                        message: format!("{e:?}"),
+                        backtrace: snafu::Backtrace::generate(),
                     })?;
 
-                let response = result.data;
                 match response {
                     crate::types::LedgerResponse::SigningKeyCreated {
                         kid: created_kid, ..
@@ -1643,15 +1790,18 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     organization_slug: saga.input.organization_slug,
                     region: saga.input.region,
                 });
-                let result =
-                    self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
-                        SagaError::SagaRaftWrite {
-                            message: format!("{e:?}"),
-                            backtrace: snafu::Backtrace::generate(),
-                        }
+                let response = self
+                    .handle
+                    .propose_and_wait(
+                        RaftPayload::system(request),
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
+                        message: format!("{e:?}"),
+                        backtrace: snafu::Backtrace::generate(),
                     })?;
 
-                let response = result.data;
                 match response {
                     crate::types::LedgerResponse::OnboardingUserCreated {
                         user_id,
@@ -1807,12 +1957,16 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     organization_slug: saga.input.organization_slug,
                     email_hmac: saga.input.email_hmac.clone(),
                 });
-                self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
-                    SagaError::SagaRaftWrite {
+                self.handle
+                    .propose_and_wait(
+                        RaftPayload::system(request),
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
                         backtrace: snafu::Backtrace::generate(),
-                    }
-                })?;
+                    })?;
 
                 saga.transition(CreateOnboardingUserSagaState::Completed {
                     user_id,
@@ -2039,8 +2193,22 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                         let refresh_token_hash = inferadb_ledger_types::sha256(
                                             c.refresh_token.as_bytes(),
                                         );
-                                        let sys = self.system_service();
-                                        match sys.get_refresh_token_by_hash(&refresh_token_hash) {
+                                        // Read from the REGIONAL state layer where the
+                                        // refresh token was written in step 2. Falls back
+                                        // to GLOBAL for single-region test setups.
+                                        let token_result = if let Some(ref mgr) = self.manager {
+                                            if let Ok(rg) = mgr.get_region_group(s.input.region) {
+                                                let sys = inferadb_ledger_state::system::SystemOrganizationService::new(rg.state().clone());
+                                                sys.get_refresh_token_by_hash(&refresh_token_hash)
+                                            } else {
+                                                let sys = self.system_service();
+                                                sys.get_refresh_token_by_hash(&refresh_token_hash)
+                                            }
+                                        } else {
+                                            let sys = self.system_service();
+                                            sys.get_refresh_token_by_hash(&refresh_token_hash)
+                                        };
+                                        match token_result {
                                             Ok(Some(rt)) => Ok(SagaOutput {
                                                 user_id: *user_id,
                                                 user_slug: c.user_slug,

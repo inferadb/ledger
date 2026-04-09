@@ -56,10 +56,42 @@ impl From<&inferadb_ledger_types::Operation> for proto::Operation {
 }
 
 /// Converts an owned domain [`Operation`](inferadb_ledger_types::Operation) to its protobuf
-/// representation.
+/// representation, moving fields instead of cloning.
 impl From<inferadb_ledger_types::Operation> for proto::Operation {
     fn from(op: inferadb_ledger_types::Operation) -> Self {
-        (&op).into()
+        use inferadb_ledger_types::Operation as LedgerOp;
+        use proto::operation::Op;
+
+        match op {
+            LedgerOp::CreateRelationship { resource, relation, subject } => proto::Operation {
+                op: Some(Op::CreateRelationship(proto::CreateRelationship {
+                    resource,
+                    relation,
+                    subject,
+                })),
+            },
+            LedgerOp::DeleteRelationship { resource, relation, subject } => proto::Operation {
+                op: Some(Op::DeleteRelationship(proto::DeleteRelationship {
+                    resource,
+                    relation,
+                    subject,
+                })),
+            },
+            LedgerOp::SetEntity { key, value, condition, expires_at } => proto::Operation {
+                op: Some(Op::SetEntity(proto::SetEntity {
+                    key,
+                    value,
+                    condition: condition.map(proto::SetCondition::from),
+                    expires_at,
+                })),
+            },
+            LedgerOp::DeleteEntity { key } => {
+                proto::Operation { op: Some(Op::DeleteEntity(proto::DeleteEntity { key })) }
+            },
+            LedgerOp::ExpireEntity { key, expired_at } => proto::Operation {
+                op: Some(Op::ExpireEntity(proto::ExpireEntity { key, expired_at })),
+            },
+        }
     }
 }
 
@@ -87,10 +119,21 @@ impl From<&inferadb_ledger_types::SetCondition> for proto::SetCondition {
 }
 
 /// Converts an owned domain [`SetCondition`](inferadb_ledger_types::SetCondition) to its protobuf
-/// representation.
+/// representation, moving fields instead of cloning.
 impl From<inferadb_ledger_types::SetCondition> for proto::SetCondition {
     fn from(c: inferadb_ledger_types::SetCondition) -> Self {
-        (&c).into()
+        use proto::set_condition::Condition;
+
+        let condition = match c {
+            inferadb_ledger_types::SetCondition::MustNotExist => Condition::NotExists(true),
+            inferadb_ledger_types::SetCondition::MustExist => Condition::MustExists(true),
+            inferadb_ledger_types::SetCondition::VersionEquals(v) => Condition::Version(v),
+            inferadb_ledger_types::SetCondition::ValueEquals(bytes) => {
+                Condition::ValueEquals(bytes)
+            },
+        };
+
+        proto::SetCondition { condition: Some(condition) }
     }
 }
 
@@ -178,13 +221,49 @@ impl TryFrom<&proto::Operation> for inferadb_ledger_types::Operation {
 }
 
 /// Converts an owned protobuf [`Operation`](proto::Operation) to the domain
-/// [`Operation`](inferadb_ledger_types::Operation).
-///
-/// Delegates to the reference-based conversion.
+/// [`Operation`](inferadb_ledger_types::Operation), moving fields instead of cloning.
 impl TryFrom<proto::Operation> for inferadb_ledger_types::Operation {
     type Error = Status;
 
     fn try_from(proto_op: proto::Operation) -> Result<Self, Self::Error> {
-        Self::try_from(&proto_op)
+        use proto::operation::Op;
+
+        let op =
+            proto_op.op.ok_or_else(|| Status::invalid_argument("Operation missing op field"))?;
+
+        match op {
+            Op::CreateRelationship(cr) => {
+                Ok(inferadb_ledger_types::Operation::CreateRelationship {
+                    resource: cr.resource,
+                    relation: cr.relation,
+                    subject: cr.subject,
+                })
+            },
+            Op::DeleteRelationship(dr) => {
+                Ok(inferadb_ledger_types::Operation::DeleteRelationship {
+                    resource: dr.resource,
+                    relation: dr.relation,
+                    subject: dr.subject,
+                })
+            },
+            Op::SetEntity(se) => {
+                let condition: Option<inferadb_ledger_types::SetCondition> =
+                    se.condition.as_ref().and_then(|c| c.into());
+
+                Ok(inferadb_ledger_types::Operation::SetEntity {
+                    key: se.key,
+                    value: se.value,
+                    condition,
+                    expires_at: se.expires_at,
+                })
+            },
+            Op::DeleteEntity(de) => {
+                Ok(inferadb_ledger_types::Operation::DeleteEntity { key: de.key })
+            },
+            Op::ExpireEntity(ee) => Ok(inferadb_ledger_types::Operation::ExpireEntity {
+                key: ee.key,
+                expired_at: ee.expired_at,
+            }),
+        }
     }
 }

@@ -11,13 +11,12 @@ use std::sync::{
 
 use inferadb_ledger_proto::proto::{HealthCheckRequest, HealthCheckResponse, HealthStatus};
 use inferadb_ledger_raft::{
+    ConsensusHandle,
     dependency_health::DependencyHealthChecker,
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
-    types::LedgerTypeConfig,
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
-use openraft::Raft;
 use tonic::{Request, Response, Status};
 
 use super::slug_resolver::SlugResolver;
@@ -32,8 +31,8 @@ use super::slug_resolver::SlugResolver;
 /// Dependency checks (disk, peer, Raft lag) are cached with a configurable TTL
 /// to prevent I/O storms from aggressive probe intervals.
 pub struct HealthService {
-    /// Raft consensus handle for leadership and term queries.
-    raft: Arc<Raft<LedgerTypeConfig>>,
+    /// Consensus handle for leadership and term queries.
+    handle: Arc<ConsensusHandle>,
     /// State layer for vault health and height queries.
     state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (vault heights, health).
@@ -51,13 +50,13 @@ pub struct HealthService {
 impl HealthService {
     /// Creates a new health service.
     pub fn new(
-        raft: Arc<Raft<LedgerTypeConfig>>,
+        handle: Arc<ConsensusHandle>,
         state: Arc<StateLayer<FileBackend>>,
         applied_state: AppliedStateAccessor,
         health_state: inferadb_ledger_raft::graceful_shutdown::HealthState,
     ) -> Self {
         Self {
-            raft,
+            handle,
             state,
             applied_state,
             health_state,
@@ -174,31 +173,28 @@ impl inferadb_ledger_proto::proto::health_service_server::HealthService for Heal
         }
 
         // Check overall node health using three-probe pattern
-        let metrics = self.raft.metrics().borrow().clone();
+        let state = self.handle.shard_state();
         let mut details = std::collections::HashMap::new();
 
         // Emit SLI metrics: quorum status and leader election detection
-        let has_quorum = metrics.current_leader.is_some();
+        let has_quorum = state.leader.is_some();
         inferadb_ledger_raft::metrics::set_cluster_quorum_status(has_quorum);
 
         // Detect leader elections by observing Raft term changes
-        let prev_term = self.last_observed_term.swap(metrics.current_term, Ordering::Relaxed);
-        if prev_term > 0 && metrics.current_term > prev_term {
+        let prev_term = self.last_observed_term.swap(state.term, Ordering::Relaxed);
+        if prev_term > 0 && state.term > prev_term {
             // Term increased — a leader election occurred (possibly multiple)
-            for _ in 0..(metrics.current_term - prev_term) {
+            for _ in 0..(state.term - prev_term) {
                 inferadb_ledger_raft::metrics::record_leader_election();
             }
         }
 
         // Add Raft metrics to details
-        details.insert("current_term".to_string(), metrics.current_term.to_string());
-        if let Some(leader) = metrics.current_leader {
-            details.insert("leader_id".to_string(), leader.to_string());
+        details.insert("current_term".to_string(), state.term.to_string());
+        if let Some(leader) = state.leader {
+            details.insert("leader_id".to_string(), leader.0.to_string());
         }
-        details.insert(
-            "member_count".to_string(),
-            metrics.membership_config.membership().nodes().count().to_string(),
-        );
+        details.insert("member_count".to_string(), state.voters.len().to_string());
 
         // Include Kubernetes probe results in details
         details.insert("startup".to_string(), self.health_state.startup_check().to_string());
@@ -253,7 +249,7 @@ impl inferadb_ledger_proto::proto::health_service_server::HealthService for Heal
             inferadb_ledger_raft::graceful_shutdown::NodePhase::Ready => {
                 if !deps_healthy {
                     (HealthStatus::Degraded, "Dependencies unhealthy")
-                } else if metrics.current_leader.is_some() {
+                } else if state.leader.is_some() {
                     (HealthStatus::Healthy, "Node is healthy and has a leader")
                 } else {
                     (HealthStatus::Degraded, "No leader elected")

@@ -17,17 +17,17 @@ use std::{
 
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::StorageBackend;
-use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::{
+    consensus_handle::ConsensusHandle,
     log_storage::AppliedStateAccessor,
     metrics::{
         record_background_job_duration, record_background_job_items, record_background_job_run,
     },
     trace_context::TraceContext,
-    types::{BlockRetentionMode, LedgerNodeId, LedgerTypeConfig},
+    types::BlockRetentionMode,
 };
 
 /// Default interval between compaction cycles.
@@ -40,10 +40,8 @@ const COMPACTION_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct BlockCompactor<B: StorageBackend + 'static> {
-    /// Raft consensus handle for leader checks.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// This node's ID.
-    node_id: LedgerNodeId,
+    /// Consensus handle for leader checks.
+    handle: Arc<ConsensusHandle>,
     /// Block archive for compaction.
     block_archive: Arc<BlockArchive<B>>,
     /// Accessor for applied state (vault registry and metadata).
@@ -59,8 +57,7 @@ pub struct BlockCompactor<B: StorageBackend + 'static> {
 impl<B: StorageBackend + 'static> BlockCompactor<B> {
     /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader == Some(self.node_id)
+        self.handle.is_leader()
     }
 
     /// Runs a single compaction cycle.

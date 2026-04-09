@@ -17,8 +17,25 @@ use inferadb_ledger_types::{
 };
 // Re-export domain types that originated here but now live in types crate.
 pub use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId};
-use openraft::{BasicNode, impls::OneshotResponder};
 use serde::{Deserialize, Serialize};
+
+// ============================================================================
+// Node Lifecycle Status
+// ============================================================================
+
+/// Lifecycle status for a cluster node. Stored in GLOBAL state and read
+/// by the DR checker/scheduler to derive desired DR membership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum NodeStatus {
+    /// Normal operation. Participates in all assigned Raft groups.
+    Active,
+    /// Operator-initiated departure. DRs drain replicas.
+    Decommissioning,
+    /// System-detected failure (no heartbeat within dead_node_timeout).
+    Dead,
+    /// Terminal. Node removed from GLOBAL, all DR replicas drained.
+    Removed,
+}
 
 // ============================================================================
 // State Root Commitment
@@ -124,18 +141,7 @@ impl RaftPayload {
     }
 }
 
-openraft::declare_raft_types!(
-    /// Ledger Raft type configuration.
-    pub LedgerTypeConfig:
-        D = RaftPayload,
-        R = LedgerResponse,
-        NodeId = LedgerNodeId,
-        Node = BasicNode,
-        Entry = openraft::Entry<LedgerTypeConfig>,
-        SnapshotData = tokio::fs::File,
-        AsyncRuntime = openraft::TokioRuntime,
-        Responder = OneshotResponder<LedgerTypeConfig>
-);
+// openraft type configuration removed — local types in log_storage/types.rs.
 
 // ============================================================================
 // Request/Response Types
@@ -777,18 +783,13 @@ pub enum SystemRequest {
         email_id: UserEmailId,
     },
 
-    /// Adds a node to the cluster.
-    AddNode {
-        /// Numeric node ID.
-        node_id: LedgerNodeId,
-        /// Node's gRPC address.
-        address: String,
-    },
-
-    /// Removes a node from the cluster.
-    RemoveNode {
-        /// Node ID to remove.
-        node_id: LedgerNodeId,
+    /// Sets a node's lifecycle status. Proposed to GLOBAL Raft and applied
+    /// deterministically on all nodes. Used for decommissioning and dead-node detection.
+    SetNodeStatus {
+        /// Node whose status changes.
+        node_id: u64,
+        /// New lifecycle status.
+        status: NodeStatus,
     },
 
     /// Updates organization-to-region mapping.
@@ -1403,6 +1404,46 @@ pub enum SystemRequest {
         /// New HMAC hex computed with the rotated blinding key.
         new_hmac: String,
     },
+
+    /// Creates a data region on all cluster nodes.
+    ///
+    /// Proposed to the GLOBAL Raft group. Each node's apply handler sends the
+    /// region through a channel so the `RaftManager` can start the local
+    /// region group, ensuring cluster-wide consensus on region creation.
+    CreateDataRegion {
+        /// The region to create.
+        region: Region,
+        /// Initial members for the region's Raft group.
+        /// Carried in the Raft entry so all nodes use the same membership.
+        initial_members: Vec<(u64, String)>,
+    },
+
+    /// Registers a peer's network address so all nodes can route to it.
+    ///
+    /// Proposed to GLOBAL when a node joins the cluster. All nodes apply it
+    /// by updating their local peer_addresses map, enabling data region
+    /// transports to reach the new node.
+    RegisterPeerAddress {
+        /// The node to register.
+        node_id: u64,
+        /// The node's gRPC address.
+        address: String,
+    },
+
+    /// DR leader reports its current membership to GLOBAL.
+    ///
+    /// Used by the drain monitor to check when decommissioning nodes are fully
+    /// drained from all data regions before removing them from GLOBAL.
+    RegionMembershipReport {
+        /// The data region this report is from.
+        region: inferadb_ledger_types::Region,
+        /// Current voting members of the data region's Raft group.
+        voters: Vec<u64>,
+        /// Current non-voting learners of the data region's Raft group.
+        learners: Vec<u64>,
+        /// Configuration epoch — stale reports with a lower epoch are ignored.
+        conf_epoch: u64,
+    },
 }
 
 /// Response from the Raft state machine.
@@ -1922,6 +1963,15 @@ pub enum LedgerResponse {
         /// Updated attempt count.
         attempts: u8,
     },
+
+    /// Data region created via GLOBAL Raft consensus.
+    ///
+    /// Each node's apply handler triggers local region startup through
+    /// the `region_creation_sender` channel.
+    DataRegionCreated {
+        /// The region that was created.
+        region: Region,
+    },
 }
 
 /// TOTP pre-resolved data embedded in [`SystemRequest::VerifyEmailCode`].
@@ -2215,6 +2265,48 @@ impl fmt::Display for LedgerResponse {
             LedgerResponse::TotpAttemptIncremented { attempts } => {
                 write!(f, "TotpAttemptIncremented(attempts={})", attempts)
             },
+            LedgerResponse::DataRegionCreated { region } => {
+                write!(f, "DataRegionCreated(region={})", region)
+            },
+        }
+    }
+}
+
+// ============================================================================
+// Liveness Configuration
+// ============================================================================
+
+/// Configuration for dead-node detection.
+///
+/// Controls the timeouts and intervals used by the GLOBAL leader's quorum-based
+/// liveness checker to detect and mark dead nodes.
+#[derive(Debug, Clone)]
+pub struct LivenessConfig {
+    /// Time after which a node is suspected dead by the local observer.
+    ///
+    /// Default: 5 minutes.
+    pub dead_node_timeout: std::time::Duration,
+    /// How often the GLOBAL leader runs the liveness check.
+    ///
+    /// Default: 30 seconds.
+    pub liveness_check_interval: std::time::Duration,
+    /// Timeout for each `CheckPeerLiveness` RPC.
+    ///
+    /// Default: 2 seconds.
+    pub liveness_query_timeout: std::time::Duration,
+    /// Hard wall-clock budget for the entire quorum confirmation per suspect.
+    ///
+    /// Default: 10 seconds.
+    pub liveness_cycle_budget: std::time::Duration,
+}
+
+impl Default for LivenessConfig {
+    fn default() -> Self {
+        Self {
+            dead_node_timeout: std::time::Duration::from_secs(300),
+            liveness_check_interval: std::time::Duration::from_secs(30),
+            liveness_query_timeout: std::time::Duration::from_secs(2),
+            liveness_cycle_budget: std::time::Duration::from_secs(10),
         }
     }
 }
@@ -2223,6 +2315,22 @@ impl fmt::Display for LedgerResponse {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_status_serde_roundtrip() {
+        use crate::types::NodeStatus;
+        let statuses = [
+            NodeStatus::Active,
+            NodeStatus::Decommissioning,
+            NodeStatus::Dead,
+            NodeStatus::Removed,
+        ];
+        for status in &statuses {
+            let encoded = inferadb_ledger_types::encode(status).unwrap();
+            let decoded: NodeStatus = inferadb_ledger_types::decode(&encoded).unwrap();
+            assert_eq!(*status, decoded);
+        }
+    }
 
     /// Classifies whether a Raft request targets the GLOBAL or REGIONAL group.
     ///
@@ -3411,14 +3519,16 @@ mod tests {
 
     mod proptest_raft_log {
         use inferadb_ledger_types::{OrganizationId, UserId, VaultId, VaultSlug};
-        use openraft::{CommittedLeaderId, LogId};
         use proptest::prelude::*;
 
-        use crate::types::{LedgerNodeId, LedgerRequest, SystemRequest};
+        use crate::{
+            log_storage::LogId,
+            types::{LedgerRequest, SystemRequest},
+        };
 
         /// Helper to create a LogId from term and index.
-        fn make_log_id(term: u64, index: u64) -> LogId<LedgerNodeId> {
-            LogId::new(CommittedLeaderId::new(term, 0), index)
+        fn make_log_id(term: u64, index: u64) -> LogId {
+            LogId::new(term, 0, index)
         }
 
         /// Represents a Raft log entry with term and index.
@@ -3482,10 +3592,10 @@ mod tests {
             }
 
             /// LogId ordering: later entries have greater or equal LogId.
-            /// This verifies that openraft's LogId ordering matches our expectations.
+            /// This verifies that LogId ordering matches our expectations.
             #[test]
             fn prop_logid_ordering_consistent(log in arb_valid_log(200)) {
-                let log_ids: Vec<LogId<LedgerNodeId>> = log
+                let log_ids: Vec<LogId> = log
                     .iter()
                     .map(|e| make_log_id(e.term, e.index))
                     .collect();
@@ -3597,8 +3707,9 @@ mod tests {
         match req {
             // GLOBAL variants — no plaintext PII
             SystemRequest::ActivateOnboardingUser { .. } => RaftScope::Global,
-            SystemRequest::AddNode { .. } => RaftScope::Global,
             SystemRequest::ClearRehashProgress { .. } => RaftScope::Global,
+            SystemRequest::CreateDataRegion { .. } => RaftScope::Global,
+            SystemRequest::RegisterPeerAddress { .. } => RaftScope::Global,
             SystemRequest::CreateOnboardingUser { .. } => RaftScope::Global,
             SystemRequest::CreateOrganization { .. } => RaftScope::Global,
             SystemRequest::CreateUser { .. } => RaftScope::Global,
@@ -3608,7 +3719,7 @@ mod tests {
             SystemRequest::MigrateExistingUsers { .. } => RaftScope::Global,
             SystemRequest::RegisterEmailHash { .. } => RaftScope::Global,
             SystemRequest::RemoveEmailHash { .. } => RaftScope::Global,
-            SystemRequest::RemoveNode { .. } => RaftScope::Global,
+            SystemRequest::SetNodeStatus { .. } => RaftScope::Global,
             SystemRequest::SetBlindingKeyVersion { .. } => RaftScope::Global,
             SystemRequest::UpdateOrganizationStatus { .. } => RaftScope::Global,
             SystemRequest::UpdateOrganizationRouting { .. } => RaftScope::Global,
@@ -3616,6 +3727,7 @@ mod tests {
             SystemRequest::UpdateUser { .. } => RaftScope::Global,
             SystemRequest::UpdateUserDirectoryStatus { .. } => RaftScope::Global,
             SystemRequest::VerifyUserEmail { .. } => RaftScope::Global,
+            SystemRequest::RegionMembershipReport { .. } => RaftScope::Global,
 
             // REGIONAL variants — carry plaintext PII
             SystemRequest::AddTeamMember { .. } => RaftScope::Regional,
@@ -3725,10 +3837,6 @@ mod tests {
     /// purpose, serving as a human-readable audit trail.
     #[test]
     fn test_global_string_fields_are_not_pii() {
-        // AddNode::address — gRPC network address, not PII
-        let add_node = SystemRequest::AddNode { node_id: 1, address: "10.0.0.1:50051".to_string() };
-        assert_eq!(classify_system_request(&add_node), RaftScope::Global);
-
         // RegisterEmailHash::hmac_hex — cryptographic hash, not PII
         let register_hash = SystemRequest::RegisterEmailHash {
             hmac_hex: "abcdef1234567890".to_string(),

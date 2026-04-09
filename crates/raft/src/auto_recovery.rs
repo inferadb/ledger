@@ -21,19 +21,19 @@ use std::{
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{OrganizationId, VaultId};
-use openraft::Raft;
 use snafu::{GenerateImplicitData, ResultExt};
 use tokio::{sync::mpsc, time::interval};
 use tracing::{debug, error, info, warn};
 
 use crate::{
+    consensus_handle::ConsensusHandle,
     error::{
         ApplyOperationsSnafu, BlockArchiveNotConfiguredSnafu, BlockReadSnafu, IndexLookupSnafu,
         RecoveryError, StateRootComputationSnafu,
     },
     log_storage::{AppliedStateAccessor, MAX_RECOVERY_ATTEMPTS, VaultHealthStatus},
     trace_context::TraceContext,
-    types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig, RaftPayload},
+    types::{LedgerNodeId, LedgerRequest, LedgerResponse, RaftPayload},
 };
 
 /// Default interval between recovery scans.
@@ -93,9 +93,10 @@ pub enum RecoveryResult {
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct AutoRecoveryJob<B: StorageBackend + 'static> {
-    /// Raft consensus handle for proposing vault health state changes.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// This node's ID.
+    /// Consensus handle for proposing vault health state changes.
+    handle: Arc<ConsensusHandle>,
+    /// This node's ID (retained for future logging/diagnostics).
+    #[allow(dead_code)]
     node_id: LedgerNodeId,
     /// Accessor for applied state (vault health).
     applied_state: AppliedStateAccessor,
@@ -119,8 +120,7 @@ pub struct AutoRecoveryJob<B: StorageBackend + 'static> {
 impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
     /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader == Some(self.node_id)
+        self.handle.is_leader()
     }
 
     /// Calculates retry delay with exponential backoff.
@@ -454,23 +454,23 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
             recovery_started_at,
         };
 
-        let result = self.raft.client_write(RaftPayload::system(request)).await.map_err(|e| {
-            RecoveryError::RaftConsensus {
+        let response = self
+            .handle
+            .propose_and_wait(RaftPayload::system(request), Duration::from_secs(10))
+            .await
+            .map_err(|e| RecoveryError::RaftConsensus {
                 message: format!("{:?}", e),
                 backtrace: snafu::Backtrace::generate(),
-            }
-        })?;
+            })?;
 
-        match result.data {
-            LedgerResponse::VaultHealthUpdated { success: true } => Ok(()),
+        match response {
+            LedgerResponse::VaultHealthUpdated { success } if success => Ok(()),
             LedgerResponse::VaultHealthUpdated { success: false } => {
                 Err(RecoveryError::HealthUpdateRejected {
-                    reason: "Health update failed".to_string(),
+                    reason: "state machine returned success=false".to_string(),
                 })
             },
-            other => {
-                Err(RecoveryError::UnexpectedRaftResponse { description: format!("{:?}", other) })
-            },
+            other => Err(RecoveryError::UnexpectedRaftResponse { description: format!("{other}") }),
         }
     }
 

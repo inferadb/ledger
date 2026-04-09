@@ -18,11 +18,13 @@
 
 use std::sync::Arc;
 
-use openraft::Raft;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use crate::types::{LedgerRequest, LedgerTypeConfig, RaftPayload, StateRootDivergence};
+use crate::{
+    consensus_handle::ConsensusHandle,
+    types::{LedgerRequest, RaftPayload, StateRootDivergence},
+};
 
 /// Async task that receives divergence events and halts diverged vaults.
 ///
@@ -30,8 +32,8 @@ use crate::types::{LedgerRequest, LedgerTypeConfig, RaftPayload, StateRootDiverg
 /// `UpdateVaultHealth { healthy: false }` through Raft to record the
 /// divergence in the state machine (visible to all nodes).
 pub struct StateRootDivergenceHandler {
-    /// Raft handle for proposing vault health updates.
-    raft: Arc<Raft<LedgerTypeConfig>>,
+    /// Consensus handle for proposing vault health updates.
+    handle: Arc<ConsensusHandle>,
     /// Receiver for divergence events from the apply path.
     receiver: mpsc::UnboundedReceiver<StateRootDivergence>,
     /// Region name for logging.
@@ -41,11 +43,11 @@ pub struct StateRootDivergenceHandler {
 impl StateRootDivergenceHandler {
     /// Creates a new divergence handler.
     pub fn new(
-        raft: Arc<Raft<LedgerTypeConfig>>,
+        handle: Arc<ConsensusHandle>,
         receiver: mpsc::UnboundedReceiver<StateRootDivergence>,
         region: String,
     ) -> Self {
-        Self { raft, receiver, region }
+        Self { handle, receiver, region }
     }
 
     /// Runs the handler loop until the channel is closed.
@@ -83,7 +85,7 @@ impl StateRootDivergenceHandler {
                 caller: 0,
             };
 
-            match self.raft.client_write(payload).await {
+            match self.handle.propose(payload).await {
                 Ok(_) => {
                     info!(
                         region = %self.region,

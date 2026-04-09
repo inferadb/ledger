@@ -15,90 +15,6 @@ use super::*;
 use crate::proto;
 
 // -------------------------------------------------------------------------
-// Vote conversion tests (LedgerNodeId)
-// -------------------------------------------------------------------------
-
-#[test]
-fn vote_uncommitted_ledger_node_id_to_proto() {
-    use inferadb_ledger_types::LedgerNodeId;
-    use openraft::Vote;
-    let vote: Vote<LedgerNodeId> = Vote::new(5, 42);
-    let proto: proto::RaftVote = (&vote).into();
-
-    assert_eq!(proto.term, 5);
-    assert_eq!(proto.node_id, 42);
-    assert!(!proto.committed);
-}
-
-#[test]
-fn vote_committed_ledger_node_id_to_proto() {
-    use inferadb_ledger_types::LedgerNodeId;
-    use openraft::Vote;
-    let vote: Vote<LedgerNodeId> = Vote::new_committed(10, 99);
-    let proto: proto::RaftVote = (&vote).into();
-
-    assert_eq!(proto.term, 10);
-    assert_eq!(proto.node_id, 99);
-    assert!(proto.committed);
-}
-
-#[test]
-fn proto_to_vote_uncommitted_ledger_node_id() {
-    use inferadb_ledger_types::LedgerNodeId;
-    use openraft::Vote;
-    let proto = proto::RaftVote { term: 7, node_id: 123, committed: false };
-    let vote: Vote<LedgerNodeId> = proto.into();
-
-    assert_eq!(vote.leader_id.term, 7);
-    assert_eq!(vote.leader_id.voted_for().unwrap_or(0), 123);
-    assert!(!vote.committed);
-}
-
-#[test]
-fn proto_to_vote_committed_ledger_node_id() {
-    use inferadb_ledger_types::LedgerNodeId;
-    use openraft::Vote;
-    let proto = proto::RaftVote { term: 15, node_id: 456, committed: true };
-    let vote: Vote<LedgerNodeId> = proto.into();
-
-    assert_eq!(vote.leader_id.term, 15);
-    assert_eq!(vote.leader_id.voted_for().unwrap_or(0), 456);
-    assert!(vote.committed);
-}
-
-#[test]
-fn vote_uncommitted_ledger_node_id_roundtrip() {
-    use inferadb_ledger_types::LedgerNodeId;
-    use openraft::Vote;
-    let original: Vote<LedgerNodeId> = Vote::new(100, 200);
-    let proto: proto::RaftVote = (&original).into();
-    let recovered: Vote<LedgerNodeId> = proto.into();
-
-    assert_eq!(original.leader_id.term, recovered.leader_id.term);
-    assert_eq!(
-        original.leader_id.voted_for().unwrap_or(0),
-        recovered.leader_id.voted_for().unwrap_or(0)
-    );
-    assert_eq!(original.committed, recovered.committed);
-}
-
-#[test]
-fn vote_committed_ledger_node_id_roundtrip() {
-    use inferadb_ledger_types::LedgerNodeId;
-    use openraft::Vote;
-    let original: Vote<LedgerNodeId> = Vote::new_committed(50, 60);
-    let proto: proto::RaftVote = (&original).into();
-    let recovered: Vote<LedgerNodeId> = proto.into();
-
-    assert_eq!(original.leader_id.term, recovered.leader_id.term);
-    assert_eq!(
-        original.leader_id.voted_for().unwrap_or(0),
-        recovered.leader_id.voted_for().unwrap_or(0)
-    );
-    assert_eq!(original.committed, recovered.committed);
-}
-
-// -------------------------------------------------------------------------
 // SetCondition conversion tests
 // -------------------------------------------------------------------------
 
@@ -2121,48 +2037,6 @@ fn email_verify_token_id_roundtrip() {
     let proto_id: proto::EmailVerifyTokenId = original.into();
     let roundtripped: EmailVerifyTokenId = proto_id.into();
     assert_eq!(original, roundtripped);
-}
-
-// -------------------------------------------------------------------------
-// Raft vote conversion tests
-// -------------------------------------------------------------------------
-
-#[test]
-fn raft_vote_uncommitted_roundtrip() {
-    let domain = openraft::Vote::new(5u64, 42u64);
-    let proto_vote: proto::RaftVote = domain.into();
-    assert_eq!(proto_vote.term, 5);
-    assert_eq!(proto_vote.node_id, 42);
-    assert!(!proto_vote.committed);
-    let roundtripped: openraft::Vote<u64> = proto_vote.into();
-    assert_eq!(domain, roundtripped);
-}
-
-#[test]
-fn raft_vote_committed_roundtrip() {
-    let domain = openraft::Vote::new_committed(3u64, 10u64);
-    let proto_vote: proto::RaftVote = domain.into();
-    assert_eq!(proto_vote.term, 3);
-    assert_eq!(proto_vote.node_id, 10);
-    assert!(proto_vote.committed);
-    let roundtripped: openraft::Vote<u64> = proto_vote.into();
-    assert_eq!(domain, roundtripped);
-}
-
-#[test]
-fn raft_vote_ref_to_proto() {
-    let domain = openraft::Vote::new(1u64, 2u64);
-    let proto_vote: proto::RaftVote = (&domain).into();
-    assert_eq!(proto_vote.term, 1);
-    assert_eq!(proto_vote.node_id, 2);
-}
-
-#[test]
-fn raft_vote_proto_ref_to_domain() {
-    let proto_vote = proto::RaftVote { term: 7, node_id: 99, committed: true };
-    let domain: openraft::Vote<u64> = (&proto_vote).into();
-    assert!(domain.committed);
-    assert_eq!(domain.leader_id.term, 7);
 }
 
 // -------------------------------------------------------------------------

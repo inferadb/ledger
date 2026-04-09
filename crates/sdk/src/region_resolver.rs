@@ -6,7 +6,10 @@
 //! a discovery round-trip on every request while still reacting to leader
 //! changes within seconds.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::Region;
@@ -20,10 +23,7 @@ use crate::{
 /// Internal cached leader entry.
 #[derive(Debug, Clone)]
 struct CachedLeader {
-    endpoint: String,
-    /// Stored for future term-based cache invalidation (e.g., stale-term eviction).
-    #[allow(dead_code)]
-    raft_term: u64,
+    endpoint: Arc<str>,
     resolved_at: Instant,
     ttl: Duration,
 }
@@ -59,9 +59,9 @@ impl RegionLeaderCache {
     ///
     /// Returns `None` when the cache is empty or the TTL has expired.
     #[must_use]
-    pub fn cached_endpoint(&self) -> Option<String> {
+    pub fn cached_endpoint(&self) -> Option<Arc<str>> {
         let guard = self.cached.read();
-        guard.as_ref().filter(|c| c.is_valid()).map(|c| c.endpoint.clone())
+        guard.as_ref().filter(|c| c.is_valid()).map(|c| Arc::clone(&c.endpoint))
     }
 
     /// Returns the region this cache is associated with.
@@ -101,11 +101,10 @@ impl RegionLeaderCache {
             Duration::from_secs(DEFAULT_TTL_SECS)
         };
 
-        let endpoint = resp.endpoint.clone();
+        let endpoint = resp.endpoint;
 
         *self.cached.write() = Some(CachedLeader {
-            endpoint: endpoint.clone(),
-            raft_term: resp.raft_term,
+            endpoint: Arc::from(endpoint.as_str()),
             resolved_at: Instant::now(),
             ttl,
         });
@@ -121,8 +120,8 @@ mod tests {
     #[test]
     fn cached_leader_valid_within_ttl() {
         let cached = CachedLeader {
-            endpoint: "http://10.0.1.5:5000".to_string(),
-            raft_term: 1,
+            endpoint: Arc::from("http://10.0.1.5:5000"),
+
             resolved_at: Instant::now(),
             ttl: Duration::from_secs(30),
         };
@@ -132,8 +131,8 @@ mod tests {
     #[test]
     fn cached_leader_invalid_after_ttl() {
         let cached = CachedLeader {
-            endpoint: "http://10.0.1.5:5000".to_string(),
-            raft_term: 1,
+            endpoint: Arc::from("http://10.0.1.5:5000"),
+
             resolved_at: Instant::now() - Duration::from_secs(60),
             ttl: Duration::from_secs(30),
         };
@@ -144,8 +143,8 @@ mod tests {
     fn invalidate_clears_cache() {
         let cache = RegionLeaderCache::new(Region::US_EAST_VA);
         *cache.cached.write() = Some(CachedLeader {
-            endpoint: "http://10.0.1.5:5000".to_string(),
-            raft_term: 1,
+            endpoint: Arc::from("http://10.0.1.5:5000"),
+
             resolved_at: Instant::now(),
             ttl: Duration::from_secs(30),
         });

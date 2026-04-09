@@ -58,7 +58,16 @@ use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 use parking_lot::Mutex;
 use tokio::sync::Semaphore;
 
-use crate::common::{RegionTestCluster, TestCluster};
+use crate::common::TestCluster;
+
+// ---------------------------------------------------------------------------
+// Performance targets — advisory thresholds, not pass/fail criteria.
+// Missing a target emits a warning; the test still passes.
+// ---------------------------------------------------------------------------
+const WRITE_P99_TARGET_US: u64 = 50_000; // 50ms in µs
+const READ_P99_TARGET_US: u64 = 2_000; // 2ms in µs
+const WRITE_THROUGHPUT_TARGET: f64 = 5_000.0; // 5K ops/sec
+const MULTI_REGION_THROUGHPUT_TARGET: f64 = 5_000.0; // 5K ops/sec
 
 /// Configuration for the stress test.
 #[derive(Debug, Clone)]
@@ -163,70 +172,6 @@ struct StressMetrics {
     written_values_with_location: Mutex<HashMap<String, WrittenValue>>,
 }
 
-/// Setup organization and vault for stress testing.
-///
-/// Creates an organization and vault, returning the actual Snowflake slugs
-/// assigned by the server (which differ from the sequential config values).
-async fn setup_organization_and_vault(
-    leader_addr: SocketAddr,
-    config: &mut StressConfig,
-) -> Result<(), String> {
-    let endpoint = format!("http://{}", leader_addr);
-    let mut org_client =
-        inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient::connect(
-            endpoint.clone(),
-        )
-        .await
-        .map_err(|e| format!("Failed to connect organization client: {}", e))?;
-    let mut vault_client =
-        inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::connect(
-            endpoint.clone(),
-        )
-        .await
-        .map_err(|e| format!("Failed to connect vault client: {}", e))?;
-
-    // Create organization and capture the actual Snowflake slug
-    let ns_request = inferadb_ledger_proto::proto::CreateOrganizationRequest {
-        name: format!("stress-ns-{}", config.organization.value()),
-        region: 10, // REGION_US_EAST_VA
-        tier: None,
-        caller: None,
-    };
-    let ns_response = org_client
-        .create_organization(ns_request)
-        .await
-        .map_err(|e| format!("Failed to create organization: {}", e))?;
-    let organization = ns_response
-        .into_inner()
-        .slug
-        .map(|n| OrganizationSlug::new(n.slug))
-        .ok_or("No organization slug in response")?;
-    config.organization = organization;
-
-    // Create vault using the actual organization slug
-    let vault_request = inferadb_ledger_proto::proto::CreateVaultRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
-        replication_factor: 1,
-        initial_nodes: vec![],
-        retention_policy: None,
-        caller: None,
-    };
-    let vault_response = vault_client
-        .create_vault(vault_request)
-        .await
-        .map_err(|e| format!("Failed to create vault: {}", e))?;
-    let vault = vault_response
-        .into_inner()
-        .vault
-        .map(|v| VaultSlug::new(v.slug))
-        .ok_or("No vault slug in response")?;
-    config.vault = vault;
-
-    Ok(())
-}
-
 /// Organization and vault assignment for multi-region stress testing.
 #[derive(Debug, Clone)]
 struct RegionAssignment {
@@ -240,23 +185,19 @@ struct RegionAssignment {
 
 /// Setup multiple organizations across different regions for true multi-region stress testing.
 ///
-/// Creates one organization per data region, each explicitly routed to its region.
-/// This enables parallel writes since each region has independent Raft consensus.
+/// Creates one admin user + organization per data region using `setup_org_with_admin`,
+/// then creates a vault in each. This enables parallel writes since each region has
+/// independent Raft consensus.
 async fn setup_multi_region_organizations(
     leader_addr: SocketAddr,
     num_regions: usize,
+    node: &crate::common::TestNode,
 ) -> Result<Vec<RegionAssignment>, String> {
-    let endpoint = format!("http://{}", leader_addr);
-    let mut org_client =
-        inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient::connect(
-            endpoint.clone(),
-        )
-        .await
-        .map_err(|e| format!("Failed to connect organization client: {}", e))?;
     let mut vault_client =
-        inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::connect(
-            endpoint.clone(),
-        )
+        inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::connect(format!(
+            "http://{}",
+            leader_addr
+        ))
         .await
         .map_err(|e| format!("Failed to connect vault client: {}", e))?;
 
@@ -265,45 +206,20 @@ async fn setup_multi_region_organizations(
     for region in 1..=num_regions {
         let region_u32 = region as u32;
 
-        // Create organization (all assigned to GLOBAL region; server routes internally)
-        let ns_request = inferadb_ledger_proto::proto::CreateOrganizationRequest {
-            name: format!("stress-region-{}-ns", region),
-            region: 10, // REGION_US_EAST_VA
-            tier: None,
-            caller: None,
-        };
+        // Create admin user + organization via direct Raft write
+        let (org_slug, admin_slug) = crate::common::setup_org_with_admin(
+            leader_addr,
+            &format!("stress-region-{}-ns", region),
+            &format!("stress-region-{}-admin@test.local", region),
+            node,
+        )
+        .await;
+        let organization = OrganizationSlug::new(org_slug);
 
-        let ns_response = org_client
-            .create_organization(ns_request)
-            .await
-            .map_err(|e| format!("Failed to create organization for region {}: {}", region, e))?;
-
-        let organization = ns_response
-            .into_inner()
-            .slug
-            .map(|n| OrganizationSlug::new(n.slug))
-            .ok_or_else(|| format!("No organization slug in response for region {}", region))?;
-
-        // Create vault in this organization
-        let vault_request = inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization.value(),
-            }),
-            replication_factor: 1,
-            initial_nodes: vec![],
-            retention_policy: None,
-            caller: None,
-        };
-
-        let vault_response = vault_client.create_vault(vault_request).await.map_err(|e| {
-            format!("Failed to create vault in organization {}: {}", organization, e)
-        })?;
-
-        let vault = vault_response
-            .into_inner()
-            .vault
-            .map(|v| VaultSlug::new(v.slug))
-            .ok_or_else(|| format!("No vault in response for organization {}", organization))?;
+        // Create vault with the admin user as caller (retries internally)
+        let vault =
+            crate::common::create_vault_with_retry(&mut vault_client, organization, admin_slug)
+                .await;
 
         assignments.push(RegionAssignment { region_index: region_u32, organization, vault });
     }
@@ -418,28 +334,24 @@ impl StressMetrics {
         println!("║                            TARGETS                           ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
 
-        let write_p99_target = 50_000; // 50ms in µs
-        let read_p99_target = 2_000; // 2ms in µs
-        let write_throughput_target = 5_000.0; // 5K ops/sec
-
-        let write_latency_pass = w_p99 <= write_p99_target;
-        let read_latency_pass = r_p99 <= read_p99_target;
-        let write_throughput_pass = write_throughput >= write_throughput_target;
+        let write_latency_pass = w_p99 <= WRITE_P99_TARGET_US;
+        let read_latency_pass = r_p99 <= READ_P99_TARGET_US;
+        let write_throughput_pass = write_throughput >= WRITE_THROUGHPUT_TARGET;
 
         println!(
             "║ Write p99 <50ms:   {:>5}ms  │  Target: 50ms    │  {}  ║",
             w_p99 / 1000,
-            if write_latency_pass { "✅ PASS" } else { "❌ FAIL" }
+            if write_latency_pass { "✅ PASS" } else { "⚠ MISS" }
         );
         println!(
             "║ Read p99 <2ms:     {:>5}ms  │  Target: 2ms     │  {}  ║",
             r_p99 / 1000,
-            if read_latency_pass { "✅ PASS" } else { "❌ FAIL" }
+            if read_latency_pass { "✅ PASS" } else { "⚠ MISS" }
         );
         println!(
             "║ Write throughput:  {:>5.0}/s  │  Target: 5000/s  │  {}  ║",
             write_throughput,
-            if write_throughput_pass { "✅ PASS" } else { "❌ FAIL" }
+            if write_throughput_pass { "✅ PASS" } else { "⚠ MISS" }
         );
         println!("╚══════════════════════════════════════════════════════════════╝\n");
     }
@@ -1099,12 +1011,31 @@ async fn run_stress_test_with_cluster_size(cluster_size: usize, mut config: Stre
     let leader_addr = leader.addr;
     let all_addrs: Vec<SocketAddr> = cluster.nodes().iter().map(|n| n.addr).collect();
 
-    // Setup: Create organization and vault for the stress test
-    // This ensures the write operations don't fail due to missing entities
+    // Setup: Create admin user + organization + vault for the stress test.
+    // Uses setup_org_with_admin which creates a user via direct Raft write
+    // (immediate, no saga), then creates the org with that user as admin.
     println!("🔧 Setting up organization and vault...");
-    setup_organization_and_vault(leader_addr, &mut config)
+    let (org_slug, admin_slug) = crate::common::setup_org_with_admin(
+        leader_addr,
+        &format!("stress-ns-{}", config.organization.value()),
+        &format!("stress-admin-{}@test.local", config.organization.value()),
+        leader,
+    )
+    .await;
+    config.organization = OrganizationSlug::new(org_slug);
+
+    // Create vault (retry — org provisioning saga may still be running)
+    let mut vault_client =
+        inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::connect(format!(
+            "http://{}",
+            leader_addr
+        ))
         .await
-        .expect("setup organization and vault");
+        .expect("connect vault client");
+    let vault =
+        crate::common::create_vault_with_retry(&mut vault_client, config.organization, admin_slug)
+            .await;
+    config.vault = vault;
     println!(
         "   ✅ Organization (slug={}) and vault (slug={}) created",
         config.organization, config.vault
@@ -1303,7 +1234,7 @@ async fn test_stress_standard() {
 // Multi-Region Stress Tests
 // ============================================================================
 //
-// These tests use RegionTestCluster to achieve higher write throughput
+// These tests use TestCluster::with_data_regions for multi-region throughput
 // via parallel Raft consensus across multiple independent regions.
 //
 // Each region is a separate Raft group, allowing writes to different regions
@@ -1330,7 +1261,7 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
 
     // Start multi-region cluster
     println!("📦 Creating {}-node, {}-region cluster...", num_nodes, num_regions);
-    let cluster = RegionTestCluster::new(num_nodes, num_regions).await;
+    let cluster = TestCluster::with_data_regions(num_nodes, num_regions).await;
 
     // Wait for all regions to have leaders
     let leaders_ready = cluster.wait_for_leaders(Duration::from_secs(10)).await;
@@ -1345,25 +1276,25 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
 
     let node = cluster.any_node();
     let leader_addr = node.addr;
-    let all_addrs = cluster.addresses();
+    let all_addrs = cluster.addrs();
 
     // Setup organizations across all regions - one organization per region
     println!("🔧 Setting up {} organizations (one per region)...", num_regions);
-    let region_assignments = match setup_multi_region_organizations(leader_addr, num_regions).await
-    {
-        Ok(assignments) => {
-            for assignment in &assignments {
-                println!(
-                    "   ✅ Region {} → Organization {} → Vault {}",
-                    assignment.region_index, assignment.organization, assignment.vault
-                );
-            }
-            assignments
-        },
-        Err(e) => {
-            panic!("Failed to setup multi-region organizations: {}", e);
-        },
-    };
+    let region_assignments =
+        match setup_multi_region_organizations(leader_addr, num_regions, node).await {
+            Ok(assignments) => {
+                for assignment in &assignments {
+                    println!(
+                        "   ✅ Region {} → Organization {} → Vault {}",
+                        assignment.region_index, assignment.organization, assignment.vault
+                    );
+                }
+                assignments
+            },
+            Err(e) => {
+                panic!("Failed to setup multi-region organizations: {}", e);
+            },
+        };
 
     // Metrics and control
     let metrics = Arc::new(StressMetrics::new());
@@ -1481,7 +1412,7 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
     println!("   Total throughput: {:.0} ops/sec", ops_per_sec);
     println!(
         "   Target (5000 ops/sec): {}",
-        if ops_per_sec >= 5000.0 { "✅ PASS" } else { "❌ FAIL" }
+        if ops_per_sec >= MULTI_REGION_THROUGHPUT_TARGET { "✅ PASS" } else { "⚠ MISS" }
     );
 }
 
@@ -1522,8 +1453,8 @@ async fn test_stress_multi_region_quick() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn test_stress_multi_region_batched() {
     run_multi_region_stress_test(
-        1, // Single node
-        4, // 4 data regions for parallel writes
+        3, // 3 nodes (required for protected regions)
+        2, // 2 data regions (non-protected: US_EAST_VA, US_WEST_OR)
         StressConfig {
             write_workers: 8, // 2 workers per region
             read_workers: 16,
@@ -1547,8 +1478,8 @@ async fn test_stress_multi_region_batched() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn test_stress_multi_region() {
     run_multi_region_stress_test(
-        1, // Single node
-        4, // 4 data regions for parallel writes
+        3, // 3 nodes (required for protected regions)
+        2, // 2 data regions (non-protected: US_EAST_VA, US_WEST_OR)
         StressConfig {
             write_workers: 16,
             read_workers: 32,
@@ -1581,8 +1512,8 @@ async fn test_stress_multi_region() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 32)]
 async fn test_stress_multi_region_target() {
     run_multi_region_stress_test(
-        1, // Single node
-        8, // 8 data regions - optimal for single machine
+        3, // 3 nodes (required for protected regions)
+        2, // 2 data regions (non-protected: US_EAST_VA, US_WEST_OR)
         StressConfig {
             write_workers: 16, // 2 workers per region
             read_workers: 16,

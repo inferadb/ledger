@@ -111,6 +111,23 @@ impl From<&PasskeyCredential> for proto::PasskeyCredentialData {
     }
 }
 
+/// Converts an owned domain [`PasskeyCredential`] to proto
+/// [`PasskeyCredentialData`](proto::PasskeyCredentialData), moving fields instead of cloning.
+impl From<PasskeyCredential> for proto::PasskeyCredentialData {
+    fn from(pk: PasskeyCredential) -> Self {
+        proto::PasskeyCredentialData {
+            credential_id: pk.credential_id,
+            public_key: pk.public_key,
+            sign_count: pk.sign_count,
+            transports: pk.transports,
+            backup_eligible: pk.backup_eligible,
+            backup_state: pk.backup_state,
+            attestation_format: pk.attestation_format,
+            aaguid: pk.aaguid.map(|a| a.to_vec()),
+        }
+    }
+}
+
 /// Converts proto [`PasskeyCredentialData`](proto::PasskeyCredentialData) to a domain
 /// [`PasskeyCredential`].
 impl TryFrom<&proto::PasskeyCredentialData> for PasskeyCredential {
@@ -161,6 +178,19 @@ impl From<&TotpCredential> for proto::TotpCredentialData {
     }
 }
 
+/// Converts an owned domain [`TotpCredential`] to proto
+/// [`TotpCredentialData`](proto::TotpCredentialData), moving fields instead of cloning.
+impl From<TotpCredential> for proto::TotpCredentialData {
+    fn from(totp: TotpCredential) -> Self {
+        proto::TotpCredentialData {
+            secret: totp.secret.to_vec(),
+            algorithm: proto::TotpAlgorithm::from(totp.algorithm).into(),
+            digits: u32::from(totp.digits),
+            period: totp.period,
+        }
+    }
+}
+
 /// Converts proto [`TotpCredentialData`](proto::TotpCredentialData) to a domain [`TotpCredential`].
 impl TryFrom<&proto::TotpCredentialData> for TotpCredential {
     type Error = Status;
@@ -197,6 +227,18 @@ impl From<&RecoveryCodeCredential> for proto::RecoveryCodeCredentialData {
     fn from(rc: &RecoveryCodeCredential) -> Self {
         proto::RecoveryCodeCredentialData {
             code_hashes: rc.code_hashes.iter().map(|h| h.to_vec()).collect(),
+            total_generated: u32::from(rc.total_generated),
+        }
+    }
+}
+
+/// Converts an owned domain [`RecoveryCodeCredential`] to proto
+/// [`RecoveryCodeCredentialData`](proto::RecoveryCodeCredentialData), moving fields instead of
+/// cloning.
+impl From<RecoveryCodeCredential> for proto::RecoveryCodeCredentialData {
+    fn from(rc: RecoveryCodeCredential) -> Self {
+        proto::RecoveryCodeCredentialData {
+            code_hashes: rc.code_hashes.into_iter().map(|h| h.to_vec()).collect(),
             total_generated: u32::from(rc.total_generated),
         }
     }

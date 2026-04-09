@@ -18,11 +18,9 @@ use std::{
 
 use inferadb_ledger_store::crypto::{RegionKeyManager, rmk_versions_for_health};
 use inferadb_ledger_types::{config::HealthCheckConfig, types::Region};
-use openraft::{BasicNode, Raft};
 use parking_lot::RwLock;
-use tonic::transport::Channel;
 
-use crate::types::LedgerTypeConfig;
+use crate::{consensus_handle::ConsensusHandle, peer_address_map::PeerAddressMap};
 
 /// Result of a single dependency health check.
 #[derive(Debug, Clone)]
@@ -58,8 +56,8 @@ pub struct DependencyHealth {
 /// aggressive Kubernetes probe intervals.
 #[derive(Clone)]
 pub struct DependencyHealthChecker {
-    /// Raft instance for metrics access.
-    raft: Arc<Raft<LedgerTypeConfig>>,
+    /// Consensus handle for shard state access.
+    handle: Arc<ConsensusHandle>,
     /// Data directory for disk writability checks.
     data_dir: PathBuf,
     /// Configuration for timeouts, cache TTL, and thresholds.
@@ -70,23 +68,28 @@ pub struct DependencyHealthChecker {
     key_manager: Option<Arc<dyn RegionKeyManager>>,
     /// Node's region for determining required RMK regions.
     node_region: Option<Region>,
+    /// Peer address map for TCP reachability checks.
+    peer_addresses: Option<PeerAddressMap>,
 }
 
 impl DependencyHealthChecker {
     /// Creates a new dependency health checker.
-    pub fn new(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        data_dir: PathBuf,
-        config: HealthCheckConfig,
-    ) -> Self {
+    pub fn new(handle: Arc<ConsensusHandle>, data_dir: PathBuf, config: HealthCheckConfig) -> Self {
         Self {
-            raft,
+            handle,
             data_dir,
             config,
             cache: Arc::new(RwLock::new(None)),
             key_manager: None,
             node_region: None,
+            peer_addresses: None,
         }
+    }
+
+    /// Attaches the peer address map for TCP reachability checks.
+    pub fn with_peer_addresses(mut self, peer_addresses: PeerAddressMap) -> Self {
+        self.peer_addresses = Some(peer_addresses);
+        self
     }
 
     /// Sets the key manager and node region for RMK health reporting.
@@ -118,9 +121,12 @@ impl DependencyHealthChecker {
         let mut results = HashMap::new();
 
         let disk_result = check_disk(&self.data_dir);
-        let raft_lag_result = check_raft_lag(&self.raft, self.config.max_raft_lag);
-        let peer_result = check_peer_reachability(
-            &self.raft,
+        let raft_lag_result = check_raft_lag(&self.handle, self.config.max_raft_lag);
+        let default_map = PeerAddressMap::new();
+        let peer_addresses = self.peer_addresses.as_ref().unwrap_or(&default_map);
+        let peer_result = check_peer_reachability_handle(
+            &self.handle,
+            peer_addresses,
             Duration::from_secs(self.config.dependency_check_timeout_secs),
         )
         .await;
@@ -195,73 +201,79 @@ pub(crate) fn check_disk(data_dir: &std::path::Path) -> DependencyCheckResult {
     }
 }
 
-/// Checks Raft log lag by comparing last_log_index with last_applied.
-pub(crate) fn check_raft_lag(raft: &Raft<LedgerTypeConfig>, max_lag: u64) -> DependencyCheckResult {
-    let metrics = raft.metrics().borrow().clone();
-
-    let last_log = metrics.last_log_index.unwrap_or(0);
-    let last_applied = metrics.last_applied.map_or(0, |id| id.index);
-    let lag = last_log.saturating_sub(last_applied);
+/// Checks Raft log lag using the consensus handle's shard state.
+///
+/// Computes lag as `last_log_index - commit_index`. A large gap indicates
+/// entries have been appended but not yet committed, either due to a slow
+/// leader or a partitioned follower.
+pub(crate) fn check_raft_lag(handle: &ConsensusHandle, max_lag: u64) -> DependencyCheckResult {
+    let state = handle.shard_state();
+    let lag = state.last_log_index.saturating_sub(state.commit_index);
+    let commit_index = state.commit_index;
 
     if lag <= max_lag {
         DependencyCheckResult {
             healthy: true,
-            detail: format!("raft log lag: {lag} (max: {max_lag})"),
+            detail: format!("raft log lag: {lag} (max: {max_lag}, commit_index: {commit_index})"),
         }
     } else {
         DependencyCheckResult {
             healthy: false,
-            detail: format!(
-                "raft log lag too high: {lag} > {max_lag} (last_log: {last_log}, last_applied: {last_applied})"
-            ),
+            detail: format!("raft log lag too high: {lag} > {max_lag}"),
         }
     }
 }
 
-/// Checks whether at least one peer is reachable via gRPC connectivity.
-pub(crate) async fn check_peer_reachability(
-    raft: &Raft<LedgerTypeConfig>,
+/// Checks TCP reachability for cluster peers.
+///
+/// Resolves each voter's address from `peer_addresses` and attempts a TCP
+/// connection within `timeout`. Reports healthy when a majority of peers
+/// are reachable.
+pub(crate) async fn check_peer_reachability_handle(
+    handle: &ConsensusHandle,
+    peer_addresses: &PeerAddressMap,
     timeout: Duration,
 ) -> DependencyCheckResult {
-    let metrics = raft.metrics().borrow().clone();
-    let my_id = metrics.id;
+    let state = handle.shard_state();
+    let my_id = handle.node_id();
 
-    // Collect peer addresses from Raft membership
-    let peers: Vec<(u64, String)> = metrics
-        .membership_config
-        .membership()
-        .nodes()
-        .filter(|(id, _)| **id != my_id)
-        .map(|(id, node): (&u64, &BasicNode)| (*id, node.addr.clone()))
-        .collect();
+    let voter_ids: Vec<u64> =
+        state.voters.iter().filter(|&&id| id.0 != my_id).map(|id| id.0).collect();
 
-    if peers.is_empty() {
+    if voter_ids.is_empty() {
         return DependencyCheckResult {
             healthy: true,
             detail: "single-node cluster, no peers to check".to_string(),
         };
     }
 
-    // Try each peer until one succeeds
-    for (peer_id, addr) in &peers {
-        let endpoint = format!("http://{addr}");
-        if let Ok(ep) = Channel::from_shared(endpoint) {
-            match tokio::time::timeout(timeout, ep.connect()).await {
-                Ok(Ok(_)) => {
-                    return DependencyCheckResult {
-                        healthy: true,
-                        detail: format!("peer {peer_id} ({addr}) reachable"),
-                    };
-                },
-                Ok(Err(_)) | Err(_) => continue,
-            }
+    let mut reachable = 0u32;
+    let mut unreachable = 0u32;
+
+    for &peer_id in &voter_ids {
+        let addr = match peer_addresses.get(peer_id) {
+            Some(a) => a,
+            None => {
+                unreachable += 1;
+                continue;
+            },
+        };
+
+        match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await {
+            Ok(Ok(_)) => reachable += 1,
+            _ => unreachable += 1,
         }
     }
 
-    let peer_addrs: Vec<String> = peers.iter().map(|(id, addr)| format!("{id}@{addr}")).collect();
+    let other_voters = voter_ids.len() as u32;
+    let total_voters = other_voters + 1; // include self
+    let healthy = (reachable + 1) > total_voters / 2; // +1 for self
+
     DependencyCheckResult {
-        healthy: false,
-        detail: format!("no peers reachable (tried: {})", peer_addrs.join(", ")),
+        healthy,
+        detail: format!(
+            "{reachable}/{other_voters} peers reachable ({unreachable} unreachable, self counts toward {total_voters}-node quorum)"
+        ),
     }
 }
 

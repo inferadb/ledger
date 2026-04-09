@@ -600,7 +600,7 @@ define_string_id!(
     ClientId
 );
 
-/// Numeric node identifier for openraft.
+/// Numeric node identifier for the consensus engine.
 ///
 /// Uses `u64` for efficient storage and comparison. Mapped from
 /// human-readable [`NodeId`] strings (e.g., `"node-1"`) via the

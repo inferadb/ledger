@@ -1,9 +1,9 @@
 //! Raft consensus infrastructure for InferaDB Ledger.
 //!
 //! Provides:
-//! - OpenRaft integration with inferadb-ledger-store log storage
-//! - Combined RaftStorage implementation (log + state machine)
-//! - Inter-node Raft network transport
+//! - Consensus engine integration with inferadb-ledger-store log storage
+//! - State machine apply path via
+//!   [`CommittedEntry`](inferadb_ledger_consensus::committed::CommittedEntry)
 //! - Transaction batching, rate limiting, and background jobs
 //!
 //! # Public API
@@ -11,16 +11,9 @@
 //! The stable public API surface consists of:
 //! - [`trace_context`] — distributed tracing propagation helpers
 //! - [`metrics`] — Prometheus metric constants and recording helpers
-//! - [`LedgerTypeConfig`] — OpenRaft type configuration
 //!
 //! All other modules and re-exports are server-internal infrastructure
 //! hidden from documentation. They may change without notice.
-//!
-//! ## Architecture Note
-//!
-//! OpenRaft 0.9 has sealed traits for `RaftLogStorage` and `RaftStateMachine` (v2 API).
-//! We use the deprecated but non-sealed `RaftStorage` trait which combines both
-//! log storage and state machine functionality into a single implementation.
 //!
 //! ## Security Model
 //!
@@ -47,9 +40,17 @@ pub mod trace_context;
 // ---------------------------------------------------------------------------
 
 #[doc(hidden)]
+pub mod apply_pool;
+#[doc(hidden)]
+pub mod apply_worker;
+#[doc(hidden)]
 pub mod backup;
 #[doc(hidden)]
 pub mod batching;
+#[doc(hidden)]
+pub mod consensus_handle;
+#[doc(hidden)]
+pub mod consensus_transport;
 #[doc(hidden)]
 pub mod deadline;
 #[doc(hidden)]
@@ -73,21 +74,30 @@ pub mod integrity_scrubber;
 #[doc(hidden)]
 pub mod invite_maintenance;
 #[doc(hidden)]
+pub mod leader_lease;
+#[doc(hidden)]
 pub mod leader_transfer;
 #[doc(hidden)]
 pub mod log_storage;
 #[doc(hidden)]
 pub mod logging;
 #[doc(hidden)]
+pub mod message_outbox;
+#[cfg(feature = "observability")]
+#[doc(hidden)]
 pub mod otel;
 #[doc(hidden)]
 pub mod pagination;
+#[doc(hidden)]
+pub mod peer_address_map;
 #[doc(hidden)]
 pub mod peer_tracker;
 #[doc(hidden)]
 pub mod proof;
 #[doc(hidden)]
 pub mod raft_manager;
+#[doc(hidden)]
+pub mod read_index;
 #[doc(hidden)]
 pub mod resource_metrics;
 #[doc(hidden)]
@@ -111,8 +121,6 @@ pub mod organization_purge;
 pub mod orphan_cleanup;
 #[doc(hidden)]
 pub mod post_erasure_compaction;
-#[doc(hidden)]
-pub mod raft_network;
 #[doc(hidden)]
 pub mod rate_limit;
 #[doc(hidden)]
@@ -150,6 +158,10 @@ pub use backup::{BackupJob, BackupManager};
 #[doc(hidden)]
 pub use block_compaction::BlockCompactor;
 #[doc(hidden)]
+pub use consensus_handle::{ConsensusHandle, HandleError, ResponseMap, SpilloverMap};
+#[doc(hidden)]
+pub use consensus_transport::GrpcConsensusTransport;
+#[doc(hidden)]
 pub use events_gc::EventsGarbageCollector;
 #[doc(hidden)]
 pub use graceful_shutdown::{BackgroundJobWatchdog, GracefulShutdown, HealthState};
@@ -160,6 +172,8 @@ pub use integrity_scrubber::IntegrityScrubberJob;
 #[doc(hidden)]
 pub use invite_maintenance::InviteMaintenanceJob;
 #[doc(hidden)]
+pub use leader_lease::LeaderLease;
+#[doc(hidden)]
 pub use learner_refresh::LearnerRefreshJob;
 #[doc(hidden)]
 pub use log_storage::RaftLogStore;
@@ -168,13 +182,17 @@ pub use organization_purge::OrganizationPurgeJob;
 #[doc(hidden)]
 pub use orphan_cleanup::OrphanCleanupJob;
 #[doc(hidden)]
+pub use peer_address_map::PeerAddressMap;
+#[doc(hidden)]
 pub use post_erasure_compaction::PostErasureCompactionJob;
 #[doc(hidden)]
-pub use raft_manager::{RaftManager, RaftManagerConfig, RegionConfig, RegionGroup};
-#[doc(hidden)]
-pub use raft_network::GrpcRaftNetworkFactory;
+pub use raft_manager::{
+    RaftManager, RaftManagerConfig, RegionConfig, RegionGroup, SystemStateReader,
+};
 #[doc(hidden)]
 pub use rate_limit::RateLimiter;
+#[doc(hidden)]
+pub use read_index::wait_for_apply;
 #[doc(hidden)]
 pub use region_storage::{RegionStorage, RegionStorageManager};
 #[doc(hidden)]
@@ -191,7 +209,8 @@ pub use token_maintenance::TokenMaintenanceJob;
 pub use ttl_gc::TtlGarbageCollector;
 #[doc(hidden)]
 pub use types::LedgerNodeId;
-/// OpenRaft type configuration for the ledger's Raft consensus layer.
-pub use types::LedgerTypeConfig;
+#[doc(hidden)]
+pub use types::LivenessConfig;
+pub use types::NodeStatus;
 #[doc(hidden)]
 pub use user_retention::UserRetentionReaper;

@@ -116,6 +116,8 @@ fn split_leaf(original: &mut Page, new_page: &mut Page) -> Result<LeafSplitResul
     }
 
     let split_at = entries.len() / 2;
+    // Clone required: entries[split_at] is still included in the right-half range
+    // (entries[split_at..]) written below, so we cannot move out of the vec.
     let separator_key = entries[split_at].0.clone();
 
     // Re-initialize both pages (zeros next_leaf)
@@ -269,6 +271,8 @@ pub fn split_leaf_for_key(
                 if new_key >= entries[0].0.as_slice() {
                     continue;
                 }
+                // Clone required: entries is borrowed by try_split on the path below
+                // and the loop may retry with a different split_at on the next iteration.
                 entries[0].0.clone()
             } else if split_at >= entries.len() {
                 if new_key <= entries[entries.len() - 1].0.as_slice() {
@@ -276,6 +280,8 @@ pub fn split_leaf_for_key(
                 }
                 new_key.to_vec()
             } else {
+                // Clone required: entries is borrowed by try_split on the path below
+                // and the loop may retry with a different split_at on the next iteration.
                 entries[split_at].0.clone()
             };
 
@@ -330,6 +336,10 @@ pub fn split_branch(original: &mut Page, new_page: &mut Page) -> Result<BranchSp
     // Calculate split point
     // For branch nodes, the middle key is promoted (not kept in either child)
     let split_at = entries.len() / 2;
+    // Clone required: entries[split_at].1 is read as left_rightmost on the next line,
+    // and entries is then iterated by reference for the left (..split_at) and right
+    // (split_at+1..) halves. Moving out of an indexed vec while other indices are still
+    // needed would require restructuring the loop.
     let separator_key = entries[split_at].0.clone();
 
     // Left half: entries[0..split_at], rightmost = left child of promoted key

@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use arc_swap::ArcSwap;
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{
     BlockArchive, StateLayer,
@@ -18,7 +19,6 @@ use inferadb_ledger_types::{
     OrganizationId, OrganizationSlug, RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug,
     UserEmailId, UserId, UserSlug, VaultId, VaultSlug, decode, encode,
 };
-use openraft::{Entry, LogId, StorageError, Vote};
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use tracing::warn;
@@ -26,21 +26,28 @@ use tracing::warn;
 use super::{
     KEY_APPLIED_STATE, KEY_LAST_PURGED, KEY_VOTE, RegionChainState,
     accessor::AppliedStateAccessor,
-    raft_impl::{to_serde_error, to_storage_error},
     types::{
-        AppliedState, AppliedStateCore, ClientSequenceEntry, OrganizationMeta,
-        PendingExternalWrites, SequenceCounters, VaultHealthStatus, VaultMeta,
+        AppliedState, AppliedStateCore, ClientSequenceEntry, LogId, OrganizationMeta,
+        PendingExternalWrites, SequenceCounters, StoreError, StoredMembership, VaultHealthStatus,
+        VaultMeta, Vote,
     },
 };
+use crate::{event_writer::EventWriter, types::StateRootCommitment};
 
-/// Create a `StorageError` from a corruption reason string.
-fn corrupted_error(reason: impl Into<String>) -> StorageError<LedgerNodeId> {
-    to_storage_error(&inferadb_ledger_store::Error::Corrupted { reason: reason.into() })
+/// Create a `StoreError` from any error.
+fn to_storage_error<E: std::error::Error>(e: &E) -> StoreError {
+    StoreError::from_error(e)
 }
-use crate::{
-    event_writer::EventWriter,
-    types::{LedgerNodeId, LedgerTypeConfig, StateRootCommitment},
-};
+
+/// Create a `StoreError` from a serde/decode error.
+fn to_serde_error<E: std::error::Error>(e: &E) -> StoreError {
+    StoreError::from_error(e)
+}
+
+/// Create a `StoreError` from a corruption reason string.
+fn corrupted_error(reason: impl Into<String>) -> StoreError {
+    StoreError::msg(reason)
+}
 
 /// Combined Raft storage.
 ///
@@ -60,11 +67,14 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     /// Database handle for raft log.
     pub(super) db: Arc<Database<FileBackend>>,
     /// Cached vote state.
-    pub(super) vote_cache: RwLock<Option<Vote<LedgerNodeId>>>,
+    pub(super) vote_cache: RwLock<Option<Vote>>,
     /// Cached last purged log ID.
-    pub(super) last_purged_cache: RwLock<Option<LogId<LedgerNodeId>>>,
+    pub(super) last_purged_cache: RwLock<Option<LogId>>,
     /// Applied state (state machine) - shared with accessor.
-    pub(super) applied_state: Arc<RwLock<AppliedState>>,
+    ///
+    /// Uses `ArcSwap` for lock-free reads. Writers clone the current state,
+    /// mutate the copy, and atomically swap it in via `store(Arc::new(...))`.
+    pub(super) applied_state: Arc<ArcSwap<AppliedState>>,
     /// State layer for entity/relationship storage (shared with read service).
     pub(super) state_layer: Option<Arc<StateLayer<B>>>,
     /// Block archive for permanent block storage.
@@ -73,6 +83,11 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     pub(super) region: Region,
     /// Node ID for block metadata.
     pub(super) node_id: NodeId,
+    /// Numeric node ID for leader lease comparisons.
+    ///
+    /// Matches the `LedgerNodeId` (u64) used by the consensus engine.
+    /// Used to gate leader lease renewal — only the leader should renew.
+    pub(super) ledger_node_id: inferadb_ledger_types::LedgerNodeId,
     /// Region chain state (height and previous hash).
     ///
     /// Consolidated into single lock to avoid lock ordering issues.
@@ -107,6 +122,33 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     /// to halt the vault cluster-wide.
     pub(super) divergence_sender:
         Option<tokio::sync::mpsc::UnboundedSender<crate::types::StateRootDivergence>>,
+    /// Channel for signaling data region creation to the `RaftManager`.
+    ///
+    /// When a `CreateDataRegion` entry is applied on the GLOBAL log store,
+    /// the region is sent through this channel. The receiver task (spawned
+    /// during bootstrap) calls `start_data_region` on the manager.
+    pub(super) region_creation_sender:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::raft_manager::RegionCreationRequest>>,
+    /// Shared peer address map for propagating addresses via Raft.
+    ///
+    /// When a `RegisterPeerAddress` entry is applied, the address is stored
+    /// here so all nodes can reach the new peer for data region transport.
+    pub(super) peer_addresses: Option<crate::PeerAddressMap>,
+    /// Leader lease for fast linearizable reads.
+    ///
+    /// Renewed after each successful `apply_to_state_machine` — entries only
+    /// reach that path after quorum consensus. While valid, reads can skip
+    /// the quorum round-trip.
+    pub(super) leader_lease: Arc<crate::leader_lease::LeaderLease>,
+    /// Watch channel sender for broadcasting the latest applied log index.
+    ///
+    /// Updated after each `apply_to_state_machine` call. Followers use this
+    /// to wait until their local state catches up to a target committed index
+    /// (ReadIndex protocol). Wrapped in `Arc` so the log reader clone can
+    /// share the sender without requiring `Clone` on `watch::Sender`.
+    pub(super) applied_index_tx: Arc<tokio::sync::watch::Sender<u64>>,
+    /// Receiver side of the applied index watch channel.
+    pub(super) applied_index_rx: tokio::sync::watch::Receiver<u64>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -134,7 +176,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     ///
     /// Returns `StorageError` if the database file cannot be opened or created,
     /// or if the cached vote/purge metadata cannot be loaded.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError<LedgerNodeId>> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let raft_config = DatabaseConfig::builder()
             .page_size(Self::RAFT_PAGE_SIZE)
             .cache_size(Self::RAFT_CACHE_SIZE)
@@ -151,11 +193,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 .map_err(|e| to_storage_error(&e))?
         };
 
+        let (applied_index_tx, applied_index_rx) = tokio::sync::watch::channel(0u64);
+
         let store = Self {
             db: Arc::new(db),
             vote_cache: RwLock::new(None),
             last_purged_cache: RwLock::new(None),
-            applied_state: Arc::new(RwLock::new(AppliedState {
+            applied_state: Arc::new(ArcSwap::from_pointee(AppliedState {
                 sequences: SequenceCounters::new(),
                 ..Default::default()
             })),
@@ -163,6 +207,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             block_archive: None,
             region: Region::GLOBAL,
             node_id: NodeId::new(""),
+            ledger_node_id: 0,
             region_chain: RwLock::new(RegionChainState {
                 height: 0,
                 previous_hash: inferadb_ledger_types::ZERO_HASH,
@@ -173,6 +218,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 inferadb_ledger_types::config::ClientSequenceEvictionConfig::default(),
             state_root_commitments: Arc::new(Mutex::new(Vec::new())),
             divergence_sender: None,
+            region_creation_sender: None,
+            peer_addresses: None,
+            leader_lease: Arc::new(crate::leader_lease::LeaderLease::new(
+                std::time::Duration::from_millis(150),
+            )),
+            applied_index_tx: Arc::new(applied_index_tx),
+            applied_index_rx,
         };
 
         // Load cached values
@@ -198,9 +250,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
     }
 
     /// Configures region metadata.
-    pub fn with_region_config(mut self, region: Region, node_id: NodeId) -> Self {
+    pub fn with_region_config(
+        mut self,
+        region: Region,
+        node_id: NodeId,
+        ledger_node_id: inferadb_ledger_types::LedgerNodeId,
+    ) -> Self {
         self.region = region;
         self.node_id = node_id;
+        self.ledger_node_id = ledger_node_id;
         self
     }
 
@@ -265,13 +323,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
         // Rebuild user→org index from Organization skeletons (GLOBAL).
         // Members live in the Organization skeleton, not OrganizationProfile.
         let org_ids: Vec<_> = {
-            let state = self.applied_state.read();
+            let state = self.applied_state.load();
             state.organizations.keys().copied().collect()
         };
-        let mut user_org_entries: std::collections::HashMap<
-            UserId,
-            std::collections::HashSet<OrganizationId>,
-        > = std::collections::HashMap::new();
+        let mut user_org_entries: im::HashMap<UserId, im::HashSet<OrganizationId>> =
+            im::HashMap::new();
         for org_id in org_ids {
             let key = SystemKeys::organization_key(org_id);
             match state_layer.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
@@ -279,7 +335,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     match decode::<inferadb_ledger_state::system::Organization>(&entity.value) {
                         Ok(org) => {
                             for member in &org.members {
-                                user_org_entries.entry(member.user_id).or_default().insert(org_id);
+                                let mut orgs = user_org_entries
+                                    .get(&member.user_id)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                orgs.insert(org_id);
+                                user_org_entries.insert(member.user_id, orgs);
                             }
                         },
                         Err(e) => {
@@ -304,14 +365,16 @@ impl<B: StorageBackend> RaftLogStore<B> {
             }
         }
 
-        let mut state = self.applied_state.write();
+        let current = self.applied_state.load_full();
+        let mut new_state = (*current).clone();
         for (key, team_id) in name_entries {
-            state.team_name_index.insert(key, team_id);
+            new_state.team_name_index.insert(key, team_id);
         }
         for (key, app_id) in app_name_entries {
-            state.app_name_index.insert(key, app_id);
+            new_state.app_name_index.insert(key, app_id);
         }
-        state.user_org_index = user_org_entries;
+        new_state.user_org_index = user_org_entries;
+        self.applied_state.store(Arc::new(new_state));
     }
 
     /// Returns a reference to the event writer (if configured).
@@ -344,7 +407,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// This accessor can be cloned and passed to services that need to read
     /// vault heights and health status.
     pub fn accessor(&self) -> AppliedStateAccessor {
-        AppliedStateAccessor { state: self.applied_state.clone() }
+        AppliedStateAccessor::new(self.applied_state.clone())
     }
 
     /// Returns the shared commitment buffer handle.
@@ -353,6 +416,32 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// can drain commitments without holding a reference to the log store.
     pub fn commitment_buffer(&self) -> Arc<Mutex<Vec<StateRootCommitment>>> {
         Arc::clone(&self.state_root_commitments)
+    }
+
+    /// Replaces the default leader lease with one derived from the Raft config.
+    ///
+    /// `lease_duration` is typically `election_timeout_min / 2` — half the
+    /// minimum election timeout guarantees no new leader can be elected
+    /// while the lease is valid.
+    pub fn with_leader_lease(mut self, lease: Arc<crate::leader_lease::LeaderLease>) -> Self {
+        self.leader_lease = lease;
+        self
+    }
+
+    /// Returns the shared leader lease handle.
+    ///
+    /// Used by read services to check lease validity before serving
+    /// linearizable reads without a quorum round-trip.
+    pub fn leader_lease(&self) -> &Arc<crate::leader_lease::LeaderLease> {
+        &self.leader_lease
+    }
+
+    /// Returns a receiver for the applied index watch channel.
+    ///
+    /// Followers use this to wait until their local applied index reaches
+    /// the committed index returned by the leader's ReadIndex RPC.
+    pub fn applied_index_watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.applied_index_rx.clone()
     }
 
     /// Configures the divergence sender channel.
@@ -364,6 +453,28 @@ impl<B: StorageBackend> RaftLogStore<B> {
         sender: tokio::sync::mpsc::UnboundedSender<crate::types::StateRootDivergence>,
     ) -> Self {
         self.divergence_sender = Some(sender);
+        self
+    }
+
+    /// Configures the region creation sender channel.
+    ///
+    /// When set, `CreateDataRegion` entries applied on the GLOBAL log store
+    /// send the region through this channel so the `RaftManager` can start
+    /// the corresponding local region group.
+    pub fn with_region_creation_sender(
+        mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<crate::raft_manager::RegionCreationRequest>,
+    ) -> Self {
+        self.region_creation_sender = Some(sender);
+        self
+    }
+
+    /// Configures the shared peer address map.
+    ///
+    /// When set, `RegisterPeerAddress` entries applied on the GLOBAL log store
+    /// store the address so all nodes can route to the new peer.
+    pub fn with_peer_addresses(mut self, addresses: crate::PeerAddressMap) -> Self {
+        self.peer_addresses = Some(addresses);
         self
     }
 
@@ -391,14 +502,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
     ///
     /// Returns `StorageError` if the underlying database read or
     /// deserialization of cached vote/purge metadata fails.
-    pub(super) fn load_caches(&self) -> Result<(), StorageError<LedgerNodeId>> {
+    pub(super) fn load_caches(&self) -> Result<(), StoreError> {
         let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
 
         if let Some(vote_data) = read_txn
             .get::<tables::RaftState>(&KEY_VOTE.to_string())
             .map_err(|e| to_storage_error(&e))?
         {
-            let vote: Vote<LedgerNodeId> = decode(&vote_data).map_err(|e| to_serde_error(&e))?;
+            let vote: Vote = decode(&vote_data).map_err(|e| to_serde_error(&e))?;
             *self.vote_cache.write() = Some(vote);
         }
 
@@ -406,8 +517,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             .get::<tables::RaftState>(&KEY_LAST_PURGED.to_string())
             .map_err(|e| to_storage_error(&e))?
         {
-            let purged: LogId<LedgerNodeId> =
-                decode(&purged_data).map_err(|e| to_serde_error(&e))?;
+            let purged: LogId = decode(&purged_data).map_err(|e| to_serde_error(&e))?;
             *self.last_purged_cache.write() = Some(purged);
         }
 
@@ -420,26 +530,54 @@ impl<B: StorageBackend> RaftLogStore<B> {
             height: state.region_height,
             previous_hash: state.previous_region_hash,
         };
-        *self.applied_state.write() = state;
+        self.applied_state.store(Arc::new(state));
 
         Ok(())
     }
 
-    /// Returns the last log entry.
-    pub(super) fn get_last_entry(
-        &self,
-    ) -> Result<Option<Entry<LedgerTypeConfig>>, StorageError<LedgerNodeId>> {
+    /// Returns the index of the last log entry, if any.
+    #[allow(dead_code)]
+    pub(super) fn get_last_log_index(&self) -> Result<Option<u64>, StoreError> {
         let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
 
-        if let Some((_, entry_data)) =
+        if let Some((key_bytes, _)) =
             read_txn.last::<tables::RaftLog>().map_err(|e| to_storage_error(&e))?
         {
-            let entry: Entry<LedgerTypeConfig> =
-                decode(&entry_data).map_err(|e| to_serde_error(&e))?;
-            Ok(Some(entry))
+            let index = <u64 as inferadb_ledger_store::Key>::decode(&key_bytes)
+                .ok_or_else(|| StoreError::msg("failed to decode last log index"))?;
+            Ok(Some(index))
         } else {
             Ok(None)
         }
+    }
+
+    // ========================================================================
+    // Raft Log Operations (retained for consensus engine storage)
+    // ========================================================================
+
+    /// Saves the current vote state.
+    pub async fn save_vote(&self, vote: &Vote) -> Result<(), StoreError> {
+        let vote_data = encode(vote).map_err(|e| to_serde_error(&e))?;
+        let mut write_txn = self.db.write().map_err(|e| to_storage_error(&e))?;
+        write_txn
+            .insert::<tables::RaftState>(&super::KEY_VOTE.to_string(), &vote_data)
+            .map_err(|e| to_storage_error(&e))?;
+        write_txn.commit().map_err(|e| to_storage_error(&e))?;
+        *self.vote_cache.write() = Some(*vote);
+        Ok(())
+    }
+
+    /// Reads the persisted vote state.
+    pub async fn read_vote(&self) -> Result<Option<Vote>, StoreError> {
+        Ok(*self.vote_cache.read())
+    }
+
+    /// Returns the last applied state and membership.
+    pub async fn last_applied_state(
+        &self,
+    ) -> Result<(Option<LogId>, StoredMembership), StoreError> {
+        let state = self.applied_state.load();
+        Ok((state.last_applied, state.membership.clone()))
     }
 
     // ========================================================================
@@ -471,7 +609,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     pub(super) fn flush_external_writes(
         pending: &PendingExternalWrites,
         write_txn: &mut WriteTransaction<'_, FileBackend>,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         // OrganizationMeta inserts/updates
         for (org_id, blob) in &pending.organizations {
             write_txn
@@ -635,7 +773,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         &self,
         state: &AppliedState,
         pending: &PendingExternalWrites,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         let core = AppliedStateCore::from(state);
         let core_bytes = encode(&core).map_err(|e| to_serde_error(&e))?;
 
@@ -670,9 +808,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// Handles two cases:
     /// - **Valid format** (version sentinel present): normal load from tables.
     /// - **Fresh database** (no `KEY_APPLIED_STATE` entry): returns default state.
-    pub(super) fn load_state_from_tables(
-        &self,
-    ) -> Result<AppliedState, StorageError<LedgerNodeId>> {
+    pub(super) fn load_state_from_tables(&self) -> Result<AppliedState, StoreError> {
         let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
 
         let state_data = read_txn
@@ -702,10 +838,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     }
 
     /// Reconstruct the full `AppliedState` from `AppliedStateCore` and external tables.
-    fn reconstruct_from_tables(
-        &self,
-        core: AppliedStateCore,
-    ) -> Result<AppliedState, StorageError<LedgerNodeId>> {
+    fn reconstruct_from_tables(&self, core: AppliedStateCore) -> Result<AppliedState, StoreError> {
         let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
 
         let mut state = AppliedState {
@@ -761,7 +894,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     fn load_sequences(
         read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
         state: &mut AppliedState,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         let mut iter = read_txn.iter::<tables::Sequences>().map_err(|e| to_storage_error(&e))?;
 
         while let Some((key_bytes, value_bytes)) =
@@ -809,7 +942,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     fn load_organizations(
         read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
         state: &mut AppliedState,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         let mut iter =
             read_txn.iter::<tables::OrganizationMeta>().map_err(|e| to_storage_error(&e))?;
 
@@ -841,7 +974,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     fn load_vaults(
         read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
         state: &mut AppliedState,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         let mut iter = read_txn.iter::<tables::VaultMeta>().map_err(|e| to_storage_error(&e))?;
 
         while let Some((key_bytes, value_bytes)) =
@@ -867,7 +1000,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     fn load_vault_heights(
         read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
         state: &mut AppliedState,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         let mut iter = read_txn.iter::<tables::VaultHeights>().map_err(|e| to_storage_error(&e))?;
 
         while let Some((key_bytes, value_bytes)) =
@@ -885,7 +1018,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     fn load_vault_hashes(
         read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
         state: &mut AppliedState,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         let mut iter = read_txn.iter::<tables::VaultHashes>().map_err(|e| to_storage_error(&e))?;
 
         while let Some((key_bytes, value_bytes)) =
@@ -906,7 +1039,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     fn load_vault_health(
         read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
         state: &mut AppliedState,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         let mut iter = read_txn.iter::<tables::VaultHealth>().map_err(|e| to_storage_error(&e))?;
 
         while let Some((key_bytes, value_bytes)) =
@@ -924,7 +1057,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     fn load_client_sequences(
         read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
         state: &mut AppliedState,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         let mut iter =
             read_txn.iter::<tables::ClientSequences>().map_err(|e| to_storage_error(&e))?;
 
@@ -962,7 +1095,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     fn load_slug_index(
         read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
         state: &mut AppliedState,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         let mut iter =
             read_txn.iter::<tables::OrganizationSlugIndex>().map_err(|e| to_storage_error(&e))?;
 
@@ -983,7 +1116,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     fn load_vault_slug_index(
         read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
         state: &mut AppliedState,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         let mut iter =
             read_txn.iter::<tables::VaultSlugIndex>().map_err(|e| to_storage_error(&e))?;
 
@@ -1004,7 +1137,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     fn load_user_slug_index(
         read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
         state: &mut AppliedState,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         let mut iter =
             read_txn.iter::<tables::UserSlugIndex>().map_err(|e| to_storage_error(&e))?;
 
@@ -1026,7 +1159,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     fn load_team_slug_index(
         read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
         state: &mut AppliedState,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         let mut iter =
             read_txn.iter::<tables::TeamSlugIndex>().map_err(|e| to_storage_error(&e))?;
 
@@ -1049,7 +1182,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     fn load_app_slug_index(
         read_txn: &inferadb_ledger_store::ReadTransaction<'_, FileBackend>,
         state: &mut AppliedState,
-    ) -> Result<(), StorageError<LedgerNodeId>> {
+    ) -> Result<(), StoreError> {
         let mut iter = read_txn.iter::<tables::AppSlugIndex>().map_err(|e| to_storage_error(&e))?;
 
         while let Some((key_bytes, value_bytes)) =
@@ -1070,7 +1203,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// Decode a 16-byte composite key into (OrganizationId, VaultId).
     fn decode_vault_composite_key(
         key_bytes: &[u8],
-    ) -> Result<(OrganizationId, VaultId), StorageError<LedgerNodeId>> {
+    ) -> Result<(OrganizationId, VaultId), StoreError> {
         if key_bytes.len() != 16 {
             return Err(corrupted_error(format!(
                 "vault composite key must be 16 bytes, got {}",
@@ -1145,15 +1278,14 @@ mod tests {
         RefreshTokenId, Region, SigningKeyId, TeamId, UserEmailId, VaultId, VaultSlug, decode,
         encode,
     };
-    use openraft::{CommittedLeaderId, LogId};
     use tempfile::tempdir;
 
     use super::*;
-    use crate::types::{BlockRetentionPolicy, LedgerNodeId};
+    use crate::{log_storage::StoredMembership, types::BlockRetentionPolicy};
 
     /// Helper to create log IDs for tests.
-    fn make_log_id(term: u64, index: u64) -> LogId<LedgerNodeId> {
-        LogId::new(CommittedLeaderId::new(term, 0), index)
+    fn make_log_id(term: u64, index: u64) -> LogId {
+        LogId::new(term, 0, index)
     }
 
     /// Build an `AppliedState` with realistic data across multiple organizations
@@ -1161,7 +1293,7 @@ mod tests {
     fn build_populated_state() -> AppliedState {
         let mut state = AppliedState {
             last_applied: Some(make_log_id(3, 42)),
-            membership: openraft::StoredMembership::default(),
+            membership: StoredMembership::default(),
             region_height: 100,
             previous_region_hash: [0xAB; 32],
             sequences: SequenceCounters {

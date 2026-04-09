@@ -45,7 +45,7 @@ use inferadb_ledger_types::{
 };
 use tonic::{Request, Response, Status};
 
-use super::{service_infra::ServiceContext, slug_resolver::SlugResolver};
+use super::{error_classify, service_infra::ServiceContext, slug_resolver::SlugResolver};
 
 /// gRPC handler for organization lifecycle operations.
 pub struct OrganizationService {
@@ -67,10 +67,7 @@ impl OrganizationService {
             return Ok(());
         }
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
-        let nodes = sys_svc.list_nodes().map_err(|e| {
-            tracing::error!(error = %e, "Failed to list nodes for region validation");
-            Status::internal("Internal error")
-        })?;
+        let nodes = sys_svc.list_nodes().map_err(|e| error_classify::storage_error(&e))?;
         let in_region_count = nodes.iter().filter(|n| n.region == region).count();
         if in_region_count >= 3 {
             return Ok(());
@@ -472,31 +469,27 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // For protected regions, validate sufficient in-region nodes for quorum
         self.validate_region_nodes(region)?;
 
-        // Resolve admin_slug → UserId (optional — if absent, org has no admin member)
-        let admin_user_id = if let Some(admin_slug_proto) = req.caller {
-            let admin_user_slug = inferadb_ledger_types::UserSlug::new(admin_slug_proto.slug);
-            let sys_svc_admin = SystemOrganizationService::new(self.ctx.state.clone());
-            sys_svc_admin
-                .get_user_id_by_slug(admin_user_slug)
-                .map_err(|e| {
-                    tracing::error!(error = %e, "Failed to resolve admin slug");
-                    Status::internal("Internal error")
-                })?
-                .ok_or_else(|| {
-                    Status::invalid_argument(format!(
-                        "Admin user with slug {} not found",
-                        admin_slug_proto.slug
-                    ))
-                })?
-        } else {
-            inferadb_ledger_types::UserId::new(0)
-        };
+        // Resolve admin_slug → UserId. Every organization requires an admin.
+        let admin_slug_proto = req.caller.filter(|s| s.slug != 0).ok_or_else(|| {
+            Status::invalid_argument(
+                "caller is required: every organization must have an admin user",
+            )
+        })?;
+        let admin_user_slug = inferadb_ledger_types::UserSlug::new(admin_slug_proto.slug);
+        let sys_svc_admin = SystemOrganizationService::new(self.ctx.state.clone());
+        let admin_user_id = sys_svc_admin
+            .get_user_id_by_slug(admin_user_slug)
+            .map_err(|e| error_classify::storage_error(&e))?
+            .ok_or_else(|| {
+                Status::invalid_argument(format!(
+                    "Admin user with slug {} not found",
+                    admin_slug_proto.slug
+                ))
+            })?;
 
         // Generate a Snowflake slug for the organization
-        let slug = inferadb_ledger_types::snowflake::generate_organization_slug().map_err(|e| {
-            tracing::error!(error = %e, "Failed to generate organization slug");
-            Status::internal("Internal error")
-        })?;
+        let slug = inferadb_ledger_types::snowflake::generate_organization_slug()
+            .map_err(|e| error_classify::internal_error("id-generation", &e))?;
 
         let tier = crate::proto_compat::organization_tier_from_proto(req.tier());
 
@@ -774,6 +767,10 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
+        // Ensure GLOBAL state is fresh before listing (recent org creation may
+        // not have replicated to this follower yet).
+        super::helpers::ensure_global_consistency(self.ctx.manager.as_deref()).await;
+
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
 
         // Resolve caller — required for authorization filtering
@@ -951,10 +948,8 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
 
         let saga_key = format!("_meta:saga:{}", saga.id);
         let saga_wrapped = inferadb_ledger_state::system::Saga::MigrateOrg(saga);
-        let saga_bytes = serde_json::to_vec(&saga_wrapped).map_err(|e| {
-            tracing::error!(error = %e, "Failed to serialize migration saga");
-            Status::internal("Internal error")
-        })?;
+        let saga_bytes = serde_json::to_vec(&saga_wrapped)
+            .map_err(|e| error_classify::serialization_error(&e))?;
 
         let saga_op = inferadb_ledger_types::Operation::SetEntity {
             key: saga_key,
@@ -1615,8 +1610,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Generate team slug
         let team_slug = inferadb_ledger_types::snowflake::generate_team_slug().map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
-            tracing::error!(error = %e, "Failed to generate team slug");
-            Status::internal("Internal error")
+            error_classify::internal_error("id-generation", &e)
         })?;
 
         // Step 1 (GLOBAL): Create team directory entry (ID + slug only, no PII).
@@ -2150,7 +2144,7 @@ mod tests {
     fn make_org_service() -> (
         super::OrganizationService,
         Arc<MockProposalService>,
-        Arc<parking_lot::RwLock<AppliedState>>,
+        Arc<arc_swap::ArcSwap<AppliedState>>,
         TestDir,
     ) {
         let temp = TestDir::new();
@@ -2173,9 +2167,10 @@ mod tests {
         let user_slug = inferadb_ledger_types::UserSlug::new(1000);
         let user_id = inferadb_ledger_types::UserId::new(1);
         {
-            let mut state = applied_state.write();
+            let mut state = (*applied_state.load_full()).clone();
             state.user_slug_index.insert(user_slug, user_id);
             state.user_id_to_slug.insert(user_id, user_slug);
+            applied_state.store(Arc::new(state));
         }
 
         let request = Request::new(ListOrganizationsRequest {
@@ -2312,9 +2307,10 @@ mod tests {
         let org_slug = inferadb_ledger_types::OrganizationSlug::new(1000);
         let org_id = inferadb_ledger_types::OrganizationId::new(1);
         {
-            let mut state = applied_state.write();
+            let mut state = (*applied_state.load_full()).clone();
             state.slug_index.insert(org_slug, org_id);
             state.id_to_slug.insert(org_id, org_slug);
+            applied_state.store(Arc::new(state));
         }
 
         // Caller slug 1 is unknown → admin validation fails with NotFound

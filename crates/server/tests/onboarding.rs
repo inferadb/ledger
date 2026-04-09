@@ -419,16 +419,13 @@ fn test_domain_separation_code_hash_vs_email_hmac() {
 }
 
 // ============================================================================
-// Tests: Missing Blinding Key (via RegionTestCluster which doesn't configure it)
+// Tests: Missing Blinding Key
 // ============================================================================
 
 /// When email_blinding_key is not configured, onboarding RPCs return FAILED_PRECONDITION.
-///
-/// Uses `RegionTestCluster` which builds `LedgerServer` without the blinding key,
-/// unlike `TestCluster` which always configures it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_missing_blinding_key_returns_failed_precondition() {
-    let cluster = crate::common::RegionTestCluster::new(1, 1).await;
+    let cluster = crate::common::TestCluster::without_blinding_key(1, 1).await;
     let addr = cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
@@ -438,7 +435,7 @@ async fn test_missing_blinding_key_returns_failed_precondition() {
     let err = client
         .initiate_email_verification(proto::InitiateEmailVerificationRequest {
             email: "nokey@example.com".to_string(),
-            region: 10, // US_EAST_VA — RegionTestCluster has data regions
+            region: 10, // US_EAST_VA
         })
         .await
         .expect_err("should fail without blinding key");

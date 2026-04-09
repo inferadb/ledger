@@ -1,0 +1,27 @@
+[package]
+name = "inferadb-ledger-consensus"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+aes-gcm = { workspace = true }
+crc32fast = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true }
+rkyv = { workspace = true }
+seahash = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
+snafu = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt"] }
+tracing = { workspace = true }
+
+[features]
+default = []
+io-uring = []
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

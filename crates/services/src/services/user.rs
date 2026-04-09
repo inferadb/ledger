@@ -41,7 +41,7 @@ use inferadb_ledger_types::{
 };
 use tonic::{Request, Response, Status};
 
-use super::{service_infra::ServiceContext, slug_resolver::SlugResolver};
+use super::{error_classify, service_infra::ServiceContext, slug_resolver::SlugResolver};
 
 /// gRPC handler for user lifecycle operations.
 pub struct UserService {
@@ -80,27 +80,18 @@ impl UserService {
 
         let signing_key = sys_svc
             .get_active_signing_key(&inferadb_ledger_state::system::SigningKeyScope::Global)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read signing key");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::crypto_error(&e))?
             .ok_or_else(|| Status::failed_precondition("No active signing key"))?;
 
         if !jwt_engine.has_cached_key(&signing_key.kid) {
-            let scope_region =
-                crate::jwt::scope_to_region(&signing_key.scope, sys_svc).map_err(|e| {
-                    tracing::error!(error = %e, "Failed to resolve key region");
-                    Status::internal("Internal error")
-                })?;
-            let rmk =
-                key_manager.rmk_by_version(scope_region, signing_key.rmk_version).map_err(|e| {
-                    tracing::error!(error = %e, "Failed to load RMK");
-                    Status::internal("Internal error")
-                })?;
-            jwt_engine.load_key(&signing_key, &rmk).map_err(|e| {
-                tracing::error!(error = %e, "Failed to load signing key");
-                Status::internal("Internal error")
-            })?;
+            let scope_region = crate::jwt::scope_to_region(&signing_key.scope, sys_svc)
+                .map_err(|e| error_classify::crypto_error(&e))?;
+            let rmk = key_manager
+                .rmk_by_version(scope_region, signing_key.rmk_version)
+                .map_err(|e| error_classify::crypto_error(&e))?;
+            jwt_engine
+                .load_key(&signing_key, &rmk)
+                .map_err(|e| error_classify::crypto_error(&e))?;
         }
 
         Ok(signing_key)
@@ -139,10 +130,7 @@ impl UserService {
 
         let (access_token, access_expires_at) = jwt_engine
             .sign_user_session(user_slug, role_str, token_version, &signing_key.kid)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to sign access token");
-                Status::internal("Internal error")
-            })?;
+            .map_err(|e| error_classify::crypto_error(&e))?;
 
         let (refresh_token_str, refresh_token_hash) = crate::jwt::generate_refresh_token();
         let family = crate::jwt::generate_family_id();
@@ -197,10 +185,7 @@ impl UserService {
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let dir_entry = sys_svc
             .get_user_directory(user_id)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read user directory");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::storage_error(&e))?
             .ok_or_else(|| {
                 ctx.set_error("NotFound", "User directory entry not found");
                 Status::not_found("User not found")
@@ -306,10 +291,7 @@ impl UserService {
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let dir_entry = sys_svc
             .get_user_directory(user_id)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read user directory");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::storage_error(&e))?
             .ok_or_else(|| Status::internal("User directory not found"))?;
         let user_region =
             dir_entry.region.ok_or_else(|| Status::internal("User has no assigned region"))?;
@@ -318,10 +300,7 @@ impl UserService {
         let regional_sys = SystemOrganizationService::new(regional_state);
         let user = regional_sys
             .get_user(user_id)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read user");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::storage_error(&e))?
             .ok_or_else(|| Status::internal("User not found after verification"))?;
 
         let role_str = match user.role {
@@ -331,10 +310,7 @@ impl UserService {
 
         let (access_token, access_expires_at) = jwt_engine
             .sign_user_session(user_slug, role_str, user.version, &signing_key.kid)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to sign access token");
-                Status::internal("Internal error")
-            })?;
+            .map_err(|e| error_classify::crypto_error(&e))?;
 
         let refresh_expires_at = Utc::now() + chrono::Duration::seconds(refresh_ttl_secs as i64);
 
@@ -457,10 +433,8 @@ impl proto::user_service_server::UserService for UserService {
         );
         let saga_key = format!("_meta:saga:{saga_id}");
         let saga_wrapped = Saga::CreateUser(saga);
-        let saga_bytes = serde_json::to_vec(&saga_wrapped).map_err(|e| {
-            tracing::error!(error = %e, "Failed to serialize saga");
-            Status::internal("Internal error")
-        })?;
+        let saga_bytes = serde_json::to_vec(&saga_wrapped)
+            .map_err(|e| error_classify::serialization_error(&e))?;
 
         let saga_op = inferadb_ledger_types::Operation::SetEntity {
             key: saga_key,
@@ -518,11 +492,14 @@ impl proto::user_service_server::UserService for UserService {
         request: Request<GetUserRequest>,
     ) -> Result<Response<GetUserResponse>, Status> {
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
 
-        let mut ctx =
-            self.ctx.make_request_context("UserService", "get_user", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "UserService",
+            "get_user",
+            request.metadata(),
+            &trace_ctx,
+        );
+        let req = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -534,8 +511,7 @@ impl proto::user_service_server::UserService for UserService {
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let user = sys_svc.get_user(user_id).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
-            tracing::error!(error = %e, "Failed to read user");
-            Status::internal("Internal error")
+            error_classify::storage_error(&e)
         })?;
 
         let user = user.ok_or_else(|| {
@@ -545,8 +521,7 @@ impl proto::user_service_server::UserService for UserService {
 
         let emails = sys_svc.get_user_emails(user_id).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
-            tracing::error!(error = %e, "Failed to read user emails");
-            Status::internal("Internal error")
+            error_classify::storage_error(&e)
         })?;
 
         ctx.set_success();
@@ -634,8 +609,7 @@ impl proto::user_service_server::UserService for UserService {
             let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
             let dir_entry = sys_svc.get_user_directory(user_id).map_err(|e| {
                 ctx.set_error("Internal", &e.to_string());
-                tracing::error!(error = %e, "Failed to read user directory");
-                Status::internal("Internal error")
+                error_classify::storage_error(&e)
             })?;
             let dir_entry = dir_entry.ok_or_else(|| {
                 ctx.set_error("NotFound", "User directory entry not found");
@@ -695,16 +669,10 @@ impl proto::user_service_server::UserService for UserService {
         let user = if let Some(region) = user_region {
             let regional_state = self.ctx.regional_state(region)?;
             let regional_sys = SystemOrganizationService::new(regional_state);
-            regional_sys.get_user(user_id).map_err(|e| {
-                tracing::error!(error = %e, "Failed to read updated user");
-                Status::internal("Internal error")
-            })?
+            regional_sys.get_user(user_id).map_err(|e| error_classify::storage_error(&e))?
         } else {
             let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
-            sys_svc.get_user(user_id).map_err(|e| {
-                tracing::error!(error = %e, "Failed to read updated user");
-                Status::internal("Internal error")
-            })?
+            sys_svc.get_user(user_id).map_err(|e| error_classify::storage_error(&e))?
         };
 
         ctx.set_success();
@@ -788,11 +756,14 @@ impl proto::user_service_server::UserService for UserService {
         request: Request<ListUsersRequest>,
     ) -> Result<Response<ListUsersResponse>, Status> {
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
 
-        let mut ctx =
-            self.ctx.make_request_context("UserService", "list_users", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "UserService",
+            "list_users",
+            request.metadata(),
+            &trace_ctx,
+        );
+        let req = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let page_size = if req.page_size == 0 { 100 } else { req.page_size.min(1000) as usize };
@@ -804,8 +775,7 @@ impl proto::user_service_server::UserService for UserService {
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let users = sys_svc.list_users(start_after_key.as_deref(), page_size + 1).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
-            tracing::error!(error = %e, "Failed to list users");
-            Status::internal("Internal error")
+            error_classify::storage_error(&e)
         })?;
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -860,8 +830,7 @@ impl proto::user_service_server::UserService for UserService {
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let user = sys_svc.search_users_by_email(&email).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
-            tracing::error!(error = %e, "Search failed");
-            Status::internal("Internal error")
+            error_classify::storage_error(&e)
         })?;
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -916,8 +885,7 @@ impl proto::user_service_server::UserService for UserService {
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let dir_entry = sys_svc.get_user_directory(user_id).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
-            tracing::error!(error = %e, "Failed to read user directory");
-            Status::internal("Internal error")
+            error_classify::storage_error(&e)
         })?;
         let dir_entry = dir_entry.ok_or_else(|| {
             ctx.set_error("NotFound", "User directory entry not found");
@@ -933,8 +901,7 @@ impl proto::user_service_server::UserService for UserService {
         // this user (from a previous partial attempt), skip the GLOBAL proposal.
         let existing_owner = sys_svc.get_email_hash(&req.email_hmac).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
-            tracing::error!(error = %e, "Failed to check email hash");
-            Status::internal("Internal error")
+            error_classify::storage_error(&e)
         })?;
         match existing_owner {
             Some(EmailHashEntry::Active(owner)) if owner == user_id => {
@@ -968,8 +935,7 @@ impl proto::user_service_server::UserService for UserService {
                         // Re-check ownership.
                         let owner = sys_svc.get_email_hash(&req.email_hmac).map_err(|e| {
                             ctx.set_error("Internal", &e.to_string());
-                            tracing::error!(error = %e, "Failed to re-check email hash");
-                            Status::internal("Internal error")
+                            error_classify::storage_error(&e)
                         })?;
                         if owner != Some(EmailHashEntry::Active(user_id)) {
                             ctx.set_error(
@@ -1026,10 +992,9 @@ impl proto::user_service_server::UserService for UserService {
                 // Read back from REGIONAL state (email record lives in-region).
                 let regional_state = self.ctx.regional_state(region)?;
                 let regional_sys = SystemOrganizationService::new(regional_state);
-                let email = regional_sys.get_user_email(email_id).map_err(|e| {
-                    tracing::error!(error = %e, "Failed to read created email");
-                    Status::internal("Internal error")
-                })?;
+                let email = regional_sys
+                    .get_user_email(email_id)
+                    .map_err(|e| error_classify::storage_error(&e))?;
 
                 ctx.set_success();
                 Ok(Response::new(CreateUserEmailResponse {
@@ -1156,8 +1121,7 @@ impl proto::user_service_server::UserService for UserService {
 
             let emails = sys_svc.get_user_emails(user_id).map_err(|e| {
                 ctx.set_error("Internal", &e.to_string());
-                tracing::error!(error = %e, "Failed to list user emails");
-                Status::internal("Internal error")
+                error_classify::storage_error(&e)
             })?;
 
             ctx.set_success();
@@ -1171,15 +1135,13 @@ impl proto::user_service_server::UserService for UserService {
         if let Some(ref email) = filter.email {
             let user = sys_svc.search_users_by_email(email).map_err(|e| {
                 ctx.set_error("Internal", &e.to_string());
-                tracing::error!(error = %e, "Email search failed");
-                Status::internal("Internal error")
+                error_classify::storage_error(&e)
             })?;
 
             if let Some(user) = user {
-                let emails = sys_svc.get_user_emails(user.id).map_err(|e| {
-                    tracing::error!(error = %e, "Failed to list user emails");
-                    Status::internal("Internal error")
-                })?;
+                let emails = sys_svc
+                    .get_user_emails(user.id)
+                    .map_err(|e| error_classify::storage_error(&e))?;
                 let matching: Vec<proto::UserEmail> = emails
                     .iter()
                     .filter(|e| e.email.eq_ignore_ascii_case(email))
@@ -1225,8 +1187,7 @@ impl proto::user_service_server::UserService for UserService {
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let token_record = sys_svc.get_verification_token_by_hash(&req.token).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
-            tracing::error!(error = %e, "Failed to look up verification token");
-            Status::internal("Internal error")
+            error_classify::storage_error(&e)
         })?;
         let token_record = token_record.ok_or_else(|| {
             ctx.set_error("NotFound", "Verification token not found or expired");
@@ -1255,10 +1216,9 @@ impl proto::user_service_server::UserService for UserService {
                     );
                 }
 
-                let email = sys_svc.get_user_email(email_id).map_err(|e| {
-                    tracing::error!(error = %e, "Failed to read verified email");
-                    Status::internal("Internal error")
-                })?;
+                let email = sys_svc
+                    .get_user_email(email_id)
+                    .map_err(|e| error_classify::storage_error(&e))?;
 
                 ctx.set_success();
                 Ok(Response::new(VerifyUserEmailResponse {
@@ -1309,8 +1269,7 @@ impl proto::user_service_server::UserService for UserService {
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let dir_entry = sys_svc.get_user_directory(user_id).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
-            tracing::error!(error = %e, "Failed to read user directory");
-            Status::internal("Internal error")
+            error_classify::storage_error(&e)
         })?;
         let dir_entry = dir_entry.ok_or_else(|| {
             ctx.set_error("NotFound", "User directory entry not found");
@@ -1350,10 +1309,7 @@ impl proto::user_service_server::UserService for UserService {
         }
 
         if target_region.requires_residency() {
-            let nodes = sys_svc.list_nodes().map_err(|e| {
-                tracing::error!(error = %e, "Failed to list nodes for region validation");
-                Status::internal("Internal error")
-            })?;
+            let nodes = sys_svc.list_nodes().map_err(|e| error_classify::storage_error(&e))?;
             let in_region_count = nodes.iter().filter(|n| n.region == target_region).count();
             if in_region_count < 3 {
                 let mut context = std::collections::HashMap::new();
@@ -1391,10 +1347,8 @@ impl proto::user_service_server::UserService for UserService {
 
         let saga_key = format!("_meta:saga:{}", saga.id);
         let saga_wrapped = Saga::MigrateUser(saga);
-        let saga_bytes = serde_json::to_vec(&saga_wrapped).map_err(|e| {
-            tracing::error!(error = %e, "Failed to serialize user migration saga");
-            Status::internal("Internal error")
-        })?;
+        let saga_bytes = serde_json::to_vec(&saga_wrapped)
+            .map_err(|e| error_classify::serialization_error(&e))?;
 
         let saga_op = inferadb_ledger_types::Operation::SetEntity {
             key: saga_key,
@@ -1615,20 +1569,17 @@ impl proto::user_service_server::UserService for UserService {
         // Pre-resolve: check GLOBAL HMAC index for existing *active* user.
         // Provisioning entries (in-flight onboarding sagas) are not existing users.
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
-        let email_hash_entry = sys_svc.get_email_hash(&email_hmac).map_err(|e| {
-            tracing::error!(error = %e, "Failed to read email hash index");
-            Status::internal("Internal error")
-        })?;
+        let email_hash_entry =
+            sys_svc.get_email_hash(&email_hmac).map_err(|e| error_classify::storage_error(&e))?;
         let existing_user_hmac_hit = matches!(&email_hash_entry, Some(EmailHashEntry::Active(_)));
 
         // TOTP pre-resolve: if this is an existing active user, check whether
         // they have a TOTP credential in their region. If so, pre-generate
         // challenge data so the state machine can atomically create it.
         let totp_pre_resolve = if let Some(EmailHashEntry::Active(user_id)) = &email_hash_entry {
-            let dir_entry = sys_svc.get_user_directory(*user_id).map_err(|e| {
-                tracing::error!(error = %e, "Failed to read user directory");
-                Status::internal("Internal error")
-            })?;
+            let dir_entry = sys_svc
+                .get_user_directory(*user_id)
+                .map_err(|e| error_classify::storage_error(&e))?;
             if let Some(ref dir) = dir_entry {
                 if let (Some(user_region), Some(slug)) = (dir.region, dir.slug) {
                     let regional_state = self.ctx.regional_state(user_region)?;
@@ -1638,10 +1589,7 @@ impl proto::user_service_server::UserService for UserService {
                             *user_id,
                             Some(inferadb_ledger_types::CredentialType::Totp),
                         )
-                        .map_err(|e| {
-                            tracing::error!(error = %e, "Failed to check TOTP status");
-                            Status::internal("Internal error")
-                        })?;
+                        .map_err(|e| error_classify::storage_error(&e))?;
                     if totp_creds.iter().any(|c| c.enabled) {
                         let mut nonce = [0u8; 32];
                         rand::Rng::fill_bytes(&mut rand::rng(), &mut nonce);
@@ -1701,10 +1649,7 @@ impl proto::user_service_server::UserService for UserService {
                 // Re-read UserDirectoryEntry from GLOBAL to find actual region
                 let hash_entry = sys_svc
                     .get_email_hash(&email_hmac)
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "Failed to re-read email hash");
-                        Status::internal("Internal error")
-                    })?
+                    .map_err(|e| error_classify::storage_error(&e))?
                     .ok_or_else(|| Status::internal("Email hash vanished after verification"))?;
 
                 let user_id = match hash_entry {
@@ -1718,10 +1663,7 @@ impl proto::user_service_server::UserService for UserService {
 
                 let dir_entry = sys_svc
                     .get_user_directory(user_id)
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "Failed to read user directory");
-                        Status::internal("Internal error")
-                    })?
+                    .map_err(|e| error_classify::storage_error(&e))?
                     .ok_or_else(|| Status::internal("User directory entry not found"))?;
 
                 let user_region = dir_entry
@@ -1736,10 +1678,7 @@ impl proto::user_service_server::UserService for UserService {
                 let regional_sys = SystemOrganizationService::new(regional_state);
                 let user = regional_sys
                     .get_user(user_id)
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "Failed to read user");
-                        Status::internal("Internal error")
-                    })?
+                    .map_err(|e| error_classify::storage_error(&e))?
                     .ok_or_else(|| Status::permission_denied("Invalid verification code"))?;
 
                 // Check status — non-Active users get the same error as invalid code
@@ -1877,19 +1816,15 @@ impl proto::user_service_server::UserService for UserService {
 
         // Idempotency check: read GLOBAL HMAC index
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
-        if let Some(hash_entry) = sys_svc.get_email_hash(&email_hmac).map_err(|e| {
-            tracing::error!(error = %e, "Failed to read email hash index");
-            Status::internal("Internal error")
-        })? {
+        if let Some(hash_entry) =
+            sys_svc.get_email_hash(&email_hmac).map_err(|e| error_classify::storage_error(&e))?
+        {
             match hash_entry {
                 EmailHashEntry::Active(user_id) => {
                     // Security tradeoff #15: return fresh session for idempotent re-registration
                     let dir_entry = sys_svc
                         .get_user_directory(user_id)
-                        .map_err(|e| {
-                            tracing::error!(error = %e, "Failed to read user directory");
-                            Status::internal("Internal error")
-                        })?
+                        .map_err(|e| error_classify::storage_error(&e))?
                         .ok_or_else(|| Status::internal("User directory entry not found"))?;
 
                     let user_slug = dir_entry
@@ -1904,10 +1839,7 @@ impl proto::user_service_server::UserService for UserService {
                     let regional_sys = SystemOrganizationService::new(regional_state);
                     let user = regional_sys
                         .get_user(user_id)
-                        .map_err(|e| {
-                            tracing::error!(error = %e, "Failed to read user");
-                            Status::internal("Internal error")
-                        })?
+                        .map_err(|e| error_classify::storage_error(&e))?
                         .ok_or_else(|| Status::internal("User record not found in region"))?;
 
                     let session = self
@@ -1950,16 +1882,33 @@ impl proto::user_service_server::UserService for UserService {
             }
         }
 
-        // Read regional onboarding account and validate token hash
+        // Read regional onboarding account and validate token hash.
+        // Retry briefly: in multi-node clusters the VerifyEmailCode write may have
+        // been forwarded to the data region leader. Raft replication to this follower
+        // node can lag by a few milliseconds; poll until the entry is applied locally.
         let regional_state = self.ctx.regional_state(region)?;
         let regional_sys = SystemOrganizationService::new(regional_state);
-        let account = regional_sys
-            .get_onboarding_account_by_hmac(&email_hmac)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read onboarding account");
-                Status::internal("Internal error")
+        let account = {
+            let mut found = None;
+            for attempt in 0..20u32 {
+                match regional_sys.get_onboarding_account_by_hmac(&email_hmac) {
+                    Ok(Some(a)) => {
+                        found = Some(a);
+                        break;
+                    },
+                    Ok(None) if attempt < 19 => {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    },
+                    Ok(None) => {},
+                    Err(e) => {
+                        return Err(error_classify::storage_error(&e));
+                    },
+                }
+            }
+            found.ok_or_else(|| {
+                Status::not_found("No onboarding account found — verify email first")
             })?
-            .ok_or_else(|| Status::not_found("No onboarding account found — verify email first"))?;
+        };
 
         // Validate token hash (constant-time comparison)
         if !inferadb_ledger_types::hash_eq(&token_hash, &account.token_hash) {
@@ -1972,14 +1921,10 @@ impl proto::user_service_server::UserService for UserService {
         }
 
         // Generate slugs for the new user and organization
-        let user_slug = generate_user_slug().map_err(|e| {
-            tracing::error!(error = %e, "Failed to generate user slug");
-            Status::internal("Internal error")
-        })?;
-        let organization_slug = generate_organization_slug().map_err(|e| {
-            tracing::error!(error = %e, "Failed to generate org slug");
-            Status::internal("Internal error")
-        })?;
+        let user_slug = generate_user_slug()
+            .map_err(|e| error_classify::internal_error("id-generation", &e))?;
+        let organization_slug = generate_organization_slug()
+            .map_err(|e| error_classify::internal_error("id-generation", &e))?;
 
         // Build saga
         let saga_id = SagaId::new(uuid::Uuid::new_v4().to_string());
@@ -2023,10 +1968,7 @@ impl proto::user_service_server::UserService for UserService {
                 Status::deadline_exceeded("Registration saga timed out — it may still complete")
             })?
             .map_err(|_| Status::internal("Saga orchestrator dropped notification channel"))?
-            .map_err(|e| {
-                tracing::error!(error = %e, "Saga failed");
-                Status::internal("Internal error")
-            })?;
+            .map_err(|e| error_classify::raft_error(&e))?;
 
         // Sign JWT for the new user session
         let signing_key = self.ensure_signing_key_cached(&sys_svc)?;
@@ -2042,10 +1984,7 @@ impl proto::user_service_server::UserService for UserService {
                 TokenVersion::new(1),
                 &signing_key.kid,
             )
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to sign access token");
-                Status::internal("Internal error")
-            })?;
+            .map_err(|e| error_classify::crypto_error(&e))?;
 
         let token_pair = proto::TokenPair {
             access_token,
@@ -2102,8 +2041,7 @@ impl proto::user_service_server::UserService for UserService {
         let regional_sys = SystemOrganizationService::new(regional_state);
         let user = regional_sys.get_user(user_id).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
-            tracing::error!(error = %e, "Failed to read user");
-            Status::internal("Internal error")
+            error_classify::storage_error(&e)
         })?;
         if !matches!(
             user.as_ref().map(|u| u.status),
@@ -2247,8 +2185,7 @@ impl proto::user_service_server::UserService for UserService {
         let credentials =
             regional_sys.list_user_credentials(user_id, type_filter).map_err(|e| {
                 ctx.set_error("Internal", &e.to_string());
-                tracing::error!(error = %e, "Failed to list credentials");
-                Status::internal("Internal error")
+                error_classify::storage_error(&e)
             })?;
 
         // Convert to proto, stripping sensitive credential data
@@ -2324,10 +2261,7 @@ impl proto::user_service_server::UserService for UserService {
                 let regional_sys = SystemOrganizationService::new(regional_state);
                 let cred = regional_sys
                     .get_user_credential(user_id, updated_id)
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "Failed to read updated credential");
-                        Status::internal("Internal error")
-                    })?
+                    .map_err(|e| error_classify::storage_error(&e))?
                     .ok_or_else(|| Status::internal("Credential vanished after update"))?;
 
                 let mut proto_cred =
@@ -2499,10 +2433,7 @@ impl proto::user_service_server::UserService for UserService {
 
         let challenge = regional_sys
             .get_totp_challenge(user_id, &nonce)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read TOTP challenge");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::storage_error(&e))?
             .ok_or_else(|| {
                 ctx.set_error("NotFound", "Challenge not found");
                 Status::not_found("Challenge not found")
@@ -2523,10 +2454,7 @@ impl proto::user_service_server::UserService for UserService {
         // Read TOTP credential from regional state
         let totp_creds = regional_sys
             .list_user_credentials(user_id, Some(inferadb_ledger_types::CredentialType::Totp))
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read TOTP credential");
-                Status::internal("Internal error")
-            })?;
+            .map_err(|e| error_classify::storage_error(&e))?;
 
         let totp_cred = totp_creds.first().ok_or_else(|| {
             ctx.set_error("FailedPrecondition", "No TOTP credential configured");
@@ -2648,10 +2576,7 @@ impl proto::user_service_server::UserService for UserService {
 
         let challenge = regional_sys
             .get_totp_challenge(user_id, &nonce)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read TOTP challenge");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::storage_error(&e))?
             .ok_or_else(|| {
                 ctx.set_error("NotFound", "Challenge not found");
                 Status::not_found("Challenge not found")
@@ -2675,10 +2600,7 @@ impl proto::user_service_server::UserService for UserService {
                 user_id,
                 Some(inferadb_ledger_types::CredentialType::RecoveryCode),
             )
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read recovery credentials");
-                Status::internal("Internal error")
-            })?;
+            .map_err(|e| error_classify::storage_error(&e))?;
 
         let Some(recovery_cred) = recovery_creds.first() else {
             // No recovery credential — still increment attempts to prevent probing
@@ -2772,12 +2694,12 @@ impl proto::user_service_server::UserService for UserService {
 mod tests {
     use std::sync::Arc;
 
+    use arc_swap::ArcSwap;
     use inferadb_ledger_proto::proto::{
         self, user_service_server::UserService as UserServiceTrait,
     };
     use inferadb_ledger_raft::log_storage::AppliedState;
     use inferadb_ledger_test_utils::TestDir;
-    use parking_lot::RwLock;
     use tonic::Request;
 
     use super::*;
@@ -2785,7 +2707,7 @@ mod tests {
 
     /// Creates a `UserService` backed by a [`MockProposalService`].
     fn make_user_service()
-    -> (super::UserService, Arc<MockProposalService>, Arc<RwLock<AppliedState>>, TestDir) {
+    -> (super::UserService, Arc<MockProposalService>, Arc<ArcSwap<AppliedState>>, TestDir) {
         let temp = TestDir::new();
         let mock = Arc::new(MockProposalService::new());
         let (ctx, applied_state) =
@@ -2828,9 +2750,10 @@ mod tests {
         let user_slug = inferadb_ledger_types::UserSlug::new(5000);
         let user_id = inferadb_ledger_types::UserId::new(1);
         {
-            let mut state = applied_state.write();
+            let mut state = (*applied_state.load_full()).clone();
             state.user_slug_index.insert(user_slug, user_id);
             state.user_id_to_slug.insert(user_id, user_slug);
+            applied_state.store(Arc::new(state));
         }
 
         let request = Request::new(proto::GetUserRequest {
@@ -2891,9 +2814,10 @@ mod tests {
         let user_slug = inferadb_ledger_types::UserSlug::new(5000);
         let user_id = inferadb_ledger_types::UserId::new(1);
         {
-            let mut state = applied_state.write();
+            let mut state = (*applied_state.load_full()).clone();
             state.user_slug_index.insert(user_slug, user_id);
             state.user_id_to_slug.insert(user_id, user_slug);
+            applied_state.store(Arc::new(state));
         }
 
         let request = Request::new(proto::UpdateUserRequest {
@@ -2932,9 +2856,10 @@ mod tests {
         let user_slug = inferadb_ledger_types::UserSlug::new(5000);
         let user_id = inferadb_ledger_types::UserId::new(1);
         {
-            let mut state = applied_state.write();
+            let mut state = (*applied_state.load_full()).clone();
             state.user_slug_index.insert(user_slug, user_id);
             state.user_id_to_slug.insert(user_id, user_slug);
+            applied_state.store(Arc::new(state));
         }
 
         mock.enqueue(Ok(LedgerResponse::UserUpdated { user_id }));
@@ -2994,9 +2919,10 @@ mod tests {
         let user_slug = inferadb_ledger_types::UserSlug::new(5000);
         let user_id = inferadb_ledger_types::UserId::new(1);
         {
-            let mut state = applied_state.write();
+            let mut state = (*applied_state.load_full()).clone();
             state.user_slug_index.insert(user_slug, user_id);
             state.user_id_to_slug.insert(user_id, user_slug);
+            applied_state.store(Arc::new(state));
         }
 
         let request = Request::new(proto::DeleteUserRequest {
@@ -3017,11 +2943,12 @@ mod tests {
         let caller_slug = inferadb_ledger_types::UserSlug::new(6000);
         let caller_id = inferadb_ledger_types::UserId::new(2);
         {
-            let mut state = applied_state.write();
+            let mut state = (*applied_state.load_full()).clone();
             state.user_slug_index.insert(user_slug, user_id);
             state.user_id_to_slug.insert(user_id, user_slug);
             state.user_slug_index.insert(caller_slug, caller_id);
             state.user_id_to_slug.insert(caller_id, caller_slug);
+            applied_state.store(Arc::new(state));
         }
 
         mock.enqueue(Ok(LedgerResponse::UserSoftDeleted { user_id, retention_days: 30 }));
@@ -3053,11 +2980,12 @@ mod tests {
         let caller_slug = inferadb_ledger_types::UserSlug::new(6000);
         let caller_id = inferadb_ledger_types::UserId::new(2);
         {
-            let mut state = applied_state.write();
+            let mut state = (*applied_state.load_full()).clone();
             state.user_slug_index.insert(user_slug, user_id);
             state.user_id_to_slug.insert(user_id, user_slug);
             state.user_slug_index.insert(caller_slug, caller_id);
             state.user_id_to_slug.insert(caller_id, caller_slug);
+            applied_state.store(Arc::new(state));
         }
 
         mock.enqueue(Err(tonic::Status::unavailable("leader changed")));
@@ -3156,9 +3084,10 @@ mod tests {
         let user_slug = inferadb_ledger_types::UserSlug::new(5000);
         let user_id = inferadb_ledger_types::UserId::new(1);
         {
-            let mut state = applied_state.write();
+            let mut state = (*applied_state.load_full()).clone();
             state.user_slug_index.insert(user_slug, user_id);
             state.user_id_to_slug.insert(user_id, user_slug);
+            applied_state.store(Arc::new(state));
         }
 
         let request = Request::new(proto::CreateUserEmailRequest {
@@ -3179,9 +3108,10 @@ mod tests {
         let user_slug = inferadb_ledger_types::UserSlug::new(5000);
         let user_id = inferadb_ledger_types::UserId::new(1);
         {
-            let mut state = applied_state.write();
+            let mut state = (*applied_state.load_full()).clone();
             state.user_slug_index.insert(user_slug, user_id);
             state.user_id_to_slug.insert(user_id, user_slug);
+            applied_state.store(Arc::new(state));
         }
 
         let request = Request::new(proto::CreateUserEmailRequest {

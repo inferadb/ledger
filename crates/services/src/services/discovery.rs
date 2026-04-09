@@ -17,11 +17,11 @@ use inferadb_ledger_proto::proto::{
     ResolveRegionLeaderResponse, system_discovery_service_server::SystemDiscoveryService,
 };
 use inferadb_ledger_raft::{
-    log_storage::AppliedStateAccessor, peer_tracker::PeerTracker, types::LedgerTypeConfig,
+    ConsensusHandle, log_storage::AppliedStateAccessor, peer_tracker::PeerTracker,
+    raft_manager::RaftManager,
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
-use openraft::Raft;
 use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 
@@ -165,8 +165,8 @@ const DEFAULT_LEARNER_CACHE_TTL: std::time::Duration = std::time::Duration::from
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct DiscoveryService {
-    /// Raft consensus handle for membership and leader queries.
-    raft: Arc<Raft<LedgerTypeConfig>>,
+    /// Consensus handle for leadership and term queries.
+    handle: Arc<ConsensusHandle>,
     /// State layer for organization registry access.
     #[allow(dead_code)] // retained to maintain Arc reference count
     state: Arc<StateLayer<FileBackend>>,
@@ -188,7 +188,17 @@ pub struct DiscoveryService {
     ///
     /// Included in system state responses for peer region awareness.
     #[builder(default = inferadb_ledger_types::Region::GLOBAL)]
+    #[allow(dead_code)]
     region: inferadb_ledger_types::Region,
+    /// Raft manager for membership queries that need node addresses.
+    #[builder(default)]
+    #[allow(dead_code)]
+    raft_manager: Option<Arc<RaftManager>>,
+    /// Shared peer address map for resolving peer network addresses.
+    ///
+    /// Updated by `announce_peer` and used by discovery RPCs.
+    #[builder(default)]
+    peer_addresses: Option<inferadb_ledger_raft::PeerAddressMap>,
 }
 
 impl DiscoveryService {
@@ -209,11 +219,11 @@ impl DiscoveryService {
             return true;
         };
 
-        let metrics = self.raft.metrics().borrow().clone();
-        let membership = metrics.membership_config.membership();
-
-        // Check if this node is in the voter set
-        membership.voter_ids().any(|id| id == node_id)
+        // Check if this node is a voter by comparing its ID against the
+        // shard state voter set. We compare the raw u64 values since
+        // inferadb_ledger_consensus::types::NodeId is not accessible from
+        // this crate.
+        self.handle.shard_state().voters.iter().any(|v| v.0 == node_id)
     }
 
     /// Checks if the local state cache is stale (for learners).
@@ -232,8 +242,7 @@ impl DiscoveryService {
 
     /// Returns the current leader's node ID (for forwarding from stale learners).
     fn get_leader_hint(&self) -> Option<String> {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader.map(|id| id.to_string())
+        self.handle.current_leader().map(|id| id.to_string())
     }
 
     /// Prunes stale peers that haven't been seen within the staleness threshold.
@@ -270,27 +279,22 @@ impl DiscoveryService {
         &self,
         _region: inferadb_ledger_types::Region,
     ) -> std::result::Result<(String, u64, u32), Status> {
-        let metrics = self.raft.metrics().borrow().clone();
+        let state = self.handle.shard_state();
+        let current_term = self.handle.current_term();
 
         let leader_id =
-            metrics.current_leader.ok_or_else(|| Status::unavailable("No leader elected"))?;
+            state.leader.ok_or_else(|| Status::unavailable("No leader elected in this region"))?;
 
-        let raft_term = metrics.current_term;
+        let endpoint =
+            self.peer_addresses.as_ref().and_then(|m| m.get(leader_id.0)).ok_or_else(|| {
+                Status::unavailable(format!(
+                    "Leader {} address not yet known — peer has not announced itself",
+                    leader_id.0
+                ))
+            })?;
 
-        // Look up leader's network address from Raft membership.
-        let membership = metrics.membership_config.membership();
-        let (_, leader_node) = membership
-            .nodes()
-            .find(|(id, _)| **id == leader_id)
-            .ok_or_else(|| Status::unavailable("Leader node not found in membership"))?;
-
-        // Build endpoint from the node's registered address. The address
-        // in BasicNode is typically "host:port" or just "host".
-        let addr = &leader_node.addr;
-        let endpoint = if addr.contains("://") { addr.clone() } else { format!("http://{addr}") };
-
-        // 30-second recommended cache TTL.
-        Ok((endpoint, raft_term, 30))
+        // Recommend a short TTL since leadership can change on election.
+        Ok((endpoint, current_term, 10))
     }
 }
 
@@ -300,29 +304,30 @@ impl SystemDiscoveryService for DiscoveryService {
         &self,
         request: Request<GetPeersRequest>,
     ) -> Result<Response<GetPeersResponse>, Status> {
-        let req = request.into_inner();
-        let max_peers = if req.max_peers == 0 { 100 } else { req.max_peers as usize };
+        let _req = request.into_inner();
 
-        // Get peers from Raft membership
-        let metrics = self.raft.metrics().borrow().clone();
-        let membership = metrics.membership_config.membership();
+        let current_term = self.handle.current_term();
+        let state = self.handle.shard_state();
 
-        let tracker = self.peer_tracker.read();
-        let peers: Vec<PeerInfo> = membership
-            .nodes()
-            .take(max_peers)
-            .map(|(id, node)| {
-                let node_id_str = id.to_string();
-                PeerInfo {
-                    node_id: Some(NodeId { id: node_id_str.clone() }),
-                    addresses: vec![node.addr.clone()],
-                    grpc_port: 5000, // Default port
-                    last_seen: tracker.get_last_seen(&node_id_str),
-                }
+        let peers: Vec<PeerInfo> = state
+            .voters
+            .iter()
+            .chain(state.learners.iter())
+            .filter_map(|node_id| {
+                let addr_with_port = self.peer_addresses.as_ref()?.get(node_id.0)?;
+                // Split "host:port" into address and port components.
+                let (host, port_str) = addr_with_port.rsplit_once(':')?;
+                let grpc_port: u32 = port_str.parse().ok()?;
+                Some(PeerInfo {
+                    node_id: Some(NodeId { id: node_id.0.to_string() }),
+                    addresses: vec![host.to_string()],
+                    grpc_port,
+                    last_seen: None,
+                })
             })
             .collect();
 
-        Ok(Response::new(GetPeersResponse { peers, system_version: metrics.current_term }))
+        Ok(Response::new(GetPeersResponse { peers, system_version: current_term }))
     }
 
     async fn announce_peer(
@@ -354,6 +359,16 @@ impl SystemDiscoveryService for DiscoveryService {
             tracker.record_seen(&node_id.id);
         }
 
+        // Update the shared peer address map so other services can resolve
+        // this peer's address for forwarding and health checks.
+        if let Some(ref peer_addresses) = self.peer_addresses
+            && let (Ok(parsed_id), Some(first_addr)) =
+                (node_id.id.parse::<u64>(), peer.addresses.first())
+        {
+            let address = format!("{first_addr}:{}", peer.grpc_port);
+            peer_addresses.insert(parsed_id, address);
+        }
+
         tracing::info!(
             node_id = %node_id.id,
             addresses = ?peer.addresses,
@@ -381,8 +396,7 @@ impl SystemDiscoveryService for DiscoveryService {
         }
 
         // Get current system version (Raft term)
-        let metrics = self.raft.metrics().borrow().clone();
-        let current_version = metrics.current_term;
+        let current_version = self.handle.current_term();
 
         // If client already has current version, return empty response
         if req.if_version_greater_than >= current_version {
@@ -393,34 +407,31 @@ impl SystemDiscoveryService for DiscoveryService {
             }));
         }
 
-        // Build node info from Raft membership
-        let membership = metrics.membership_config.membership();
+        let state = self.handle.shard_state();
 
-        let own_region: i32 = ProtoRegion::from(self.region).into();
-
-        let nodes: Vec<NodeInfo> = membership
-            .nodes()
-            .map(|(id, node)| {
-                // Report this node's region for its own entry;
-                // other nodes' regions are unknown from Raft membership alone.
-                let region = match self.node_id {
-                    Some(own_id) if *id == own_id => own_region,
-                    _ => ProtoRegion::Unspecified.into(),
-                };
-                NodeInfo {
-                    node_id: Some(NodeId { id: id.to_string() }),
-                    addresses: vec![node.addr.clone()],
-                    grpc_port: 5000,
+        // Build node list from voters that have announced their addresses.
+        let nodes: Vec<NodeInfo> = state
+            .voters
+            .iter()
+            .chain(state.learners.iter())
+            .filter_map(|node_id| {
+                let addr_with_port = self.peer_addresses.as_ref()?.get(node_id.0)?;
+                let (host, port_str) = addr_with_port.rsplit_once(':')?;
+                let grpc_port: u32 = port_str.parse().ok()?;
+                Some(NodeInfo {
+                    node_id: Some(NodeId { id: node_id.0.to_string() }),
+                    addresses: vec![host.to_string()],
+                    grpc_port,
                     last_heartbeat: None,
                     joined_at: None,
-                    region,
-                }
+                    region: ProtoRegion::Global.into(),
+                })
             })
             .collect();
 
-        // Build organization registry from applied state
+        // Member node IDs for the organization registry entries.
         let member_nodes: Vec<NodeId> =
-            membership.nodes().map(|(id, _)| NodeId { id: id.to_string() }).collect();
+            state.voters.iter().map(|n| NodeId { id: n.0.to_string() }).collect();
 
         let organizations: Vec<OrganizationRegistry> = self
             .applied_state

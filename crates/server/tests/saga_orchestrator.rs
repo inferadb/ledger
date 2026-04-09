@@ -115,15 +115,13 @@ async fn test_saga_orchestrator_starts() {
 
     // Saga orchestrator runs in background
     // Verify cluster remains healthy
-    let metrics = leader.raft.metrics().borrow().clone();
-    assert!(metrics.current_leader.is_some(), "leader should be elected");
+    assert!(leader.handle.current_leader().is_some(), "leader should be elected");
 
     // Give orchestrator time to run at least one poll cycle
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Cluster should still be healthy
-    let metrics = leader.raft.metrics().borrow().clone();
-    assert!(metrics.current_leader.is_some(), "cluster should remain healthy");
+    assert!(leader.handle.current_leader().is_some(), "cluster should remain healthy");
 }
 
 /// Tests that saga orchestrator only runs on leader.

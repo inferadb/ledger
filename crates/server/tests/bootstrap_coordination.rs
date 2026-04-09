@@ -1,10 +1,11 @@
-//! Integration tests for coordinated cluster bootstrap.
+//! Integration tests for cluster bootstrap.
 //!
-//! Tests the bootstrap coordination system including:
-//! - Single-node bootstrap with `bootstrap_expect=1`
-//! - 3-node coordinated bootstrap (lowest ID wins)
+//! Tests the bootstrap system including:
+//! - Single-node bootstrap with cluster_id pre-written
+//! - 3-node cluster via dynamic join
 //! - Node restart preserves ID and rejoins cluster
 //! - Late joiner finds existing cluster via `is_cluster_member`
+//! - Fresh node (no cluster_id) waits for initialization
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
@@ -18,10 +19,10 @@ use inferadb_ledger_test_utils::TestDir;
 
 use crate::common::{TestCluster, allocate_ports, create_admin_client};
 
-/// Tests single-node bootstrap with `bootstrap_expect=1`.
+/// Tests single-node bootstrap with pre-written cluster_id.
 ///
-/// Verifies that a single node can bootstrap immediately when configured
-/// with `bootstrap_expect=1`.
+/// Verifies that a single node can bootstrap immediately when a cluster_id
+/// file exists (restart path).
 #[tokio::test]
 async fn test_single_node_bootstrap() {
     let temp_dir = TestDir::new();
@@ -29,12 +30,13 @@ async fn test_single_node_bootstrap() {
     let port = allocate_ports(1);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
-    // Create config with single-node mode
+    // Write cluster_id so bootstrap_node takes the restart path (immediate startup)
+    inferadb_ledger_server::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
+
     let config = Config {
         listen_addr: addr,
         metrics_addr: None,
         data_dir: Some(data_dir.clone()),
-        single: true, // Single-node mode
         ..Config::default()
     };
 
@@ -85,11 +87,13 @@ async fn test_node_restart_preserves_id() {
     let port = allocate_ports(2);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
+    // Write cluster_id so bootstrap_node takes the restart path
+    inferadb_ledger_server::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
+
     let config = Config {
         listen_addr: addr,
         metrics_addr: None,
         data_dir: Some(data_dir.clone()),
-        single: true, // Single-node mode
         ..Config::default()
     };
 
@@ -107,8 +111,7 @@ async fn test_node_restart_preserves_id() {
         .expect("first bootstrap should succeed");
 
         // Get the generated node ID
-        let raft_metrics = bootstrapped.raft.metrics().borrow().clone();
-        let node_id = raft_metrics.id;
+        let node_id = bootstrapped.handle.node_id();
 
         // Verify ID was persisted
         let node_id_file = temp_dir.path().join("node_id");
@@ -134,7 +137,6 @@ async fn test_node_restart_preserves_id() {
             listen_addr: addr2,
             metrics_addr: None,
             data_dir: Some(data_dir.clone()),
-            single: true, // Single-node mode
             ..Config::default()
         };
 
@@ -149,8 +151,7 @@ async fn test_node_restart_preserves_id() {
         .await
         .expect("restart should succeed");
 
-        let raft_metrics = bootstrapped.raft.metrics().borrow().clone();
-        let node_id = raft_metrics.id;
+        let node_id = bootstrapped.handle.node_id();
 
         // Server is already running and accepting TCP connections from bootstrap_node()
 
@@ -241,13 +242,16 @@ async fn test_late_joiner_finds_existing_cluster() {
     let leader_addr: std::net::SocketAddr = format!("127.0.0.1:{}", leader_port).parse().unwrap();
 
     // Pre-write node_id for deterministic test behavior
-    inferadb_ledger_server::node_id::write_node_id(leader_dir.path(), 1).expect("write node_id");
+    std::fs::write(leader_dir.path().join("node_id"), "1").expect("write node_id");
+
+    // Write cluster_id so bootstrap_node takes the restart path
+    inferadb_ledger_server::cluster_id::write_cluster_id(&leader_data_dir, 1)
+        .expect("write cluster_id");
 
     let leader_config = Config {
         listen_addr: leader_addr,
         metrics_addr: None,
         data_dir: Some(leader_data_dir.clone()),
-        single: true, // Single-node mode
         ..Config::default()
     };
 
@@ -261,15 +265,14 @@ async fn test_late_joiner_finds_existing_cluster() {
     )
     .await
     .expect("leader bootstrap");
-    let leader_raft = leader.raft.clone();
+    let leader_handle = leader.handle.clone();
 
     // Server is already running and accepting TCP connections from bootstrap_node()
 
     // Wait for leader to become leader
     let start = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
-        let metrics = leader_raft.metrics().borrow().clone();
-        if metrics.current_leader == Some(1) {
+        if leader_handle.current_leader() == Some(1) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -305,47 +308,76 @@ async fn test_late_joiner_finds_existing_cluster() {
     leader.server_handle.abort();
 }
 
-/// Tests join mode (bootstrap_expect=0) starts without bootstrapping.
+/// Tests that a fresh node (no cluster_id) waits for initialization.
 ///
-/// Verifies that a node with bootstrap_expect=0 starts successfully but
-/// does not initialize a Raft cluster - it waits to be added via AdminService.
+/// Verifies that a node without a cluster_id file starts its gRPC server
+/// but does not initialize a Raft cluster — it waits for InitCluster RPC.
 #[tokio::test]
-async fn test_join_mode_does_not_bootstrap() {
+async fn test_fresh_node_waits_for_init() {
     let temp_dir = TestDir::new();
     let data_dir = temp_dir.path().to_path_buf();
     let port = allocate_ports(1);
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
+    // No cluster_id written — node enters "fresh" path and blocks waiting
+    // for InitCluster RPC. The gRPC server is running during this wait.
     let config = Config {
         listen_addr: addr,
         metrics_addr: None,
         data_dir: Some(data_dir.clone()),
-        join: true, // Join mode
         ..Config::default()
     };
 
-    // Bootstrap should succeed (node starts but doesn't initialize cluster)
-    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let result = bootstrap_node(
-        &config,
-        &data_dir,
-        inferadb_ledger_raft::HealthState::new(),
-        shutdown_rx,
-        None,
-    )
-    .await;
-    assert!(result.is_ok(), "join mode should start successfully: {:?}", result.err());
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let bootstrapped = result.unwrap();
+    // Spawn bootstrap_node in background — it blocks on the fresh path.
+    let bootstrap_handle = tokio::spawn(async move {
+        bootstrap_node(
+            &config,
+            &data_dir,
+            inferadb_ledger_raft::HealthState::new(),
+            shutdown_rx,
+            None,
+        )
+        .await
+    });
 
-    // Server is already running and accepting TCP connections from bootstrap_node()
+    // Wait for the gRPC server to be reachable.
+    let start = tokio::time::Instant::now();
+    let mut client = None;
+    while start.elapsed() < Duration::from_secs(5) {
+        match create_admin_client(addr).await {
+            Ok(c) => {
+                client = Some(c);
+                break;
+            },
+            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    let mut client = client.expect("connect to admin service");
 
-    // Verify node is NOT a cluster member (hasn't bootstrapped)
-    let mut client = create_admin_client(addr).await.expect("connect to admin service");
+    // Verify node is NOT a cluster member (hasn't been initialized)
     let response = client.get_node_info(GetNodeInfoRequest {}).await.expect("get_node_info RPC");
     let info = response.into_inner();
 
-    assert!(!info.is_cluster_member, "join mode node should NOT be cluster member");
+    assert!(!info.is_cluster_member, "fresh node should NOT be cluster member");
 
-    bootstrapped.server_handle.abort();
+    // Send shutdown to unblock the fresh path
+    let _ = shutdown_tx.send(true);
+
+    // Wait for bootstrap_node to finish (it returns after shutdown signal).
+    // On the fresh path, shutdown before InitCluster returns an error — that's
+    // expected behavior, not a failure. The key assertion above (is_cluster_member
+    // == false) already validated the test invariant.
+    let result = tokio::time::timeout(Duration::from_secs(5), bootstrap_handle)
+        .await
+        .expect("bootstrap should finish after shutdown")
+        .expect("bootstrap task should not panic");
+
+    match result {
+        Ok(bootstrapped) => bootstrapped.server_handle.abort(),
+        Err(_) => {
+            // Fresh node received shutdown before initialization — expected.
+        },
+    }
 }

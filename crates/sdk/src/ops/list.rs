@@ -7,7 +7,6 @@ use crate::{
     LedgerClient,
     error::Result,
     proto_util::non_empty,
-    retry::with_retry_cancellable,
     types::query::{
         Entity, ListEntitiesOpts, ListRelationshipsOpts, ListResourcesOpts, PagedResult,
         Relationship,
@@ -65,44 +64,35 @@ impl LedgerClient {
         organization: OrganizationSlug,
         opts: ListEntitiesOpts,
     ) -> Result<PagedResult<Entity>> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("list_entities", || {
+            let pool = pool.clone();
+            let opts = opts.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_read_client);
 
-        self.with_metrics(
-            "list_entities",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "list_entities",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_read_client);
+                let request = proto::ListEntitiesRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    key_prefix: opts.key_prefix.clone(),
+                    at_height: opts.at_height,
+                    include_expired: opts.include_expired,
+                    limit: opts.limit,
+                    page_token: opts.page_token.clone().unwrap_or_default(),
+                    consistency: opts.consistency.to_proto() as i32,
+                    vault: opts.vault.map(|v| proto::VaultSlug { slug: v.value() }),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::ListEntitiesRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        key_prefix: opts.key_prefix.clone(),
-                        at_height: opts.at_height,
-                        include_expired: opts.include_expired,
-                        limit: opts.limit,
-                        page_token: opts.page_token.clone().unwrap_or_default(),
-                        consistency: opts.consistency.to_proto() as i32,
-                        vault: opts.vault.map(|v| proto::VaultSlug { slug: v.value() }),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.list_entities(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.list_entities(tonic::Request::new(request)).await?.into_inner();
+                let items = response.entities.into_iter().map(Entity::from_proto).collect();
 
-                    let items = response.entities.into_iter().map(Entity::from_proto).collect();
+                let next_page_token = non_empty(response.next_page_token);
 
-                    let next_page_token = non_empty(response.next_page_token);
-
-                    Ok(PagedResult { items, next_page_token, block_height: response.block_height })
-                },
-            ),
-        )
+                Ok(PagedResult { items, next_page_token, block_height: response.block_height })
+            }
+        })
         .await
     }
 
@@ -151,46 +141,37 @@ impl LedgerClient {
         vault: VaultSlug,
         opts: ListRelationshipsOpts,
     ) -> Result<PagedResult<Relationship>> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("list_relationships", || {
+            let pool = pool.clone();
+            let opts = opts.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_read_client);
 
-        self.with_metrics(
-            "list_relationships",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "list_relationships",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_read_client);
+                let request = proto::ListRelationshipsRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    vault: Some(proto::VaultSlug { slug: vault.value() }),
+                    resource: opts.resource.clone(),
+                    relation: opts.relation.clone(),
+                    subject: opts.subject.clone(),
+                    at_height: opts.at_height,
+                    limit: opts.limit,
+                    page_token: opts.page_token.clone().unwrap_or_default(),
+                    consistency: opts.consistency.to_proto() as i32,
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::ListRelationshipsRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault: Some(proto::VaultSlug { slug: vault.value() }),
-                        resource: opts.resource.clone(),
-                        relation: opts.relation.clone(),
-                        subject: opts.subject.clone(),
-                        at_height: opts.at_height,
-                        limit: opts.limit,
-                        page_token: opts.page_token.clone().unwrap_or_default(),
-                        consistency: opts.consistency.to_proto() as i32,
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.list_relationships(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.list_relationships(tonic::Request::new(request)).await?.into_inner();
+                let items =
+                    response.relationships.into_iter().map(Relationship::from_proto).collect();
 
-                    let items =
-                        response.relationships.into_iter().map(Relationship::from_proto).collect();
+                let next_page_token = non_empty(response.next_page_token);
 
-                    let next_page_token = non_empty(response.next_page_token);
-
-                    Ok(PagedResult { items, next_page_token, block_height: response.block_height })
-                },
-            ),
-        )
+                Ok(PagedResult { items, next_page_token, block_height: response.block_height })
+            }
+        })
         .await
     }
 
@@ -239,45 +220,36 @@ impl LedgerClient {
         vault: VaultSlug,
         opts: ListResourcesOpts,
     ) -> Result<PagedResult<String>> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("list_resources", || {
+            let pool = pool.clone();
+            let opts = opts.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_read_client);
 
-        self.with_metrics(
-            "list_resources",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "list_resources",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_read_client);
+                let request = proto::ListResourcesRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    vault: Some(proto::VaultSlug { slug: vault.value() }),
+                    resource_type: opts.resource_type.clone(),
+                    at_height: opts.at_height,
+                    limit: opts.limit,
+                    page_token: opts.page_token.clone().unwrap_or_default(),
+                    consistency: opts.consistency.to_proto() as i32,
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::ListResourcesRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault: Some(proto::VaultSlug { slug: vault.value() }),
-                        resource_type: opts.resource_type.clone(),
-                        at_height: opts.at_height,
-                        limit: opts.limit,
-                        page_token: opts.page_token.clone().unwrap_or_default(),
-                        consistency: opts.consistency.to_proto() as i32,
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.list_resources(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.list_resources(tonic::Request::new(request)).await?.into_inner();
+                let next_page_token = non_empty(response.next_page_token);
 
-                    let next_page_token = non_empty(response.next_page_token);
-
-                    Ok(PagedResult {
-                        items: response.resources,
-                        next_page_token,
-                        block_height: response.block_height,
-                    })
-                },
-            ),
-        )
+                Ok(PagedResult {
+                    items: response.resources,
+                    next_page_token,
+                    block_height: response.block_height,
+                })
+            }
+        })
         .await
     }
 }

@@ -41,7 +41,7 @@ use moka::sync::Cache as MokaCache;
 use tonic::{Request, Response, Status};
 use zeroize::Zeroizing;
 
-use super::{service_infra::ServiceContext, slug_resolver::SlugResolver};
+use super::{error_classify, service_infra::ServiceContext, slug_resolver::SlugResolver};
 
 /// Cache key for credential idempotency, scoped to prevent cross-tenant collisions.
 type CredentialCacheKey = (DomainOrganizationId, DomainAppId, [u8; 16]);
@@ -182,13 +182,11 @@ impl AppService {
     /// REGIONAL PII (name, description) from `AppProfile` records.
     fn list_apps_internal(&self, org_id: DomainOrganizationId) -> Result<Vec<App>, Status> {
         let prefix = SystemKeys::app_prefix(org_id);
-        let entities =
-            self.ctx.state.list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, 10000).map_err(
-                |e| {
-                    tracing::error!(error = %e, "Failed to list apps");
-                    Status::internal("Internal error")
-                },
-            )?;
+        let entities = self
+            .ctx
+            .state
+            .list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, 10000)
+            .map_err(|e| error_classify::storage_error(&e))?;
 
         let mut apps = Vec::with_capacity(entities.len());
         for entity in &entities {
@@ -212,13 +210,11 @@ impl AppService {
         app_id: DomainAppId,
     ) -> Result<Vec<AppVaultConnection>, Status> {
         let prefix = SystemKeys::app_vault_prefix(org_id, app_id);
-        let entities =
-            self.ctx.state.list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, 10000).map_err(
-                |e| {
-                    tracing::error!(error = %e, "Failed to list vault connections");
-                    Status::internal("Internal error")
-                },
-            )?;
+        let entities = self
+            .ctx
+            .state
+            .list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, 10000)
+            .map_err(|e| error_classify::storage_error(&e))?;
 
         let mut connections = Vec::with_capacity(entities.len());
         for entity in &entities {
@@ -265,13 +261,11 @@ impl AppService {
         app_id: DomainAppId,
     ) -> Result<Vec<ClientAssertionEntry>, Status> {
         let prefix = SystemKeys::app_assertion_prefix(org_id, app_id);
-        let entities =
-            self.ctx.state.list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, 10000).map_err(
-                |e| {
-                    tracing::error!(error = %e, "Failed to list assertions");
-                    Status::internal("Internal error")
-                },
-            )?;
+        let entities = self
+            .ctx
+            .state
+            .list_entities(SYSTEM_VAULT_ID, Some(&prefix), None, 10000)
+            .map_err(|e| error_classify::storage_error(&e))?;
 
         let mut entries = Vec::with_capacity(entities.len());
         for entity in &entities {
@@ -368,10 +362,8 @@ impl proto::app_service_server::AppService for AppService {
         let resolver = self.resolver();
         let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
-        let slug = inferadb_ledger_types::snowflake::generate_app_slug().map_err(|e| {
-            tracing::error!(error = %e, "Failed to generate app slug");
-            Status::internal("Internal error")
-        })?;
+        let slug = inferadb_ledger_types::snowflake::generate_app_slug()
+            .map_err(|e| error_classify::internal_error("id-generation", &e))?;
 
         let name = inner.name.trim().to_string();
         if name.is_empty() {
@@ -797,14 +789,8 @@ impl proto::app_service_server::AppService for AppService {
         let secret_hash =
             tokio::task::spawn_blocking(move || bcrypt::hash(secret_to_hash, bcrypt::DEFAULT_COST))
                 .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, "Hash task panicked");
-                    Status::internal("Internal error")
-                })?
-                .map_err(|e| {
-                    tracing::error!(error = %e, "Failed to hash secret");
-                    Status::internal("Internal error")
-                })?;
+                .map_err(|e| error_classify::crypto_error(&e))?
+                .map_err(|e| error_classify::crypto_error(&e))?;
 
         let response = self
             .ctx
@@ -918,10 +904,7 @@ impl proto::app_service_server::AppService for AppService {
             let pk = signing_key.verifying_key().to_bytes().to_vec();
             let pem: Zeroizing<String> = signing_key
                 .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
-                .map_err(|e| {
-                    tracing::error!(error = %e, "Failed to encode private key");
-                    Status::internal("Internal error")
-                })?
+                .map_err(|e| error_classify::crypto_error(&e))?
                 .to_string()
                 .into();
 
@@ -1378,10 +1361,10 @@ impl proto::app_service_server::AppService for AppService {
 mod tests {
     use std::sync::Arc;
 
+    use arc_swap::ArcSwap;
     use inferadb_ledger_proto::proto::{self, app_service_server::AppService as AppServiceTrait};
     use inferadb_ledger_raft::log_storage::AppliedState;
     use inferadb_ledger_test_utils::TestDir;
-    use parking_lot::RwLock;
     use tonic::Request;
 
     use super::*;
@@ -1389,7 +1372,7 @@ mod tests {
 
     /// Creates an `AppService` backed by a [`MockProposalService`].
     fn make_app_service()
-    -> (super::AppService, Arc<MockProposalService>, Arc<RwLock<AppliedState>>, TestDir) {
+    -> (super::AppService, Arc<MockProposalService>, Arc<ArcSwap<AppliedState>>, TestDir) {
         let temp = TestDir::new();
         let mock = Arc::new(MockProposalService::new());
         let (ctx, applied_state) =
@@ -1480,9 +1463,10 @@ mod tests {
         let org_slug = inferadb_ledger_types::OrganizationSlug::new(1000);
         let org_id = inferadb_ledger_types::OrganizationId::new(1);
         {
-            let mut state = applied_state.write();
+            let mut state = (*applied_state.load_full()).clone();
             state.slug_index.insert(org_slug, org_id);
             state.id_to_slug.insert(org_id, org_slug);
+            applied_state.store(Arc::new(state));
         }
 
         let request = Request::new(proto::CreateAppRequest {
@@ -1573,11 +1557,12 @@ mod tests {
         let app_slug = inferadb_ledger_types::AppSlug::new(2000);
         let app_id = inferadb_ledger_types::AppId::new(1);
         {
-            let mut state = applied_state.write();
+            let mut state = (*applied_state.load_full()).clone();
             state.slug_index.insert(org_slug, org_id);
             state.id_to_slug.insert(org_id, org_slug);
             state.app_slug_index.insert(app_slug, (org_id, app_id));
             state.app_id_to_slug.insert(app_id, app_slug);
+            applied_state.store(Arc::new(state));
         }
 
         let request = Request::new(proto::UpdateAppRequest {
@@ -1602,11 +1587,12 @@ mod tests {
         let app_slug = inferadb_ledger_types::AppSlug::new(2000);
         let app_id = inferadb_ledger_types::AppId::new(1);
         {
-            let mut state = applied_state.write();
+            let mut state = (*applied_state.load_full()).clone();
             state.slug_index.insert(org_slug, org_id);
             state.id_to_slug.insert(org_id, org_slug);
             state.app_slug_index.insert(app_slug, (org_id, app_id));
             state.app_id_to_slug.insert(app_id, app_slug);
+            applied_state.store(Arc::new(state));
         }
 
         let request = Request::new(proto::UpdateAppRequest {
@@ -1634,11 +1620,12 @@ mod tests {
         let app_slug = inferadb_ledger_types::AppSlug::new(2000);
         let app_id = inferadb_ledger_types::AppId::new(1);
         {
-            let mut state = applied_state.write();
+            let mut state = (*applied_state.load_full()).clone();
             state.slug_index.insert(org_slug, org_id);
             state.id_to_slug.insert(org_id, org_slug);
             state.app_slug_index.insert(app_slug, (org_id, app_id));
             state.app_id_to_slug.insert(app_id, app_slug);
+            applied_state.store(Arc::new(state));
         }
 
         let request = Request::new(proto::SetAppCredentialEnabledRequest {

@@ -25,7 +25,7 @@ pub fn wrap_dek(dek: &DataEncryptionKey, rmk: &RegionMasterKey) -> Result<Wrappe
     let kek = KekAes256::new(rmk.as_bytes().into());
     let mut output = [0u8; 40];
     kek.wrap(dek.as_bytes(), &mut output)
-        .map_err(|_| Error::Encryption { reason: "AES-KWP wrap failed".to_string() })?;
+        .map_err(|_| Error::Encryption { reason: "AES-KWP wrap failed".into() })?;
     Ok(WrappedDek::from_bytes(output))
 }
 
@@ -37,7 +37,7 @@ pub fn unwrap_dek(wrapped: &WrappedDek, rmk: &RegionMasterKey) -> Result<DataEnc
     let kek = KekAes256::new(rmk.as_bytes().into());
     let mut output = [0u8; 32];
     kek.unwrap(wrapped.as_bytes(), &mut output).map_err(|_| Error::Encryption {
-        reason: "AES-KWP unwrap failed (wrong RMK or tampered wrapped DEK)".to_string(),
+        reason: "AES-KWP unwrap failed (wrong RMK or tampered wrapped DEK)".into(),
     })?;
     Ok(DataEncryptionKey::from_bytes(output))
 }
@@ -65,7 +65,7 @@ pub fn encrypt_page_body(
     let payload = Payload { msg: body, aad };
     let ciphertext_with_tag = cipher
         .encrypt(nonce, payload)
-        .map_err(|_| Error::Encryption { reason: "AES-256-GCM encryption failed".to_string() })?;
+        .map_err(|_| Error::Encryption { reason: "AES-256-GCM encryption failed".into() })?;
 
     // aes-gcm appends the 16-byte tag to the ciphertext
     let tag_offset = ciphertext_with_tag.len() - 16;
@@ -103,7 +103,7 @@ pub fn decrypt_page_body(
 
     let payload = Payload { msg: &ct_with_tag, aad };
     cipher.decrypt(nonce, payload).map_err(|_| Error::Encryption {
-        reason: "AES-256-GCM decryption failed (wrong key or tampered data)".to_string(),
+        reason: "AES-256-GCM decryption failed (wrong key or tampered data)".into(),
     })
 }
 

@@ -377,8 +377,8 @@ impl SlugResolver {
 mod tests {
     use std::sync::Arc;
 
+    use arc_swap::ArcSwap;
     use inferadb_ledger_raft::log_storage::AppliedState;
-    use parking_lot::RwLock;
 
     use super::*;
 
@@ -403,7 +403,7 @@ mod tests {
             state.vault_slug_index.insert(slug, vault_id);
             state.vault_id_to_slug.insert(vault_id, slug);
         }
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         SlugResolver::new(accessor)
     }
 
@@ -754,7 +754,7 @@ mod tests {
             state.user_slug_index.insert(slug, user_id);
             state.user_id_to_slug.insert(user_id, slug);
         }
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         SlugResolver::new(accessor)
     }
 
@@ -890,7 +890,7 @@ mod tests {
         state.vault_id_to_slug.insert(VaultId::new(2), VaultSlug::new(200));
         state.user_slug_index.insert(UserSlug::new(300), UserId::new(3));
         state.user_id_to_slug.insert(UserId::new(3), UserSlug::new(300));
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         let resolver = SlugResolver::new(accessor);
 
         assert_eq!(resolver.resolve(OrganizationSlug::new(100)).unwrap(), OrganizationId::new(1));
@@ -914,7 +914,7 @@ mod tests {
             state.app_slug_index.insert(slug, (org_id, app_id));
             state.app_id_to_slug.insert(app_id, slug);
         }
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         SlugResolver::new(accessor)
     }
 

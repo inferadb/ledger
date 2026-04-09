@@ -3,7 +3,21 @@
 //! Defines [`AppliedState`], [`OrganizationMeta`], [`VaultMeta`],
 //! [`SequenceCounters`], and snapshot types used by the log store.
 
-use std::collections::{HashMap, HashSet};
+// ============================================================================
+// Type System Note
+// ============================================================================
+//
+// Storage types (LogId, Vote, StoredMembership) are intentionally separate
+// from consensus engine types (NodeId, ShardId, Membership in the consensus
+// crate). Storage types carry serialization history (postcard format) and
+// fields like LogId.node_id that the consensus engine doesn't track.
+//
+// The apply worker bridges these via:
+//   CommittedEntry.{term, index} → LogId::new(term, 0, index)
+//
+// Unification into a single type set is planned when the storage format
+// is next versioned.
+// ============================================================================
 
 use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
 use inferadb_ledger_types::{
@@ -11,10 +25,157 @@ use inferadb_ledger_types::{
     OrganizationId, OrganizationSlug, RefreshTokenId, Region, SigningKeyId, TeamId, TeamSlug,
     Transaction, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
 };
-use openraft::{LogId, StoredMembership};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{BlockRetentionPolicy, LedgerNodeId};
+use crate::types::BlockRetentionPolicy;
+
+// ============================================================================
+// Local Replacements for OpenRaft Types
+// ============================================================================
+
+/// Identifies a committed log entry by term, leader node, and index.
+///
+/// Postcard-serialized in the B+ tree storage. No backwards compatibility
+/// with openraft's `LogId` serialization format is needed (pre-launch product).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct LogId {
+    /// Raft term of the leader that proposed this entry.
+    pub term: u64,
+    /// Node ID of the leader (informational, excluded from equality/ordering/hashing).
+    pub node_id: u64,
+    /// Monotonically increasing log index.
+    pub index: u64,
+}
+
+impl PartialEq for LogId {
+    fn eq(&self, other: &Self) -> bool {
+        self.term == other.term && self.index == other.index
+    }
+}
+
+impl Eq for LogId {}
+
+impl std::hash::Hash for LogId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.term.hash(state);
+        self.index.hash(state);
+    }
+}
+
+impl LogId {
+    /// Creates a new log ID.
+    pub fn new(term: u64, node_id: u64, index: u64) -> Self {
+        Self { term, node_id, index }
+    }
+}
+
+impl std::fmt::Display for LogId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "T{}-N{}-I{}", self.term, self.node_id, self.index)
+    }
+}
+
+impl PartialOrd for LogId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for LogId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.term.cmp(&other.term).then(self.index.cmp(&other.index))
+    }
+}
+
+/// Persisted vote state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vote {
+    /// Current term.
+    pub term: u64,
+    /// Node that received the vote.
+    pub node_id: u64,
+    /// Whether the vote has been committed (leader confirmed).
+    pub committed: bool,
+}
+
+/// Persisted membership configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredMembership {
+    /// Log ID at which this membership was committed.
+    pub log_id: Option<LogId>,
+    /// Set of voter node IDs.
+    pub voter_ids: std::collections::BTreeSet<u64>,
+    /// Set of learner node IDs.
+    pub learner_ids: std::collections::BTreeSet<u64>,
+}
+
+// Default is derived.
+
+impl StoredMembership {
+    /// Creates a new membership with the given log ID and voter/learner sets.
+    pub fn new(
+        log_id: Option<LogId>,
+        voter_ids: std::collections::BTreeSet<u64>,
+        learner_ids: std::collections::BTreeSet<u64>,
+    ) -> Self {
+        Self { log_id, voter_ids, learner_ids }
+    }
+}
+
+/// Metadata for a snapshot.
+#[derive(Debug, Clone)]
+pub struct SnapshotMeta {
+    /// Log ID of the last entry included in the snapshot.
+    pub last_log_id: Option<LogId>,
+    /// Membership at the time of the snapshot.
+    pub last_membership: StoredMembership,
+    /// Unique identifier for this snapshot.
+    pub snapshot_id: String,
+}
+
+// ============================================================================
+// Store Error
+// ============================================================================
+
+/// Error type for Raft log store operations.
+///
+/// Replaces `openraft::StorageError<LedgerNodeId>` with a simple IO-based error.
+#[derive(Debug)]
+pub struct StoreError {
+    /// What went wrong.
+    pub message: String,
+    /// Optional underlying IO error.
+    pub source: Option<std::io::Error>,
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for StoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_ref().map(|e| e as &(dyn std::error::Error + 'static))
+    }
+}
+
+impl StoreError {
+    /// Creates a store error from any error.
+    pub fn from_error<E: std::error::Error>(e: &E) -> Self {
+        Self { message: e.to_string(), source: None }
+    }
+
+    /// Creates a store error from an IO error.
+    pub fn from_io(e: std::io::Error) -> Self {
+        Self { message: e.to_string(), source: Some(e) }
+    }
+
+    /// Creates a store error with a message.
+    pub fn msg(message: impl Into<String>) -> Self {
+        Self { message: message.into(), source: None }
+    }
+}
 
 // ============================================================================
 // Applied State (State Machine)
@@ -24,21 +185,21 @@ use crate::types::{BlockRetentionPolicy, LedgerNodeId};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppliedState {
     /// Last applied log ID.
-    pub last_applied: Option<LogId<LedgerNodeId>>,
+    pub last_applied: Option<LogId>,
     /// Stored membership configuration.
-    pub membership: StoredMembership<LedgerNodeId, openraft::BasicNode>,
+    pub membership: StoredMembership,
     /// Sequence counters for ID generation.
     pub sequences: SequenceCounters,
     /// Per-vault heights for deterministic block heights.
-    pub vault_heights: HashMap<(OrganizationId, VaultId), u64>,
+    pub vault_heights: im::HashMap<(OrganizationId, VaultId), u64>,
     /// Vault health status.
-    pub vault_health: HashMap<(OrganizationId, VaultId), VaultHealthStatus>,
+    pub vault_health: im::HashMap<(OrganizationId, VaultId), VaultHealthStatus>,
     /// Organization registry (replicated via Raft).
-    pub organizations: HashMap<OrganizationId, OrganizationMeta>,
+    pub organizations: im::HashMap<OrganizationId, OrganizationMeta>,
     /// Vault registry (replicated via Raft).
-    pub vaults: HashMap<(OrganizationId, VaultId), VaultMeta>,
+    pub vaults: im::HashMap<(OrganizationId, VaultId), VaultMeta>,
     /// Previous vault block hashes (for chaining).
-    pub previous_vault_hashes: HashMap<(OrganizationId, VaultId), Hash>,
+    pub previous_vault_hashes: im::HashMap<(OrganizationId, VaultId), Hash>,
     /// Current region height for block creation.
     #[serde(default)]
     pub region_height: u64,
@@ -48,7 +209,7 @@ pub struct AppliedState {
     /// Per-client sequence tracking with cross-failover idempotency metadata.
     /// Key: (organization, vault, client_id), Value: sequence + dedup fields.
     #[serde(default)]
-    pub client_sequences: HashMap<(OrganizationId, VaultId, ClientId), ClientSequenceEntry>,
+    pub client_sequences: im::HashMap<(OrganizationId, VaultId, ClientId), ClientSequenceEntry>,
     /// Cumulative estimated storage bytes per organization.
     ///
     /// Updated on every write (increment by key+value sizes) and delete
@@ -57,52 +218,52 @@ pub struct AppliedState {
     ///
     /// Replicated via Raft consensus and survives restarts via snapshot.
     #[serde(default)]
-    pub organization_storage_bytes: HashMap<OrganizationId, u64>,
+    pub organization_storage_bytes: im::HashMap<OrganizationId, u64>,
     /// Organization slug → internal ID mapping for fast resolution.
     #[serde(default)]
-    pub slug_index: HashMap<OrganizationSlug, OrganizationId>,
+    pub slug_index: im::HashMap<OrganizationSlug, OrganizationId>,
     /// Internal organization ID → slug reverse mapping for response construction.
     #[serde(default)]
-    pub id_to_slug: HashMap<OrganizationId, OrganizationSlug>,
+    pub id_to_slug: im::HashMap<OrganizationId, OrganizationSlug>,
     /// Vault slug → internal vault ID mapping for fast resolution.
     #[serde(default)]
-    pub vault_slug_index: HashMap<VaultSlug, VaultId>,
+    pub vault_slug_index: im::HashMap<VaultSlug, VaultId>,
     /// Internal vault ID → slug reverse mapping for response construction.
     #[serde(default)]
-    pub vault_id_to_slug: HashMap<VaultId, VaultSlug>,
+    pub vault_id_to_slug: im::HashMap<VaultId, VaultSlug>,
     /// User slug → internal user ID mapping for fast resolution.
     #[serde(default)]
-    pub user_slug_index: HashMap<UserSlug, UserId>,
+    pub user_slug_index: im::HashMap<UserSlug, UserId>,
     /// Internal user ID → slug reverse mapping for response construction.
     #[serde(default)]
-    pub user_id_to_slug: HashMap<UserId, UserSlug>,
+    pub user_id_to_slug: im::HashMap<UserId, UserSlug>,
     /// Team slug → (organization ID, team ID) mapping for fast resolution.
     #[serde(default)]
-    pub team_slug_index: HashMap<TeamSlug, (OrganizationId, TeamId)>,
+    pub team_slug_index: im::HashMap<TeamSlug, (OrganizationId, TeamId)>,
     /// Internal team ID → slug reverse mapping for response construction.
     #[serde(default)]
-    pub team_id_to_slug: HashMap<TeamId, TeamSlug>,
+    pub team_id_to_slug: im::HashMap<TeamId, TeamSlug>,
     /// Team name uniqueness index: (organization, name) → team ID.
     ///
     /// Enables O(1) name conflict checks for team create/rename operations,
     /// replacing the previous O(n) scan of all team profiles in the organization.
     #[serde(default)]
-    pub team_name_index: HashMap<(OrganizationId, String), TeamId>,
+    pub team_name_index: im::HashMap<(OrganizationId, String), TeamId>,
     /// User → organizations membership index for O(1) membership lookups.
     ///
     /// Enables `list_organizations` to filter by caller membership without
     /// loading every organization profile from the state layer.
     #[serde(default)]
-    pub user_org_index: HashMap<UserId, HashSet<OrganizationId>>,
+    pub user_org_index: im::HashMap<UserId, im::HashSet<OrganizationId>>,
     /// App slug → (organization ID, app ID) mapping for fast resolution.
     #[serde(default)]
-    pub app_slug_index: HashMap<AppSlug, (OrganizationId, AppId)>,
+    pub app_slug_index: im::HashMap<AppSlug, (OrganizationId, AppId)>,
     /// Internal app ID → slug reverse mapping for response construction.
     #[serde(default)]
-    pub app_id_to_slug: HashMap<AppId, AppSlug>,
+    pub app_id_to_slug: im::HashMap<AppId, AppSlug>,
     /// App name uniqueness index: (organization, name) → app ID.
     #[serde(default)]
-    pub app_name_index: HashMap<(OrganizationId, String), AppId>,
+    pub app_name_index: im::HashMap<(OrganizationId, String), AppId>,
     /// Deterministic timestamp (nanoseconds since epoch) from the last applied
     /// Raft entry's `proposed_at`. Used as the reference "now" for snapshot event
     /// collection — ensures two snapshots of the same state produce identical
@@ -336,9 +497,9 @@ impl SequenceCounters {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppliedStateCore {
     /// Last applied log ID.
-    pub last_applied: Option<LogId<LedgerNodeId>>,
+    pub last_applied: Option<LogId>,
     /// Stored membership configuration.
-    pub membership: StoredMembership<LedgerNodeId, openraft::BasicNode>,
+    pub membership: StoredMembership,
     /// Current region height for block creation.
     pub region_height: u64,
     /// Previous region hash for chain continuity.
@@ -571,35 +732,25 @@ impl VaultHealthStatus {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use openraft::{CommittedLeaderId, LogId, Membership, StoredMembership};
-
     use super::*;
 
-    /// Helper: build a StoredMembership with the given node count per config.
-    fn make_membership(
-        nodes_per_config: &[usize],
-    ) -> StoredMembership<LedgerNodeId, openraft::BasicNode> {
+    /// Helper: build a StoredMembership with the given total node count.
+    fn make_membership(nodes_per_config: &[usize]) -> StoredMembership {
         use std::collections::BTreeSet;
 
-        // Collect all nodes across all configs into a single node map
-        let mut all_nodes = BTreeMap::new();
-        let mut configs: Vec<BTreeSet<u64>> = Vec::new();
-
+        let mut voter_ids = BTreeSet::new();
         for &count in nodes_per_config {
-            let mut voter_ids = BTreeSet::new();
             for i in 0..count as u64 {
                 let node_id = u64::MAX - i;
                 voter_ids.insert(node_id);
-                all_nodes.insert(node_id, openraft::BasicNode::default());
             }
-            configs.push(voter_ids);
         }
 
-        let membership = Membership::new(configs, all_nodes);
-
-        StoredMembership::new(Some(LogId::new(CommittedLeaderId::new(1, 0), 1)), membership)
+        StoredMembership::new(
+            Some(LogId::new(1, 0, 1)),
+            voter_ids,
+            std::collections::BTreeSet::new(),
+        )
     }
 
     #[test]
@@ -608,7 +759,7 @@ mod tests {
         let membership = make_membership(&[3]);
 
         let core = AppliedStateCore {
-            last_applied: Some(LogId::new(CommittedLeaderId::new(5, 42), 100)),
+            last_applied: Some(LogId::new(5, 42, 100)),
             membership: membership.clone(),
             region_height: 999,
             previous_region_hash: hash,
@@ -630,7 +781,7 @@ mod tests {
         let membership = make_membership(&[10, 10]);
 
         let core = AppliedStateCore {
-            last_applied: Some(LogId::new(CommittedLeaderId::new(u64::MAX, u64::MAX), u64::MAX)),
+            last_applied: Some(LogId::new(u64::MAX, u64::MAX, u64::MAX)),
             membership,
             region_height: u64::MAX,
             previous_region_hash: [0xFF; 32],
@@ -651,7 +802,7 @@ mod tests {
         let membership = make_membership(&[3]);
 
         let core = AppliedStateCore {
-            last_applied: Some(LogId::new(CommittedLeaderId::new(1, 1), 1000)),
+            last_applied: Some(LogId::new(1, 1, 1000)),
             membership,
             region_height: 500,
             previous_region_hash: [0x42; 32],
@@ -669,7 +820,7 @@ mod tests {
     #[test]
     fn test_applied_state_core_from_applied_state() {
         let mut state = AppliedState {
-            last_applied: Some(LogId::new(CommittedLeaderId::new(2, 10), 50)),
+            last_applied: Some(LogId::new(2, 10, 50)),
             region_height: 42,
             previous_region_hash: [0xDE; 32],
             ..Default::default()
@@ -975,6 +1126,39 @@ mod tests {
 
             // Suffix must be the raw client_id
             assert_eq!(&key[16..], &client_id[..], "client_id suffix wrong for length {}", len);
+        }
+    }
+
+    #[cfg(test)]
+    mod log_id_tests {
+        use super::*;
+
+        #[test]
+        fn ordering_ignores_node_id() {
+            let a = LogId { term: 5, node_id: 42, index: 100 };
+            let b = LogId { term: 5, node_id: 0, index: 200 };
+            assert!(b > a, "index 200 > index 100 regardless of node_id");
+        }
+
+        #[test]
+        fn ordering_term_takes_precedence() {
+            let a = LogId { term: 3, node_id: 0, index: 999 };
+            let b = LogId { term: 4, node_id: 0, index: 1 };
+            assert!(b > a, "higher term always wins");
+        }
+
+        #[test]
+        fn ordering_equal_when_only_node_id_differs() {
+            let a = LogId { term: 5, node_id: 1, index: 100 };
+            let b = LogId { term: 5, node_id: 99, index: 100 };
+            assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal);
+        }
+
+        #[test]
+        fn partial_ord_consistent_with_ord() {
+            let a = LogId { term: 1, node_id: 0, index: 1 };
+            let b = LogId { term: 1, node_id: 0, index: 2 };
+            assert_eq!(a.partial_cmp(&b), Some(std::cmp::Ordering::Less));
         }
     }
 }

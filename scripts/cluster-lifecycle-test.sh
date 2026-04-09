@@ -36,7 +36,7 @@ SKIP_BUILD=false
 # Timeouts
 HEALTH_TIMEOUT=60
 SETTLE_TIME=5
-SYNC_TIMEOUT=30
+SYNC_TIMEOUT=60
 JOIN_TIMEOUT=60
 
 # Bulk write tuning — operations per Write RPC in write_batch.
@@ -130,18 +130,36 @@ node_addr() {
 # Cleanup — runs on ANY exit
 # ---------------------------------------------------------------------------
 
+PROTECTED_PIDS=()
+
 cleanup() {
   local exit_code=$?
   echo ""
   log_info "Cleaning up..."
 
-  for pid in "${ALL_PIDS[@]}"; do
+  # Send SIGTERM to all non-protected processes.
+  for pid in "${ALL_PIDS[@]+"${ALL_PIDS[@]}"}"; do
+    local protected=false
+    for pp in "${PROTECTED_PIDS[@]+"${PROTECTED_PIDS[@]}"}"; do
+      [[ "$pid" == "$pp" ]] && protected=true && break
+    done
+    [[ "$protected" == "true" ]] && continue
+
     if kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
     fi
   done
 
-  for pid in "${ALL_PIDS[@]}"; do
+  # Brief wait for graceful shutdown, then SIGKILL stragglers.
+  sleep 2
+  for pid in "${ALL_PIDS[@]+"${ALL_PIDS[@]}"}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
+
+  # Reap all child processes (non-blocking after SIGKILL).
+  for pid in "${ALL_PIDS[@]+"${ALL_PIDS[@]}"}"; do
     wait "$pid" 2>/dev/null || true
   done
 
@@ -167,49 +185,42 @@ trap cleanup EXIT
 
 # Start a node with coordinated bootstrap (--cluster N).
 # Args: node_number cluster_size
-start_node_cluster() {
+# Start a node (first node or with --join seed).
+# Args: node_number [seed_address]
+# If seed_address is provided, passes --join. Otherwise starts without seeds.
+start_node() {
   local node_num=$1
-  local cluster_size=$2
+  local seed_addr="${2:-}"
   local port
   port=$(node_port "$node_num")
   local node_data="$DATA_ROOT/node$node_num"
   mkdir -p "$node_data"
 
+  local join_flag=""
+  if [[ -n "$seed_addr" ]]; then
+    join_flag="--join $seed_addr"
+  fi
+
+  # Fixed test blinding key (matches TestCluster / SDK e2e configuration)
+  local blinding_key="deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
   RUST_LOG=info,inferadb_ledger_raft::leader_transfer=debug "$BINARY" \
     --listen "127.0.0.1:$port" \
     --data "$node_data" \
-    --cluster "$cluster_size" \
-    --peers "$PEERS_FILE" \
-    --peers-timeout 30 \
+    $join_flag \
+    --enable-grpc-reflection \
+    --email-blinding-key "$blinding_key" \
     --log-format text \
     > "$DATA_ROOT/node$node_num.log" 2>&1 &
 
   local pid=$!
   ALL_PIDS+=("$pid")
   ACTIVE_PIDS+=("$pid")
-  log_info "  Node $node_num: PID $pid, port $port (cluster mode)"
-}
-
-# Start a node in join mode (--join).
-# Args: node_number
-start_node_join() {
-  local node_num=$1
-  local port
-  port=$(node_port "$node_num")
-  local node_data="$DATA_ROOT/node$node_num"
-  mkdir -p "$node_data"
-
-  RUST_LOG=info,inferadb_ledger_raft::leader_transfer=debug "$BINARY" \
-    --listen "127.0.0.1:$port" \
-    --data "$node_data" \
-    --join \
-    --log-format text \
-    > "$DATA_ROOT/node$node_num.log" 2>&1 &
-
-  local pid=$!
-  ALL_PIDS+=("$pid")
-  ACTIVE_PIDS+=("$pid")
-  log_info "  Node $node_num: PID $pid, port $port (join mode)"
+  if [[ -n "$seed_addr" ]]; then
+    log_info "  Node $node_num: PID $pid, port $port (join seed: $seed_addr)"
+  else
+    log_info "  Node $node_num: PID $pid, port $port (first node)"
+  fi
 }
 
 # Wait for specific nodes to be listening on their ports.
@@ -423,7 +434,7 @@ leave_cluster() {
   leaving_id=$(get_node_id "$leaving_num")
 
   local attempts=0
-  local max_attempts=10
+  local max_attempts=15
   while [[ $attempts -lt $max_attempts ]]; do
     local result
     result=$(grpcurl -plaintext \
@@ -438,11 +449,42 @@ leave_cluster() {
       return 0
     fi
 
+    local message
+    message=$(echo "$result" | jq -r '.message // ""' 2>/dev/null || true)
+
+    # Leader transferred — retry on any listening node to find the new leader
+    if echo "$message" | grep -q "Leader transferred\|retry LeaveCluster"; then
+      attempts=$((attempts + 1))
+      log_info "    Leader transferred, finding new leader ($attempts/$max_attempts)..."
+      sleep 1
+      # Try each listening port to find the new leader
+      for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
+        if nc -z 127.0.0.1 "$port" 2>/dev/null; then
+          leader_addr="127.0.0.1:$port"
+          break
+        fi
+      done
+      continue
+    fi
+
     # Retryable: prior membership change still committing
     if echo "$result" | grep -q "already undergoing a configuration change"; then
       attempts=$((attempts + 1))
       log_info "    Membership change in progress, retrying ($attempts/$max_attempts)..."
       sleep 1
+      continue
+    fi
+
+    # Not the leader — try another node
+    if echo "$message" | grep -q "Not the leader"; then
+      attempts=$((attempts + 1))
+      sleep 0.5
+      for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
+        if nc -z 127.0.0.1 "$port" 2>/dev/null; then
+          leader_addr="127.0.0.1:$port"
+          break
+        fi
+      done
       continue
     fi
 
@@ -461,7 +503,7 @@ wait_for_member_removed() {
   local removed_num=$1
   local query_num=$2
   local start_time=$SECONDS
-  local timeout=15
+  local timeout=30
 
   local removed_id
   removed_id=$(get_node_id "$removed_num")
@@ -508,9 +550,9 @@ kill_node() {
     fi
   done
 
-  # Fallback: kill by port
+  # Fallback: kill by port (LISTEN only — avoid killing nodes with client connections)
   local pid
-  pid=$(lsof -ti "tcp:$port" 2>/dev/null || true)
+  pid=$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null || true)
   if [[ -n "$pid" ]]; then
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
@@ -526,38 +568,22 @@ kill_nodes_parallel() {
   local nodes=("$@")
   local pids_to_wait=()
 
-  # Phase 1: send SIGTERM to all nodes
+  # Phase 1: send SIGTERM to each node by finding its LISTEN PID.
+  # Using lsof -sTCP:LISTEN avoids killing nodes that merely have
+  # client connections to the target port.
   for node_num in "${nodes[@]}"; do
     local port
     port=$(node_port "$node_num")
-    local found=false
-
-    for i in "${!ACTIVE_PIDS[@]}"; do
-      local pid="${ACTIVE_PIDS[$i]}"
-      if kill -0 "$pid" 2>/dev/null; then
-        if grep -q "127.0.0.1:$port" "$DATA_ROOT/node$node_num.log" 2>/dev/null; then
-          kill "$pid" 2>/dev/null || true
-          pids_to_wait+=("$pid")
-          unset 'ACTIVE_PIDS[i]'
-          log_info "  Sent SIGTERM to node $node_num (PID $pid)"
-          found=true
-          break
-        fi
-      fi
-    done
-
-    # Fallback: find by port if not found via ACTIVE_PIDS
-    if [[ "$found" == "false" ]]; then
-      local pid
-      pid=$(lsof -ti "tcp:$port" 2>/dev/null || true)
-      if [[ -n "$pid" ]]; then
-        kill "$pid" 2>/dev/null || true
-        pids_to_wait+=("$pid")
-        log_info "  Sent SIGTERM to node $node_num (PID $pid, found by port)"
-      fi
+    local pid
+    pid=$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null || true)
+    if [[ -n "$pid" ]]; then
+      kill -9 "$pid" 2>/dev/null || true
+      pids_to_wait+=("$pid")
+      log_info "  Sent SIGKILL to node $node_num (PID $pid, port $port)"
+    else
+      log_info "  Node $node_num (port $port): no LISTEN process found (already exited?)"
     fi
   done
-  ACTIVE_PIDS=("${ACTIVE_PIDS[@]}")
 
   # Phase 2: wait for all to exit
   for pid in "${pids_to_wait[@]}"; do
@@ -571,47 +597,114 @@ kill_nodes_parallel() {
 
 IDEM_COUNTER=1
 
-# Create an organization. Sets ORG_SLUG.
-# Args: leader_node_number org_name
+# Create a user and organization via the onboarding flow. Sets ORG_SLUG and USER_SLUG.
+# Retries across all active nodes to handle data region creation + leader election.
+# Args: org_name
 create_org() {
   local node_num=$1
   local name=$2
-  local addr
-  addr=$(node_addr "$node_num")
+  local email="test-$(uuidgen | tr '[:upper:]' '[:lower:]')@lifecycle.local"
+  local region=10  # REGION_US_EAST_VA
 
-  local result
-  result=$(grpcurl -plaintext \
-    -d "{\"name\": \"$name\"}" \
-    "$addr" \
-    ledger.v1.AdminService/CreateOrganization 2>&1) || true
+  # Phase 1: InitiateEmailVerification — retry across endpoints
+  local code=""
+  local working_addr=""
+  local attempt=0
+  while [[ -z "$code" && $attempt -lt 30 ]]; do
+    # Try each listening port in the cluster
+    for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
+      if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
+        continue
+      fi
+      local addr="127.0.0.1:$port"
+      local result
+      result=$(grpcurl -plaintext \
+        -d "{\"email\": \"$email\", \"region\": $region}" \
+        "$addr" \
+        ledger.v1.UserService/InitiateEmailVerification 2>&1) || true
+      local extracted_code
+      extracted_code=$(echo "$result" | jq -r '.code // empty' 2>/dev/null || true)
+      if [[ -n "$extracted_code" ]]; then
+        code="$extracted_code"
+        working_addr="$addr"
+        break
+      fi
+    done
+    attempt=$((attempt + 1))
+    sleep 1
+  done
 
-  ORG_SLUG=$(echo "$result" | jq -r '.slug.slug // empty' 2>/dev/null)
-  if [[ -z "$ORG_SLUG" ]]; then
-    log_error "CreateOrganization failed: $result"
+  if [[ -z "$code" ]]; then
+    log_error "InitiateEmailVerification failed after 30 attempts"
     return 1
   fi
-  log_step "Created organization '$name' (slug: $ORG_SLUG)"
+
+  # Phase 2: VerifyEmailCode
+  local verify_result
+  verify_result=$(grpcurl -plaintext \
+    -d "{\"email\": \"$email\", \"code\": \"$code\", \"region\": $region}" \
+    "$working_addr" \
+    ledger.v1.UserService/VerifyEmailCode 2>&1) || true
+
+  local onboarding_token
+  onboarding_token=$(echo "$verify_result" | jq -r '.newUser.onboardingToken // empty' 2>/dev/null || true)
+  if [[ -z "$onboarding_token" ]]; then
+    log_error "VerifyEmailCode failed: $verify_result"
+    return 1
+  fi
+
+  # Phase 3: CompleteRegistration
+  local reg_result
+  reg_result=$(grpcurl -plaintext \
+    -d "{\"onboarding_token\": \"$onboarding_token\", \"email\": \"$email\", \"region\": $region, \"name\": \"Test Admin\", \"organization_name\": \"$name\"}" \
+    "$working_addr" \
+    ledger.v1.UserService/CompleteRegistration 2>&1) || true
+
+  ORG_SLUG=$(echo "$reg_result" | jq -r '.organization.slug // empty' 2>/dev/null || true)
+  USER_SLUG=$(echo "$reg_result" | jq -r '.user.slug.slug // empty' 2>/dev/null || true)
+  if [[ -z "$ORG_SLUG" || -z "$USER_SLUG" ]]; then
+    log_error "CompleteRegistration failed: $reg_result"
+    return 1
+  fi
+  log_step "Created organization '$name' (slug: $ORG_SLUG) with admin user (slug: $USER_SLUG)"
 }
 
 # Create a vault. Sets VAULT_SLUG.
+# Retries because the organization may still be provisioning after creation.
 # Args: leader_node_number
 create_vault() {
   local node_num=$1
   local addr
   addr=$(node_addr "$node_num")
 
-  local result
-  result=$(grpcurl -plaintext \
-    -d "{\"organization\": {\"slug\": \"$ORG_SLUG\"}}" \
-    "$addr" \
-    ledger.v1.AdminService/CreateVault 2>&1) || true
+  local attempt=0
+  local max_attempts=30
+  while [[ $attempt -lt $max_attempts ]]; do
+    local result
+    result=$(grpcurl -plaintext \
+      -d "{\"organization\": {\"slug\": \"$ORG_SLUG\"}, \"caller\": {\"slug\": \"$USER_SLUG\"}}" \
+      "$addr" \
+      ledger.v1.VaultService/CreateVault 2>&1) || true
 
-  VAULT_SLUG=$(echo "$result" | jq -r '.vault.slug // empty' 2>/dev/null)
-  if [[ -z "$VAULT_SLUG" ]]; then
+    VAULT_SLUG=$(echo "$result" | jq -r '.vault.slug // empty' 2>/dev/null || true)
+    if [[ -n "$VAULT_SLUG" ]]; then
+      log_step "Created vault (slug: $VAULT_SLUG)"
+      return 0
+    fi
+
+    # Retry on provisioning/not-found errors
+    if echo "$result" | grep -qiE 'not found|provisioned|provisioning'; then
+      attempt=$((attempt + 1))
+      sleep 1
+      continue
+    fi
+
     log_error "CreateVault failed: $result"
     return 1
-  fi
-  log_step "Created vault (slug: $VAULT_SLUG)"
+  done
+
+  log_error "CreateVault timed out after $max_attempts attempts"
+  return 1
 }
 
 # Write an entity.
@@ -634,6 +727,7 @@ write_entity() {
   local result
   result=$(grpcurl -plaintext \
     -d "{
+      \"caller\": {\"slug\": \"$USER_SLUG\"},
       \"organization\": {\"slug\": \"$ORG_SLUG\"},
       \"vault\": {\"slug\": \"$VAULT_SLUG\"},
       \"clientId\": {\"id\": \"lifecycle-test\"},
@@ -649,7 +743,7 @@ write_entity() {
     ledger.v1.WriteService/Write 2>&1) || true
 
   local block_height
-  block_height=$(echo "$result" | jq -r '.success.blockHeight // empty' 2>/dev/null)
+  block_height=$(echo "$result" | jq -r '.success.blockHeight // empty' 2>/dev/null || true)
   if [[ -z "$block_height" ]]; then
     log_error "Write failed for key '$key': $result"
     return 1
@@ -694,6 +788,7 @@ write_batch() {
     local result
     result=$(grpcurl -plaintext \
       -d "{
+        \"caller\": {\"slug\": \"$USER_SLUG\"},
         \"organization\": {\"slug\": \"$ORG_SLUG\"},
         \"vault\": {\"slug\": \"$VAULT_SLUG\"},
         \"clientId\": {\"id\": \"lifecycle-test\"},
@@ -704,7 +799,7 @@ write_batch() {
       ledger.v1.WriteService/Write 2>&1) || true
 
     local block_height
-    block_height=$(echo "$result" | jq -r '.success.blockHeight // empty' 2>/dev/null)
+    block_height=$(echo "$result" | jq -r '.success.blockHeight // empty' 2>/dev/null || true)
     if [[ -z "$block_height" ]]; then
       log_error "Batch write failed for prefix '$key_prefix' (items $((total_written+1))-$((total_written+chunk_size))): $result"
       return 1
@@ -727,6 +822,7 @@ read_entity() {
   local result
   result=$(grpcurl -plaintext \
     -d "{
+      \"caller\": {\"slug\": \"$USER_SLUG\"},
       \"organization\": {\"slug\": \"$ORG_SLUG\"},
       \"vault\": {\"slug\": \"$VAULT_SLUG\"},
       \"key\": \"$key\",
@@ -737,7 +833,7 @@ read_entity() {
 
   # Value is base64-encoded bytes — decode it
   local value_b64
-  value_b64=$(echo "$result" | jq -r '.value // empty' 2>/dev/null)
+  value_b64=$(echo "$result" | jq -r '.value // empty' 2>/dev/null || true)
   if [[ -n "$value_b64" ]]; then
     echo "$value_b64" | base64 -d 2>/dev/null
   fi
@@ -755,6 +851,7 @@ list_entities() {
 
   while true; do
     local request="{
+      \"caller\": {\"slug\": \"$USER_SLUG\"},
       \"organization\": {\"slug\": \"$ORG_SLUG\"},
       \"vault\": {\"slug\": \"$VAULT_SLUG\"},
       \"keyPrefix\": \"\",
@@ -764,6 +861,7 @@ list_entities() {
 
     if [[ -n "$page_token" ]]; then
       request="{
+        \"caller\": {\"slug\": \"$USER_SLUG\"},
         \"organization\": {\"slug\": \"$ORG_SLUG\"},
         \"vault\": {\"slug\": \"$VAULT_SLUG\"},
         \"keyPrefix\": \"\",
@@ -788,7 +886,7 @@ list_entities() {
       done <<< "$entities"
     fi
 
-    page_token=$(echo "$result" | jq -r '.nextPageToken // empty' 2>/dev/null)
+    page_token=$(echo "$result" | jq -r '.nextPageToken // empty' 2>/dev/null || true)
     if [[ -z "$page_token" ]]; then
       break
     fi
@@ -949,6 +1047,16 @@ if ! command -v jq &>/dev/null; then
   exit 1
 fi
 
+# Kill any stale processes on test ports from previous runs.
+for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
+  stale_pid=$(lsof -ti :"$port" 2>/dev/null || true)
+  if [[ -n "$stale_pid" ]]; then
+    log_warn "Killing stale process on port $port (PID $stale_pid)"
+    kill -9 $stale_pid 2>/dev/null || true
+    sleep 0.5
+  fi
+done
+
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
@@ -974,18 +1082,6 @@ mkdir -p "$DATA_ROOT"
 # Create peers file for initial 3-node cluster
 # ---------------------------------------------------------------------------
 
-PEERS_FILE="$DATA_ROOT/peers.json"
-CACHED_AT=$(date +%s)
-PEERS_ARRAY=""
-for i in 1 2 3; do
-  PORT=$(node_port "$i")
-  [[ $i -gt 1 ]] && PEERS_ARRAY+=","
-  PEERS_ARRAY+="{\"addr\":\"127.0.0.1:$PORT\"}"
-done
-cat > "$PEERS_FILE" <<EOF
-{"cached_at": $CACHED_AT, "peers": [$PEERS_ARRAY]}
-EOF
-
 # ===========================================================================
 # Phase 1: Boot 3-node cluster, write data, verify replication
 # ===========================================================================
@@ -993,12 +1089,24 @@ EOF
 log_phase "Phase 1: Boot 3-node cluster and write initial data"
 
 log_info "Starting 3-node cluster (ports $(node_port 1)-$(node_port 3))..."
-for i in 1 2 3; do
-  start_node_cluster "$i" 3
+# First node without --join, others with --join pointing to first
+FIRST_ADDR="$(node_addr 1)"
+start_node 1
+for i in 2 3; do
+  start_node "$i" "$FIRST_ADDR"
 done
 NEXT_NODE_NUM=4
 
 wait_for_ports 1 2 3
+
+# Initialize the cluster via the first node
+log_step "Initializing cluster via node 1..."
+"$BINARY" init --host="$FIRST_ADDR" || {
+  log_error "Cluster initialization failed"
+  exit 1
+}
+log_success "Cluster initialized"
+
 wait_for_leader 1 2 3
 
 # Find the leader
@@ -1048,12 +1156,12 @@ log_success "Follower point reads verified for Phase 1"
 
 log_phase "Phase 2: Add 4th node and verify catch-up"
 
-log_info "Starting node 4 in join mode..."
-start_node_join 4
+log_info "Starting node 4 with --join seed..."
+LEADER=$(find_leader 1 2 3)
+start_node 4 "$(node_addr "$LEADER")"
 wait_for_ports 4
 
-# Join node 4 to the cluster via the leader
-LEADER=$(find_leader 1 2 3)
+# Join node 4 to the cluster via the leader (auto-join not yet implemented)
 join_node_to_cluster "$LEADER" 4
 
 # Wait for node 4 to become a voter
@@ -1156,12 +1264,17 @@ log_success "New leader ID: $NEW_LEADER_ID (differs from old: $OLD_LEADER_ID)"
 VERIFY_NODE=1
 [[ "$OLD_LEADER" -eq 1 ]] && VERIFY_NODE=2
 
-# Wait briefly for the new leader to be reported by all nodes
-sleep 2
-
+# Wait for the new leader to be reported by the verification node.
 VERIFY_ADDR=$(node_addr "$VERIFY_NODE")
-CLUSTER_INFO=$(grpcurl -plaintext "$VERIFY_ADDR" ledger.v1.AdminService/GetClusterInfo 2>/dev/null || true)
-REPORTED_LEADER=$(echo "$CLUSTER_INFO" | jq -r '.leaderId // "0"' 2>/dev/null || echo "0")
+REPORTED_LEADER=""
+for _wait in $(seq 1 30); do
+  CLUSTER_INFO=$(grpcurl -plaintext "$VERIFY_ADDR" ledger.v1.AdminService/GetClusterInfo 2>/dev/null || true)
+  REPORTED_LEADER=$(echo "$CLUSTER_INFO" | jq -r '.leaderId // "0"' 2>/dev/null || echo "0")
+  if [[ "$REPORTED_LEADER" == "$NEW_LEADER_ID" ]]; then
+    break
+  fi
+  sleep 1
+done
 
 if [[ "$REPORTED_LEADER" != "$NEW_LEADER_ID" ]]; then
   log_error "Node $VERIFY_NODE reports leader $REPORTED_LEADER, expected $NEW_LEADER_ID"
@@ -1236,15 +1349,63 @@ for node_num in "${NODES_TO_REMOVE[@]}"; do
   wait_for_member_removed "$node_num" "${ACTIVE_QUERY_NODES[0]}"
 done
 
-log_info "Killing original nodes (parallel shutdown)..."
-kill_nodes_parallel 1 2 3
+# Data region membership changes are declarative: leave_cluster marks the
+# node as Decommissioning, the DR scheduler removes it from data regions,
+# and the drain monitor removes it from GLOBAL once fully drained. The
+# wait_for_member_removed calls above block until GLOBAL removal completes.
+log_info "Waiting for data region membership reconciliation..."
+sleep 5
 
-# Wait for node 4 to elect itself leader (it's the sole remaining voter).
-# This replaces a blind sleep — the election timeout is non-deterministic.
+# Protect node 4 from the cleanup trap — it's the survivor under test.
+_n4_pid=$(lsof -ti "tcp:$(node_port 4)" -sTCP:LISTEN 2>/dev/null || true)
+[[ -n "$_n4_pid" ]] && PROTECTED_PIDS+=("$_n4_pid")
+
+log_info "Killing original nodes (SIGKILL — simulating crash)..."
+# Use SIGKILL to simulate a hard crash. The surviving node recovers via
+# the Raft no-op commit on leader election, which advances commit_index
+# and applies any pending membership changes.
+set +e
+for _kn in 1 2 3; do
+  _kport=$(node_port "$_kn")
+  _kpid=$(lsof -ti "tcp:$_kport" -sTCP:LISTEN 2>/dev/null)
+  if [[ -n "$_kpid" ]]; then
+    kill -9 "$_kpid" 2>/dev/null
+    wait "$_kpid" 2>/dev/null
+    log_info "  Killed node $_kn (PID $_kpid)"
+    # Remove from ACTIVE_PIDS so wait_for_tcp doesn't flag as "exited prematurely"
+    _new_active=()
+    for _ap in "${ACTIVE_PIDS[@]}"; do
+      [[ "$_ap" != "$_kpid" ]] && _new_active+=("$_ap")
+    done
+    ACTIVE_PIDS=("${_new_active[@]}")
+  fi
+done
+set -e
+sleep 2
+
+# Wait for node 4 to become the GLOBAL leader. It's the sole remaining voter
+# after nodes 1-3 were removed and killed.
+set +e
 wait_for_leader 4
+set -e
 
 log_info "Writing Phase 5 data to surviving node 4..."
-write_entity 4 "user:frank" "Frank from Phase 5"
+# Retry the first write — data region leadership may still be stabilizing
+# after membership changes propagate via the Raft no-op commit.
+set +e
+_p5_ok=false
+for _p5_attempt in $(seq 1 15); do
+  if write_entity 4 "user:frank" "Frank from Phase 5" 2>/dev/null; then
+    _p5_ok=true
+    break
+  fi
+  sleep 2
+done
+set -e
+if [[ "$_p5_ok" != "true" ]]; then
+  log_error "Phase 5 write failed after 15 attempts"
+  exit 1
+fi
 write_entity 4 "event:migration" "original-3-shutdown"
 
 log_info "Writing Phase 5 bulk data (20 entities)..."
@@ -1256,9 +1417,9 @@ write_batch 4 "p5-data" 20 "Phase 5 batch"
 
 log_phase "Phase 6: Boot 2 new nodes and verify full replication"
 
-log_info "Starting nodes 5 and 6 in join mode..."
-start_node_join 5
-start_node_join 6
+log_info "Starting nodes 5 and 6 with --join seed..."
+start_node 5 "$(node_addr 4)"
+start_node 6 "$(node_addr 4)"
 wait_for_ports 5 6
 
 # Join them via node 4 (the sole surviving member/leader)

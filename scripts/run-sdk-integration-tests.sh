@@ -2,11 +2,10 @@
 # Run SDK end-to-end integration tests against a local Ledger cluster.
 #
 # This script:
-#   1. Cleans the cargo build cache for a fresh build
-#   2. Builds the inferadb-ledger binary
-#   3. Starts a 3-node cluster on localhost (ports 50051-50053)
-#   4. Runs SDK integration tests against the cluster
-#   5. Cleans up all processes and data directories on exit
+#   1. Builds the inferadb-ledger binary
+#   2. Starts a 3-node cluster on localhost (ports 50051-50053)
+#   3. Runs SDK integration tests against the cluster
+#   4. Cleans up all processes and data directories on exit
 #
 # Usage:
 #   ./scripts/run_sdk_integration_tests.sh                    # Run all SDK e2e tests
@@ -123,14 +122,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# Step 1: Clean cargo build cache
-# ---------------------------------------------------------------------------
-
-log_info "Cleaning cargo build cache..."
-cargo clean
-
-# ---------------------------------------------------------------------------
-# Step 2: Build the binary
+# Step 1: Build the binary
 # ---------------------------------------------------------------------------
 
 if [[ "$PROFILE" == "release" ]]; then
@@ -148,25 +140,24 @@ fi
 log_success "Built: $BINARY"
 
 # ---------------------------------------------------------------------------
-# Step 3: Create data directories and peers file
+# Step 2: Kill any leftover processes on test ports
+# ---------------------------------------------------------------------------
+
+for i in $(seq 1 "$NODE_COUNT"); do
+  PORT=$((BASE_PORT + i - 1))
+  STALE_PID=$(lsof -ti :"$PORT" 2>/dev/null || true)
+  if [[ -n "$STALE_PID" ]]; then
+    log_warn "Killing stale process on port $PORT (PID $STALE_PID)"
+    kill -9 $STALE_PID 2>/dev/null || true
+    sleep 0.5
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Step 3: Create data directories
 # ---------------------------------------------------------------------------
 
 mkdir -p "$DATA_ROOT"
-
-PEERS_FILE="$DATA_ROOT/peers.json"
-CACHED_AT=$(date +%s)
-PEERS_ARRAY=""
-for i in $(seq 1 "$NODE_COUNT"); do
-  PORT=$((BASE_PORT + i - 1))
-  [[ $i -gt 1 ]] && PEERS_ARRAY+=","
-  PEERS_ARRAY+="{\"addr\":\"127.0.0.1:$PORT\"}"
-done
-
-cat > "$PEERS_FILE" <<EOF
-{"cached_at": $CACHED_AT, "peers": [$PEERS_ARRAY]}
-EOF
-
-log_info "Peers file: $PEERS_FILE"
 
 # ---------------------------------------------------------------------------
 # Step 4: Start cluster nodes
@@ -174,37 +165,40 @@ log_info "Peers file: $PEERS_FILE"
 
 log_info "Starting $NODE_COUNT-node cluster (ports $BASE_PORT-$((BASE_PORT + NODE_COUNT - 1)))..."
 
+FIRST_PORT=$BASE_PORT
 for i in $(seq 1 "$NODE_COUNT"); do
   PORT=$((BASE_PORT + i - 1))
   NODE_DATA="$DATA_ROOT/node$i"
   mkdir -p "$NODE_DATA"
 
-  if [[ "$NODE_COUNT" -eq 1 ]]; then
-    # Single-node: immediate bootstrap, no coordination needed
+  # Fixed test blinding key (matches TestCluster configuration)
+  BLINDING_KEY="deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+  if [[ $i -eq 1 ]]; then
+    # First node: start without --join (accepts incoming connections)
     RUST_LOG=info "$BINARY" \
       --listen "127.0.0.1:$PORT" \
       --data "$NODE_DATA" \
-      --single \
+      --email-blinding-key "$BLINDING_KEY" \
       --log-format text \
       > "$DATA_ROOT/node$i.log" 2>&1 &
   else
-    # Multi-node: coordinated bootstrap via peers file
+    # Other nodes: --join points to first node as seed
     RUST_LOG=info "$BINARY" \
       --listen "127.0.0.1:$PORT" \
       --data "$NODE_DATA" \
-      --cluster "$NODE_COUNT" \
-      --peers "$PEERS_FILE" \
-      --peers-timeout 30 \
+      --join "127.0.0.1:$FIRST_PORT" \
+      --email-blinding-key "$BLINDING_KEY" \
       --log-format text \
       > "$DATA_ROOT/node$i.log" 2>&1 &
   fi
 
   PIDS+=($!)
-  log_info "  Node $i: PID ${PIDS[-1]}, port $PORT"
+  log_info "  Node $i: PID $!, port $PORT"
 done
 
 # ---------------------------------------------------------------------------
-# Step 5: Wait for cluster readiness
+# Step 4: Wait for cluster readiness
 # ---------------------------------------------------------------------------
 
 log_info "Waiting for cluster to become ready (timeout: ${HEALTH_TIMEOUT}s)..."
@@ -222,7 +216,18 @@ while [[ $ELAPSED -lt $HEALTH_TIMEOUT ]]; do
 
   if [[ "$ALL_LISTENING" == "true" ]]; then
     log_success "All $NODE_COUNT nodes are listening"
-    # Allow extra time for Raft leader election and cluster stabilization
+    # Initialize the cluster (one-time operation)
+    log_info "Initializing cluster via first node (127.0.0.1:$FIRST_PORT)..."
+    "$BINARY" init --host="127.0.0.1:$FIRST_PORT" || {
+      log_error "Cluster initialization failed"
+      for i in $(seq 1 "$NODE_COUNT"); do
+        log_error "--- Node $i log (last 10 lines) ---"
+        tail -10 "$DATA_ROOT/node$i.log" 2>/dev/null || true
+      done
+      exit 1
+    }
+    log_success "Cluster initialized"
+    # Allow time for leader election and cluster stabilization
     log_info "Waiting ${SETTLE_TIME}s for leader election..."
     sleep "$SETTLE_TIME"
     break
@@ -271,7 +276,7 @@ done
 echo ""
 
 # ---------------------------------------------------------------------------
-# Step 6: Run SDK integration tests
+# Step 5: Run SDK integration tests
 # ---------------------------------------------------------------------------
 
 log_info "Running SDK integration tests..."

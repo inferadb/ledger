@@ -22,15 +22,14 @@ use std::{sync::Arc, time::Duration};
 use inferadb_ledger_proto::proto::{
     GetSystemStateRequest, system_discovery_service_client::SystemDiscoveryServiceClient,
 };
-use openraft::Raft;
 use parking_lot::RwLock;
 use tokio::{sync::mpsc, time::interval};
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
 use crate::{
-    log_storage::AppliedStateAccessor,
-    types::{LedgerNodeId, LedgerTypeConfig},
+    consensus_handle::ConsensusHandle, log_storage::AppliedStateAccessor,
+    peer_address_map::PeerAddressMap, types::LedgerNodeId,
 };
 
 /// Default refresh interval for learner background task.
@@ -100,10 +99,8 @@ impl CachedSystemState {
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct LearnerRefreshJob {
-    /// Raft consensus handle for querying cluster membership.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// This node's ID.
-    node_id: LedgerNodeId,
+    /// Consensus handle for querying cluster state.
+    handle: Arc<ConsensusHandle>,
     /// Applied state accessor for updating local state.
     /// Reserved for future use when we want to apply state updates locally.
     #[allow(dead_code)] // retained for state access in refresh operations
@@ -114,6 +111,9 @@ pub struct LearnerRefreshJob {
     /// Configuration.
     #[builder(default)]
     config: LearnerRefreshConfig,
+    /// Peer address map for resolving voter network addresses.
+    #[builder(default)]
+    peer_addresses: Option<PeerAddressMap>,
     /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
     #[builder(default)]
     watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
@@ -127,21 +127,24 @@ impl LearnerRefreshJob {
 
     /// Checks if this node is a learner (not a voter).
     fn is_learner(&self) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        let membership = metrics.membership_config.membership();
-
-        // Check if this node is NOT in the voter set
-        !membership.voter_ids().any(|id| id == self.node_id)
+        let state = self.handle.shard_state();
+        let my_id = self.handle.node_id();
+        // A node is a learner if it is not in the voter set
+        !state.voters.iter().any(|id| id.0 == my_id)
     }
 
-    /// Returns list of voter addresses from Raft membership.
+    /// Returns list of voter addresses from shard state and peer address map.
     fn get_voter_addresses(&self) -> Vec<(LedgerNodeId, String)> {
-        let metrics = self.raft.metrics().borrow().clone();
-        let membership = metrics.membership_config.membership();
-
-        membership
-            .voter_ids()
-            .filter_map(|id| membership.get_node(&id).map(|node| (id, node.addr.clone())))
+        let state = self.handle.shard_state();
+        let my_id = self.handle.node_id();
+        state
+            .voters
+            .iter()
+            .filter(|&&id| id.0 != my_id)
+            .filter_map(|id| {
+                let addr = self.peer_addresses.as_ref()?.get(id.0)?;
+                Some((id.0, addr))
+            })
             .collect()
     }
 
@@ -162,9 +165,7 @@ impl LearnerRefreshJob {
         let channel = Channel::from_shared(endpoint)
             .map_err(|e| format!("Invalid endpoint: {}", e))?
             .timeout(self.config.rpc_timeout)
-            .connect()
-            .await
-            .map_err(|e| format!("Failed to connect to voter: {}", e))?;
+            .connect_lazy();
 
         let mut client = SystemDiscoveryServiceClient::new(channel);
 

@@ -14,18 +14,18 @@ use std::{
 
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
-use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::{
+    consensus_handle::ConsensusHandle,
     metrics::{
         record_background_job_duration, record_background_job_items, record_background_job_run,
         record_onboarding_gc_accounts, record_onboarding_gc_codes, record_totp_gc_challenges,
     },
     raft_manager::RaftManager,
     trace_context::TraceContext,
-    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig, RaftPayload, SystemRequest},
+    types::{LedgerRequest, RaftPayload, SystemRequest},
 };
 
 /// Default interval between token maintenance cycles (5 minutes).
@@ -58,10 +58,8 @@ pub struct MaintenanceResult {
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct TokenMaintenanceJob<B: StorageBackend + 'static> {
-    /// Raft consensus handle for proposing changes and verifying leadership.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// This node's ID.
-    node_id: LedgerNodeId,
+    /// Consensus handle for proposing changes and verifying leadership.
+    handle: Arc<ConsensusHandle>,
     /// State layer for reading signing key status during revocation scans.
     state: Arc<StateLayer<B>>,
     /// Interval between maintenance cycles.
@@ -78,8 +76,7 @@ pub struct TokenMaintenanceJob<B: StorageBackend + 'static> {
 impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
     /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader == Some(self.node_id)
+        self.handle.is_leader()
     }
 
     /// Runs a single maintenance cycle.
@@ -100,25 +97,30 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
         let mut result = MaintenanceResult::default();
         let mut had_errors = false;
 
-        // Phase 1: Delete expired refresh tokens (the apply handler does the actual work)
+        // Phase 1: Delete expired refresh tokens and capture the count from the response.
         match self
-            .raft
-            .client_write(RaftPayload::system(LedgerRequest::DeleteExpiredRefreshTokens))
+            .handle
+            .propose_and_wait(
+                RaftPayload::system(LedgerRequest::DeleteExpiredRefreshTokens),
+                Duration::from_secs(10),
+            )
             .await
         {
-            Ok(response) => {
-                if let crate::types::LedgerResponse::ExpiredRefreshTokensDeleted { count } =
-                    response.data
-                {
-                    result.expired_tokens_deleted = count;
-                    if count > 0 {
-                        info!(
-                            trace_id = %trace_ctx.trace_id,
-                            count,
-                            "Deleted expired refresh tokens"
-                        );
-                    }
-                }
+            Ok(crate::types::LedgerResponse::ExpiredRefreshTokensDeleted { count }) => {
+                result.expired_tokens_deleted = count;
+                debug!(
+                    trace_id = %trace_ctx.trace_id,
+                    count,
+                    "Deleted expired refresh tokens"
+                );
+            },
+            Ok(other) => {
+                had_errors = true;
+                warn!(
+                    trace_id = %trace_ctx.trace_id,
+                    response = %other,
+                    "Unexpected response deleting expired refresh tokens"
+                );
             },
             Err(e) => {
                 had_errors = true;
@@ -137,11 +139,13 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
             Ok(kids) => {
                 for kid in kids {
                     match self
-                        .raft
-                        .client_write(RaftPayload::new(
-                            LedgerRequest::TransitionSigningKeyRevoked { kid: kid.clone() },
-                            0,
-                        ))
+                        .handle
+                        .propose_and_wait(
+                            RaftPayload::system(LedgerRequest::TransitionSigningKeyRevoked {
+                                kid: kid.clone(),
+                            }),
+                            Duration::from_secs(10),
+                        )
                         .await
                     {
                         Ok(_) => {
@@ -184,13 +188,20 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
                     Ok(group) => {
                         let request =
                             LedgerRequest::System(SystemRequest::CleanupExpiredOnboarding);
-                        match group.raft().client_write(RaftPayload::system(request)).await {
+                        match group
+                            .handle()
+                            .propose_and_wait(
+                                RaftPayload::system(request),
+                                std::time::Duration::from_secs(30),
+                            )
+                            .await
+                        {
                             Ok(response) => {
                                 if let crate::types::LedgerResponse::OnboardingCleanedUp {
                                     verification_codes_deleted,
                                     onboarding_accounts_deleted,
                                     totp_challenges_deleted,
-                                } = response.data
+                                } = response
                                 {
                                     let codes = u64::from(verification_codes_deleted);
                                     let accounts = u64::from(onboarding_accounts_deleted);

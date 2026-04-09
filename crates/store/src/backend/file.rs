@@ -88,7 +88,9 @@ impl FileBackend {
 
         // Ensure page size is power of 2
         if !page_size.is_power_of_two() || page_size < 512 || page_size > 65536 {
-            return Err(Error::Corrupted { reason: format!("Invalid page size: {page_size}") });
+            return Err(Error::Corrupted {
+                reason: format!("Invalid page size: {page_size}").into(),
+            });
         }
 
         let file = OpenOptions::new()
@@ -122,7 +124,8 @@ impl StorageBackend for FileBackend {
     fn write_header(&self, header: &[u8]) -> Result<()> {
         if header.len() != HEADER_SIZE {
             return Err(Error::Corrupted {
-                reason: format!("Invalid header size: {} (expected {})", header.len(), HEADER_SIZE),
+                reason: format!("Invalid header size: {} (expected {})", header.len(), HEADER_SIZE)
+                    .into(),
             });
         }
 
@@ -153,7 +156,8 @@ impl StorageBackend for FileBackend {
                     "Invalid page data size: {} (expected {})",
                     data.len(),
                     self.page_size
-                ),
+                )
+                .into(),
             });
         }
 

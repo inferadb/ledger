@@ -955,11 +955,12 @@ impl<B: StorageBackend> Database<B> {
         let dirty_pages = self.cache.dirty_pages();
         let backend = self.backend.write();
 
-        for mut page in dirty_pages {
+        for arc_page in &dirty_pages {
             // Update checksum in the cache so it matches the on-disk version
-            self.cache.update_checksum(page.id);
+            self.cache.update_checksum(arc_page.id);
 
-            // Compute checksum on the clone used for writing
+            // Clone the page for writing with an up-to-date checksum
+            let mut page = (**arc_page).clone();
             page.update_checksum();
             backend.write_page(page.id, &page.data)?;
             self.cache.mark_clean(page.id);

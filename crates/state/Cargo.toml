@@ -27,6 +27,7 @@ seahash.workspace = true
 zstd.workspace = true
 
 # Concurrency
+dashmap.workspace = true
 parking_lot.workspace = true
 
 # Caching

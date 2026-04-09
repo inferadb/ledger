@@ -12,15 +12,8 @@
 //!
 //! ```no_run
 //! # use inferadb_ledger_proto::{proto, convert};
-//! # use inferadb_ledger_types::LedgerNodeId;
-//! # use openraft::Vote;
-//! // Domain to proto
-//! let domain_vote = Vote::new(1u64, 42u64);
-//! let proto_vote: proto::RaftVote = domain_vote.into();
-//!
-//! // Proto to domain
+//! // Proto type construction
 //! let proto_vote = proto::RaftVote { term: 1, node_id: 42, committed: false };
-//! let domain_vote: Vote<LedgerNodeId> = proto_vote.into();
 //! ```
 //!
 //! # Note
@@ -32,7 +25,6 @@ mod credentials;
 mod domain;
 mod identifiers;
 mod operations;
-mod raft;
 mod statuses;
 mod tokens;
 

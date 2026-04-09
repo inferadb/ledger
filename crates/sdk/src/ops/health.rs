@@ -6,7 +6,6 @@ use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 use crate::{
     LedgerClient,
     error::{self, Result},
-    retry::with_retry_cancellable,
     types::admin::{HealthCheckResult, HealthStatus},
 };
 
@@ -85,29 +84,20 @@ impl LedgerClient {
     /// # }
     /// ```
     pub async fn health_check_detailed(&self) -> Result<HealthCheckResult> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
 
-        self.with_metrics(
-            "health_check_detailed",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "health_check_detailed",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_health_client);
+        self.call_with_retry("health_check_detailed", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_health_client);
 
-                    let request = proto::HealthCheckRequest { organization: None, vault: None };
+                let request = proto::HealthCheckRequest { organization: None, vault: None };
 
-                    let response = client.check(tonic::Request::new(request)).await?.into_inner();
+                let response = client.check(tonic::Request::new(request)).await?.into_inner();
 
-                    Ok(HealthCheckResult::from_proto(response))
-                },
-            ),
-        )
+                Ok(HealthCheckResult::from_proto(response))
+            }
+        })
         .await
     }
 
@@ -149,32 +139,23 @@ impl LedgerClient {
         organization: OrganizationSlug,
         vault: VaultSlug,
     ) -> Result<HealthCheckResult> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
 
-        self.with_metrics(
-            "health_check_vault",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "health_check_vault",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_health_client);
+        self.call_with_retry("health_check_vault", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_health_client);
 
-                    let request = proto::HealthCheckRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault: Some(proto::VaultSlug { slug: vault.value() }),
-                    };
+                let request = proto::HealthCheckRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    vault: Some(proto::VaultSlug { slug: vault.value() }),
+                };
 
-                    let response = client.check(tonic::Request::new(request)).await?.into_inner();
+                let response = client.check(tonic::Request::new(request)).await?.into_inner();
 
-                    Ok(HealthCheckResult::from_proto(response))
-                },
-            ),
-        )
+                Ok(HealthCheckResult::from_proto(response))
+            }
+        })
         .await
     }
 }

@@ -1,5 +1,7 @@
 target/
 .DS_Store
+.zed/
+.vscode/
 build_rs_cov.profraw
 fuzz/artifacts/
 fuzz/corpus/

@@ -1,18 +1,15 @@
 //! Shared read handle for Raft applied state.
 //!
-//! Provides concurrent read access to the state machine's applied state
-//! without holding the write lock.
+//! Provides lock-free read access to the state machine's applied state
+//! via [`ArcSwap`]. Reads never block, even during state machine apply.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
+use arc_swap::ArcSwap;
 use inferadb_ledger_types::{
     AppId, AppSlug, ClientId, OrganizationId, OrganizationSlug, OrganizationUsage, TeamId,
     TeamSlug, UserId, UserSlug, VaultId, VaultSlug,
 };
-use parking_lot::RwLock;
 
 use super::types::{AppliedState, OrganizationMeta, VaultHealthStatus, VaultMeta};
 
@@ -30,13 +27,14 @@ pub enum IdempotencyCheckResult {
     Miss,
 }
 
-/// Provides shared read access to the Raft state machine's applied state.
+/// Provides lock-free read access to the Raft state machine's applied state.
 ///
 /// Services use this to query vault heights and health status
 /// without holding a direct reference to the Raft log store.
+/// Reads are guaranteed non-blocking via [`ArcSwap`].
 #[derive(Clone)]
 pub struct AppliedStateAccessor {
-    pub(super) state: Arc<RwLock<AppliedState>>,
+    state: Arc<ArcSwap<AppliedState>>,
 }
 
 impl AppliedStateAccessor {
@@ -45,7 +43,7 @@ impl AppliedStateAccessor {
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn vault_height(&self, organization: OrganizationId, vault: VaultId) -> u64 {
-        self.state.read().vault_heights.get(&(organization, vault)).copied().unwrap_or(0)
+        self.state.load().vault_heights.get(&(organization, vault)).copied().unwrap_or(0)
     }
 
     /// Returns the health status for a vault.
@@ -53,12 +51,12 @@ impl AppliedStateAccessor {
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn vault_health(&self, organization: OrganizationId, vault: VaultId) -> VaultHealthStatus {
-        self.state.read().vault_health.get(&(organization, vault)).cloned().unwrap_or_default()
+        self.state.load().vault_health.get(&(organization, vault)).cloned().unwrap_or_default()
     }
 
     /// Calls `f` for each `(organization, vault, height)` triple under a single read lock.
     pub fn for_each_vault_height(&self, mut f: impl FnMut(OrganizationId, VaultId, u64)) {
-        let state = self.state.read();
+        let state = self.state.load();
         for (&(org, vault), &height) in &state.vault_heights {
             f(org, vault, height);
         }
@@ -66,7 +64,7 @@ impl AppliedStateAccessor {
 
     /// Returns vault heights filtered to a single organization.
     pub fn org_vault_heights(&self, organization: OrganizationId) -> Vec<(VaultId, u64)> {
-        let state = self.state.read();
+        let state = self.state.load();
         state
             .vault_heights
             .iter()
@@ -77,12 +75,12 @@ impl AppliedStateAccessor {
 
     /// Returns the maximum vault height across all vaults.
     pub fn max_vault_height(&self) -> u64 {
-        self.state.read().vault_heights.values().copied().max().unwrap_or(0)
+        self.state.load().vault_heights.values().copied().max().unwrap_or(0)
     }
 
     /// Returns the maximum vault height within a specific organization.
     pub fn org_max_vault_height(&self, organization: OrganizationId) -> u64 {
-        let state = self.state.read();
+        let state = self.state.load();
         state
             .vault_heights
             .iter()
@@ -94,7 +92,7 @@ impl AppliedStateAccessor {
 
     /// Returns the total number of tracked vault heights.
     pub fn vault_height_count(&self) -> usize {
-        self.state.read().vault_heights.len()
+        self.state.load().vault_heights.len()
     }
 
     /// Returns organization metadata by internal ID.
@@ -103,7 +101,7 @@ impl AppliedStateAccessor {
     pub fn get_organization(&self, organization: OrganizationId) -> Option<OrganizationMeta> {
         use inferadb_ledger_state::system::OrganizationStatus;
         self.state
-            .read()
+            .load()
             .organizations
             .get(&organization)
             .filter(|ns| ns.status != OrganizationStatus::Deleted)
@@ -114,7 +112,7 @@ impl AppliedStateAccessor {
     pub fn list_organizations(&self) -> Vec<OrganizationMeta> {
         use inferadb_ledger_state::system::OrganizationStatus;
         self.state
-            .read()
+            .load()
             .organizations
             .values()
             .filter(|ns| ns.status != OrganizationStatus::Deleted)
@@ -126,8 +124,8 @@ impl AppliedStateAccessor {
     ///
     /// Uses the `user_org_index` for O(1) lookup instead of scanning
     /// all organization profiles.
-    pub fn user_organization_ids(&self, user: UserId) -> HashSet<OrganizationId> {
-        self.state.read().user_org_index.get(&user).cloned().unwrap_or_default()
+    pub fn user_organization_ids(&self, user: UserId) -> im::HashSet<OrganizationId> {
+        self.state.load().user_org_index.get(&user).cloned().unwrap_or_default()
     }
 
     /// Returns vault metadata by internal ID.
@@ -135,7 +133,7 @@ impl AppliedStateAccessor {
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     /// * `vault` - Internal vault identifier (`VaultId`).
     pub fn get_vault(&self, organization: OrganizationId, vault: VaultId) -> Option<VaultMeta> {
-        self.state.read().vaults.get(&(organization, vault)).filter(|v| !v.deleted).cloned()
+        self.state.load().vaults.get(&(organization, vault)).filter(|v| !v.deleted).cloned()
     }
 
     /// Lists all active vaults in an organization.
@@ -143,7 +141,7 @@ impl AppliedStateAccessor {
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     pub fn list_vaults(&self, organization: OrganizationId) -> Vec<VaultMeta> {
         self.state
-            .read()
+            .load()
             .vaults
             .values()
             .filter(|v| v.organization == organization && !v.deleted)
@@ -164,7 +162,7 @@ impl AppliedStateAccessor {
         client_id: &str,
     ) -> u64 {
         self.state
-            .read()
+            .load()
             .client_sequences
             .get(&(organization, vault, ClientId::new(client_id)))
             .map_or(0, |entry| entry.sequence)
@@ -172,13 +170,13 @@ impl AppliedStateAccessor {
 
     /// Returns the current region height (for snapshot info).
     pub fn region_height(&self) -> u64 {
-        self.state.read().region_height
+        self.state.load().region_height
     }
 
     /// Returns all vault metadata (for retention policy checks).
     pub fn all_vaults(&self) -> HashMap<(OrganizationId, VaultId), VaultMeta> {
         self.state
-            .read()
+            .load()
             .vaults
             .iter()
             .filter(|(_, v)| !v.deleted)
@@ -192,7 +190,7 @@ impl AppliedStateAccessor {
     pub fn vault_count(&self, organization: OrganizationId) -> u32 {
         let count = self
             .state
-            .read()
+            .load()
             .vaults
             .values()
             .filter(|v| v.organization == organization && !v.deleted)
@@ -210,7 +208,7 @@ impl AppliedStateAccessor {
     ///
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     pub fn organization_storage_bytes(&self, organization: OrganizationId) -> u64 {
-        self.state.read().organization_storage_bytes.get(&organization).copied().unwrap_or(0)
+        self.state.load().organization_storage_bytes.get(&organization).copied().unwrap_or(0)
     }
 
     /// Returns a snapshot of resource usage for an organization.
@@ -220,7 +218,7 @@ impl AppliedStateAccessor {
     ///
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     pub fn organization_usage(&self, organization: OrganizationId) -> OrganizationUsage {
-        let state = self.state.read();
+        let state = self.state.load();
         let storage_bytes =
             state.organization_storage_bytes.get(&organization).copied().unwrap_or(0);
         let vault_count =
@@ -233,66 +231,66 @@ impl AppliedStateAccessor {
     ///
     /// Returns `None` if the slug is not registered in the slug index.
     pub fn resolve_slug_to_id(&self, slug: OrganizationSlug) -> Option<OrganizationId> {
-        self.state.read().slug_index.get(&slug).copied()
+        self.state.load().slug_index.get(&slug).copied()
     }
 
     /// Resolves an internal organization ID to its external slug.
     ///
     /// Returns `None` if the ID is not registered in the reverse index.
     pub fn resolve_id_to_slug(&self, id: OrganizationId) -> Option<OrganizationSlug> {
-        self.state.read().id_to_slug.get(&id).copied()
+        self.state.load().id_to_slug.get(&id).copied()
     }
 
     /// Resolves an external vault slug to its internal ID.
     ///
     /// Returns `None` if the slug is not registered in the vault slug index.
     pub fn resolve_vault_slug_to_id(&self, slug: VaultSlug) -> Option<VaultId> {
-        self.state.read().vault_slug_index.get(&slug).copied()
+        self.state.load().vault_slug_index.get(&slug).copied()
     }
 
     /// Resolves an internal vault ID to its external slug.
     ///
     /// Returns `None` if the ID is not registered in the vault reverse index.
     pub fn resolve_vault_id_to_slug(&self, id: VaultId) -> Option<VaultSlug> {
-        self.state.read().vault_id_to_slug.get(&id).copied()
+        self.state.load().vault_id_to_slug.get(&id).copied()
     }
 
     /// Resolves an external user slug to the internal user ID.
     ///
     /// Returns `None` if the slug is not registered in the user slug index.
     pub fn resolve_user_slug_to_id(&self, slug: UserSlug) -> Option<UserId> {
-        self.state.read().user_slug_index.get(&slug).copied()
+        self.state.load().user_slug_index.get(&slug).copied()
     }
 
     /// Resolves an internal user ID to its external slug.
     ///
     /// Returns `None` if the ID is not registered in the user reverse index.
     pub fn resolve_user_id_to_slug(&self, id: UserId) -> Option<UserSlug> {
-        self.state.read().user_id_to_slug.get(&id).copied()
+        self.state.load().user_id_to_slug.get(&id).copied()
     }
 
     // --- Team slug resolution ---
 
     /// Resolves an external team slug to its internal (organization, team) IDs.
     pub fn resolve_team_slug(&self, slug: TeamSlug) -> Option<(OrganizationId, TeamId)> {
-        self.state.read().team_slug_index.get(&slug).copied()
+        self.state.load().team_slug_index.get(&slug).copied()
     }
 
     /// Resolves an internal team ID to its external slug.
     pub fn resolve_team_id_to_slug(&self, id: TeamId) -> Option<TeamSlug> {
-        self.state.read().team_id_to_slug.get(&id).copied()
+        self.state.load().team_id_to_slug.get(&id).copied()
     }
 
     // --- App slug resolution ---
 
     /// Resolves an external app slug to its internal (organization, app) IDs.
     pub fn resolve_app_slug(&self, slug: AppSlug) -> Option<(OrganizationId, AppId)> {
-        self.state.read().app_slug_index.get(&slug).copied()
+        self.state.load().app_slug_index.get(&slug).copied()
     }
 
     /// Resolves an internal app ID to its external slug.
     pub fn resolve_app_id_to_slug(&self, id: AppId) -> Option<AppSlug> {
-        self.state.read().app_id_to_slug.get(&id).copied()
+        self.state.load().app_id_to_slug.get(&id).copied()
     }
 
     /// Checks the replicated client sequence table for idempotency.
@@ -321,7 +319,7 @@ impl AppliedStateAccessor {
         }
 
         let key = (organization, vault, ClientId::new(client_id));
-        let state = self.state.read();
+        let state = self.state.load();
 
         match state.client_sequences.get(&key) {
             Some(entry) if entry.last_idempotency_key == *idempotency_key => {
@@ -335,9 +333,14 @@ impl AppliedStateAccessor {
         }
     }
 
+    /// Creates an accessor from a shared `ArcSwap<AppliedState>`.
+    pub(super) fn new(state: Arc<ArcSwap<AppliedState>>) -> Self {
+        Self { state }
+    }
+
     /// Creates an accessor from a pre-built state (for testing).
     #[doc(hidden)]
-    pub fn new_for_test(state: Arc<RwLock<AppliedState>>) -> Self {
+    pub fn new_for_test(state: Arc<ArcSwap<AppliedState>>) -> Self {
         Self { state }
     }
 }
@@ -346,8 +349,8 @@ impl AppliedStateAccessor {
 mod tests {
     use std::sync::Arc;
 
+    use arc_swap::ArcSwap;
     use inferadb_ledger_types::{OrganizationId, VaultId};
-    use parking_lot::RwLock;
 
     use super::*;
     use crate::log_storage::types::ClientSequenceEntry;
@@ -360,7 +363,7 @@ mod tests {
     ) -> AppliedStateAccessor {
         let mut state = AppliedState::default();
         state.client_sequences.insert((org, vault, ClientId::new(client_id)), entry);
-        AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)))
+        AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)))
     }
 
     #[test]
@@ -410,8 +413,9 @@ mod tests {
 
     #[test]
     fn idempotency_check_miss_no_entry() {
-        let accessor =
-            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(
+            AppliedState::default(),
+        )));
 
         let result = accessor.client_idempotency_check(
             OrganizationId::new(1),
@@ -474,8 +478,9 @@ mod tests {
     fn idempotency_check_post_eviction_is_miss() {
         // After TTL eviction removes a ClientSequenceEntry, a retry with
         // the same idempotency key is treated as a new request (Miss).
-        let accessor =
-            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(
+            AppliedState::default(),
+        )));
 
         // Entry was evicted — no entry in state
         let result = accessor.client_idempotency_check(
@@ -492,8 +497,9 @@ mod tests {
 
     #[test]
     fn vault_height_returns_zero_for_unknown() {
-        let accessor =
-            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(
+            AppliedState::default(),
+        )));
         assert_eq!(accessor.vault_height(OrganizationId::new(1), VaultId::new(1)), 0);
     }
 
@@ -501,14 +507,15 @@ mod tests {
     fn vault_height_returns_stored_value() {
         let mut state = AppliedState::default();
         state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 42);
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert_eq!(accessor.vault_height(OrganizationId::new(1), VaultId::new(2)), 42);
     }
 
     #[test]
     fn max_vault_height_empty() {
-        let accessor =
-            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(
+            AppliedState::default(),
+        )));
         assert_eq!(accessor.max_vault_height(), 0);
     }
 
@@ -518,7 +525,7 @@ mod tests {
         state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 10);
         state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 50);
         state.vault_heights.insert((OrganizationId::new(2), VaultId::new(1)), 30);
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert_eq!(accessor.max_vault_height(), 50);
     }
 
@@ -528,7 +535,7 @@ mod tests {
         state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 10);
         state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 50);
         state.vault_heights.insert((OrganizationId::new(2), VaultId::new(1)), 100);
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert_eq!(accessor.org_max_vault_height(OrganizationId::new(1)), 50);
         assert_eq!(accessor.org_max_vault_height(OrganizationId::new(2)), 100);
         assert_eq!(accessor.org_max_vault_height(OrganizationId::new(3)), 0);
@@ -539,7 +546,7 @@ mod tests {
         let mut state = AppliedState::default();
         state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 10);
         state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 20);
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert_eq!(accessor.vault_height_count(), 2);
     }
 
@@ -548,7 +555,7 @@ mod tests {
         let mut state = AppliedState::default();
         state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 10);
         state.vault_heights.insert((OrganizationId::new(2), VaultId::new(3)), 20);
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         let mut visited = Vec::new();
         accessor.for_each_vault_height(|org, vault, height| {
             visited.push((org, vault, height));
@@ -562,7 +569,7 @@ mod tests {
         state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 10);
         state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 20);
         state.vault_heights.insert((OrganizationId::new(2), VaultId::new(1)), 30);
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         let heights = accessor.org_vault_heights(OrganizationId::new(1));
         assert_eq!(heights.len(), 2);
     }
@@ -571,8 +578,9 @@ mod tests {
 
     #[test]
     fn get_vault_returns_none_for_unknown() {
-        let accessor =
-            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(
+            AppliedState::default(),
+        )));
         assert!(accessor.get_vault(OrganizationId::new(1), VaultId::new(1)).is_none());
     }
 
@@ -591,7 +599,7 @@ mod tests {
                 retention_policy: Default::default(),
             },
         );
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert!(accessor.get_vault(OrganizationId::new(1), VaultId::new(1)).is_none());
     }
 
@@ -634,7 +642,7 @@ mod tests {
                 retention_policy: Default::default(),
             },
         );
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         let vaults = accessor.list_vaults(OrganizationId::new(1));
         assert_eq!(vaults.len(), 1);
         assert_eq!(vaults[0].vault, VaultId::new(1));
@@ -667,7 +675,7 @@ mod tests {
                 retention_policy: Default::default(),
             },
         );
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert_eq!(accessor.vault_count(OrganizationId::new(1)), 1);
     }
 
@@ -701,7 +709,7 @@ mod tests {
                 storage_bytes: 0,
             },
         );
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         let orgs = accessor.list_organizations();
         assert_eq!(orgs.len(), 1);
         assert_eq!(orgs[0].organization, OrganizationId::new(1));
@@ -723,7 +731,7 @@ mod tests {
                 storage_bytes: 0,
             },
         );
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert!(accessor.get_organization(OrganizationId::new(1)).is_none());
     }
 
@@ -738,7 +746,7 @@ mod tests {
         state
             .id_to_slug
             .insert(OrganizationId::new(1), inferadb_ledger_types::OrganizationSlug::new(100));
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert_eq!(
             accessor.resolve_slug_to_id(inferadb_ledger_types::OrganizationSlug::new(100)),
             Some(OrganizationId::new(1))
@@ -754,7 +762,7 @@ mod tests {
         let mut state = AppliedState::default();
         state.vault_slug_index.insert(VaultSlug::new(200), VaultId::new(2));
         state.vault_id_to_slug.insert(VaultId::new(2), VaultSlug::new(200));
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert_eq!(accessor.resolve_vault_slug_to_id(VaultSlug::new(200)), Some(VaultId::new(2)));
         assert_eq!(accessor.resolve_vault_id_to_slug(VaultId::new(2)), Some(VaultSlug::new(200)));
     }
@@ -770,7 +778,7 @@ mod tests {
             inferadb_ledger_types::UserId::new(3),
             inferadb_ledger_types::UserSlug::new(300),
         );
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert_eq!(
             accessor.resolve_user_slug_to_id(inferadb_ledger_types::UserSlug::new(300)),
             Some(inferadb_ledger_types::UserId::new(3))
@@ -792,7 +800,7 @@ mod tests {
             inferadb_ledger_types::TeamId::new(4),
             inferadb_ledger_types::TeamSlug::new(400),
         );
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert_eq!(
             accessor.resolve_team_slug(inferadb_ledger_types::TeamSlug::new(400)),
             Some((OrganizationId::new(1), inferadb_ledger_types::TeamId::new(4)))
@@ -813,7 +821,7 @@ mod tests {
         state
             .app_id_to_slug
             .insert(inferadb_ledger_types::AppId::new(5), inferadb_ledger_types::AppSlug::new(500));
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert_eq!(
             accessor.resolve_app_slug(inferadb_ledger_types::AppSlug::new(500)),
             Some((OrganizationId::new(1), inferadb_ledger_types::AppId::new(5)))
@@ -828,8 +836,9 @@ mod tests {
 
     #[test]
     fn organization_storage_bytes_default_zero() {
-        let accessor =
-            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(
+            AppliedState::default(),
+        )));
         assert_eq!(accessor.organization_storage_bytes(OrganizationId::new(1)), 0);
     }
 
@@ -837,7 +846,7 @@ mod tests {
     fn organization_storage_bytes_returns_stored() {
         let mut state = AppliedState::default();
         state.organization_storage_bytes.insert(OrganizationId::new(1), 1024);
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert_eq!(accessor.organization_storage_bytes(OrganizationId::new(1)), 1024);
     }
 
@@ -869,7 +878,7 @@ mod tests {
                 retention_policy: Default::default(),
             },
         );
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         let usage = accessor.organization_usage(OrganizationId::new(1));
         assert_eq!(usage.storage_bytes, 2048);
         assert_eq!(usage.vault_count, 1);
@@ -879,22 +888,24 @@ mod tests {
 
     #[test]
     fn region_height_default_zero() {
-        let accessor =
-            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(
+            AppliedState::default(),
+        )));
         assert_eq!(accessor.region_height(), 0);
     }
 
     #[test]
     fn region_height_returns_stored() {
         let state = AppliedState { region_height: 999, ..Default::default() };
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert_eq!(accessor.region_height(), 999);
     }
 
     #[test]
     fn client_sequence_returns_zero_for_unknown() {
-        let accessor =
-            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(
+            AppliedState::default(),
+        )));
         assert_eq!(accessor.client_sequence(OrganizationId::new(1), VaultId::new(1), "unknown"), 0);
     }
 
@@ -905,7 +916,7 @@ mod tests {
             (OrganizationId::new(1), VaultId::new(1), ClientId::new("client-1")),
             ClientSequenceEntry { sequence: 42, ..Default::default() },
         );
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert_eq!(
             accessor.client_sequence(OrganizationId::new(1), VaultId::new(1), "client-1"),
             42
@@ -916,19 +927,20 @@ mod tests {
 
     #[test]
     fn user_organization_ids_returns_empty_for_unknown() {
-        let accessor =
-            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(
+            AppliedState::default(),
+        )));
         assert!(accessor.user_organization_ids(inferadb_ledger_types::UserId::new(1)).is_empty());
     }
 
     #[test]
     fn user_organization_ids_returns_stored() {
         let mut state = AppliedState::default();
-        let mut orgs = HashSet::new();
+        let mut orgs = im::HashSet::new();
         orgs.insert(OrganizationId::new(1));
         orgs.insert(OrganizationId::new(2));
         state.user_org_index.insert(inferadb_ledger_types::UserId::new(42), orgs);
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         let result = accessor.user_organization_ids(inferadb_ledger_types::UserId::new(42));
         assert_eq!(result.len(), 2);
         assert!(result.contains(&OrganizationId::new(1)));
@@ -963,7 +975,7 @@ mod tests {
                 retention_policy: Default::default(),
             },
         );
-        let accessor = AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(state)));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         let all = accessor.all_vaults();
         assert_eq!(all.len(), 1);
     }
@@ -972,8 +984,9 @@ mod tests {
 
     #[test]
     fn vault_health_returns_default_for_unknown() {
-        let accessor =
-            AppliedStateAccessor::new_for_test(Arc::new(RwLock::new(AppliedState::default())));
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(
+            AppliedState::default(),
+        )));
         let health = accessor.vault_health(OrganizationId::new(1), VaultId::new(1));
         // Default should be Healthy
         assert_eq!(health, VaultHealthStatus::Healthy);

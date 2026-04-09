@@ -7,7 +7,6 @@ use crate::{
     LedgerClient,
     error::Result,
     proto_util::{missing_response_field, proto_timestamp_to_system_time, region_from_proto_i32},
-    retry::with_retry_cancellable,
     types::admin::{
         MigrationInfo, OrganizationDeleteInfo, OrganizationInfo, OrganizationMemberInfo,
         OrganizationMemberRole, OrganizationStatus, OrganizationTier, TeamInfo, TeamMemberRole,
@@ -62,49 +61,38 @@ impl LedgerClient {
         caller: UserSlug,
         tier: OrganizationTier,
     ) -> Result<OrganizationInfo> {
-        self.check_shutdown(None)?;
-
         let name = name.into();
         let proto_region: proto::Region = region.into();
         let region_i32: i32 = proto_region.into();
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("create_organization", || {
+            let pool = pool.clone();
+            let name = name.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "create_organization",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "create_organization",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::CreateOrganizationRequest {
+                    name: name.clone(),
+                    region: region_i32,
+                    tier: Some(tier.to_proto()),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::CreateOrganizationRequest {
-                        name: name.clone(),
-                        region: region_i32,
-                        tier: Some(tier.to_proto()),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.create_organization(tonic::Request::new(request)).await?.into_inner();
 
-                    let response = client
-                        .create_organization(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
-
-                    Ok(OrganizationInfo::from_fields(
-                        response.slug,
-                        response.name,
-                        response.region,
-                        response.member_nodes,
-                        response.config_version,
-                        response.status,
-                        response.tier,
-                        &response.members,
-                    ))
-                },
-            ),
-        )
+                Ok(OrganizationInfo::from_fields(
+                    response.slug,
+                    response.name,
+                    response.region,
+                    response.member_nodes,
+                    response.config_version,
+                    response.status,
+                    response.tier,
+                    &response.members,
+                ))
+            }
+        })
         .await
     }
 
@@ -141,33 +129,23 @@ impl LedgerClient {
         slug: OrganizationSlug,
         user: UserSlug,
     ) -> Result<OrganizationInfo> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("get_organization", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "get_organization",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "get_organization",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::GetOrganizationRequest {
+                    slug: Some(proto::OrganizationSlug { slug: slug.value() }),
+                    caller: Some(proto::UserSlug { slug: user.value() }),
+                };
 
-                    let request = proto::GetOrganizationRequest {
-                        slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        caller: Some(proto::UserSlug { slug: user.value() }),
-                    };
+                let response =
+                    client.get_organization(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.get_organization(tonic::Request::new(request)).await?.into_inner();
-
-                    Ok(OrganizationInfo::from_proto(response))
-                },
-            ),
-        )
+                Ok(OrganizationInfo::from_proto(response))
+            }
+        })
         .await
     }
 
@@ -212,36 +190,25 @@ impl LedgerClient {
         user: UserSlug,
         name: Option<String>,
     ) -> Result<OrganizationInfo> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("update_organization", || {
+            let pool = pool.clone();
+            let name = name.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "update_organization",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "update_organization",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::UpdateOrganizationRequest {
+                    slug: Some(proto::OrganizationSlug { slug: slug.value() }),
+                    caller: Some(proto::UserSlug { slug: user.value() }),
+                    name: name.clone(),
+                };
 
-                    let request = proto::UpdateOrganizationRequest {
-                        slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        caller: Some(proto::UserSlug { slug: user.value() }),
-                        name: name.clone(),
-                    };
+                let response =
+                    client.update_organization(tonic::Request::new(request)).await?.into_inner();
 
-                    let response = client
-                        .update_organization(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
-
-                    Ok(OrganizationInfo::from_update_proto(response))
-                },
-            ),
-        )
+                Ok(OrganizationInfo::from_update_proto(response))
+            }
+        })
         .await
     }
 
@@ -285,41 +252,26 @@ impl LedgerClient {
         slug: OrganizationSlug,
         user: UserSlug,
     ) -> Result<OrganizationDeleteInfo> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("delete_organization", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "delete_organization",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "delete_organization",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::DeleteOrganizationRequest {
+                    slug: Some(proto::OrganizationSlug { slug: slug.value() }),
+                    caller: Some(proto::UserSlug { slug: user.value() }),
+                };
 
-                    let request = proto::DeleteOrganizationRequest {
-                        slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        caller: Some(proto::UserSlug { slug: user.value() }),
-                    };
+                let response =
+                    client.delete_organization(tonic::Request::new(request)).await?.into_inner();
 
-                    let response = client
-                        .delete_organization(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
+                let deleted_at =
+                    response.deleted_at.as_ref().and_then(proto_timestamp_to_system_time);
 
-                    let deleted_at =
-                        response.deleted_at.as_ref().and_then(proto_timestamp_to_system_time);
-
-                    Ok(OrganizationDeleteInfo {
-                        deleted_at,
-                        retention_days: response.retention_days,
-                    })
-                },
-            ),
-        )
+                Ok(OrganizationDeleteInfo { deleted_at, retention_days: response.retention_days })
+            }
+        })
         .await
     }
 
@@ -363,40 +315,28 @@ impl LedgerClient {
         page_size: u32,
         page_token: Option<Vec<u8>>,
     ) -> Result<(Vec<OrganizationInfo>, Option<Vec<u8>>)> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("list_organizations", || {
+            let pool = pool.clone();
+            let page_token = page_token.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "list_organizations",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "list_organizations",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::ListOrganizationsRequest {
+                    page_token: page_token.clone(),
+                    page_size,
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::ListOrganizationsRequest {
-                        page_token: page_token.clone(),
-                        page_size,
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.list_organizations(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.list_organizations(tonic::Request::new(request)).await?.into_inner();
+                let organizations =
+                    response.organizations.into_iter().map(OrganizationInfo::from_proto).collect();
 
-                    let organizations = response
-                        .organizations
-                        .into_iter()
-                        .map(OrganizationInfo::from_proto)
-                        .collect();
-
-                    Ok((organizations, response.next_page_token))
-                },
-            ),
-        )
+                Ok((organizations, response.next_page_token))
+            }
+        })
         .await
     }
 
@@ -427,40 +367,31 @@ impl LedgerClient {
         page_size: u32,
         page_token: Option<Vec<u8>>,
     ) -> Result<(Vec<OrganizationMemberInfo>, Option<Vec<u8>>)> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("list_organization_members", || {
+            let pool = pool.clone();
+            let page_token = page_token.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "list_organization_members",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "list_organization_members",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::ListOrganizationMembersRequest {
+                    slug: Some(proto::OrganizationSlug { slug: slug.value() }),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                    page_token: page_token.clone(),
+                    page_size,
+                };
 
-                    let request = proto::ListOrganizationMembersRequest {
-                        slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                        page_token: page_token.clone(),
-                        page_size,
-                    };
+                let response = client
+                    .list_organization_members(tonic::Request::new(request))
+                    .await?
+                    .into_inner();
 
-                    let response = client
-                        .list_organization_members(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
+                let members =
+                    response.members.iter().map(OrganizationMemberInfo::from_proto).collect();
 
-                    let members =
-                        response.members.iter().map(OrganizationMemberInfo::from_proto).collect();
-
-                    Ok((members, response.next_page_token))
-                },
-            ),
-        )
+                Ok((members, response.next_page_token))
+            }
+        })
         .await
     }
 
@@ -487,33 +418,23 @@ impl LedgerClient {
         user: UserSlug,
         target: UserSlug,
     ) -> Result<()> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("remove_organization_member", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "remove_organization_member",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "remove_organization_member",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::RemoveOrganizationMemberRequest {
+                    slug: Some(proto::OrganizationSlug { slug: slug.value() }),
+                    caller: Some(proto::UserSlug { slug: user.value() }),
+                    target: Some(proto::UserSlug { slug: target.value() }),
+                };
 
-                    let request = proto::RemoveOrganizationMemberRequest {
-                        slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        caller: Some(proto::UserSlug { slug: user.value() }),
-                        target: Some(proto::UserSlug { slug: target.value() }),
-                    };
+                client.remove_organization_member(tonic::Request::new(request)).await?;
 
-                    client.remove_organization_member(tonic::Request::new(request)).await?;
-
-                    Ok(())
-                },
-            ),
-        )
+                Ok(())
+            }
+        })
         .await
     }
 
@@ -545,45 +466,32 @@ impl LedgerClient {
         target: UserSlug,
         role: OrganizationMemberRole,
     ) -> Result<OrganizationMemberInfo> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("update_organization_member_role", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "update_organization_member_role",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "update_organization_member_role",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::UpdateOrganizationMemberRoleRequest {
+                    slug: Some(proto::OrganizationSlug { slug: slug.value() }),
+                    caller: Some(proto::UserSlug { slug: user.value() }),
+                    target: Some(proto::UserSlug { slug: target.value() }),
+                    role: role.to_proto(),
+                };
 
-                    let request = proto::UpdateOrganizationMemberRoleRequest {
-                        slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        caller: Some(proto::UserSlug { slug: user.value() }),
-                        target: Some(proto::UserSlug { slug: target.value() }),
-                        role: role.to_proto(),
-                    };
+                let response = client
+                    .update_organization_member_role(tonic::Request::new(request))
+                    .await?
+                    .into_inner();
 
-                    let response = client
-                        .update_organization_member_role(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
+                let member =
+                    response.member.as_ref().map(OrganizationMemberInfo::from_proto).ok_or_else(
+                        || missing_response_field("member", "UpdateOrganizationMemberRoleResponse"),
+                    )?;
 
-                    let member = response
-                        .member
-                        .as_ref()
-                        .map(OrganizationMemberInfo::from_proto)
-                        .ok_or_else(|| {
-                        missing_response_field("member", "UpdateOrganizationMemberRoleResponse")
-                    })?;
-
-                    Ok(member)
-                },
-            ),
-        )
+                Ok(member)
+            }
+        })
         .await
     }
 
@@ -611,39 +519,30 @@ impl LedgerClient {
         page_size: u32,
         page_token: Option<Vec<u8>>,
     ) -> Result<(Vec<TeamInfo>, Option<Vec<u8>>)> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("list_organization_teams", || {
+            let pool = pool.clone();
+            let page_token = page_token.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "list_organization_teams",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "list_organization_teams",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::ListOrganizationTeamsRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                    page_token: page_token.clone(),
+                    page_size,
+                };
 
-                    let request = proto::ListOrganizationTeamsRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                        page_token: page_token.clone(),
-                        page_size,
-                    };
+                let response = client
+                    .list_organization_teams(tonic::Request::new(request))
+                    .await?
+                    .into_inner();
 
-                    let response = client
-                        .list_organization_teams(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
+                let teams = response.teams.iter().map(TeamInfo::from_proto).collect();
 
-                    let teams = response.teams.iter().map(TeamInfo::from_proto).collect();
-
-                    Ok((teams, response.next_page_token))
-                },
-            ),
-        )
+                Ok((teams, response.next_page_token))
+            }
+        })
         .await
     }
 
@@ -657,41 +556,34 @@ impl LedgerClient {
         name: &str,
         caller: UserSlug,
     ) -> Result<TeamInfo> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
         let name = name.to_string();
 
-        self.with_metrics(
-            "create_organization_team",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "create_organization_team",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+        self.call_with_retry("create_organization_team", || {
+            let pool = pool.clone();
 
-                    let request = proto::CreateOrganizationTeamRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        name: name.clone(),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+            let name = name.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-                    let response = client
-                        .create_organization_team(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
+                let request = proto::CreateOrganizationTeamRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    name: name.clone(),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    response
-                        .team
-                        .as_ref()
-                        .map(TeamInfo::from_proto)
-                        .ok_or_else(|| missing_response_field("team", "CreateTeamResponse"))
-                },
-            ),
-        )
+                let response = client
+                    .create_organization_team(tonic::Request::new(request))
+                    .await?
+                    .into_inner();
+
+                response
+                    .team
+                    .as_ref()
+                    .map(TeamInfo::from_proto)
+                    .ok_or_else(|| missing_response_field("team", "CreateTeamResponse"))
+            }
+        })
         .await
     }
 
@@ -705,34 +597,23 @@ impl LedgerClient {
         caller: UserSlug,
         move_members_to: Option<TeamSlug>,
     ) -> Result<()> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("delete_organization_team", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "delete_organization_team",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "delete_organization_team",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::DeleteOrganizationTeamRequest {
+                    slug: Some(proto::TeamSlug { slug: team.value() }),
+                    move_members_to: move_members_to.map(|s| proto::TeamSlug { slug: s.value() }),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::DeleteOrganizationTeamRequest {
-                        slug: Some(proto::TeamSlug { slug: team.value() }),
-                        move_members_to: move_members_to
-                            .map(|s| proto::TeamSlug { slug: s.value() }),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                client.delete_organization_team(tonic::Request::new(request)).await?;
 
-                    client.delete_organization_team(tonic::Request::new(request)).await?;
-
-                    Ok(())
-                },
-            ),
-        )
+                Ok(())
+            }
+        })
         .await
     }
 
@@ -745,41 +626,34 @@ impl LedgerClient {
         caller: UserSlug,
         name: Option<&str>,
     ) -> Result<TeamInfo> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
         let name = name.map(|s| s.to_string());
 
-        self.with_metrics(
-            "update_organization_team",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "update_organization_team",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+        self.call_with_retry("update_organization_team", || {
+            let pool = pool.clone();
 
-                    let request = proto::UpdateOrganizationTeamRequest {
-                        slug: Some(proto::TeamSlug { slug: team.value() }),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                        name: name.clone(),
-                    };
+            let name = name.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-                    let response = client
-                        .update_organization_team(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
+                let request = proto::UpdateOrganizationTeamRequest {
+                    slug: Some(proto::TeamSlug { slug: team.value() }),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                    name: name.clone(),
+                };
 
-                    response
-                        .team
-                        .as_ref()
-                        .map(TeamInfo::from_proto)
-                        .ok_or_else(|| missing_response_field("team", "UpdateTeamResponse"))
-                },
-            ),
-        )
+                let response = client
+                    .update_organization_team(tonic::Request::new(request))
+                    .await?
+                    .into_inner();
+
+                response
+                    .team
+                    .as_ref()
+                    .map(TeamInfo::from_proto)
+                    .ok_or_else(|| missing_response_field("team", "UpdateTeamResponse"))
+            }
+        })
         .await
     }
 
@@ -792,37 +666,27 @@ impl LedgerClient {
         team: TeamSlug,
         caller: UserSlug,
     ) -> Result<TeamInfo> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("get_organization_team", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "get_organization_team",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "get_organization_team",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::GetOrganizationTeamRequest {
+                    slug: Some(proto::TeamSlug { slug: team.value() }),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::GetOrganizationTeamRequest {
-                        slug: Some(proto::TeamSlug { slug: team.value() }),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.get_organization_team(tonic::Request::new(request)).await?.into_inner();
 
-                    let response = client
-                        .get_organization_team(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
-
-                    response.team.as_ref().map(TeamInfo::from_proto).ok_or_else(|| {
-                        missing_response_field("team", "GetOrganizationTeamResponse")
-                    })
-                },
-            ),
-        )
+                response
+                    .team
+                    .as_ref()
+                    .map(TeamInfo::from_proto)
+                    .ok_or_else(|| missing_response_field("team", "GetOrganizationTeamResponse"))
+            }
+        })
         .await
     }
 
@@ -836,39 +700,29 @@ impl LedgerClient {
         role: TeamMemberRole,
         caller: UserSlug,
     ) -> Result<TeamInfo> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("add_team_member", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "add_team_member",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "add_team_member",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::AddTeamMemberRequest {
+                    team: Some(proto::TeamSlug { slug: team.value() }),
+                    user: Some(proto::UserSlug { slug: user.value() }),
+                    role: role.to_proto().into(),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::AddTeamMemberRequest {
-                        team: Some(proto::TeamSlug { slug: team.value() }),
-                        user: Some(proto::UserSlug { slug: user.value() }),
-                        role: role.to_proto().into(),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.add_team_member(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.add_team_member(tonic::Request::new(request)).await?.into_inner();
-
-                    response
-                        .team
-                        .as_ref()
-                        .map(TeamInfo::from_proto)
-                        .ok_or_else(|| missing_response_field("team", "AddTeamMemberResponse"))
-                },
-            ),
-        )
+                response
+                    .team
+                    .as_ref()
+                    .map(TeamInfo::from_proto)
+                    .ok_or_else(|| missing_response_field("team", "AddTeamMemberResponse"))
+            }
+        })
         .await
     }
 
@@ -879,32 +733,22 @@ impl LedgerClient {
         user: UserSlug,
         caller: UserSlug,
     ) -> Result<()> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("remove_team_member", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "remove_team_member",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "remove_team_member",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::RemoveTeamMemberRequest {
+                    team: Some(proto::TeamSlug { slug: team.value() }),
+                    user: Some(proto::UserSlug { slug: user.value() }),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::RemoveTeamMemberRequest {
-                        team: Some(proto::TeamSlug { slug: team.value() }),
-                        user: Some(proto::UserSlug { slug: user.value() }),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
-
-                    client.remove_team_member(tonic::Request::new(request)).await?;
-                    Ok(())
-                },
-            ),
-        )
+                client.remove_team_member(tonic::Request::new(request)).await?;
+                Ok(())
+            }
+        })
         .await
     }
 
@@ -923,39 +767,31 @@ impl LedgerClient {
         role: TeamMemberRole,
         caller: UserSlug,
     ) -> Result<TeamInfo> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("update_team_member_role", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "update_team_member_role",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "update_team_member_role",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::UpdateTeamMemberRoleRequest {
+                    team: Some(proto::TeamSlug { slug: team.value() }),
+                    user: Some(proto::UserSlug { slug: user.value() }),
+                    role: role.to_proto().into(),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::UpdateTeamMemberRoleRequest {
-                        team: Some(proto::TeamSlug { slug: team.value() }),
-                        user: Some(proto::UserSlug { slug: user.value() }),
-                        role: role.to_proto().into(),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response = client
+                    .update_team_member_role(tonic::Request::new(request))
+                    .await?
+                    .into_inner();
 
-                    let response = client
-                        .update_team_member_role(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
-
-                    response.team.as_ref().map(TeamInfo::from_proto).ok_or_else(|| {
-                        missing_response_field("team", "UpdateTeamMemberRoleResponse")
-                    })
-                },
-            ),
-        )
+                response
+                    .team
+                    .as_ref()
+                    .map(TeamInfo::from_proto)
+                    .ok_or_else(|| missing_response_field("team", "UpdateTeamMemberRoleResponse"))
+            }
+        })
         .await
     }
 
@@ -988,46 +824,34 @@ impl LedgerClient {
         acknowledge_residency_downgrade: bool,
         user: UserSlug,
     ) -> Result<MigrationInfo> {
-        self.check_shutdown(None)?;
-
         let proto_target: proto::Region = target_region.into();
         let target_i32: i32 = proto_target.into();
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("migrate_organization", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_organization_client);
 
-        self.with_metrics(
-            "migrate_organization",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "migrate_organization",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_organization_client);
+                let request = proto::MigrateOrganizationRequest {
+                    slug: Some(proto::OrganizationSlug { slug: slug.value() }),
+                    target_region: target_i32,
+                    acknowledge_residency_downgrade,
+                    caller: Some(proto::UserSlug { slug: user.value() }),
+                };
 
-                    let request = proto::MigrateOrganizationRequest {
-                        slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                        target_region: target_i32,
-                        acknowledge_residency_downgrade,
-                        caller: Some(proto::UserSlug { slug: user.value() }),
-                    };
+                let response =
+                    client.migrate_organization(tonic::Request::new(request)).await?.into_inner();
 
-                    let response = client
-                        .migrate_organization(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
-
-                    Ok(MigrationInfo {
-                        slug: OrganizationSlug::new(response.slug.map_or(0, |s| s.slug)),
-                        source_region: region_from_proto_i32(response.source_region)
-                            .unwrap_or(Region::GLOBAL),
-                        target_region: region_from_proto_i32(response.target_region)
-                            .unwrap_or(target_region),
-                        status: OrganizationStatus::from_proto(response.status),
-                    })
-                },
-            ),
-        )
+                Ok(MigrationInfo {
+                    slug: OrganizationSlug::new(response.slug.map_or(0, |s| s.slug)),
+                    source_region: region_from_proto_i32(response.source_region)
+                        .unwrap_or(Region::GLOBAL),
+                    target_region: region_from_proto_i32(response.target_region)
+                        .unwrap_or(target_region),
+                    status: OrganizationStatus::from_proto(response.status),
+                })
+            }
+        })
         .await
     }
 
@@ -1058,45 +882,33 @@ impl LedgerClient {
         user: UserSlug,
         target_region: Region,
     ) -> Result<UserMigrationInfo> {
-        self.check_shutdown(None)?;
-
         let proto_target: proto::Region = target_region.into();
         let target_i32: i32 = proto_target.into();
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("migrate_user_region", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_user_client);
 
-        self.with_metrics(
-            "migrate_user_region",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "migrate_user_region",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_user_client);
+                let request = proto::MigrateUserRegionRequest {
+                    slug: Some(proto::UserSlug { slug: user.value() }),
+                    target_region: target_i32,
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::MigrateUserRegionRequest {
-                        slug: Some(proto::UserSlug { slug: user.value() }),
-                        target_region: target_i32,
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.migrate_user_region(tonic::Request::new(request)).await?.into_inner();
 
-                    let response = client
-                        .migrate_user_region(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
-
-                    Ok(UserMigrationInfo {
-                        slug: UserSlug::new(response.slug.map_or(0, |s| s.slug)),
-                        source_region: region_from_proto_i32(response.source_region)
-                            .unwrap_or(Region::GLOBAL),
-                        target_region: region_from_proto_i32(response.target_region)
-                            .unwrap_or(target_region),
-                        directory_status: response.directory_status,
-                    })
-                },
-            ),
-        )
+                Ok(UserMigrationInfo {
+                    slug: UserSlug::new(response.slug.map_or(0, |s| s.slug)),
+                    source_region: region_from_proto_i32(response.source_region)
+                        .unwrap_or(Region::GLOBAL),
+                    target_region: region_from_proto_i32(response.target_region)
+                        .unwrap_or(target_region),
+                    directory_status: response.directory_status,
+                })
+            }
+        })
         .await
     }
 
@@ -1127,36 +939,25 @@ impl LedgerClient {
         caller: UserSlug,
         region: Region,
     ) -> Result<UserSlug> {
-        self.check_shutdown(None)?;
-
         let proto_region: proto::Region = region.into();
         let region_i32: i32 = proto_region.into();
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("erase_user", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_user_client);
 
-        self.with_metrics(
-            "erase_user",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "erase_user",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_user_client);
+                let request = proto::EraseUserRequest {
+                    user: Some(proto::UserSlug { slug: user.value() }),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                    region: region_i32,
+                };
 
-                    let request = proto::EraseUserRequest {
-                        user: Some(proto::UserSlug { slug: user.value() }),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                        region: region_i32,
-                    };
+                let response = client.erase_user(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.erase_user(tonic::Request::new(request)).await?.into_inner();
-
-                    Ok(UserSlug::new(response.user.map_or(0, |u| u.slug)))
-                },
-            ),
-        )
+                Ok(UserSlug::new(response.user.map_or(0, |u| u.slug)))
+            }
+        })
         .await
     }
 }

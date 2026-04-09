@@ -21,10 +21,11 @@ use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
 use snafu::{ResultExt, Snafu};
 
 use crate::{
-    binary_keys::InternCategory,
+    binary_keys::{InternCategory, encode_relationship_local_key, split_typed_id},
     bucket::{BucketRootBuilder, NUM_BUCKETS, VaultCommitment},
     indexes::{IndexError, IndexManager},
     keys::encode_storage_key,
+    relationship_index::RelationshipIndex,
 };
 
 /// Errors returned by [`StateLayer`] operations.
@@ -119,6 +120,8 @@ pub struct StateLayer<B: StorageBackend> {
     vault_commitments: RwLock<HashMap<VaultId, VaultCommitment>>,
     /// Cached per-vault string dictionaries for relationship storage.
     vault_dictionaries: RwLock<HashMap<VaultId, crate::dictionary::VaultDictionary>>,
+    /// In-memory hash index for O(1) relationship existence checks.
+    relationship_index: Arc<RelationshipIndex>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -129,6 +132,7 @@ impl<B: StorageBackend> StateLayer<B> {
             db,
             vault_commitments: RwLock::new(HashMap::new()),
             vault_dictionaries: RwLock::new(HashMap::new()),
+            relationship_index: Arc::new(RelationshipIndex::new()),
         }
     }
 
@@ -423,6 +427,16 @@ impl<B: StorageBackend> StateLayer<B> {
                             &mut *txn, dict, vault, resource, relation, subject,
                         )
                         .context(IndexSnafu)?;
+
+                        // Update hash index only if the vault is already loaded.
+                        // If not loaded, the lazy-load on next exists() picks up the new entry.
+                        if self.relationship_index.is_vault_loaded(vault)
+                            && let Some(hash) =
+                                Self::relationship_hash_from_dict(dict, resource, relation, subject)
+                        {
+                            self.relationship_index.insert(vault, hash);
+                        }
+
                         WriteStatus::Created
                     } else {
                         WriteStatus::AlreadyExists
@@ -444,6 +458,15 @@ impl<B: StorageBackend> StateLayer<B> {
                             &mut *txn, dict, vault, resource, relation, subject,
                         )
                         .context(IndexSnafu)?;
+
+                        // Remove from hash index only if the vault is already loaded.
+                        if self.relationship_index.is_vault_loaded(vault)
+                            && let Some(hash) =
+                                Self::relationship_hash_from_dict(dict, resource, relation, subject)
+                        {
+                            self.relationship_index.remove(vault, hash);
+                        }
+
                         WriteStatus::Deleted
                     } else {
                         WriteStatus::NotFound
@@ -562,9 +585,10 @@ impl<B: StorageBackend> StateLayer<B> {
 
         txn.commit().context(StoreSnafu)?;
 
-        // Reset commitment and dictionary caches for this vault
+        // Reset commitment, dictionary, and relationship index caches for this vault
         self.vault_commitments.write().remove(&vault);
         self.vault_dictionaries.write().remove(&vault);
+        self.relationship_index.evict_vault(vault);
 
         Ok(())
     }
@@ -590,6 +614,10 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Checks if a relationship exists.
     ///
+    /// Attempts the in-memory hash index first for O(1) lookups. Falls back
+    /// to the B+ tree if the vault is not yet indexed or the dictionary
+    /// cannot resolve the triple's components.
+    ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the read transaction fails.
@@ -600,12 +628,113 @@ impl<B: StorageBackend> StateLayer<B> {
         relation: &str,
         subject: &str,
     ) -> Result<bool> {
+        // Try hash index first (O(1)).
+        if let Some(key_hash) = self.compute_relationship_hash(vault, resource, relation, subject) {
+            if let Some(result) = self.relationship_index.exists(vault, key_hash) {
+                return Ok(result);
+            }
+            // Vault not indexed — load it, then re-check.
+            self.load_vault_relationship_index(vault)?;
+            if let Some(result) = self.relationship_index.exists(vault, key_hash) {
+                return Ok(result);
+            }
+        }
+        // Fallback to B+ tree (dictionary strings unknown or load failed to index).
         let dict = self.get_dictionary(vault)?;
         let txn = self.db.read().context(StoreSnafu)?;
         crate::relationship::RelationshipStore::exists(
             &txn, &dict, vault, resource, relation, subject,
         )
         .context(RelationshipSnafu)
+    }
+
+    /// Computes the seahash of a relationship's binary key using the
+    /// dictionary cache. Returns `None` if any component string is
+    /// unknown in the dictionary (read-only lookup — no interning).
+    fn compute_relationship_hash(
+        &self,
+        vault: VaultId,
+        resource: &str,
+        relation: &str,
+        subject: &str,
+    ) -> Option<u64> {
+        let dict = self.get_dictionary(vault).ok()?;
+
+        let (res_type_str, res_local) = split_typed_id(resource).unwrap_or(("", resource));
+        let res_type = dict.get_id(InternCategory::ResourceType, res_type_str)?;
+        let res_id_bytes = res_local.as_bytes();
+
+        let rel_id = dict.get_id(InternCategory::Relation, relation)?;
+
+        let (subj_type_str, subj_local) = split_typed_id(subject).unwrap_or(("", subject));
+        let subj_type = dict.get_id(InternCategory::SubjectType, subj_type_str)?;
+        let subj_id_bytes = subj_local.as_bytes();
+
+        let local_key =
+            encode_relationship_local_key(res_type, res_id_bytes, rel_id, subj_type, subj_id_bytes);
+        Some(seahash::hash(&local_key))
+    }
+
+    /// Loads all relationships for a vault into the hash index.
+    ///
+    /// Iterates the Relationships table for the given vault prefix and
+    /// inserts the seahash of each local key into the index.
+    fn load_vault_relationship_index(&self, vault: VaultId) -> Result<()> {
+        let txn = self.db.read().context(StoreSnafu)?;
+        let vault_start = crate::keys::vault_prefix(vault);
+        let next_vault = VaultId::from(vault.value() + 1);
+        let vault_end = crate::keys::vault_prefix(next_vault);
+
+        let start_key = vault_start.to_vec();
+        let end_key = vault_end.to_vec();
+
+        for (key_bytes, _) in txn
+            .range::<tables::Relationships>(Some(&start_key), Some(&end_key))
+            .context(StoreSnafu)?
+        {
+            if key_bytes.len() < 9 {
+                continue;
+            }
+            // local_key starts after the 8-byte vault prefix + 1-byte bucket_id.
+            let local_key = &key_bytes[9..];
+            self.relationship_index.insert(vault, seahash::hash(local_key));
+        }
+
+        // Mark the vault as loaded even if it had zero relationships.
+        self.relationship_index.ensure_vault(vault);
+        Ok(())
+    }
+
+    /// Returns a reference to the in-memory relationship hash index.
+    pub fn relationship_index(&self) -> &Arc<RelationshipIndex> {
+        &self.relationship_index
+    }
+
+    /// Computes a relationship hash from an already-populated dictionary.
+    ///
+    /// Used in `apply_operations_in_txn` where the dictionary is guaranteed
+    /// to contain all component strings (the preceding create/delete interned
+    /// them). Returns `None` only if the dictionary is missing an entry, which
+    /// should not happen in practice.
+    fn relationship_hash_from_dict(
+        dict: &crate::dictionary::VaultDictionary,
+        resource: &str,
+        relation: &str,
+        subject: &str,
+    ) -> Option<u64> {
+        let (res_type_str, res_local) = split_typed_id(resource).unwrap_or(("", resource));
+        let res_type = dict.get_id(InternCategory::ResourceType, res_type_str)?;
+        let res_id_bytes = res_local.as_bytes();
+
+        let rel_id = dict.get_id(InternCategory::Relation, relation)?;
+
+        let (subj_type_str, subj_local) = split_typed_id(subject).unwrap_or(("", subject));
+        let subj_type = dict.get_id(InternCategory::SubjectType, subj_type_str)?;
+        let subj_id_bytes = subj_local.as_bytes();
+
+        let local_key =
+            encode_relationship_local_key(res_type, res_id_bytes, rel_id, subj_type, subj_id_bytes);
+        Some(seahash::hash(&local_key))
     }
 
     /// Computes state root for a vault, updating dirty bucket roots.
@@ -937,6 +1066,7 @@ impl<B: StorageBackend> Clone for StateLayer<B> {
             db: Arc::clone(&self.db),
             vault_commitments: RwLock::new(HashMap::new()), // Each clone starts fresh
             vault_dictionaries: RwLock::new(HashMap::new()), // Each clone starts fresh
+            relationship_index: Arc::clone(&self.relationship_index), // Shared across clones
         }
     }
 }

@@ -77,7 +77,8 @@ impl StorageBackend for InMemoryBackend {
     fn write_header(&self, header: &[u8]) -> Result<()> {
         if header.len() != HEADER_SIZE {
             return Err(Error::Corrupted {
-                reason: format!("Invalid header size: {} (expected {})", header.len(), HEADER_SIZE),
+                reason: format!("Invalid header size: {} (expected {})", header.len(), HEADER_SIZE)
+                    .into(),
             });
         }
 
@@ -100,7 +101,8 @@ impl StorageBackend for InMemoryBackend {
                     "Invalid page data size: {} (expected {})",
                     data.len(),
                     self.page_size
-                ),
+                )
+                .into(),
             });
         }
 

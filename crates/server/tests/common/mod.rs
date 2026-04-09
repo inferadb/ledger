@@ -4,11 +4,9 @@
 //!
 //! ## Cluster Types
 //!
-//! - `TestCluster`: Single-region cluster using the standard bootstrap flow. Best for testing Raft
-//!   consensus, membership changes, and basic operations.
-//!
-//! - `RegionTestCluster`: Multi-region cluster using `RaftManager`. Best for testing horizontal
-//!   scaling, region routing, and high-throughput.
+//! - `TestCluster`: Full-stack cluster using `bootstrap_node()`. Supports single-region (`new()`)
+//!   and multi-region (`with_data_regions()`) configurations. Includes gRPC server, saga
+//!   orchestrator, background jobs, and all production services.
 
 #![allow(
     dead_code,
@@ -37,14 +35,10 @@ pub fn allocate_ports(count: u16) -> u16 {
 }
 
 use inferadb_ledger_proto::proto::{JoinClusterRequest, admin_service_client::AdminServiceClient};
-use inferadb_ledger_raft::{
-    LedgerTypeConfig, RaftManager, RaftManagerConfig, RegionConfig, RegionGroup,
-};
-use inferadb_ledger_services::LedgerServer;
+use inferadb_ledger_raft::{ConsensusHandle, RaftManager, RegionConfig, RegionGroup};
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{FileBackend, crypto::InMemoryKeyManager};
 use inferadb_ledger_test_utils::TestDir;
-use openraft::Raft;
 use tokio::time::timeout;
 
 /// A test node in a cluster.
@@ -56,8 +50,8 @@ pub struct TestNode {
     pub id: u64,
     /// The gRPC address.
     pub addr: SocketAddr,
-    /// The GLOBAL Raft instance.
-    pub raft: Arc<Raft<LedgerTypeConfig>>,
+    /// The GLOBAL consensus handle.
+    pub handle: Arc<ConsensusHandle>,
     /// The GLOBAL state layer (internally thread-safe via inferadb-ledger-store MVCC).
     pub state: Arc<StateLayer<FileBackend>>,
     /// Multi-Raft manager for region routing and data region access.
@@ -75,23 +69,22 @@ pub struct TestNode {
 impl TestNode {
     /// Checks if this node is the current leader for the GLOBAL region.
     pub fn is_leader(&self) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader == Some(self.id)
+        self.handle.current_leader() == Some(self.id)
     }
 
     /// Returns the current leader ID for the GLOBAL region if known.
     pub fn current_leader(&self) -> Option<u64> {
-        self.raft.metrics().borrow().current_leader
+        self.handle.current_leader()
     }
 
     /// Returns the current term for the GLOBAL region.
     pub fn current_term(&self) -> u64 {
-        self.raft.metrics().borrow().current_term
+        self.handle.current_term()
     }
 
     /// Returns the last applied log index for the GLOBAL region.
     pub fn last_applied(&self) -> u64 {
-        self.raft.metrics().borrow().last_applied.map_or(0, |id| id.index)
+        self.handle.commit_index()
     }
 
     /// Returns the system (GLOBAL) region group.
@@ -111,9 +104,7 @@ impl TestNode {
 
     /// Checks if this node is leader for the system (GLOBAL) region.
     pub fn is_system_leader(&self) -> bool {
-        let region = self.system_region();
-        let metrics = region.raft().metrics().borrow().clone();
-        metrics.current_leader == Some(self.id)
+        self.handle.current_leader() == Some(self.id)
     }
 }
 
@@ -126,11 +117,11 @@ impl TestNode {
 /// CPU contention from parallel test execution.
 fn test_rate_limit_config() -> inferadb_ledger_types::config::RateLimitConfig {
     inferadb_ledger_types::config::RateLimitConfig::builder()
-        .client_burst(100_u64)
-        .client_rate(1.0)
-        .organization_burst(1000_u64)
-        .organization_rate(500.0)
-        .backpressure_threshold(1000_u64)
+        .client_burst(10_000_u64)
+        .client_rate(10_000.0)
+        .organization_burst(10_000_u64)
+        .organization_rate(10_000.0)
+        .backpressure_threshold(10_000_u64)
         .build()
         .expect("valid rate limit config")
 }
@@ -163,7 +154,7 @@ impl TestCluster {
     /// the AdminService's join_cluster RPC.
     /// All nodes use ephemeral ports on localhost.
     pub async fn new(size: usize) -> Self {
-        Self::with_data_regions(size, 1).await
+        Self::build(size, 1, true).await
     }
 
     /// Creates a new test cluster with the given number of nodes and data regions.
@@ -171,6 +162,38 @@ impl TestCluster {
     /// Each node gets a full production bootstrap (saga, blinding key, background
     /// jobs) plus `num_data_regions` data regions in addition to the GLOBAL region.
     pub async fn with_data_regions(size: usize, num_data_regions: usize) -> Self {
+        Self::build(size, num_data_regions, true).await
+    }
+
+    /// Creates a cluster without the email blinding key configured.
+    ///
+    /// Used to test that onboarding RPCs return `FAILED_PRECONDITION` when
+    /// the server is started without a blinding key.
+    pub async fn without_blinding_key(size: usize, num_data_regions: usize) -> Self {
+        Self::build(size, num_data_regions, false).await
+    }
+
+    /// Creates a cluster with a custom rate limit config.
+    ///
+    /// Allows tests to override the default high-burst test config (burst=10,000)
+    /// with a lower config to exercise rate limiting behavior.
+    pub async fn with_rate_limit(
+        size: usize,
+        rate_limit: inferadb_ledger_types::config::RateLimitConfig,
+    ) -> Self {
+        Self::build_inner(size, 1, true, Some(rate_limit)).await
+    }
+
+    async fn build(size: usize, num_data_regions: usize, include_blinding_key: bool) -> Self {
+        Self::build_inner(size, num_data_regions, include_blinding_key, None).await
+    }
+
+    async fn build_inner(
+        size: usize,
+        num_data_regions: usize,
+        include_blinding_key: bool,
+        rate_limit_override: Option<inferadb_ledger_types::config::RateLimitConfig>,
+    ) -> Self {
         assert!(size >= 1, "cluster must have at least 1 node");
         assert!(num_data_regions >= 1, "cluster must have at least 1 data region");
 
@@ -182,13 +205,19 @@ impl TestCluster {
         let key_manager: Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager> =
             Arc::new(InMemoryKeyManager::generate_for_regions(&inferadb_ledger_types::ALL_REGIONS));
 
-        // Step 1: Start the bootstrap node as a SINGLE-NODE cluster (no peers)
-        // This allows it to immediately become leader, then we dynamically add nodes
-        let addr: SocketAddr = format!("127.0.0.1:{}", base_port).parse().unwrap();
+        // Step 1: Start the bootstrap node with cluster_id pre-written so it
+        // takes the restart path (immediate startup). It becomes leader, then
+        // we dynamically add nodes.
+        let addr: SocketAddr = format!("127.0.0.1:{base_port}").parse().unwrap();
         let temp_dir = TestDir::new();
         let data_dir = temp_dir.path().to_path_buf();
 
-        // Bootstrap node: no discovery configured → no peers found → bootstraps.
+        // Bootstrap node: write cluster_id so bootstrap_node takes the restart
+        // path (starts background jobs, marks ready) instead of the fresh path
+        // (which blocks waiting for InitCluster RPC).
+        inferadb_ledger_server::cluster_id::write_cluster_id(&data_dir, 1)
+            .expect("write cluster_id for bootstrap node");
+
         // Uses auto-generated Snowflake ID for realistic testing.
         let backup_config = inferadb_ledger_types::config::BackupConfig::builder()
             .destination(data_dir.join("backups").to_string_lossy().to_string())
@@ -199,18 +228,20 @@ impl TestCluster {
             listen_addr: addr,
             metrics_addr: None,
             data_dir: Some(data_dir.clone()),
-            single: true, // Single-node mode for immediate bootstrap
             backup: Some(backup_config),
             raft: Some(test_raft_config()),
             // Fast saga poll for auto-bootstrap integration tests (default 30s too slow)
             saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
             token_maintenance_interval_secs: 3, // Fast maintenance for integration tests
-            // Low rate limits for fast integration testing of rate limit behavior
-            rate_limit: Some(test_rate_limit_config()),
+            // High rate limits by default so most tests aren't affected; overridden
+            // by rate_limit_override for tests that exercise rate limiting behavior.
+            rate_limit: Some(rate_limit_override.clone().unwrap_or_else(test_rate_limit_config)),
             // Enable onboarding RPCs with a fixed test blinding key (32 bytes hex-encoded)
-            email_blinding_key: Some(
-                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
-            ),
+            email_blinding_key: if include_blinding_key {
+                Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string())
+            } else {
+                None
+            },
             ..inferadb_ledger_server::config::Config::default()
         };
 
@@ -230,12 +261,12 @@ impl TestCluster {
         // Mark node as ready (mirrors main.rs post-bootstrap behavior)
         health_state.mark_ready();
 
-        // Get the auto-generated Snowflake ID from Raft metrics
-        let node_id = bootstrapped.raft.metrics().borrow().id;
+        // Get the auto-generated Snowflake ID from the consensus handle
+        let node_id = bootstrapped.handle.node_id();
 
         // Server is already running and accepting TCP connections from bootstrap_node().
         // Extract fields before moving server_handle into the spawned task.
-        let raft_clone = bootstrapped.raft.clone();
+        let handle_clone = bootstrapped.handle.clone();
         let state_clone = bootstrapped.state.clone();
         let manager_clone = bootstrapped.manager.clone();
         let bg_server_handle = bootstrapped.server_handle;
@@ -243,12 +274,12 @@ impl TestCluster {
             let _ = bg_server_handle.await;
         });
 
-        let leader_raft = raft_clone.clone();
+        let leader_handle = handle_clone.clone();
         let leader_addr = addr;
         nodes.push(TestNode {
             id: node_id,
             addr,
-            raft: raft_clone,
+            handle: handle_clone,
             state: state_clone,
             manager: manager_clone.clone(),
             _temp_dir: temp_dir,
@@ -257,24 +288,20 @@ impl TestCluster {
         });
 
         // Wait for the bootstrap node to become GLOBAL leader first.
-        // With test Raft config (150-300ms election timeout on localhost), 10 seconds
-        // is ~30 election cycles — generous budget for parallel test runs under CPU contention.
+        // With test config (300-600ms election timeout on localhost), 10 seconds
+        // is generous budget for parallel test runs under CPU contention.
         let start = tokio::time::Instant::now();
         let timeout_duration = Duration::from_secs(10);
         while start.elapsed() < timeout_duration {
-            let metrics = leader_raft.metrics().borrow().clone();
-            if metrics.current_leader == Some(node_id) {
+            if leader_handle.current_leader() == Some(node_id) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
         // Verify GLOBAL leader election succeeded
-        {
-            let metrics = leader_raft.metrics().borrow().clone();
-            if metrics.current_leader != Some(node_id) {
-                panic!("Bootstrap node failed to become GLOBAL leader within timeout");
-            }
+        if leader_handle.current_leader() != Some(node_id) {
+            panic!("Bootstrap node failed to become GLOBAL leader within timeout");
         }
 
         // Start data regions AFTER GLOBAL leader election so the two don't interfere.
@@ -287,6 +314,7 @@ impl TestCluster {
                 enable_background_jobs: true,
                 batch_writer_config: None,
                 event_writer: None,
+                events_config: None,
             };
             manager_clone
                 .start_data_region(data_region_config)
@@ -300,7 +328,7 @@ impl TestCluster {
             let mut all_ready = true;
             for &dr in data_regions.iter().take(num_data_regions) {
                 if let Ok(rg) = manager_clone.get_region_group(dr) {
-                    if rg.raft().metrics().borrow().current_leader.is_none() {
+                    if rg.handle().current_leader().is_none() {
                         all_ready = false;
                         break;
                     }
@@ -320,11 +348,14 @@ impl TestCluster {
             let port = base_port + i as u16;
             let temp_dir = TestDir::new();
             let data_dir = temp_dir.path().to_path_buf();
-            let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+            let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
 
-            // Joining node: use join mode (bootstrap_expect=0) for dynamic node addition.
-            // This bypasses bootstrap entirely - no Raft cluster initialized, waiting
-            // to be added via AdminService's JoinCluster RPC.
+            // Joining node: write cluster_id so bootstrap_node takes the restart
+            // path. The node starts its own system region, then gets incorporated
+            // into the cluster via JoinCluster RPC below.
+            inferadb_ledger_server::cluster_id::write_cluster_id(&data_dir, 1)
+                .expect("write cluster_id for joining node");
+
             // Uses auto-generated Snowflake ID for realistic testing.
             let backup_config = inferadb_ledger_types::config::BackupConfig::builder()
                 .destination(data_dir.join("backups").to_string_lossy().to_string())
@@ -335,21 +366,18 @@ impl TestCluster {
                 listen_addr: addr,
                 metrics_addr: None,
                 data_dir: Some(data_dir.clone()),
-                join: true, // Join mode: wait to be added to existing cluster
                 backup: Some(backup_config),
                 raft: Some(test_raft_config()),
                 saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
                 token_maintenance_interval_secs: 3, // Fast maintenance for integration tests
-                rate_limit: Some(test_rate_limit_config()),
+                rate_limit: Some(
+                    rate_limit_override.clone().unwrap_or_else(test_rate_limit_config),
+                ),
                 email_blinding_key: Some(
                     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
                 ),
                 ..inferadb_ledger_server::config::Config::default()
             };
-
-            // Create the node - with bootstrap_expect=0, it won't initialize its own
-            // Raft cluster. It just starts the gRPC server and waits to be added via
-            // AdminService's JoinCluster RPC.
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
             let health_state = inferadb_ledger_raft::HealthState::new();
@@ -366,12 +394,12 @@ impl TestCluster {
             // Mark node as ready (mirrors main.rs post-bootstrap behavior)
             health_state.mark_ready();
 
-            // Get the auto-generated Snowflake ID from Raft metrics
-            let node_id = bootstrapped.raft.metrics().borrow().id;
+            // Get the auto-generated Snowflake ID from the consensus handle
+            let node_id = bootstrapped.handle.node_id();
 
             // Server is already running and accepting TCP connections from bootstrap_node().
             // Extract fields before moving server_handle into the spawned task.
-            let raft_clone = bootstrapped.raft.clone();
+            let handle_clone = bootstrapped.handle.clone();
             let state_clone = bootstrapped.state.clone();
             let manager_clone = bootstrapped.manager.clone();
             let bg_server_handle = bootstrapped.server_handle;
@@ -394,7 +422,7 @@ impl TestCluster {
                 let current_leader_addr = nodes
                     .iter()
                     .find_map(|n| {
-                        let leader_id = n.raft.metrics().borrow().current_leader?;
+                        let leader_id = n.handle.current_leader()?;
                         nodes.iter().find(|n2| n2.id == leader_id).map(|n2| n2.addr)
                     })
                     .unwrap_or(leader_addr);
@@ -445,11 +473,11 @@ impl TestCluster {
                 );
             }
 
-            let new_raft = raft_clone.clone();
+            let new_handle = handle_clone.clone();
             nodes.push(TestNode {
                 id: node_id,
                 addr,
-                raft: raft_clone,
+                handle: handle_clone,
                 state: state_clone,
                 manager: manager_clone,
                 _temp_dir: temp_dir,
@@ -457,38 +485,60 @@ impl TestCluster {
                 _shutdown_tx: shutdown_tx,
             });
 
-            // Wait for the new node to see itself as a voter and sync with the cluster
-            // This is critical to ensure the membership change is fully committed
-            // before we try to add another node
+            // Wait for the new node to see a leader after joining.
             let sync_start = tokio::time::Instant::now();
             let sync_timeout = Duration::from_secs(10);
             while sync_start.elapsed() < sync_timeout {
-                let metrics = new_raft.metrics().borrow().clone();
-                let membership = metrics.membership_config.membership();
-                let is_voter = membership.voter_ids().any(|id| id == node_id);
-
-                if is_voter && metrics.current_leader.is_some() {
+                if new_handle.current_leader().is_some() {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
-            // CRITICAL: Wait for the LEADER's membership to exit joint consensus.
-            // OpenRaft serializes membership changes - we cannot add the next node
-            // until the current change is fully committed on the leader.
-            // A joint config has len() > 1, uniform config has len() == 1.
+            // Wait for the membership change to fully commit before adding
+            // the next node. Raft allows only one membership change at a time.
+            // Poll until the new node appears as a voter in the leader's state.
+            let target_node = inferadb_ledger_consensus::types::NodeId(node_id);
             let stabilize_start = tokio::time::Instant::now();
             let stabilize_timeout = Duration::from_secs(10);
             while stabilize_start.elapsed() < stabilize_timeout {
-                let leader_metrics = leader_raft.metrics().borrow().clone();
-                let leader_membership = leader_metrics.membership_config.membership();
-                let joint_config = leader_membership.get_joint_config();
-
-                // Exit when leader shows single (uniform) config - change is complete
-                if joint_config.len() == 1 {
+                let state = leader_handle.shard_state();
+                if state.voters.contains(&target_node) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            // Ensure full-mesh GLOBAL transport between the new node and ALL
+            // existing nodes (not just the bootstrap node). Without this, after
+            // leader removal the remaining nodes can't communicate for elections.
+            let joining_manager_ref = nodes.last().unwrap().manager.clone();
+            if let Ok(joining_global) = joining_manager_ref.system_region()
+                && let Some(jt) = joining_global.consensus_transport()
+            {
+                for existing in &nodes[..nodes.len() - 1] {
+                    // Skip bootstrap node — already connected via JoinCluster RPC.
+                    if existing.id == nodes[0].id {
+                        continue;
+                    }
+                    let addr_str = existing.addr.to_string();
+                    if let Ok(ep) =
+                        tonic::transport::Channel::from_shared(format!("http://{addr_str}"))
+                    {
+                        jt.set_peer(existing.id, ep.connect_lazy());
+                    }
+                    // Reverse direction: existing node → joining node.
+                    if let Ok(existing_global) = existing.manager.system_region()
+                        && let Some(et) = existing_global.consensus_transport()
+                    {
+                        let join_addr_str = addr.to_string();
+                        if let Ok(ep) = tonic::transport::Channel::from_shared(format!(
+                            "http://{join_addr_str}"
+                        )) {
+                            et.set_peer(node_id, ep.connect_lazy());
+                        }
+                    }
+                }
             }
 
             // Start data regions on the joining node WITHOUT bootstrap (bootstrap: false).
@@ -505,6 +555,7 @@ impl TestCluster {
                     enable_background_jobs: true,
                     batch_writer_config: None,
                     event_writer: None,
+                    events_config: None,
                 };
                 joining_manager.start_data_region(data_region_config).await.unwrap_or_else(|e| {
                     panic!(
@@ -517,36 +568,40 @@ impl TestCluster {
                 // via Raft membership change (same pattern as GLOBAL cluster join).
                 let bootstrap_manager = &nodes[0].manager;
                 if let Ok(bootstrap_rg) = bootstrap_manager.get_region_group(data_region) {
-                    let bootstrap_raft = bootstrap_rg.raft();
+                    let bootstrap_handle = bootstrap_rg.handle();
+
+                    // Register bidirectional transport channels so the consensus
+                    // engines can replicate between the bootstrap node and the
+                    // joining node for this data region.
+                    let joining_addr_str = addr.to_string();
+                    let bootstrap_addr_str = nodes[0].addr.to_string();
+                    if let Some(bt) = bootstrap_rg.consensus_transport()
+                        && let Ok(ep) = tonic::transport::Channel::from_shared(format!(
+                            "http://{joining_addr_str}"
+                        ))
+                    {
+                        bt.set_peer(joining_node_id, ep.connect_lazy());
+                    }
+                    if let Ok(joining_rg) = joining_manager.get_region_group(data_region)
+                        && let Some(jt) = joining_rg.consensus_transport()
+                        && let Ok(ep) = tonic::transport::Channel::from_shared(format!(
+                            "http://{bootstrap_addr_str}"
+                        ))
+                    {
+                        jt.set_peer(nodes[0].id, ep.connect_lazy());
+                    }
 
                     // Step 1: Add as learner first (required before voter promotion)
-                    let _ = bootstrap_raft
-                        .add_learner(
-                            joining_node_id,
-                            openraft::BasicNode::new(addr.to_string()),
-                            true,
-                        )
-                        .await;
+                    let _ = bootstrap_handle.add_learner(joining_node_id, true).await;
 
                     // Step 2: Wait for learner to sync before promoting to voter
                     tokio::time::sleep(Duration::from_millis(500)).await;
 
-                    // Step 3: Promote to voter via change_membership
-                    let metrics = bootstrap_raft.metrics().borrow().clone();
-                    let mut new_members: std::collections::BTreeSet<u64> =
-                        metrics.membership_config.membership().voter_ids().collect();
-                    new_members.insert(joining_node_id);
-                    let _ = bootstrap_raft.change_membership(new_members, false).await;
+                    // Step 3: Promote to voter
+                    let _ = bootstrap_handle.promote_voter(joining_node_id).await;
 
                     // Step 4: Wait for membership to stabilize
-                    let stabilize_start = tokio::time::Instant::now();
-                    while stabilize_start.elapsed() < Duration::from_secs(5) {
-                        let m = bootstrap_raft.metrics().borrow().clone();
-                        if m.membership_config.membership().get_joint_config().len() == 1 {
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
 
@@ -557,7 +612,7 @@ impl TestCluster {
                 let mut all_ready = true;
                 for &dr in data_regions.iter().take(num_data_regions) {
                     if let Ok(rg) = joining_manager.get_region_group(dr) {
-                        if rg.raft().metrics().borrow().current_leader.is_none() {
+                        if rg.handle().current_leader().is_none() {
                             all_ready = false;
                             break;
                         }
@@ -683,8 +738,7 @@ impl TestCluster {
                     let mut indices = Vec::new();
                     for node in &self.nodes {
                         if let Some(rg) = node.region_group(dr) {
-                            let metrics = rg.raft().metrics().borrow().clone();
-                            indices.push(metrics.last_applied.map_or(0, |id| id.index));
+                            indices.push(rg.handle().commit_index());
                         }
                     }
                     if indices.len() < self.nodes.len()
@@ -737,8 +791,7 @@ impl TestCluster {
             if let Some(node) = self.nodes.first() {
                 for region in node.regions() {
                     if let Some(region_group) = node.region_group(region) {
-                        let metrics = region_group.raft().metrics().borrow().clone();
-                        if metrics.current_leader.is_none() {
+                        if region_group.handle().current_leader().is_none() {
                             all_ready = false;
                             break;
                         }
@@ -830,293 +883,6 @@ pub async fn create_organization_client(
         endpoint,
     )
     .await
-}
-
-// ============================================================================
-// Multi-Region Test Infrastructure
-// ============================================================================
-
-/// A test node with multiple regions.
-///
-/// Uses `RaftManager` to manage independent Raft groups per region,
-/// enabling horizontal scaling and parallel consensus.
-pub struct RegionTestNode {
-    /// The node ID.
-    pub id: u64,
-    /// The gRPC address.
-    pub addr: SocketAddr,
-    /// The multi-raft manager containing all regions.
-    pub manager: Arc<RaftManager>,
-    /// Temporary directory for node data.
-    _temp_dir: TestDir,
-    /// Server task handle for cleanup.
-    _server_handle: tokio::task::JoinHandle<()>,
-}
-
-impl RegionTestNode {
-    /// Returns the system region (Global).
-    pub fn system_region(&self) -> Arc<RegionGroup> {
-        self.manager.system_region().expect("system region exists")
-    }
-
-    /// Returns a region group by region.
-    pub fn region_group(&self, region: inferadb_ledger_types::Region) -> Option<Arc<RegionGroup>> {
-        self.manager.get_region_group(region).ok()
-    }
-
-    /// Returns all region IDs.
-    pub fn regions(&self) -> Vec<inferadb_ledger_types::Region> {
-        self.manager.list_regions()
-    }
-
-    /// Checks if this node is leader for the system region.
-    pub fn is_system_leader(&self) -> bool {
-        let region = self.system_region();
-        let metrics = region.raft().metrics().borrow().clone();
-        metrics.current_leader == Some(self.id)
-    }
-
-    /// Returns leader ID for the system region.
-    pub fn system_leader(&self) -> Option<u64> {
-        let region = self.system_region();
-        region.raft().metrics().borrow().current_leader
-    }
-}
-
-/// A multi-region test cluster.
-///
-/// Each node runs multiple independent Raft groups (regions), allowing
-/// horizontal scaling of both reads and writes.
-///
-/// ## Architecture
-///
-/// ```text
-/// RegionTestCluster
-///     |
-///     +-- Node 1 (RaftManager)
-///     |       +-- Global (system): organization/vault metadata
-///     |       +-- Region 1 (data): entity storage
-///     |       +-- Region 2 (data): entity storage
-///     |
-///     +-- Node 2 (RaftManager)
-///     |       +-- Global, Region 1, 2 (same structure)
-///     |
-///     +-- Node 3 ...
-/// ```
-pub struct RegionTestCluster {
-    /// The nodes in the cluster.
-    nodes: Vec<RegionTestNode>,
-    /// Number of data regions.
-    num_regions: usize,
-}
-
-impl RegionTestCluster {
-    /// Creates a new multi-region test cluster.
-    ///
-    /// # Arguments
-    ///
-    /// * `num_nodes` - Number of nodes in the cluster (typically 1 or 3)
-    /// * `num_data_regions` - Number of data regions (in addition to the Global system region)
-    ///
-    /// Each node will have `num_data_regions + 1` Raft groups running.
-    pub async fn new(num_nodes: usize, num_data_regions: usize) -> Self {
-        assert!(num_nodes >= 1, "cluster must have at least 1 node");
-        assert!(num_data_regions >= 1, "must have at least 1 data region");
-
-        let base_port = allocate_ports(num_nodes as u16);
-        let mut nodes = Vec::with_capacity(num_nodes);
-        let mut health_states: Vec<inferadb_ledger_raft::HealthState> =
-            Vec::with_capacity(num_nodes);
-
-        // Build the member list for all regions
-        let members: Vec<(u64, String)> = (0..num_nodes)
-            .map(|i| {
-                let node_id = (i + 1) as u64;
-                let port = base_port + i as u16;
-                let addr = format!("127.0.0.1:{}", port);
-                (node_id, addr)
-            })
-            .collect();
-
-        // Start each node
-        for i in 0..num_nodes {
-            let node_id = (i + 1) as u64;
-            let port = base_port + i as u16;
-            let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-            let temp_dir = TestDir::new();
-
-            // Create RaftManager config
-            let config = RaftManagerConfig::new(
-                temp_dir.path().to_path_buf(),
-                node_id,
-                inferadb_ledger_types::Region::GLOBAL,
-            );
-            let manager = Arc::new(RaftManager::new(config));
-
-            // Start system region (Global) - required first
-            let system_config = RegionConfig {
-                region: inferadb_ledger_types::Region::GLOBAL,
-                initial_members: members.clone(),
-                bootstrap: i == 0, // Only first node bootstraps
-                enable_background_jobs: true,
-                batch_writer_config: None,
-                event_writer: None,
-            };
-            manager.start_system_region(system_config).await.expect("start system region");
-
-            // Start data regions
-            let data_regions = &inferadb_ledger_types::ALL_REGIONS[1..];
-            for &data_region in data_regions.iter().take(num_data_regions) {
-                let region_config = RegionConfig {
-                    region: data_region,
-                    initial_members: members.clone(),
-                    bootstrap: i == 0,
-                    enable_background_jobs: true,
-                    batch_writer_config: None,
-                    event_writer: None,
-                };
-                manager
-                    .start_data_region(region_config)
-                    .await
-                    .unwrap_or_else(|_| panic!("start data region {:?}", data_region));
-            }
-
-            // Create health state (starts in Starting phase, marked Ready after leader election)
-            let health_state = inferadb_ledger_raft::HealthState::new();
-
-            // Create and start the gRPC server (LedgerServer is always multi-region capable)
-            let server = LedgerServer::builder()
-                .manager(manager.clone())
-                .addr(addr)
-                .max_concurrent(1000)
-                .timeout_secs(30)
-                .health_state(health_state.clone())
-                .build();
-
-            let server_handle = tokio::spawn(async move {
-                if let Err(e) = server.serve().await {
-                    tracing::error!("server error: {}", e);
-                }
-            });
-
-            // Wait for the gRPC server to accept TCP connections
-            let tcp_start = tokio::time::Instant::now();
-            while tcp_start.elapsed() < Duration::from_secs(5) {
-                if tokio::net::TcpStream::connect(addr).await.is_ok() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-
-            nodes.push(RegionTestNode {
-                id: node_id,
-                addr,
-                manager,
-                _temp_dir: temp_dir,
-                _server_handle: server_handle,
-            });
-            health_states.push(health_state);
-        }
-
-        // Wait for all regions to elect leaders
-        let start = tokio::time::Instant::now();
-        let timeout_duration = Duration::from_secs(10);
-
-        'outer: while start.elapsed() < timeout_duration {
-            let mut all_ready = true;
-
-            // Check each region on the first node
-            if let Some(node) = nodes.first() {
-                for region in node.manager.list_regions() {
-                    if let Ok(region_group) = node.manager.get_region_group(region) {
-                        let metrics = region_group.raft().metrics().borrow().clone();
-                        if metrics.current_leader.is_none() {
-                            all_ready = false;
-                            break;
-                        }
-                    } else {
-                        all_ready = false;
-                        break;
-                    }
-                }
-            }
-
-            if all_ready {
-                break 'outer;
-            }
-
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
-        // Mark all nodes as ready (mirrors main.rs post-bootstrap behavior)
-        for hs in &health_states {
-            hs.mark_ready();
-        }
-
-        Self { nodes, num_regions: num_data_regions }
-    }
-
-    /// Returns all nodes.
-    pub fn nodes(&self) -> &[RegionTestNode] {
-        &self.nodes
-    }
-
-    /// Returns a node by ID.
-    pub fn node(&self, id: u64) -> Option<&RegionTestNode> {
-        self.nodes.iter().find(|n| n.id == id)
-    }
-
-    /// Returns the leader node for the system region.
-    pub fn system_leader(&self) -> Option<&RegionTestNode> {
-        self.nodes.iter().find(|n| n.is_system_leader())
-    }
-
-    /// Returns any node (for client connections).
-    pub fn any_node(&self) -> &RegionTestNode {
-        &self.nodes[0]
-    }
-
-    /// Returns the number of data regions.
-    pub fn num_data_regions(&self) -> usize {
-        self.num_regions
-    }
-
-    /// Returns all node addresses.
-    pub fn addresses(&self) -> Vec<SocketAddr> {
-        self.nodes.iter().map(|n| n.addr).collect()
-    }
-
-    /// Waits for a leader to be elected on all regions.
-    pub async fn wait_for_leaders(&self, timeout_duration: Duration) -> bool {
-        let start = tokio::time::Instant::now();
-
-        while start.elapsed() < timeout_duration {
-            let mut all_have_leaders = true;
-
-            for node in &self.nodes {
-                for region in node.regions() {
-                    if let Some(region_group) = node.region_group(region) {
-                        let metrics = region_group.raft().metrics().borrow().clone();
-                        if metrics.current_leader.is_none() {
-                            all_have_leaders = false;
-                            break;
-                        }
-                    }
-                }
-                if !all_have_leaders {
-                    break;
-                }
-            }
-
-            if all_have_leaders {
-                return true;
-            }
-
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
-        false
-    }
 }
 
 // ============================================================================
@@ -1283,6 +1049,20 @@ pub async fn create_health_client_from_url(
     tonic::transport::Error,
 > {
     inferadb_ledger_proto::proto::health_service_client::HealthServiceClient::connect(
+        endpoint.to_string(),
+    )
+    .await
+}
+
+/// Helper to create a user service client from a URL string.
+#[allow(dead_code)]
+pub async fn create_user_client_from_url(
+    endpoint: &str,
+) -> Result<
+    inferadb_ledger_proto::proto::user_service_client::UserServiceClient<tonic::transport::Channel>,
+    tonic::transport::Error,
+> {
+    inferadb_ledger_proto::proto::user_service_client::UserServiceClient::connect(
         endpoint.to_string(),
     )
     .await
@@ -1505,7 +1285,10 @@ pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &Test
         user_id: inferadb_ledger_types::UserId::new(0), /* placeholder — CreateUser allocates
                                                          * real ID */
     });
-    let _ = node.raft.client_write(RaftPayload::system(register_req)).await;
+    let _ = node
+        .handle
+        .propose_and_wait(RaftPayload::system(register_req), Duration::from_secs(5))
+        .await;
 
     // Step 1: Create user directory entry (allocates UserId, registers slug)
     let create_req = LedgerRequest::System(SystemRequest::CreateUser {
@@ -1514,10 +1297,11 @@ pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &Test
         slug: user_slug,
         region: inferadb_ledger_types::Region::US_EAST_VA,
     });
-    let result = node.raft.client_write(RaftPayload::system(create_req)).await;
+    let result =
+        node.handle.propose_and_wait(RaftPayload::system(create_req), Duration::from_secs(5)).await;
 
     match result {
-        Ok(resp) => match resp.data {
+        Ok(resp) => match resp {
             inferadb_ledger_raft::types::LedgerResponse::UserCreated { user_id, slug } => {
                 // Step 2: Activate the user directory entry
                 let activate_req =
@@ -1526,7 +1310,10 @@ pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &Test
                         status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
                         region: Some(inferadb_ledger_types::Region::US_EAST_VA),
                     });
-                let _ = node.raft.client_write(RaftPayload::system(activate_req)).await;
+                let _ = node
+                    .handle
+                    .propose_and_wait(RaftPayload::system(activate_req), Duration::from_secs(5))
+                    .await;
 
                 // Step 3: Write slug index to entity store (so get_user_id_by_slug works).
                 // The CreateUser SystemRequest only writes to the in-memory index;
@@ -1552,7 +1339,10 @@ pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &Test
                     idempotency_key: [0; 16],
                     request_hash: 0,
                 };
-                let _ = node.raft.client_write(RaftPayload::system(slug_write)).await;
+                let _ = node
+                    .handle
+                    .propose_and_wait(RaftPayload::system(slug_write), Duration::from_secs(5))
+                    .await;
 
                 // Step 4: Write User entity to GLOBAL state layer.
                 // Token services (CreateUserSession) read the User entity from
@@ -1594,13 +1384,16 @@ pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &Test
                     idempotency_key: [0; 16],
                     request_hash: 0,
                 };
-                let _ = node.raft.client_write(RaftPayload::system(user_write)).await;
+                let _ = node
+                    .handle
+                    .propose_and_wait(RaftPayload::system(user_write), Duration::from_secs(5))
+                    .await;
 
                 slug.value()
             },
             other => panic!("setup_user: expected UserCreated, got {other}"),
         },
-        Err(e) => panic!("setup_user: Raft write failed: {e}"),
+        Err(e) => panic!("setup_user: consensus write failed: {e}"),
     }
 }
 
@@ -1667,4 +1460,46 @@ pub async fn setup_org_with_admin(
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+/// Creates a vault with retry — the organization may still be provisioning.
+///
+/// Retries on "not found" and "provisioned" errors for up to 30 seconds.
+pub async fn create_vault_with_retry(
+    vault_client: &mut inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient<
+        tonic::transport::Channel,
+    >,
+    organization: inferadb_ledger_types::OrganizationSlug,
+    caller_slug: u64,
+) -> inferadb_ledger_types::VaultSlug {
+    for attempt in 0..60 {
+        let request = inferadb_ledger_proto::proto::CreateVaultRequest {
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: organization.value(),
+            }),
+            replication_factor: 0,
+            initial_nodes: vec![],
+            retention_policy: None,
+            caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: caller_slug }),
+        };
+        match vault_client.create_vault(request).await {
+            Ok(response) => {
+                return response
+                    .into_inner()
+                    .vault
+                    .map(|v| inferadb_ledger_types::VaultSlug::new(v.slug))
+                    .expect("vault slug in response");
+            },
+            Err(e)
+                if (e.message().contains("not found")
+                    || e.message().contains("provisioned")
+                    || e.message().contains("provisioning"))
+                    && attempt < 59 =>
+            {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            },
+            Err(e) => panic!("create vault: {e}"),
+        }
+    }
+    panic!("create vault timed out after 60 attempts");
 }

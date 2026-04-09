@@ -20,33 +20,30 @@ use std::{
 };
 
 use inferadb_ledger_types::{Region, config::PostErasureCompactionConfig};
-use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::{
+    consensus_handle::ConsensusHandle,
     metrics::{
         record_background_job_duration, record_background_job_run,
         record_post_erasure_compaction_triggered,
     },
     raft_manager::RaftManager,
     trace_context::TraceContext,
-    types::{LedgerNodeId, LedgerTypeConfig},
 };
 
 /// Background job that enforces maximum Raft log retention by triggering
 /// proactive snapshots on all Raft groups (GLOBAL + regional).
 ///
 /// On each cycle, checks whether the time since the last snapshot trigger
-/// exceeds `max_log_retention_secs`. If so, calls `trigger().snapshot()`
-/// on the affected Raft group (leader-only).
+/// exceeds `max_log_retention_secs`. If so, triggers a snapshot via the
+/// consensus handle on the affected Raft group (leader-only).
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct PostErasureCompactionJob {
-    /// This node's ID for leadership checks.
-    node_id: LedgerNodeId,
-    /// GLOBAL Raft handle.
-    raft: Arc<Raft<LedgerTypeConfig>>,
+    /// GLOBAL consensus handle for leadership checks.
+    handle: Arc<ConsensusHandle>,
     /// Raft manager for accessing regional Raft groups.
     #[builder(default)]
     manager: Option<Arc<RaftManager>>,
@@ -59,22 +56,25 @@ pub struct PostErasureCompactionJob {
 }
 
 impl PostErasureCompactionJob {
-    /// Checks if this node is the leader of the given Raft group.
-    fn is_leader_of(&self, raft: &Raft<LedgerTypeConfig>) -> bool {
-        let metrics = raft.metrics().borrow().clone();
-        metrics.current_leader == Some(self.node_id)
+    /// Checks if this node is the leader of the GLOBAL shard.
+    fn is_leader_of_global(&self) -> bool {
+        self.handle.is_leader()
     }
 
-    /// Triggers a snapshot on a Raft group if this node is leader and
-    /// the retention threshold has been exceeded.
+    /// Triggers a snapshot if this node is leader and the retention threshold
+    /// has been exceeded.
+    ///
+    /// Calls `trigger_snapshot()` on the consensus handle to initiate snapshot
+    /// creation. The actual snapshot is taken by the apply worker / state machine.
     async fn maybe_trigger_snapshot(
         &self,
         region_label: &str,
-        raft: &Raft<LedgerTypeConfig>,
+        is_leader: bool,
         last_snapshot: &mut Option<Instant>,
         threshold: Duration,
+        handle: &ConsensusHandle,
     ) -> bool {
-        if !self.is_leader_of(raft) {
+        if !is_leader {
             return false;
         }
 
@@ -92,19 +92,32 @@ impl PostErasureCompactionJob {
             return false;
         }
 
-        match raft.trigger().snapshot().await {
-            Ok(_) => {
+        match handle.trigger_snapshot().await {
+            Ok((idx, _term)) if idx > 0 => {
+                info!(
+                    region = region_label,
+                    last_included_index = idx,
+                    "Post-erasure compaction: snapshot triggered"
+                );
                 *last_snapshot = Some(Instant::now());
                 record_post_erasure_compaction_triggered(region_label);
-                info!(region = region_label, "Post-erasure compaction: triggered snapshot");
                 true
+            },
+            Ok(_) => {
+                debug!(
+                    region = region_label,
+                    "Post-erasure compaction: no snapshot needed (commit index unchanged)"
+                );
+                *last_snapshot = Some(Instant::now());
+                false
             },
             Err(e) => {
                 warn!(
                     region = region_label,
                     error = %e,
-                    "Post-erasure compaction: failed to trigger snapshot"
+                    "Post-erasure compaction: snapshot trigger failed"
                 );
+                // Do not update timestamp — allow retry on next cycle.
                 false
             },
         }
@@ -119,13 +132,23 @@ impl PostErasureCompactionJob {
         let threshold = Duration::from_secs(self.config.max_log_retention_secs);
         let mut triggered = 0u64;
 
-        // Check GLOBAL Raft group.
+        // Check GLOBAL group.
+        let global_is_leader = self.is_leader_of_global();
         let global_last = last_snapshots.entry("GLOBAL".to_string()).or_insert(None);
-        if self.maybe_trigger_snapshot("GLOBAL", &self.raft, global_last, threshold).await {
+        if self
+            .maybe_trigger_snapshot(
+                "GLOBAL",
+                global_is_leader,
+                global_last,
+                threshold,
+                &self.handle,
+            )
+            .await
+        {
             triggered += 1;
         }
 
-        // Check each regional Raft group.
+        // Check each regional group using per-region leadership.
         if let Some(ref manager) = self.manager {
             let regions: Vec<Region> = manager.list_regions();
             for region in regions {
@@ -135,14 +158,16 @@ impl PostErasureCompactionJob {
                 let region_label = region.as_str().to_string();
                 match manager.get_region_group(region) {
                     Ok(group) => {
+                        let region_is_leader = group.handle().is_leader();
                         let region_last =
                             last_snapshots.entry(region_label.clone()).or_insert(None);
                         if self
                             .maybe_trigger_snapshot(
                                 &region_label,
-                                group.raft(),
+                                region_is_leader,
                                 region_last,
                                 threshold,
+                                group.handle(),
                             )
                             .await
                         {

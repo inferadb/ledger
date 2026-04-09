@@ -10,16 +10,16 @@ use chrono::Utc;
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{UserStatus, config::UserRetentionConfig};
-use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::{
+    consensus_handle::ConsensusHandle,
     metrics::{
         record_background_job_duration, record_background_job_items, record_background_job_run,
     },
     trace_context::TraceContext,
-    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig, RaftPayload, SystemRequest},
+    types::{LedgerRequest, RaftPayload, SystemRequest},
 };
 
 /// Background job that erases users whose soft-delete retention period has expired.
@@ -30,10 +30,8 @@ use crate::{
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct UserRetentionReaper<B: StorageBackend + 'static> {
-    /// Raft consensus handle for leadership checks and proposals.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// This node's ID.
-    node_id: LedgerNodeId,
+    /// Consensus handle for leadership checks and proposals.
+    handle: Arc<ConsensusHandle>,
     /// State layer for scanning user records.
     state: Arc<StateLayer<B>>,
     /// Reaper configuration.
@@ -44,18 +42,16 @@ pub struct UserRetentionReaper<B: StorageBackend + 'static> {
 impl<B: StorageBackend + 'static> UserRetentionReaper<B> {
     /// Creates a reaper from a configuration struct.
     pub fn from_config(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        node_id: LedgerNodeId,
+        handle: Arc<ConsensusHandle>,
         state: Arc<StateLayer<B>>,
         config: &UserRetentionConfig,
     ) -> Self {
-        Self { raft, node_id, state, config: config.clone() }
+        Self { handle, state, config: config.clone() }
     }
 
     /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader == Some(self.node_id)
+        self.handle.is_leader()
     }
 
     /// Runs a single reaper cycle, returning the number of users erased.
@@ -113,7 +109,7 @@ impl<B: StorageBackend + 'static> UserRetentionReaper<B> {
                 region: user.region,
             });
 
-            match self.raft.client_write(RaftPayload::system(request)).await {
+            match self.handle.propose(RaftPayload::system(request)).await {
                 Ok(_) => {
                     info!(
                         trace_id = %trace_ctx.trace_id,

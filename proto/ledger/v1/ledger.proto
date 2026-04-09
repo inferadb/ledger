@@ -1030,8 +1030,16 @@ service AdminService {
   // waits for it to catch up, then promotes to voter.
   rpc JoinCluster(JoinClusterRequest) returns (JoinClusterResponse);
 
-  // Gracefully leave the cluster. Node is removed from Raft membership.
+  // Initiates graceful decommission. Sets NodeStatus to Decommissioning.
+  // The DR scheduler drains replicas asynchronously. Poll GetDecommissionStatus for progress.
   rpc LeaveCluster(LeaveClusterRequest) returns (LeaveClusterResponse);
+
+  // Returns decommission progress for a node.
+  rpc GetDecommissionStatus(GetDecommissionStatusRequest) returns (GetDecommissionStatusResponse);
+
+  // Checks whether this node has recently heard from a target peer.
+  // Used by the GLOBAL leader for quorum-based dead node detection.
+  rpc CheckPeerLiveness(CheckPeerLivenessRequest) returns (CheckPeerLivenessResponse);
 
   // Get current cluster membership information.
   rpc GetClusterInfo(GetClusterInfoRequest) returns (GetClusterInfoResponse);
@@ -1040,6 +1048,12 @@ service AdminService {
   // Available even before cluster is formed. Used by nodes to discover
   // each other's Snowflake IDs and determine who should bootstrap.
   rpc GetNodeInfo(GetNodeInfoRequest) returns (GetNodeInfoResponse);
+
+  // Initialize a new cluster. One-time operation per cluster lifetime.
+  // Creates the GLOBAL shard with all known peers as voters, generates a
+  // cluster_id, and transitions the node from Uninitialized to Running.
+  // Idempotent: returns AlreadyInitialized if the cluster was already created.
+  rpc InitCluster(InitClusterRequest) returns (InitClusterResponse);
 
   // Transfer leadership to a specific node before shutdown or maintenance.
   // If target_node_id is 0, the leader picks the most caught-up follower.
@@ -2161,6 +2175,30 @@ message LeaveClusterResponse {
   string message = 2;
 }
 
+message GetDecommissionStatusRequest {
+  uint64 node_id = 1;
+}
+
+message DataRegionReplica {
+  string region = 1;
+  string role = 2;
+}
+
+message GetDecommissionStatusResponse {
+  string status = 1;
+  repeated DataRegionReplica remaining = 2;
+  bool global_removed = 3;
+}
+
+message CheckPeerLivenessRequest {
+  uint64 target_node_id = 1;
+}
+
+message CheckPeerLivenessResponse {
+  bool reachable = 1;
+  uint64 last_seen_ago_ms = 2;
+}
+
 // Get current cluster membership.
 message GetClusterInfoRequest {}
 
@@ -2184,6 +2222,23 @@ message GetNodeInfoResponse {
   bool is_cluster_member = 3;
   // Current Raft term (0 if not in cluster).
   uint64 term = 4;
+  // Cluster ID (0 if uninitialized).
+  uint64 cluster_id = 5;
+  // Node lifecycle state: "uninitialized" or "running".
+  string state = 6;
+}
+
+// Request to initialize a new cluster (empty - no parameters needed).
+message InitClusterRequest {}
+
+// Response from cluster initialization.
+message InitClusterResponse {
+  // True if this call performed the initialization.
+  bool initialized = 1;
+  // The cluster's unique identifier.
+  uint64 cluster_id = 2;
+  // True if the cluster was already initialized (idempotent case).
+  bool already_initialized = 3;
 }
 
 // A member of the Raft cluster.
@@ -3380,6 +3435,24 @@ service RaftService {
   // Called by the current leader during leadership transfer.
   // This is an internal RPC — not exposed to external clients.
   rpc TriggerElection(TriggerElectionRequest) returns (TriggerElectionResponse);
+
+  // Query committed index for follower ReadIndex protocol.
+  // Followers call this on the leader to confirm the committed index,
+  // then wait locally for their applied index to catch up.
+  rpc ReadIndex(ReadIndexRequest) returns (ReadIndexResponse);
+
+  // Batched cross-group message delivery.
+  // Coalesces AppendEntries messages for multiple Raft groups into a single RPC call,
+  // reducing per-message overhead for multi-group deployments.
+  rpc BatchSend(BatchRaftRequest) returns (BatchRaftResponse);
+
+  // Forward a consensus engine message to a peer node.
+  rpc ForwardConsensus(ConsensusForwardRequest) returns (ConsensusForwardResponse);
+
+  // Forward a regional proposal to the data region leader.
+  // Called when a node receives a write for a data region it doesn't lead.
+  // The leader proposes locally and returns the result.
+  rpc ForwardRegionalProposal(ForwardRegionalProposalRequest) returns (ForwardRegionalProposalResponse);
 }
 
 // Raft vote (term + node_id + committed flag).
@@ -3490,6 +3563,95 @@ message TriggerElectionRequest {
 message TriggerElectionResponse {
   bool accepted = 1;
   string message = 2;
+}
+
+// ReadIndex request: follower asks leader to confirm committed index.
+message ReadIndexRequest {
+  // Region for multi-region routing (defaults to GLOBAL).
+  string region = 1;
+}
+
+// ReadIndex response: leader returns its committed index and term.
+message ReadIndexResponse {
+  uint64 committed_index = 1;
+  uint64 leader_term = 2;
+}
+
+// Batched cross-group Raft request.
+// Contains multiple per-group messages coalesced into a single RPC call.
+message BatchRaftRequest {
+  repeated BatchRaftEntry entries = 1;
+}
+
+// A single entry within a batched Raft request.
+message BatchRaftEntry {
+  // Region for routing to the correct Raft group.
+  optional Region region = 1;
+  // The Raft message to deliver. Currently only AppendEntries is batched;
+  // Vote and InstallSnapshot remain individual RPCs.
+  oneof message {
+    RaftAppendEntriesRequest append_entries = 2;
+  }
+}
+
+// Batched cross-group Raft response.
+message BatchRaftResponse {
+  repeated BatchRaftEntryResponse responses = 1;
+}
+
+// Response for a single entry within a batched Raft request.
+message BatchRaftEntryResponse {
+  oneof response {
+    RaftAppendEntriesResponse append_entries = 1;
+  }
+}
+
+// Request to forward a consensus engine message.
+message ConsensusForwardRequest {
+  // Shard (consensus group) this message targets.
+  uint64 shard_id = 1;
+  // Node ID of the sender.
+  uint64 from_node = 2;
+  // Region the shard belongs to.
+  optional Region region = 3;
+  // Postcard-serialized consensus Message.
+  bytes payload = 4;
+  // gRPC address of the sender (e.g. "127.0.0.1:50051").
+  // Enables the receiver to auto-register a return transport channel
+  // for consensus responses when the sender is not yet known.
+  string from_address = 5;
+  // Cluster ID for cross-cluster message rejection.
+  // Receivers reject messages from different clusters.
+  uint64 cluster_id = 6;
+}
+
+// Empty response for fire-and-forget consensus message forwarding.
+message ConsensusForwardResponse {}
+
+// Request to forward a regional proposal to the data region leader.
+message ForwardRegionalProposalRequest {
+  // Target data region.
+  optional Region region = 1;
+  // Postcard-serialized LedgerRequest.
+  bytes request_payload = 2;
+  // Caller identity (user slug or 0 for system).
+  uint64 caller = 3;
+  // Proposal timeout in milliseconds.
+  uint32 timeout_ms = 4;
+}
+
+// Response from a forwarded regional proposal.
+message ForwardRegionalProposalResponse {
+  // Postcard-serialized LedgerResponse.
+  bytes response_payload = 1;
+  // gRPC status code (0 = OK).
+  int32 status_code = 2;
+  // Error message (empty if OK).
+  string error_message = 3;
+  // Last committed index on the leader after the proposal was applied.
+  // The forwarding node uses this to wait for local replication before
+  // returning, ensuring subsequent local reads see the written data.
+  uint64 committed_index = 4;
 }
 
 // -----------------------------------------------------------------------------

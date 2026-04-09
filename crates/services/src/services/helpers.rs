@@ -17,7 +17,9 @@ use inferadb_ledger_types::{
 };
 use tempfile::TempDir;
 use tonic::Status;
-use tracing::{error, warn};
+use tracing::warn;
+
+use super::error_classify;
 
 /// Extracts the caller's user slug from a gRPC request and sets it on the
 /// request context for canonical log line emission.
@@ -219,15 +221,9 @@ pub(crate) fn load_app(
     let key = SystemKeys::app_key(org_id, app_id);
     let entity = state
         .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
-        .map_err(|e| {
-            error!(error = %e, "Failed to read app");
-            Status::internal("Internal error")
-        })?
+        .map_err(|e| error_classify::storage_error(&e))?
         .ok_or_else(|| Status::not_found(format!("App {} not found", app_id)))?;
-    decode::<App>(&entity.value).map_err(|e| {
-        error!(error = %e, "Failed to decode app");
-        Status::internal("Internal error")
-    })
+    decode::<App>(&entity.value).map_err(|e| error_classify::serialization_error(&e))
 }
 
 /// Computes a hash of operations for idempotency payload comparison.
@@ -296,15 +292,10 @@ pub(crate) fn hash_operations(operations: &[proto::Operation]) -> Vec<u8> {
 ///
 /// Returns `tonic::Status::internal` if temp dir or database creation fails.
 pub(crate) fn create_replay_context() -> Result<(TempDir, StateLayer<FileBackend>), Status> {
-    let temp_dir = TempDir::new().map_err(|e| {
-        error!(error = %e, "Failed to create temp dir");
-        Status::internal("Internal error")
-    })?;
+    let temp_dir = TempDir::new().map_err(|e| error_classify::storage_error(&e))?;
     let temp_db = Arc::new(
-        Database::<FileBackend>::create(temp_dir.path().join("replay.db")).map_err(|e| {
-            error!(error = %e, "Failed to create temp db");
-            Status::internal("Internal error")
-        })?,
+        Database::<FileBackend>::create(temp_dir.path().join("replay.db"))
+            .map_err(|e| error_classify::storage_error(&e))?,
     );
     let temp_state = StateLayer::new(temp_db);
     Ok((temp_dir, temp_state))
@@ -315,8 +306,7 @@ pub(crate) fn create_replay_context() -> Result<(TempDir, StateLayer<FileBackend
 /// Consolidates the repeated storage error mapping pattern used across read
 /// service methods. Logs the full error and returns a generic `Status::internal`.
 pub(crate) fn storage_err(e: impl Display) -> Status {
-    error!(error = %e, "Storage error");
-    Status::internal("Internal error")
+    error_classify::storage_error(&e)
 }
 
 /// Reads and decodes an [`AppVaultConnection`] from the system vault.
@@ -334,15 +324,9 @@ pub(crate) fn read_vault_connection(
     let key = SystemKeys::app_vault_key(org_id, app_id, vault_id);
     let entity = state
         .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
-        .map_err(|e| {
-            error!(error = %e, "Failed to read vault connection");
-            Status::internal("Internal error")
-        })?
+        .map_err(|e| error_classify::storage_error(&e))?
         .ok_or(not_found)?;
-    decode::<AppVaultConnection>(&entity.value).map_err(|e| {
-        error!(error = %e, "Failed to decode vault connection");
-        Status::internal("Internal error")
-    })
+    decode::<AppVaultConnection>(&entity.value).map_err(|e| error_classify::serialization_error(&e))
 }
 
 /// Maps an [`ErrorCode`] to the corresponding gRPC [`Status`].
@@ -369,6 +353,95 @@ pub(crate) fn error_code_to_status(code: ErrorCode, message: String) -> Status {
             Status::already_exists(message)
         },
     }
+}
+
+/// Ensures GLOBAL applied state on this node is at least as fresh as the
+/// leader's committed index.
+///
+/// On follower nodes, data from recent GLOBAL proposals (vault creation, org
+/// provisioning, slug registration) may not have replicated yet. This function
+/// calls ReadIndex on the GLOBAL leader to learn the leader's committed index,
+/// then waits for the local applied index to reach it.
+///
+/// On the leader, this is a no-op. Typically completes in <5ms when caught up.
+pub(crate) async fn ensure_global_consistency(
+    manager: Option<&inferadb_ledger_raft::raft_manager::RaftManager>,
+) {
+    let Some(manager) = manager else { return };
+    let Ok(global) = manager.system_region() else { return };
+    if global.handle().is_leader() {
+        return;
+    }
+
+    // Get the leader's actual committed index via ReadIndex RPC.
+    let leader_id = match global.handle().current_leader() {
+        Some(id) => id,
+        None => return,
+    };
+    let leader_addr = match manager.peer_addresses().get(leader_id) {
+        Some(addr) => addr,
+        None => return,
+    };
+
+    let committed_index = match read_index_from_leader(leader_id, &leader_addr).await {
+        Some(idx) => idx,
+        None => {
+            // Fallback: use local commit_index (may be stale).
+            let idx = global.handle().commit_index();
+            if idx == 0 {
+                return;
+            }
+            idx
+        },
+    };
+
+    let mut watch = global.applied_index_watch();
+    let _ = inferadb_ledger_raft::wait_for_apply(
+        &mut watch,
+        committed_index,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+}
+
+/// Cached channel for ReadIndex RPCs to the GLOBAL leader.
+/// Avoids creating a new TCP connection for every follower-side RPC.
+static READ_INDEX_CHANNEL: parking_lot::Mutex<Option<(u64, tonic::transport::Channel)>> =
+    parking_lot::Mutex::new(None);
+
+/// Calls ReadIndex RPC on the GLOBAL leader to get its committed index.
+/// Caches the gRPC channel so all calls to the same leader reuse one TCP connection.
+async fn read_index_from_leader(leader_id: u64, leader_addr: &str) -> Option<u64> {
+    use inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient;
+
+    // Check the cache — reuse the channel if the leader hasn't changed.
+    let channel = {
+        let cache = READ_INDEX_CHANNEL.lock();
+        if let Some((cached_id, ref ch)) = *cache {
+            if cached_id == leader_id { Some(ch.clone()) } else { None }
+        } else {
+            None
+        }
+    };
+
+    let channel = match channel {
+        Some(ch) => ch,
+        None => {
+            let endpoint = format!("http://{leader_addr}");
+            let ch = tonic::transport::Channel::from_shared(endpoint).ok()?.connect_lazy();
+            let mut cache = READ_INDEX_CHANNEL.lock();
+            *cache = Some((leader_id, ch.clone()));
+            ch
+        },
+    };
+
+    let mut client = RaftServiceClient::new(channel);
+    let resp = client
+        .read_index(inferadb_ledger_proto::proto::ReadIndexRequest { region: String::new() })
+        .await
+        .ok()?;
+
+    Some(resp.into_inner().committed_index)
 }
 
 #[cfg(test)]
@@ -919,7 +992,7 @@ mod tests {
     fn storage_err_returns_internal_status() {
         let s = storage_err("disk failure");
         assert_eq!(s.code(), tonic::Code::Internal);
-        assert_eq!(s.message(), "Internal error");
+        assert_eq!(s.message(), "storage error");
     }
 
     // =========================================================================

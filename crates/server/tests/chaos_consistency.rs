@@ -31,8 +31,10 @@ use std::{
 };
 
 use inferadb_ledger_proto::proto::{
-    RaftAppendEntriesRequest, RaftAppendEntriesResponse, RaftInstallSnapshotRequest,
-    RaftInstallSnapshotResponse, RaftVoteRequest, RaftVoteResponse, TriggerElectionRequest,
+    BatchRaftRequest, BatchRaftResponse, ConsensusForwardRequest, ConsensusForwardResponse,
+    ForwardRegionalProposalRequest, ForwardRegionalProposalResponse, RaftAppendEntriesRequest,
+    RaftAppendEntriesResponse, RaftInstallSnapshotRequest, RaftInstallSnapshotResponse,
+    RaftVoteRequest, RaftVoteResponse, ReadIndexRequest, ReadIndexResponse, TriggerElectionRequest,
     TriggerElectionResponse,
     raft_service_server::{RaftService, RaftServiceServer},
 };
@@ -199,6 +201,32 @@ impl RaftService for SplitBrainDetectionService {
             accepted: true,
             message: "Election triggered".to_string(),
         }))
+    }
+
+    async fn read_index(
+        &self,
+        _request: Request<ReadIndexRequest>,
+    ) -> Result<Response<ReadIndexResponse>, Status> {
+        Err(Status::unimplemented("ReadIndex not supported in mock"))
+    }
+
+    async fn batch_send(
+        &self,
+        _request: Request<BatchRaftRequest>,
+    ) -> Result<Response<BatchRaftResponse>, Status> {
+        Err(Status::unimplemented("BatchSend not supported in mock"))
+    }
+    async fn forward_consensus(
+        &self,
+        _request: Request<ConsensusForwardRequest>,
+    ) -> Result<Response<ConsensusForwardResponse>, Status> {
+        Err(Status::unimplemented("ForwardConsensus not supported in mock"))
+    }
+    async fn forward_regional_proposal(
+        &self,
+        _request: Request<ForwardRegionalProposalRequest>,
+    ) -> Result<Response<ForwardRegionalProposalResponse>, Status> {
+        Err(Status::unimplemented("ForwardRegionalProposal not supported in mock"))
     }
 }
 
@@ -375,6 +403,32 @@ fn test_write_fails_in_minority_partition() {
                 message: "Election triggered".to_string(),
             }))
         }
+
+        async fn read_index(
+            &self,
+            _request: Request<ReadIndexRequest>,
+        ) -> Result<Response<ReadIndexResponse>, Status> {
+            Err(Status::unimplemented("ReadIndex not supported in mock"))
+        }
+
+        async fn batch_send(
+            &self,
+            _request: Request<BatchRaftRequest>,
+        ) -> Result<Response<BatchRaftResponse>, Status> {
+            Err(Status::unimplemented("BatchSend not supported in mock"))
+        }
+        async fn forward_consensus(
+            &self,
+            _request: Request<ConsensusForwardRequest>,
+        ) -> Result<Response<ConsensusForwardResponse>, Status> {
+            Err(Status::unimplemented("ForwardConsensus not supported in mock"))
+        }
+        async fn forward_regional_proposal(
+            &self,
+            _request: Request<ForwardRegionalProposalRequest>,
+        ) -> Result<Response<ForwardRegionalProposalResponse>, Status> {
+            Err(Status::unimplemented("ForwardRegionalProposal not supported in mock"))
+        }
     }
 
     let partition_flag = Arc::new(Mutex::new(false));
@@ -549,6 +603,32 @@ fn test_consistency_after_partition_heals() {
                 accepted: true,
                 message: "Election triggered".to_string(),
             }))
+        }
+
+        async fn read_index(
+            &self,
+            _request: Request<ReadIndexRequest>,
+        ) -> Result<Response<ReadIndexResponse>, Status> {
+            Err(Status::unimplemented("ReadIndex not supported in mock"))
+        }
+
+        async fn batch_send(
+            &self,
+            _request: Request<BatchRaftRequest>,
+        ) -> Result<Response<BatchRaftResponse>, Status> {
+            Err(Status::unimplemented("BatchSend not supported in mock"))
+        }
+        async fn forward_consensus(
+            &self,
+            _request: Request<ConsensusForwardRequest>,
+        ) -> Result<Response<ConsensusForwardResponse>, Status> {
+            Err(Status::unimplemented("ForwardConsensus not supported in mock"))
+        }
+        async fn forward_regional_proposal(
+            &self,
+            _request: Request<ForwardRegionalProposalRequest>,
+        ) -> Result<Response<ForwardRegionalProposalResponse>, Status> {
+            Err(Status::unimplemented("ForwardRegionalProposal not supported in mock"))
         }
     }
 
@@ -729,6 +809,32 @@ fn test_network_delay_request_completion() {
                 accepted: true,
                 message: "Election triggered".to_string(),
             }))
+        }
+
+        async fn read_index(
+            &self,
+            _request: Request<ReadIndexRequest>,
+        ) -> Result<Response<ReadIndexResponse>, Status> {
+            Err(Status::unimplemented("ReadIndex not supported in mock"))
+        }
+
+        async fn batch_send(
+            &self,
+            _request: Request<BatchRaftRequest>,
+        ) -> Result<Response<BatchRaftResponse>, Status> {
+            Err(Status::unimplemented("BatchSend not supported in mock"))
+        }
+        async fn forward_consensus(
+            &self,
+            _request: Request<ConsensusForwardRequest>,
+        ) -> Result<Response<ConsensusForwardResponse>, Status> {
+            Err(Status::unimplemented("ForwardConsensus not supported in mock"))
+        }
+        async fn forward_regional_proposal(
+            &self,
+            _request: Request<ForwardRegionalProposalRequest>,
+        ) -> Result<Response<ForwardRegionalProposalResponse>, Status> {
+            Err(Status::unimplemented("ForwardRegionalProposal not supported in mock"))
         }
     }
 

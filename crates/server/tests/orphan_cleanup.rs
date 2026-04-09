@@ -115,15 +115,13 @@ async fn test_orphan_cleanup_job_starts() {
 
     // Orphan cleanup runs in background
     // Verify cluster remains healthy
-    let metrics = leader.raft.metrics().borrow().clone();
-    assert!(metrics.current_leader.is_some(), "leader should be elected");
+    assert!(leader.handle.current_leader().is_some(), "leader should be elected");
 
     // Give cleanup job time to run at least one cycle
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Cluster should still be healthy
-    let metrics = leader.raft.metrics().borrow().clone();
-    assert!(metrics.current_leader.is_some(), "cluster should remain healthy");
+    assert!(leader.handle.current_leader().is_some(), "cluster should remain healthy");
 }
 
 /// Tests that orphan cleanup only runs on leader.
@@ -334,8 +332,7 @@ async fn test_orphan_cleanup_handles_empty_organization() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Cluster should remain healthy (no errors from empty organization scan)
-    let metrics = leader.raft.metrics().borrow().clone();
-    assert!(metrics.current_leader.is_some(), "cluster should remain healthy");
+    assert!(leader.handle.current_leader().is_some(), "cluster should remain healthy");
 }
 
 /// Tests concurrent background jobs don't interfere.
@@ -375,7 +372,6 @@ async fn test_orphan_cleanup_with_concurrent_jobs() {
 
     // All nodes should still be responsive
     for node in cluster.nodes() {
-        let metrics = node.raft.metrics().borrow().clone();
-        assert!(metrics.current_leader.is_some(), "node {} should know the leader", node.id);
+        assert!(node.handle.current_leader().is_some(), "node {} should know the leader", node.id);
     }
 }

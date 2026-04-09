@@ -83,8 +83,14 @@ pub struct LedgerServer {
     /// Idempotency cache for duplicate detection.
     #[builder(default = Arc::new(IdempotencyCache::new()))]
     idempotency: Arc<IdempotencyCache>,
-    /// Server address.
+    /// Server bind address.
     addr: SocketAddr,
+    /// Address other nodes should use to reach this node.
+    ///
+    /// Falls back to `addr` when not set. Used in `GetNodeInfo` and
+    /// data region initial_members.
+    #[builder(default)]
+    advertise_addr: Option<String>,
     /// Max concurrent requests per connection.
     #[builder(default = 100)]
     max_concurrent: usize,
@@ -127,14 +133,6 @@ pub struct LedgerServer {
     /// Health check configuration for dependency validation.
     #[builder(default)]
     health_check_config: Option<inferadb_ledger_types::config::HealthCheckConfig>,
-    /// Maximum Raft log lag before forwarding reads to the leader.
-    ///
-    /// When a follower's applied index trails its last log index by more than
-    /// this threshold, read requests are transparently forwarded to the leader
-    /// to avoid serving stale data during catch-up.
-    /// Default 0: only serve reads locally when fully caught up.
-    #[builder(default)]
-    max_read_forward_lag: u64,
     /// Events database for the events query service (optional).
     #[builder(default)]
     events_db: Option<inferadb_ledger_state::EventsDatabase<FileBackend>>,
@@ -178,6 +176,41 @@ pub struct LedgerServer {
     /// is ready. Returned to bootstrap via `saga_cell()` for deferred initialization.
     #[builder(default = Arc::new(tokio::sync::OnceCell::new()))]
     saga_handle: Arc<tokio::sync::OnceCell<inferadb_ledger_raft::SagaOrchestratorHandle>>,
+    /// Shared peer address map (node ID → network address).
+    ///
+    /// Passed to services that need to resolve peer addresses for forwarding
+    /// requests (read, write, discovery, admin, health). Updated dynamically
+    /// via `announce_peer` RPCs.
+    #[builder(default)]
+    peer_addresses: Option<inferadb_ledger_raft::PeerAddressMap>,
+    /// GLOBAL consensus transport for dynamic peer channel management.
+    ///
+    /// Passed to `AdminService` so that `JoinCluster`/`LeaveCluster` can
+    /// register and unregister gRPC channels for Raft replication.
+    #[builder(default)]
+    consensus_transport: Option<inferadb_ledger_raft::GrpcConsensusTransport>,
+    /// Initialization signal sender for fresh (uninitialized) nodes.
+    ///
+    /// When present, `AdminService.init_cluster()` generates a cluster ID,
+    /// persists it, and sends `Some(cluster_id)` through this channel to unblock
+    /// bootstrap. On restart (node already initialized), this is `None` and the
+    /// init handler returns `already_initialized = true`.
+    #[builder(default)]
+    init_sender: Option<Arc<tokio::sync::watch::Sender<Option<u64>>>>,
+    /// Static cluster ID for already-initialized nodes.
+    ///
+    /// Set during bootstrap on the restart path. AdminService uses this to
+    /// return `already_initialized` from `InitCluster` and to report the
+    /// cluster ID in `GetNodeInfo`.
+    #[builder(default)]
+    cluster_id: Option<u64>,
+    /// Per-node liveness timestamps for quorum-based dead node detection.
+    ///
+    /// Shared between the admin service (CheckPeerLiveness RPC), raft service
+    /// (updates on incoming messages), and bootstrap liveness checker.
+    #[builder(default)]
+    peer_liveness:
+        Option<Arc<parking_lot::RwLock<std::collections::HashMap<u64, std::time::Instant>>>>,
 }
 
 impl LedgerServer {
@@ -241,9 +274,9 @@ impl LedgerServer {
         let read_service = ReadService::builder()
             .resolver(resolver.clone())
             .manager(Some(self.manager.clone()))
-            .max_read_forward_lag(self.max_read_forward_lag)
             .active_streams(active_watch_streams)
             .max_streams(self.max_watch_streams)
+            .peer_addresses(self.peer_addresses.clone())
             .build();
 
         // Create write service using the resolver. Batch writers are per-region
@@ -253,6 +286,7 @@ impl LedgerServer {
             .manager(Some(self.manager.clone()))
             .idempotency(self.idempotency.clone())
             .proposal_timeout(self.proposal_timeout)
+            .peer_addresses(self.peer_addresses.clone())
             .build()
             .with_health_state(self.health_state.clone());
         // Wire optional features via builder methods
@@ -266,15 +300,19 @@ impl LedgerServer {
             write_service = write_service.with_event_handle(handle.clone());
         }
 
-        let admin_service = AdminService::builder()
-            .raft(system.raft().clone())
+        let mut admin_service = AdminService::builder()
+            .handle(system.handle().clone())
             .state(system.state().clone())
             .applied_state(system.applied_state().clone())
             .block_archive(Some(system.block_archive().clone()))
-            .listen_addr(self.addr)
+            .advertise_addr(self.advertise_addr.as_deref().unwrap_or(&self.addr.to_string()))
             .proposal_timeout(self.proposal_timeout)
+            .peer_addresses(self.peer_addresses.clone())
             .build()
             .with_raft_manager(self.manager.clone());
+        if let Some(ref transport) = self.consensus_transport {
+            admin_service = admin_service.with_consensus_transport(transport.clone());
+        }
         // Wire runtime config handle into admin service for UpdateConfig/GetConfig RPCs.
         // Pass the rate limiter and hot key detector so config changes propagate to them.
         let admin_service = if let Some(handle) = self.runtime_config {
@@ -302,12 +340,30 @@ impl LedgerServer {
         };
         // Wire health state for drain-phase write rejection
         let admin_service = admin_service.with_health_state(self.health_state.clone());
+        // Wire init sender and data_dir for fresh-node initialization via InitCluster RPC.
+        let admin_service = if let Some(ref sender) = self.init_sender {
+            admin_service.with_init_sender(sender.clone(), self.data_dir.clone())
+        } else {
+            admin_service
+        };
+        // Wire static cluster_id for already-initialized nodes (restart path).
+        let admin_service = if let Some(cid) = self.cluster_id {
+            admin_service.with_cluster_id(cid)
+        } else {
+            admin_service
+        };
+        // Wire peer liveness map for CheckPeerLiveness RPC (quorum-based dead node detection).
+        let admin_service = if let Some(ref liveness) = self.peer_liveness {
+            admin_service.with_peer_liveness(liveness.clone())
+        } else {
+            admin_service
+        };
 
         // Build shared service context for Organization, Vault, User, and App services.
         // All four share the same proposal path, state, applied_state, and config —
         // ServiceContext consolidates these into a single clonable struct.
         let proposer: Arc<dyn crate::proposal::ProposalService> =
-            Arc::new(RaftProposalService::new(system.raft().clone(), Some(self.manager.clone())));
+            Arc::new(RaftProposalService::new(system.handle().clone(), Some(self.manager.clone())));
         let svc_ctx = ServiceContext {
             proposer,
             state: system.state().clone(),
@@ -324,6 +380,7 @@ impl LedgerServer {
             jwt_engine: self.token_service.as_ref().map(|ts| ts.jwt_engine.clone()),
             jwt_config: self.token_service.as_ref().map(|ts| ts.jwt_config.clone()),
             key_manager: self.token_service.as_ref().map(|ts| ts.key_manager.clone()),
+            manager: Some(self.manager.clone()),
             saga_handle: self.saga_handle.clone(),
         };
 
@@ -351,7 +408,7 @@ impl LedgerServer {
         // Extract connection tracker before health_state is moved into HealthService
         let connection_tracker = self.health_state.connection_tracker().clone();
         let health_service = HealthService::new(
-            system.raft().clone(),
+            system.handle().clone(),
             system.state().clone(),
             system.applied_state().clone(),
             self.health_state,
@@ -360,25 +417,35 @@ impl LedgerServer {
         // Attach dependency health checker if data_dir is provided
         let health_service = if let Some(data_dir) = self.data_dir {
             let config = self.health_check_config.unwrap_or_default();
-            let checker = inferadb_ledger_raft::dependency_health::DependencyHealthChecker::new(
-                system.raft().clone(),
+            let mut checker = inferadb_ledger_raft::dependency_health::DependencyHealthChecker::new(
+                system.handle().clone(),
                 data_dir,
                 config,
             );
+            if let Some(peer_addresses) = self.peer_addresses.clone() {
+                checker = checker.with_peer_addresses(peer_addresses);
+            }
             health_service.with_dependency_checker(checker)
         } else {
             health_service
         };
 
         let discovery_service = DiscoveryService::builder()
-            .raft(system.raft().clone())
+            .handle(system.handle().clone())
             .state(system.state().clone())
             .applied_state(system.applied_state().clone())
             .region(self.region)
+            .raft_manager(Some(self.manager.clone()))
+            .peer_addresses(self.peer_addresses.clone())
             .build();
 
         // RaftService routes inter-node Raft RPCs to the correct region.
         let raft_service = RaftService::new(self.manager.clone());
+        let raft_service = if let Some(ref liveness) = self.peer_liveness {
+            raft_service.with_peer_liveness(liveness.clone())
+        } else {
+            raft_service
+        };
 
         tracing::info!("Starting Ledger gRPC server on {}", self.addr);
 

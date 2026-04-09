@@ -23,7 +23,7 @@ use inferadb_ledger_types::{
 };
 use tonic::{Request, Response, Status};
 
-use super::{service_infra::ServiceContext, slug_resolver::SlugResolver};
+use super::{error_classify, service_infra::ServiceContext, slug_resolver::SlugResolver};
 
 /// gRPC handler for vault lifecycle operations.
 pub struct VaultService {
@@ -85,10 +85,8 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         });
 
         // Generate vault slug via Snowflake before Raft proposal
-        let vault = inferadb_ledger_types::snowflake::generate_vault_slug().map_err(|e| {
-            tracing::error!(error = %e, "Failed to generate vault slug");
-            Status::internal("Internal error")
-        })?;
+        let vault = inferadb_ledger_types::snowflake::generate_vault_slug()
+            .map_err(|e| error_classify::internal_error("id-generation", &e))?;
 
         let ledger_request = LedgerRequest::CreateVault {
             organization: organization_id,
@@ -297,11 +295,14 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
     ) -> Result<Response<GetVaultResponse>, Status> {
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
 
-        let mut ctx =
-            self.ctx.make_request_context("VaultService", "get_vault", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.ctx.make_request_context(
+            "VaultService",
+            "get_vault",
+            request.metadata(),
+            &trace_ctx,
+        );
+        let req = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());

@@ -503,6 +503,31 @@ impl LedgerClient {
         result
     }
 
+    /// Wraps an RPC operation with shutdown check, retry policy, and metrics.
+    ///
+    /// Combines the three-step pattern (check shutdown, retry with cancellation,
+    /// record metrics) into a single call. The `operation` closure is an `FnMut`
+    /// because it may be invoked multiple times on transient failures.
+    pub(crate) async fn call_with_retry<T, F, Fut>(&self, method: &str, operation: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        self.check_shutdown(None)?;
+        let retry_policy = self.pool.config().retry_policy().clone();
+        self.with_metrics(
+            method,
+            crate::retry::with_retry_cancellable(
+                &retry_policy,
+                &self.cancellation,
+                Some(&self.pool),
+                method,
+                operation,
+            ),
+        )
+        .await
+    }
+
     /// Creates a discovery service that shares this client's connection pool.
     ///
     /// ```no_run

@@ -34,6 +34,7 @@ use uuid::Uuid;
 
 pub(crate) use super::metadata::{response_with_correlation, status_with_correlation};
 use super::{
+    error_classify,
     forward_client::{ForwardClient, LeaderChannelCache},
     region_resolver::{RegionContext, RegionResolver, RemoteRegionInfo, ResolveResult},
     slug_resolver::SlugResolver,
@@ -47,10 +48,7 @@ fn classify_batch_error(err: &BatchError) -> Status {
     match err {
         BatchError::RaftError(msg) => classify_raft_error(msg),
         BatchError::Dropped => Status::unavailable("Batch writer dropped request"),
-        BatchError::Internal(msg) => {
-            tracing::error!(error = %msg, "Batch error");
-            Status::internal("Internal error")
-        },
+        BatchError::Internal(msg) => error_classify::raft_error(&msg),
     }
 }
 
@@ -97,6 +95,11 @@ pub struct WriteService {
     /// Health state for drain-phase write rejection.
     #[builder(default)]
     health_state: Option<inferadb_ledger_raft::graceful_shutdown::HealthState>,
+    /// Shared peer address map for resolving peer network addresses.
+    ///
+    /// Used by write forwarding to resolve the leader's address.
+    #[builder(default)]
+    peer_addresses: Option<inferadb_ledger_raft::PeerAddressMap>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -230,19 +233,12 @@ impl WriteService {
         &self,
         region: &RegionContext,
     ) -> Result<Option<ForwardClient>, Status> {
-        let metrics = region.raft.metrics().borrow().clone();
-
-        let nodes: Vec<(u64, String)> = metrics
-            .membership_config
-            .membership()
-            .nodes()
-            .map(|(id, node)| (*id, node.addr.clone()))
-            .collect();
-
+        let handle = &region.handle;
+        let peers = self.peer_addresses.as_ref().map(|m| m.iter_peers()).unwrap_or_default();
         self.leader_channel_cache.get_or_connect(
-            metrics.current_leader,
-            metrics.id,
-            nodes.into_iter(),
+            handle.current_leader(),
+            handle.node_id(),
+            peers.into_iter(),
         )
     }
 
@@ -573,6 +569,9 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             return result;
         }
 
+        // Ensure GLOBAL state is replicated before resolving vault slugs.
+        super::helpers::ensure_global_consistency(self.manager.as_deref()).await;
+
         // Local processing: resolve vault slug via GLOBAL applied state.
         // Vault slug indexes are maintained in the GLOBAL Raft group (CreateVault
         // is a GLOBAL operation), not in the data region's applied state.
@@ -867,29 +866,15 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 .as_ref()
                 .map(|buf| std::mem::take(&mut *buf.lock().unwrap_or_else(|e| e.into_inner())))
                 .unwrap_or_default();
-            match tokio::time::timeout(
-                timeout,
-                region.raft.client_write(RaftPayload {
-                    request: ledger_request,
-                    proposed_at: chrono::Utc::now(),
-                    caller: ctx.caller_or_zero(),
-                    state_root_commitments: commitments,
-                }),
-            )
-            .await
-            {
-                Ok(Ok(result)) => result.data,
-                Ok(Err(e)) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("RaftError", &e.to_string());
-                    metrics::record_write(false, ctx.elapsed_secs());
-                    return Err(status_with_correlation(
-                        classify_raft_error(&e.to_string()),
-                        &ctx.request_id(),
-                        &trace_ctx.trace_id,
-                    ));
-                },
-                Err(_elapsed) => {
+            let payload = RaftPayload {
+                request: ledger_request,
+                proposed_at: chrono::Utc::now(),
+                caller: ctx.caller_or_zero(),
+                state_root_commitments: commitments,
+            };
+            match region.handle.propose_and_wait(payload, timeout).await {
+                Ok(result) => result,
+                Err(inferadb_ledger_raft::HandleError::Timeout { .. }) => {
                     ctx.end_raft_timer();
                     ctx.set_error("ProposalTimeout", "Raft proposal timed out");
                     metrics::record_write(false, ctx.elapsed_secs());
@@ -899,6 +884,16 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                             "Raft proposal timed out after {}ms",
                             timeout.as_millis()
                         )),
+                        &ctx.request_id(),
+                        &trace_ctx.trace_id,
+                    ));
+                },
+                Err(e) => {
+                    ctx.end_raft_timer();
+                    ctx.set_error("RaftError", &e.to_string());
+                    metrics::record_write(false, ctx.elapsed_secs());
+                    return Err(status_with_correlation(
+                        classify_raft_error(&e.to_string()),
                         &ctx.request_id(),
                         &trace_ctx.trace_id,
                     ));
@@ -1131,6 +1126,9 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             );
             return result;
         }
+
+        // Ensure GLOBAL state is replicated before resolving vault slugs.
+        super::helpers::ensure_global_consistency(self.manager.as_deref()).await;
 
         // Local processing: resolve vault slug via GLOBAL applied state.
         // Vault slug indexes are maintained in the GLOBAL Raft group (CreateVault
@@ -1395,29 +1393,15 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             .as_ref()
             .map(|buf| std::mem::take(&mut *buf.lock().unwrap_or_else(|e| e.into_inner())))
             .unwrap_or_default();
-        let response = match tokio::time::timeout(
-            timeout,
-            region.raft.client_write(RaftPayload {
-                request: ledger_request,
-                proposed_at: chrono::Utc::now(),
-                caller: ctx.caller_or_zero(),
-                state_root_commitments: commitments,
-            }),
-        )
-        .await
-        {
-            Ok(Ok(result)) => result.data,
-            Ok(Err(e)) => {
-                ctx.end_raft_timer();
-                ctx.set_error("RaftError", &e.to_string());
-                metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
-                return Err(status_with_correlation(
-                    classify_raft_error(&e.to_string()),
-                    &ctx.request_id(),
-                    &trace_ctx.trace_id,
-                ));
-            },
-            Err(_elapsed) => {
+        let payload = RaftPayload {
+            request: ledger_request,
+            proposed_at: chrono::Utc::now(),
+            caller: ctx.caller_or_zero(),
+            state_root_commitments: commitments,
+        };
+        let response = match region.handle.propose_and_wait(payload, timeout).await {
+            Ok(result) => result,
+            Err(inferadb_ledger_raft::HandleError::Timeout { .. }) => {
                 ctx.end_raft_timer();
                 ctx.set_error("ProposalTimeout", "Raft proposal timed out");
                 metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
@@ -1427,6 +1411,16 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                         "Raft proposal timed out after {}ms",
                         timeout.as_millis()
                     )),
+                    &ctx.request_id(),
+                    &trace_ctx.trace_id,
+                ));
+            },
+            Err(e) => {
+                ctx.end_raft_timer();
+                ctx.set_error("RaftError", &e.to_string());
+                metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
+                return Err(status_with_correlation(
+                    classify_raft_error(&e.to_string()),
                     &ctx.request_id(),
                     &trace_ctx.trace_id,
                 ));

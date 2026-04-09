@@ -98,7 +98,7 @@ fn code_to_label(code: Code) -> &'static str {
 ///
 /// # Example
 ///
-/// ```no_run
+/// ```
 /// # use inferadb_ledger_sdk::SdkError;
 /// fn handle_error(err: &SdkError) {
 ///     if let Some(details) = err.server_error_details() {
@@ -109,6 +109,9 @@ fn code_to_label(code: Code) -> &'static str {
 ///         }
 ///     }
 /// }
+///
+/// let err = SdkError::Connection { message: "timeout".into() };
+/// handle_error(&err); // Connection variant has no details — branch not taken
 /// ```
 #[derive(Debug, Clone)]
 pub struct ServerErrorDetails {
@@ -443,13 +446,13 @@ impl SdkError {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
     /// # use inferadb_ledger_sdk::SdkError;
-    /// # fn example(err: SdkError) {
+    /// let err = SdkError::Connection { message: "timeout".into() };
     /// if err.is_cas_conflict() {
     ///     // Re-read current value and retry the compare-and-set
     /// }
-    /// # }
+    /// assert!(!err.is_cas_conflict()); // Connection is not a CAS conflict
     /// ```
     #[must_use]
     pub fn is_cas_conflict(&self) -> bool {

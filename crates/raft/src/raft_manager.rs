@@ -50,7 +50,11 @@
 //! # }
 //! ```
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{
@@ -59,7 +63,6 @@ use inferadb_ledger_state::{
 };
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{NodeId, OrganizationId, Region};
-use openraft::{BasicNode, Raft, storage::Adaptor};
 use parking_lot::RwLock;
 use snafu::Snafu;
 use tokio::{sync::broadcast, task::JoinHandle};
@@ -70,16 +73,16 @@ use crate::{
     batching::{BatchWriter, BatchWriterConfig, BatchWriterHandle},
     block_compaction::BlockCompactor,
     btree_compaction::BTreeCompactor,
+    consensus_handle::ConsensusHandle,
     dek_rewrap::{DekRewrapJob, RewrapProgress},
     event_writer::EventWriter,
     integrity_scrubber::IntegrityScrubberJob,
     log_storage::{AppliedStateAccessor, RaftLogStore},
     metrics::record_region_node_count,
-    raft_network::GrpcRaftNetworkFactory,
     region_router::RegionRouter,
     region_storage::RegionStorageManager,
     ttl_gc::TtlGarbageCollector,
-    types::{LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig, RaftPayload},
+    types::{LedgerNodeId, LedgerRequest, LedgerResponse, RaftPayload},
 };
 
 // ============================================================================
@@ -126,13 +129,18 @@ pub enum RaftManagerError {
 /// Result type for multi-raft operations.
 pub type Result<T> = std::result::Result<T, RaftManagerError>;
 
+/// Region creation request: region + initial members for the Raft group.
+pub type RegionCreationRequest = (Region, Vec<(u64, String)>);
+
 /// Storage components returned from region opening (state, block archive, raft log store,
-/// block announcements).
+/// block announcements, events db, optional region creation receiver).
 type OpenedRegionStorage = (
     Arc<StateLayer<FileBackend>>,
     Arc<BlockArchive<FileBackend>>,
     RaftLogStore<FileBackend>,
     broadcast::Sender<BlockAnnouncement>,
+    Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>,
+    Option<tokio::sync::mpsc::UnboundedReceiver<RegionCreationRequest>>,
 );
 
 // ============================================================================
@@ -189,6 +197,11 @@ pub struct RegionConfig {
     /// Event writer for apply-phase audit event persistence.
     /// When set, events are recorded into the region's `events.db`.
     pub event_writer: Option<EventWriter<FileBackend>>,
+    /// Event configuration for creating an `EventWriter` from the region's own
+    /// `events.db`. Used when `event_writer` is `None` — the writer is created
+    /// inside `open_region_storage` from the locally-opened database, avoiding
+    /// a double-open of the same file.
+    pub events_config: Option<inferadb_ledger_types::events::EventConfig>,
 }
 
 impl RegionConfig {
@@ -287,8 +300,8 @@ impl Drop for RegionBackgroundJobs {
 pub struct RegionGroup {
     /// Region identifier.
     region: Region,
-    /// The Raft consensus instance.
-    raft: Arc<Raft<LedgerTypeConfig>>,
+    /// Consensus handle for background jobs and services.
+    handle: Arc<ConsensusHandle>,
     /// Shared state layer for this region.
     state: Arc<StateLayer<FileBackend>>,
     /// Block archive for historical blocks.
@@ -306,6 +319,24 @@ pub struct RegionGroup {
     /// Populated by `apply_to_state_machine` after each block, drained by the
     /// leader when constructing the next `RaftPayload` for piggybacked verification.
     commitment_buffer: std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>>,
+    /// Leader lease for fast linearizable reads on the leader.
+    leader_lease: Arc<crate::leader_lease::LeaderLease>,
+    /// Watch channel receiver for applied index (ReadIndex protocol).
+    applied_index_rx: tokio::sync::watch::Receiver<u64>,
+    /// Consensus transport for dynamic peer channel management.
+    consensus_transport: Option<crate::consensus_transport::GrpcConsensusTransport>,
+    /// Events database for event queries and handler-phase recording.
+    events_db: Option<Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>>,
+    /// Last activity timestamp (updated on every request).
+    last_activity: Arc<parking_lot::Mutex<std::time::Instant>>,
+    /// Whether background jobs are currently running.
+    jobs_active: Arc<AtomicBool>,
+    /// Receiver for data region creation signals from the GLOBAL apply handler.
+    ///
+    /// Only populated for the GLOBAL region group. Taken once by the bootstrap
+    /// handler via [`take_region_creation_rx`](RegionGroup::take_region_creation_rx).
+    region_creation_rx:
+        parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<RegionCreationRequest>>>,
 }
 
 impl RegionGroup {
@@ -314,10 +345,10 @@ impl RegionGroup {
         self.region
     }
 
-    /// Returns the Raft instance.
+    /// Returns the consensus handle.
     #[must_use]
-    pub fn raft(&self) -> &Arc<Raft<LedgerTypeConfig>> {
-        &self.raft
+    pub fn handle(&self) -> &Arc<ConsensusHandle> {
+        &self.handle
     }
 
     /// Returns the state layer.
@@ -344,10 +375,53 @@ impl RegionGroup {
         &self.block_announcements
     }
 
+    /// Returns the consensus transport for dynamic peer channel management.
+    #[must_use]
+    pub fn consensus_transport(
+        &self,
+    ) -> Option<&crate::consensus_transport::GrpcConsensusTransport> {
+        self.consensus_transport.as_ref()
+    }
+
+    /// Returns the events database, if available.
+    #[must_use]
+    pub fn events_db(&self) -> Option<&Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>> {
+        self.events_db.as_ref()
+    }
+
     /// Returns the batch writer handle, if batch writing is enabled for this region.
     #[must_use]
     pub fn batch_handle(&self) -> Option<&BatchWriterHandle> {
         self.batch_handle.as_ref()
+    }
+
+    /// Records activity on this region group, resetting the idle timer.
+    pub fn touch(&self) {
+        *self.last_activity.lock() = std::time::Instant::now();
+    }
+
+    /// Returns the number of seconds since the last activity.
+    pub fn idle_secs(&self) -> u64 {
+        self.last_activity.lock().elapsed().as_secs()
+    }
+
+    /// Returns whether background jobs are currently running.
+    pub fn is_jobs_active(&self) -> bool {
+        self.jobs_active.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Returns the leader lease for this region.
+    #[must_use]
+    pub fn leader_lease(&self) -> &Arc<crate::leader_lease::LeaderLease> {
+        &self.leader_lease
+    }
+
+    /// Returns a receiver for the applied index watch channel.
+    ///
+    /// Used by the ReadIndex protocol: followers wait on this channel
+    /// until their applied index reaches the leader's committed index.
+    pub fn applied_index_watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.applied_index_rx.clone()
     }
 
     /// Drains all buffered state root commitments.
@@ -366,14 +440,24 @@ impl RegionGroup {
     }
 
     /// Checks if this node is the leader for this region.
-    pub fn is_leader(&self, node_id: LedgerNodeId) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader == Some(node_id)
+    pub fn is_leader(&self, _node_id: LedgerNodeId) -> bool {
+        self.handle.is_leader()
     }
 
     /// Returns the current leader node ID, if known.
     pub fn current_leader(&self) -> Option<LedgerNodeId> {
-        self.raft.metrics().borrow().current_leader
+        self.handle.current_leader()
+    }
+
+    /// Takes the region creation receiver from the GLOBAL region group.
+    ///
+    /// Returns `Some` exactly once for the GLOBAL region. The bootstrap handler
+    /// calls this to spawn a task that starts data regions as they are created
+    /// through GLOBAL Raft consensus.
+    pub fn take_region_creation_rx(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<RegionCreationRequest>> {
+        self.region_creation_rx.lock().take()
     }
 }
 
@@ -395,6 +479,12 @@ pub struct RaftManager {
     regions: RwLock<HashMap<Region, Arc<RegionGroup>>>,
     /// Router for organization-to-region resolution.
     router: RwLock<Option<Arc<RegionRouter<FileBackend>>>>,
+    /// Shared peer address map (node ID → network address).
+    ///
+    /// Populated from `initial_members` during region startup and updated
+    /// dynamically via `announce_peer` RPCs. Services use this to resolve
+    /// peer addresses for forwarding and health checks.
+    peer_addresses: crate::peer_address_map::PeerAddressMap,
 }
 
 impl RaftManager {
@@ -406,6 +496,7 @@ impl RaftManager {
             storage_manager,
             regions: RwLock::new(HashMap::new()),
             router: RwLock::new(None),
+            peer_addresses: crate::peer_address_map::PeerAddressMap::new(),
         }
     }
 
@@ -426,6 +517,15 @@ impl RaftManager {
         &self.storage_manager
     }
 
+    /// Returns the shared peer address map.
+    ///
+    /// Services use this to resolve peer network addresses for forwarding
+    /// and health checks without reaching into the consensus transport layer.
+    #[must_use]
+    pub fn peer_addresses(&self) -> &crate::peer_address_map::PeerAddressMap {
+        &self.peer_addresses
+    }
+
     /// Returns a region group by ID.
     ///
     /// # Errors
@@ -444,6 +544,13 @@ impl RaftManager {
     /// has not been started.
     pub fn system_region(&self) -> Result<Arc<RegionGroup>> {
         self.get_region_group(Region::GLOBAL)
+    }
+
+    /// Returns a read-only accessor for the GLOBAL region's applied state.
+    pub fn system_state_reader(&self) -> Option<SystemStateReader> {
+        self.system_region()
+            .ok()
+            .map(|group| SystemStateReader { state_layer: group.state().clone() })
     }
 
     /// Lists all active region IDs.
@@ -468,18 +575,23 @@ impl RaftManager {
     /// the store. This ensures state root commitments flow from the apply path
     /// to the proposal path.
     ///
+    /// Registers an externally created region using a [`ConsensusHandle`].
+    ///
     /// # Errors
     ///
     /// Returns [`RaftManagerError::RegionExists`] if the region is already active.
-    pub fn register_external_region(
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_consensus_region(
         &self,
         region: Region,
-        raft: Arc<Raft<LedgerTypeConfig>>,
+        handle: Arc<ConsensusHandle>,
         state: Arc<StateLayer<FileBackend>>,
         block_archive: Arc<BlockArchive<FileBackend>>,
         applied_state: AppliedStateAccessor,
         block_announcements: broadcast::Sender<BlockAnnouncement>,
         commitment_buffer: std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>>,
+        leader_lease: Arc<crate::leader_lease::LeaderLease>,
+        applied_index_rx: tokio::sync::watch::Receiver<u64>,
     ) -> Result<Arc<RegionGroup>> {
         if self.has_region(region) {
             return Err(RaftManagerError::RegionExists { region });
@@ -487,7 +599,8 @@ impl RaftManager {
 
         let region_group = Arc::new(RegionGroup {
             region,
-            raft,
+
+            handle,
             state: state.clone(),
             block_archive,
             applied_state,
@@ -495,6 +608,13 @@ impl RaftManager {
             background_jobs: parking_lot::Mutex::new(RegionBackgroundJobs::none()),
             batch_handle: None,
             commitment_buffer,
+            leader_lease,
+            applied_index_rx,
+            consensus_transport: None,
+            events_db: None,
+            last_activity: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
+            jobs_active: Arc::new(AtomicBool::new(false)),
+            region_creation_rx: parking_lot::Mutex::new(None),
         });
 
         {
@@ -507,7 +627,7 @@ impl RaftManager {
             let system_service = Arc::new(SystemOrganizationService::new(state));
             let router = Arc::new(RegionRouter::new(system_service, self.config.local_region));
             *self.router.write() = Some(router);
-            info!("RegionRouter initialized with _system organization (external registration)");
+            info!("RegionRouter initialized with _system organization (consensus registration)");
         }
 
         Ok(region_group)
@@ -535,8 +655,18 @@ impl RaftManager {
         // Look up region assignment
         let routing = router.get_routing(organization).ok()?;
 
-        // Get local region group (if we host this region)
-        self.regions.read().get(&routing.region).cloned()
+        // Get local region group. Data regions are now created through GLOBAL Raft
+        // consensus (CreateDataRegion), so we don't lazily create here — the region
+        // must already exist from a prior consensus proposal.
+        let group = self.regions.read().get(&routing.region).cloned()?;
+        group.touch();
+
+        // Auto-wake hibernated regions on first request
+        if !group.is_jobs_active() {
+            let _ = self.wake_region(routing.region);
+        }
+
+        Some(group)
     }
 
     /// Returns the region ID for an organization.
@@ -684,10 +814,11 @@ impl RaftManager {
         let RegionConfig {
             region,
             initial_members,
-            bootstrap,
+            bootstrap: _,
             enable_background_jobs,
             batch_writer_config,
             event_writer,
+            events_config,
         } = region_config;
 
         // Check if region already exists (early exit for the common case).
@@ -720,74 +851,133 @@ impl RaftManager {
         let (divergence_sender, divergence_receiver) = tokio::sync::mpsc::unbounded_channel();
 
         // Open storage via RegionStorageManager (creates directory + databases + RaftLogStore)
-        let (state, block_archive, log_store, block_announcements) =
-            self.open_region_storage(region, event_writer, divergence_sender)?;
+        let (state, block_archive, log_store, block_announcements, events_db, region_creation_rx) =
+            self.open_region_storage(region, event_writer, events_config, divergence_sender)?;
 
-        // Get accessor and commitment buffer before log_store is consumed by Adaptor
+        // Get accessor, commitment buffer, leader lease, and applied index watch
+        // before log_store is consumed by Adaptor.
         let applied_state = log_store.accessor();
         let commitment_buffer = log_store.commitment_buffer();
+        let leader_lease = log_store.leader_lease().clone();
+        let applied_index_rx = log_store.applied_index_watch();
 
-        // Use region-aware network factory so Raft RPCs include the region identifier.
-        // This ensures the target node routes messages to the correct regional Raft group.
-        let network = if region == Region::GLOBAL {
-            GrpcRaftNetworkFactory::with_trace_config(self.config.trace_raft_rpcs)
-        } else {
-            GrpcRaftNetworkFactory::for_region(region, self.config.trace_raft_rpcs)
-        };
+        // ────────────────────────────────────────────────────────────
+        // Create consensus engine + apply worker. The consensus engine
+        // handles elections, replication, and commits. The apply worker
+        // processes committed entries through the existing state machine.
+        // ────────────────────────────────────────────────────────────
 
-        // Build Raft config
-        let raft_config = openraft::Config {
-            cluster_name: format!("ledger-region-{}", region.as_str()),
-            heartbeat_interval: self.config.heartbeat_interval_ms,
-            election_timeout_min: self.config.election_timeout_min_ms,
-            election_timeout_max: self.config.election_timeout_max_ms,
+        let shard_config = inferadb_ledger_consensus::ShardConfig {
+            election_timeout_min: std::time::Duration::from_millis(
+                self.config.election_timeout_min_ms,
+            ),
+            election_timeout_max: std::time::Duration::from_millis(
+                self.config.election_timeout_max_ms,
+            ),
+            heartbeat_interval: std::time::Duration::from_millis(self.config.heartbeat_interval_ms),
+            // Data region shards have auto-promote disabled — the DR scheduler
+            // manages promotions with a catch-up check via peer_match_index.
+            auto_promote: region == Region::GLOBAL,
             ..Default::default()
         };
+        let shard_id =
+            inferadb_ledger_consensus::types::ShardId(seahash::hash(region.as_str().as_bytes()));
 
-        // Create adaptor
-        let (log_storage, state_machine) = Adaptor::new(log_store);
+        // Initial membership for the consensus engine shard.
+        let voter_ids: std::collections::BTreeSet<inferadb_ledger_consensus::types::NodeId> =
+            if initial_members.is_empty() {
+                [inferadb_ledger_consensus::types::NodeId(self.config.node_id)]
+                    .into_iter()
+                    .collect()
+            } else {
+                initial_members
+                    .iter()
+                    .map(|(id, _)| inferadb_ledger_consensus::types::NodeId(*id))
+                    .collect()
+            };
+        let consensus_membership = inferadb_ledger_consensus::types::Membership::new(voter_ids);
 
-        // Create Raft instance
-        let raft = Raft::<LedgerTypeConfig>::new(
-            self.config.node_id,
-            Arc::new(raft_config),
-            network,
-            log_storage,
-            state_machine,
-        )
-        .await
-        .map_err(|e| RaftManagerError::Raft {
-            region,
-            message: format!("Failed to create Raft instance: {}", e),
-        })?;
+        let consensus_shard = inferadb_ledger_consensus::Shard::new(
+            shard_id,
+            inferadb_ledger_consensus::types::NodeId(self.config.node_id),
+            consensus_membership,
+            shard_config,
+            inferadb_ledger_consensus::SystemClock,
+            inferadb_ledger_consensus::rng::SystemRng,
+        );
 
-        let raft = Arc::new(raft);
+        let consensus_transport =
+            crate::consensus_transport::GrpcConsensusTransport::new(self.config.node_id, region);
+        // Set the local address from initial_members so outbound messages include
+        // the sender's address for auto-registration on the receiving end.
+        if let Some((_, addr)) = initial_members.iter().find(|(id, _)| *id == self.config.node_id) {
+            consensus_transport.set_local_address(addr.clone());
+        }
+        let consensus_transport_for_group = consensus_transport.clone();
 
-        // Bootstrap if configured
-        if bootstrap && !initial_members.is_empty() {
-            self.bootstrap_region(&raft, region, &initial_members).await?;
+        // Register peer channels for initial members and populate the shared
+        // peer address map so services can resolve addresses for forwarding.
+        for (node_id, addr) in &initial_members {
+            if *node_id != self.config.node_id {
+                self.peer_addresses.insert(*node_id, addr.clone());
+                match tonic::transport::Channel::from_shared(format!("http://{addr}")) {
+                    Ok(endpoint) => {
+                        consensus_transport.set_peer(*node_id, endpoint.connect_lazy());
+                    },
+                    Err(e) => {
+                        warn!(node_id, addr, error = %e, "Failed to create channel for peer");
+                    },
+                }
+            }
         }
 
-        // Create batch writer if configured
+        let wal_dir = self.storage_manager.region_dir(region).join("wal");
+        let wal =
+            inferadb_ledger_consensus::wal::SegmentedWalBackend::open(&wal_dir).map_err(|e| {
+                RaftManagerError::Storage { region, message: format!("failed to open WAL: {e}") }
+            })?;
+        let (engine, commit_rx, state_watchers) = inferadb_ledger_consensus::ConsensusEngine::start(
+            vec![consensus_shard],
+            wal,
+            inferadb_ledger_consensus::SystemClock,
+            consensus_transport,
+            std::time::Duration::from_millis(2),
+        );
+
+        let state_rx = state_watchers.get(&shard_id).cloned().unwrap_or_else(|| {
+            let (_, rx) = tokio::sync::watch::channel(
+                inferadb_ledger_consensus::leadership::ShardState::default(),
+            );
+            rx
+        });
+
+        let response_map: crate::consensus_handle::ResponseMap =
+            Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+        let handle = Arc::new(ConsensusHandle::new(
+            engine,
+            shard_id,
+            self.config.node_id,
+            state_rx,
+            response_map,
+        ));
+
+        // Create batch writer using ConsensusHandle for proposals.
         let batch_handle = if let Some(batch_config) = batch_writer_config {
-            let raft_clone = raft.clone();
+            let handle_clone = handle.clone();
             let buffer_clone = commitment_buffer.clone();
             let submit_fn = move |requests: Vec<LedgerRequest>| {
-                let raft = raft_clone.clone();
+                let h = handle_clone.clone();
                 let buffer = buffer_clone.clone();
                 Box::pin(async move {
                     let batch_request = LedgerRequest::BatchWrite { requests };
                     let commitments =
                         std::mem::take(&mut *buffer.lock().unwrap_or_else(|e| e.into_inner()));
-                    let result = raft
-                        .client_write(RaftPayload::with_commitments(batch_request, commitments, 0))
-                        .await;
-                    match result {
-                        Ok(response) => match response.data {
-                            LedgerResponse::BatchWrite { responses } => Ok(responses),
-                            other => Ok(vec![other]),
-                        },
-                        Err(e) => Err(format!("Raft error: {}", e)),
+                    let payload = RaftPayload::with_commitments(batch_request, commitments, 0);
+                    match h.propose_and_wait(payload, std::time::Duration::from_secs(30)).await {
+                        Ok(LedgerResponse::BatchWrite { responses }) => Ok(responses),
+                        Ok(other) => Ok(vec![other]),
+                        Err(e) => Err(format!("Consensus error: {}", e)),
                     }
                 })
                     as futures::future::BoxFuture<
@@ -797,9 +987,9 @@ impl RaftManager {
             };
 
             let writer = BatchWriter::new(batch_config, submit_fn, region.to_string());
-            let handle = writer.handle();
+            let bw_handle = writer.handle();
             tokio::spawn(writer.run());
-            Some(handle)
+            Some(bw_handle)
         } else {
             None
         };
@@ -808,7 +998,7 @@ impl RaftManager {
         let background_jobs = if enable_background_jobs {
             self.start_background_jobs(
                 region,
-                raft.clone(),
+                handle.clone(),
                 state.clone(),
                 block_archive.clone(),
                 applied_state.clone(),
@@ -820,16 +1010,26 @@ impl RaftManager {
         // Spawn state root divergence handler — halts vaults on mismatch.
         // Runs alongside AutoRecoveryJob and other background workers.
         let divergence_handler = crate::state_root_verifier::StateRootDivergenceHandler::new(
-            raft.clone(),
+            handle.clone(),
             divergence_receiver,
             region.to_string(),
         );
         tokio::spawn(divergence_handler.run());
 
+        // Spawn the apply worker — bridges consensus commits to state machine.
+        let apply_worker = crate::apply_worker::ApplyWorker::new(
+            log_store,
+            handle.response_map().clone(),
+            handle.spillover().clone(),
+        );
+        tokio::spawn(apply_worker.run(commit_rx));
+
         // Create region group
+        let jobs_running = enable_background_jobs;
         let region_group = Arc::new(RegionGroup {
             region,
-            raft,
+
+            handle,
             state,
             block_archive,
             applied_state,
@@ -837,6 +1037,13 @@ impl RaftManager {
             background_jobs: parking_lot::Mutex::new(background_jobs),
             batch_handle,
             commitment_buffer,
+            leader_lease,
+            applied_index_rx,
+            consensus_transport: Some(consensus_transport_for_group),
+            events_db: Some(events_db),
+            last_activity: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
+            jobs_active: Arc::new(AtomicBool::new(jobs_running)),
+            region_creation_rx: parking_lot::Mutex::new(region_creation_rx),
         });
 
         // Register region
@@ -854,7 +1061,7 @@ impl RaftManager {
     fn start_background_jobs(
         &self,
         region: Region,
-        raft: Arc<Raft<LedgerTypeConfig>>,
+        handle: Arc<ConsensusHandle>,
         state: Arc<StateLayer<FileBackend>>,
         block_archive: Arc<BlockArchive<FileBackend>>,
         applied_state: AppliedStateAccessor,
@@ -863,8 +1070,7 @@ impl RaftManager {
 
         // TTL Garbage Collector
         let gc = TtlGarbageCollector::builder()
-            .raft(raft.clone())
-            .node_id(self.config.node_id)
+            .handle(handle.clone())
             .state(state.clone())
             .applied_state(applied_state.clone())
             .build();
@@ -873,8 +1079,7 @@ impl RaftManager {
 
         // Block Compactor
         let compactor = BlockCompactor::builder()
-            .raft(raft.clone())
-            .node_id(self.config.node_id)
+            .handle(handle.clone())
             .block_archive(block_archive.clone())
             .applied_state(applied_state.clone())
             .build();
@@ -883,7 +1088,7 @@ impl RaftManager {
 
         // Auto Recovery Job
         let recovery = AutoRecoveryJob::builder()
-            .raft(raft.clone())
+            .handle(handle.clone())
             .node_id(self.config.node_id)
             .applied_state(applied_state)
             .state(state.clone())
@@ -893,11 +1098,8 @@ impl RaftManager {
         info!(region = region.as_str(), "Started auto recovery job");
 
         // B+ Tree Compactor
-        let btree_compactor = BTreeCompactor::builder()
-            .raft(raft.clone())
-            .node_id(self.config.node_id)
-            .state(state.clone())
-            .build();
+        let btree_compactor =
+            BTreeCompactor::builder().handle(handle.clone()).state(state.clone()).build();
         let btree_compactor_handle = btree_compactor.start();
         info!(region = region.as_str(), "Started B+ tree compactor");
 
@@ -909,8 +1111,7 @@ impl RaftManager {
         // DEK Re-Wrapping Job
         let rewrap_progress = Arc::new(RewrapProgress::new());
         let dek_rewrap = DekRewrapJob::builder()
-            .raft(raft)
-            .node_id(self.config.node_id)
+            .handle(handle)
             .state(state)
             .progress(rewrap_progress.clone())
             .build();
@@ -937,6 +1138,7 @@ impl RaftManager {
         &self,
         region: Region,
         event_writer: Option<EventWriter<FileBackend>>,
+        events_config: Option<inferadb_ledger_types::events::EventConfig>,
         divergence_sender: tokio::sync::mpsc::UnboundedSender<crate::types::StateRootDivergence>,
     ) -> Result<OpenedRegionStorage> {
         // Open databases via storage manager (creates directory + state.db, blocks.db, events.db)
@@ -958,6 +1160,12 @@ impl RaftManager {
 
         // Open Raft log store (uses inferadb-ledger-store storage - handles open/create internally)
         let log_path = self.storage_manager.raft_db_path(region);
+        // Derive leader lease duration from election_timeout_min / 2.
+        // This guarantees no new leader can be elected while the lease is valid.
+        let lease_duration =
+            std::time::Duration::from_millis(self.config.election_timeout_min_ms / 2);
+        let leader_lease = Arc::new(crate::leader_lease::LeaderLease::new(lease_duration));
+
         let mut log_store = RaftLogStore::<FileBackend>::open(&log_path)
             .map_err(|e| RaftManagerError::Storage {
                 region,
@@ -965,44 +1173,39 @@ impl RaftManager {
             })?
             .with_state_layer(state.clone())
             .with_block_archive(block_archive.clone())
-            .with_region_config(region, NodeId::new(self.config.node_id.to_string()))
+            .with_region_config(
+                region,
+                NodeId::new(self.config.node_id.to_string()),
+                self.config.node_id,
+            )
             .with_block_announcements(block_announcements.clone())
-            .with_divergence_sender(divergence_sender);
+            .with_divergence_sender(divergence_sender)
+            .with_leader_lease(leader_lease);
 
-        // Wire event writer if provided
+        // Wire region creation channel for the GLOBAL log store.
+        // CreateDataRegion entries applied on GLOBAL send the region through
+        // this channel so the RaftManager can start the local region group.
+        let region_creation_rx = if region == Region::GLOBAL {
+            let (region_tx, region_rx) = tokio::sync::mpsc::unbounded_channel();
+            log_store = log_store.with_region_creation_sender(region_tx);
+            log_store = log_store.with_peer_addresses(self.peer_addresses.clone());
+            Some(region_rx)
+        } else {
+            None
+        };
+
+        // Wire event writer: use the explicitly provided writer, or create one
+        // from the region's own events_db when only an EventConfig was supplied.
+        // This avoids callers needing to pre-open the events database.
+        let events_db = storage.events_db().clone();
         if let Some(writer) = event_writer {
+            log_store = log_store.with_event_writer(writer);
+        } else if let Some(cfg) = events_config {
+            let writer = EventWriter::new(events_db.clone(), cfg);
             log_store = log_store.with_event_writer(writer);
         }
 
-        Ok((state, block_archive, log_store, block_announcements))
-    }
-
-    /// Bootstraps a region as a new cluster.
-    async fn bootstrap_region(
-        &self,
-        raft: &Raft<LedgerTypeConfig>,
-        region: Region,
-        initial_members: &[(LedgerNodeId, String)],
-    ) -> Result<()> {
-        use std::collections::BTreeMap;
-
-        let mut members: BTreeMap<LedgerNodeId, BasicNode> = BTreeMap::new();
-        for (node_id, addr) in initial_members {
-            members.insert(*node_id, BasicNode { addr: addr.clone() });
-        }
-
-        raft.initialize(members).await.map_err(|e| RaftManagerError::Raft {
-            region,
-            message: format!("Failed to initialize: {}", e),
-        })?;
-
-        info!(
-            region = region.as_str(),
-            members = initial_members.len(),
-            "Bootstrapped region cluster"
-        );
-
-        Ok(())
+        Ok((state, block_archive, log_store, block_announcements, events_db, region_creation_rx))
     }
 
     /// Stops a region group.
@@ -1027,10 +1230,11 @@ impl RaftManager {
             debug!(region = region.as_str(), "Aborted background jobs");
         }
 
-        // Trigger Raft shutdown
-        if let Err(e) = region_group.raft.shutdown().await {
-            warn!(region = region.as_str(), error = ?e, "Error during Raft shutdown");
-        }
+        // Shut down the consensus engine reactor for this region.
+        let handle = region_group.handle().clone();
+        tokio::spawn(async move {
+            handle.request_shutdown().await;
+        });
 
         // Close region storage (removes from storage manager tracking)
         if let Err(e) = self.storage_manager.close_region(region) {
@@ -1081,18 +1285,105 @@ impl RaftManager {
                     region = region.as_str(),
                     "Triggering final snapshot before leadership handoff"
                 );
-                if let Err(e) = region_group.raft.trigger().snapshot().await {
-                    warn!(
-                        region = region.as_str(),
-                        error = %e,
-                        "Failed to trigger final snapshot"
-                    );
-                }
+                // Snapshot trigger is handled by the consensus engine.
+                // No explicit snapshot trigger needed before shutdown.
             }
         }
 
         // Proceed with normal shutdown
         self.shutdown().await;
+    }
+
+    /// Hibernates a region by stopping its background jobs.
+    ///
+    /// The Raft instance remains alive — only background jobs are stopped.
+    /// No-op if the region's jobs are already stopped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RaftManagerError::RegionNotFound`] if no region with the given ID
+    /// is currently active.
+    pub fn hibernate_region(&self, region: Region) -> Result<()> {
+        let group = self.get_region_group(region)?;
+
+        // Atomically transition from active to inactive.
+        // Only one caller wins; others return early.
+        if group
+            .jobs_active
+            .compare_exchange(
+                true,
+                false,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return Ok(());
+        }
+
+        group.background_jobs.lock().abort();
+        info!(%region, "Region group hibernated");
+        Ok(())
+    }
+
+    /// Wakes a hibernating region by restarting its background jobs.
+    ///
+    /// No-op if the region's jobs are already running.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RaftManagerError::RegionNotFound`] if no region with the given ID
+    /// is currently active.
+    pub fn wake_region(&self, region: Region) -> Result<()> {
+        let group = self.get_region_group(region)?;
+
+        // Atomically transition from inactive to active.
+        // Only one caller wins; others return early.
+        if group
+            .jobs_active
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return Ok(());
+        }
+
+        group.touch();
+        let jobs = self.start_background_jobs(
+            region,
+            group.handle().clone(),
+            group.state().clone(),
+            group.block_archive().clone(),
+            group.applied_state().clone(),
+        );
+        *group.background_jobs.lock() = jobs;
+        info!(%region, "Region group woken from hibernation");
+        Ok(())
+    }
+
+    /// Hibernates idle region groups whose background jobs have been inactive
+    /// beyond the given timeout.
+    ///
+    /// The system region (`GLOBAL`) is never hibernated.
+    pub fn hibernate_idle_regions(&self, idle_timeout_secs: u64) {
+        let regions: Vec<(Region, Arc<RegionGroup>)> =
+            self.regions.read().iter().map(|(r, g)| (*r, g.clone())).collect();
+
+        for (region, group) in regions {
+            if region == Region::GLOBAL {
+                continue;
+            }
+            if group.is_jobs_active()
+                && group.idle_secs() > idle_timeout_secs
+                && let Err(e) = self.hibernate_region(region)
+            {
+                warn!(%region, error = %e, "Failed to hibernate region");
+            }
+        }
     }
 
     /// Returns statistics about the manager.
@@ -1123,6 +1414,89 @@ pub struct RaftManagerStats {
     pub leader_regions: usize,
     /// This node's ID.
     pub node_id: LedgerNodeId,
+}
+
+// ============================================================================
+// System State Reader
+// ============================================================================
+
+/// Read-only accessor for GLOBAL system state. Used by the DR scheduler
+/// to derive desired membership without holding mutable references.
+pub struct SystemStateReader {
+    state_layer: Arc<StateLayer<FileBackend>>,
+}
+
+impl SystemStateReader {
+    /// Returns the status of a node, or `Active` if no status record exists.
+    pub fn node_status(&self, node_id: u64) -> crate::types::NodeStatus {
+        let key = format!("_meta:node_status:{node_id}");
+        match self
+            .state_layer
+            .get_entity(inferadb_ledger_state::system::SYSTEM_VAULT_ID, key.as_bytes())
+        {
+            Ok(Some(entity)) => inferadb_ledger_types::decode(&entity.value)
+                .unwrap_or(crate::types::NodeStatus::Active),
+            _ => crate::types::NodeStatus::Active,
+        }
+    }
+
+    /// Returns node statuses for all nodes that have an explicit status record.
+    pub fn all_node_statuses(&self) -> Vec<(u64, crate::types::NodeStatus)> {
+        let prefix = "_meta:node_status:";
+        match self.state_layer.list_entities(
+            inferadb_ledger_state::system::SYSTEM_VAULT_ID,
+            Some(prefix),
+            None,
+            1000,
+        ) {
+            Ok(entities) => entities
+                .iter()
+                .filter_map(|e| {
+                    let key = std::str::from_utf8(&e.key).ok()?;
+                    let id_str = key.strip_prefix(prefix)?;
+                    let node_id: u64 = id_str.parse().ok()?;
+                    let status: crate::types::NodeStatus =
+                        inferadb_ledger_types::decode(&e.value).ok()?;
+                    Some((node_id, status))
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Returns all region membership reports stored in GLOBAL state.
+    ///
+    /// Each entry is `(region_name, member_node_ids)` where member_node_ids
+    /// is the union of voters and learners for that region.
+    pub fn region_memberships(&self) -> Vec<(String, Vec<u64>)> {
+        let prefix = "_meta:region_membership:";
+
+        #[derive(serde::Deserialize)]
+        struct ReportData {
+            voters: Vec<u64>,
+            learners: Vec<u64>,
+        }
+
+        match self.state_layer.list_entities(
+            inferadb_ledger_state::system::SYSTEM_VAULT_ID,
+            Some(prefix),
+            None,
+            100,
+        ) {
+            Ok(entities) => entities
+                .iter()
+                .filter_map(|e| {
+                    let key = std::str::from_utf8(&e.key).ok()?;
+                    let region_name = key.strip_prefix(prefix)?.to_string();
+                    let data: ReportData = inferadb_ledger_types::decode(&e.value).ok()?;
+                    let mut members = data.voters;
+                    members.extend(data.learners);
+                    Some((region_name, members))
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
 }
 
 // ============================================================================
@@ -1768,5 +2142,199 @@ mod tests {
         // Region should be registered exactly once
         assert!(manager.has_region(Region::US_EAST_VA));
         assert_eq!(manager.list_regions().len(), 2); // GLOBAL + US_EAST_VA
+    }
+
+    // =========================================================================
+    // Hibernation tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_hibernate_region() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = RaftManager::new(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let region_config =
+            RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
+        manager.start_data_region(region_config).await.expect("start data");
+
+        let group = manager.get_region_group(Region::US_EAST_VA).unwrap();
+        assert!(group.is_jobs_active());
+
+        manager.hibernate_region(Region::US_EAST_VA).unwrap();
+        assert!(!group.is_jobs_active());
+    }
+
+    #[tokio::test]
+    async fn test_hibernate_idempotent() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = RaftManager::new(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let region_config =
+            RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
+        manager.start_data_region(region_config).await.expect("start data");
+
+        manager.hibernate_region(Region::US_EAST_VA).unwrap();
+        // Second call is a no-op
+        manager.hibernate_region(Region::US_EAST_VA).unwrap();
+        let group = manager.get_region_group(Region::US_EAST_VA).unwrap();
+        assert!(!group.is_jobs_active());
+    }
+
+    #[tokio::test]
+    async fn test_wake_region() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = RaftManager::new(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let region_config =
+            RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
+        manager.start_data_region(region_config).await.expect("start data");
+
+        manager.hibernate_region(Region::US_EAST_VA).unwrap();
+        let group = manager.get_region_group(Region::US_EAST_VA).unwrap();
+        assert!(!group.is_jobs_active());
+
+        manager.wake_region(Region::US_EAST_VA).unwrap();
+        assert!(group.is_jobs_active());
+    }
+
+    #[tokio::test]
+    async fn test_wake_idempotent() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = RaftManager::new(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let region_config =
+            RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
+        manager.start_data_region(region_config).await.expect("start data");
+
+        let group = manager.get_region_group(Region::US_EAST_VA).unwrap();
+        assert!(group.is_jobs_active());
+
+        // Waking an already-active region is a no-op
+        manager.wake_region(Region::US_EAST_VA).unwrap();
+        assert!(group.is_jobs_active());
+    }
+
+    #[tokio::test]
+    async fn test_hibernate_not_found() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = RaftManager::new(config);
+
+        let result = manager.hibernate_region(Region::US_EAST_VA);
+        assert!(matches!(result, Err(RaftManagerError::RegionNotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_wake_not_found() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = RaftManager::new(config);
+
+        let result = manager.wake_region(Region::US_EAST_VA);
+        assert!(matches!(result, Err(RaftManagerError::RegionNotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_hibernate_idle_regions_skips_global() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = RaftManager::new(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let group = manager.get_region_group(Region::GLOBAL).unwrap();
+        assert!(group.is_jobs_active());
+
+        // Even with idle_timeout of 0, GLOBAL is never hibernated
+        manager.hibernate_idle_regions(0);
+        assert!(group.is_jobs_active());
+    }
+
+    #[tokio::test]
+    async fn test_hibernate_idle_regions_hibernates_idle() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = RaftManager::new(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let region_config =
+            RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
+        manager.start_data_region(region_config).await.expect("start data");
+
+        let group = manager.get_region_group(Region::US_EAST_VA).unwrap();
+        assert!(group.is_jobs_active());
+
+        // Set last_activity to the past so idle_secs() > 0
+        *group.last_activity.lock() = std::time::Instant::now() - std::time::Duration::from_secs(5);
+
+        manager.hibernate_idle_regions(0);
+        assert!(!group.is_jobs_active());
+    }
+
+    #[tokio::test]
+    async fn test_touch_resets_idle_timer() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = RaftManager::new(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let group = manager.get_region_group(Region::GLOBAL).unwrap();
+        // Just-created group should have near-zero idle time
+        assert!(group.idle_secs() < 2);
+
+        group.touch();
+        assert!(group.idle_secs() < 2);
+    }
+
+    #[tokio::test]
+    async fn test_region_group_initial_jobs_active_state() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = RaftManager::new(config);
+
+        // System region with background jobs enabled
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+        let group = manager.get_region_group(Region::GLOBAL).unwrap();
+        assert!(group.is_jobs_active());
+    }
+
+    #[tokio::test]
+    async fn test_region_group_no_jobs_active_when_disabled() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = RaftManager::new(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let region_config =
+            RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())])
+                .without_background_jobs();
+        manager.start_data_region(region_config).await.expect("start data");
+
+        let group = manager.get_region_group(Region::US_EAST_VA).unwrap();
+        assert!(!group.is_jobs_active());
     }
 }

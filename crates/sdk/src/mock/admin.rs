@@ -45,6 +45,23 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for MockAd
         }))
     }
 
+    async fn get_decommission_status(
+        &self,
+        _request: Request<proto::GetDecommissionStatusRequest>,
+    ) -> Result<Response<proto::GetDecommissionStatusResponse>, Status> {
+        Err(Status::unimplemented("GetDecommissionStatus not supported in mock"))
+    }
+
+    async fn check_peer_liveness(
+        &self,
+        _request: Request<proto::CheckPeerLivenessRequest>,
+    ) -> Result<Response<proto::CheckPeerLivenessResponse>, Status> {
+        Ok(Response::new(proto::CheckPeerLivenessResponse {
+            reachable: false,
+            last_seen_ago_ms: u64::MAX,
+        }))
+    }
+
     async fn get_cluster_info(
         &self,
         _request: Request<proto::GetClusterInfoRequest>,
@@ -74,6 +91,21 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for MockAd
             address: "127.0.0.1:50051".to_string(),
             is_cluster_member: true,
             term: 1,
+            cluster_id: 42,
+            state: "running".to_string(),
+        }))
+    }
+
+    async fn init_cluster(
+        &self,
+        _request: Request<proto::InitClusterRequest>,
+    ) -> Result<Response<proto::InitClusterResponse>, Status> {
+        self.state.check_injection().await?;
+
+        Ok(Response::new(proto::InitClusterResponse {
+            initialized: false,
+            cluster_id: 42,
+            already_initialized: true,
         }))
     }
 

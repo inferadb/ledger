@@ -21,10 +21,11 @@ use std::time::Duration;
 
 use inferadb_ledger_proto::proto::{
     GetClusterInfoRequest, admin_service_client::AdminServiceClient,
+    user_service_client::UserServiceClient,
 };
 use inferadb_ledger_sdk::{
-    ClientConfig, LedgerClient, Operation, OrganizationSlug, OrganizationTier, Region, RetryPolicy,
-    ServerSource, UserSlug, VaultSlug,
+    ClientConfig, LedgerClient, Operation, OrganizationSlug, RetryPolicy, ServerSource, UserSlug,
+    VaultSlug,
 };
 
 // ============================================================================
@@ -100,15 +101,113 @@ async fn create_single_endpoint_client(endpoint: &str, client_id: &str) -> Ledge
     LedgerClient::new(config).await.expect("client creation")
 }
 
-/// Creates a test organization and vault, returning (organization, vault).
-async fn setup_test_org_vault(client: &LedgerClient) -> (OrganizationSlug, VaultSlug) {
-    let ns_name = format!("test-ns-{}", uuid::Uuid::new_v4());
-    let org = client
-        .create_organization(&ns_name, Region::US_EAST_VA, UserSlug::new(0), OrganizationTier::Free)
+/// Creates a user and organization via the onboarding flow, then creates a vault.
+///
+/// Returns `(user_slug, org_slug, vault_slug)`. Retries vault creation because
+/// the organization provisioning saga runs asynchronously and may take up to 30s.
+async fn setup_user_and_org(endpoints: &[String]) -> (UserSlug, OrganizationSlug, VaultSlug) {
+    // Try each endpoint — the data region leader may differ from the GLOBAL leader.
+    // Retry with different endpoints on UNAVAILABLE ("Not the leader for region").
+    let email = format!("test-{}@e2e.local", uuid::Uuid::new_v4());
+    let mut code = String::new();
+    let mut working_endpoint = String::new();
+
+    for _attempt in 0..30 {
+        for ep in endpoints {
+            let mut user_client = match UserServiceClient::connect(ep.clone()).await {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            match user_client
+                .initiate_email_verification(
+                    inferadb_ledger_proto::proto::InitiateEmailVerificationRequest {
+                        email: email.clone(),
+                        region: 10, // REGION_US_EAST_VA
+                    },
+                )
+                .await
+            {
+                Ok(resp) => {
+                    code = resp.into_inner().code;
+                    working_endpoint = ep.clone();
+                    break;
+                },
+                Err(e)
+                    if e.code() == tonic::Code::Unavailable
+                        || e.code() == tonic::Code::Internal =>
+                {
+                    // Data region leader might be on a different node — try next endpoint
+                    continue;
+                },
+                Err(e) => panic!("initiate email verification: {e}"),
+            }
+        }
+        if !code.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if code.is_empty() {
+        panic!("initiate email verification: all endpoints failed after 30 attempts");
+    }
+
+    // Use the working endpoint for the rest of the flow
+    let endpoint = working_endpoint;
+    let mut user_client =
+        UserServiceClient::connect(endpoint.clone()).await.expect("connect user service");
+
+    // 3. Verify email code — expect OnboardingSession for new users
+    let verify_resp = user_client
+        .verify_email_code(inferadb_ledger_proto::proto::VerifyEmailCodeRequest {
+            email: email.clone(),
+            code,
+            region: 10,
+        })
         .await
-        .expect("create organization");
-    let vault_info = client.create_vault(UserSlug::new(0), org.slug).await.expect("create vault");
-    (org.slug, vault_info.vault)
+        .expect("verify email code");
+    let inner = verify_resp.into_inner();
+    let onboarding_token = match inner.result {
+        Some(inferadb_ledger_proto::proto::verify_email_code_response::Result::NewUser(
+            session,
+        )) => session.onboarding_token,
+        other => panic!("expected OnboardingSession (NewUser), got {:?}", other),
+    };
+
+    // 4. Complete registration — creates user + organization atomically
+    let org_name = format!("test-org-{}", uuid::Uuid::new_v4());
+    let reg_resp = user_client
+        .complete_registration(inferadb_ledger_proto::proto::CompleteRegistrationRequest {
+            onboarding_token,
+            email,
+            region: 10,
+            name: "E2E Test User".to_string(),
+            organization_name: org_name,
+        })
+        .await
+        .expect("complete registration");
+    let reg = reg_resp.into_inner();
+    let user_slug = UserSlug::new(
+        reg.user.expect("user in registration response").slug.expect("user slug").slug,
+    );
+    let org_slug =
+        OrganizationSlug::new(reg.organization.expect("org slug in registration response").slug);
+
+    // 5. Create vault — retry for async provisioning saga
+    let client = create_sdk_client(endpoints, "setup-client").await;
+    for attempt in 0..60 {
+        match client.create_vault(user_slug, org_slug).await {
+            Ok(info) => return (user_slug, org_slug, info.vault),
+            Err(e)
+                if (format!("{e}").contains("not found")
+                    || format!("{e}").contains("provisioned"))
+                    && attempt < 59 =>
+            {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            },
+            Err(e) => panic!("create vault: {e}"),
+        }
+    }
+    panic!("create vault timed out after 60 attempts");
 }
 
 /// Finds the leader endpoint via `GetClusterInfo`.
@@ -166,22 +265,20 @@ async fn find_non_leader_endpoints(endpoints: &[String]) -> Vec<String> {
 async fn test_write_read_cycle() {
     let endpoints = require_cluster!();
 
+    let (user, ns_id, vault) = setup_user_and_org(&endpoints).await;
     let client = create_sdk_client(&endpoints, "e2e-write-read").await;
-    let (ns_id, vault) = setup_test_org_vault(&client).await;
 
     // Write an entity
     let ops = vec![Operation::set_entity("user:alice", b"Alice Data".to_vec(), None, None)];
-    let write_result = client
-        .write(UserSlug::new(0), ns_id, Some(vault), ops, None)
-        .await
-        .expect("write should succeed");
+    let write_result =
+        client.write(user, ns_id, Some(vault), ops, None).await.expect("write should succeed");
 
     assert!(!write_result.tx_id.is_empty(), "should have tx_id");
     assert!(write_result.block_height > 0, "should have block height");
 
     // Read the entity back
     let read_result = client
-        .read(UserSlug::new(0), ns_id, Some(vault), "user:alice", None, None)
+        .read(user, ns_id, Some(vault), "user:alice", None, None)
         .await
         .expect("read should succeed");
 
@@ -193,18 +290,15 @@ async fn test_write_read_cycle() {
 async fn test_multiple_writes_reads() {
     let endpoints = require_cluster!();
 
+    let (user, ns_id, vault) = setup_user_and_org(&endpoints).await;
     let client = create_sdk_client(&endpoints, "e2e-multi-rw").await;
-    let (ns_id, vault) = setup_test_org_vault(&client).await;
 
     // Write multiple entities
     for i in 0..5 {
         let key = format!("item:{}", i);
         let value = format!("value-{}", i).into_bytes();
         let ops = vec![Operation::set_entity(&key, value, None, None)];
-        client
-            .write(UserSlug::new(0), ns_id, Some(vault), ops, None)
-            .await
-            .expect("write should succeed");
+        client.write(user, ns_id, Some(vault), ops, None).await.expect("write should succeed");
     }
 
     // Read all entities back
@@ -212,7 +306,7 @@ async fn test_multiple_writes_reads() {
         let key = format!("item:{}", i);
         let expected = format!("value-{}", i).into_bytes();
         let result = client
-            .read(UserSlug::new(0), ns_id, Some(vault), &key, None, None)
+            .read(user, ns_id, Some(vault), &key, None, None)
             .await
             .expect("read should succeed");
         assert_eq!(result, Some(expected), "should read back value for {}", key);
@@ -224,18 +318,15 @@ async fn test_multiple_writes_reads() {
 async fn test_batch_read() {
     let endpoints = require_cluster!();
 
+    let (user, ns_id, vault) = setup_user_and_org(&endpoints).await;
     let client = create_sdk_client(&endpoints, "e2e-batch-read").await;
-    let (ns_id, vault) = setup_test_org_vault(&client).await;
 
     // Write several entities
     for i in 0..3 {
         let key = format!("batch:{}", i);
         let value = format!("batch-value-{}", i).into_bytes();
         let ops = vec![Operation::set_entity(&key, value, None, None)];
-        client
-            .write(UserSlug::new(0), ns_id, Some(vault), ops, None)
-            .await
-            .expect("write should succeed");
+        client.write(user, ns_id, Some(vault), ops, None).await.expect("write should succeed");
     }
 
     // Batch read including a missing key
@@ -246,7 +337,7 @@ async fn test_batch_read() {
         "batch:missing".to_string(),
     ];
     let results = client
-        .batch_read(UserSlug::new(0), ns_id, Some(vault), keys, None, None)
+        .batch_read(user, ns_id, Some(vault), keys, None, None)
         .await
         .expect("batch read should succeed");
 
@@ -274,15 +365,15 @@ async fn test_write_replication_to_followers() {
         return;
     }
 
+    let (user, ns_id, vault) = setup_user_and_org(&endpoints).await;
+
     let leader_ep = find_leader_endpoint(&endpoints).await;
     let leader_client = create_single_endpoint_client(&leader_ep, "repl-leader").await;
-
-    let (ns_id, vault) = setup_test_org_vault(&leader_client).await;
 
     // Write through the leader
     let ops = vec![Operation::set_entity("repl:key", b"replicated-data".to_vec(), None, None)];
     let result = leader_client
-        .write(UserSlug::new(0), ns_id, Some(vault), ops, None)
+        .write(user, ns_id, Some(vault), ops, None)
         .await
         .expect("write should succeed");
     assert!(result.block_height > 0);
@@ -299,7 +390,7 @@ async fn test_write_replication_to_followers() {
             create_single_endpoint_client(ep, &format!("repl-follower-{}", i)).await;
 
         let read_result = follower_client
-            .read(UserSlug::new(0), ns_id, Some(vault), "repl:key", None, None)
+            .read(user, ns_id, Some(vault), "repl:key", None, None)
             .await
             .expect("read from follower should succeed");
 
@@ -322,18 +413,15 @@ async fn test_three_node_write_replication() {
         return;
     }
 
+    let (user, ns_id, vault) = setup_user_and_org(&endpoints).await;
+
     let leader_ep = find_leader_endpoint(&endpoints).await;
     let client = create_single_endpoint_client(&leader_ep, "repl-3node").await;
-
-    let (ns_id, vault) = setup_test_org_vault(&client).await;
 
     // Write through the leader
     let ops =
         vec![Operation::set_entity("replicated:key", b"replicated-data".to_vec(), None, None)];
-    client
-        .write(UserSlug::new(0), ns_id, Some(vault), ops, None)
-        .await
-        .expect("write should succeed");
+    client.write(user, ns_id, Some(vault), ops, None).await.expect("write should succeed");
 
     // Wait for replication
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -343,7 +431,7 @@ async fn test_three_node_write_replication() {
         let reader = create_single_endpoint_client(ep, &format!("repl-reader-{}", i)).await;
 
         let result = reader
-            .read(UserSlug::new(0), ns_id, Some(vault), "replicated:key", None, None)
+            .read(user, ns_id, Some(vault), "replicated:key", None, None)
             .await
             .expect("read from node");
 
@@ -365,22 +453,21 @@ async fn test_three_node_write_replication() {
 async fn test_multiple_client_sessions() {
     let endpoints = require_cluster!();
 
+    let (user, ns_id, vault) = setup_user_and_org(&endpoints).await;
+
     let client1 = create_sdk_client(&endpoints, "session-1").await;
-    let (ns_id, vault) = setup_test_org_vault(&client1).await;
 
     // First session writes
     let ops1 = vec![Operation::set_entity("session:key1", b"from-session-1".to_vec(), None, None)];
     let first_result =
-        client1.write(UserSlug::new(0), ns_id, Some(vault), ops1, None).await.expect("first write");
+        client1.write(user, ns_id, Some(vault), ops1, None).await.expect("first write");
 
     // Second independent session
     let client2 = create_sdk_client(&endpoints, "session-2").await;
 
     let ops2 = vec![Operation::set_entity("session:key2", b"from-session-2".to_vec(), None, None)];
-    let second_result = client2
-        .write(UserSlug::new(0), ns_id, Some(vault), ops2, None)
-        .await
-        .expect("second write");
+    let second_result =
+        client2.write(user, ns_id, Some(vault), ops2, None).await.expect("second write");
 
     // Both writes should succeed with unique tx_ids
     assert!(!first_result.tx_id.is_empty());
@@ -389,11 +476,11 @@ async fn test_multiple_client_sessions() {
 
     // Read back both keys
     let value1 = client2
-        .read(UserSlug::new(0), ns_id, Some(vault), "session:key1", None, None)
+        .read(user, ns_id, Some(vault), "session:key1", None, None)
         .await
         .expect("read first");
     let value2 = client2
-        .read(UserSlug::new(0), ns_id, Some(vault), "session:key2", None, None)
+        .read(user, ns_id, Some(vault), "session:key2", None, None)
         .await
         .expect("read second");
 
@@ -410,11 +497,11 @@ async fn test_multiple_client_sessions() {
 async fn test_watch_blocks_stream_setup() {
     let endpoints = require_cluster!();
 
+    let (user, ns_id, vault) = setup_user_and_org(&endpoints).await;
     let client = create_sdk_client(&endpoints, "stream-client").await;
-    let (ns_id, vault) = setup_test_org_vault(&client).await;
 
     // Start watching blocks from height 1 (genesis)
-    let stream_result = client.watch_blocks(UserSlug::new(0), ns_id, vault, 1).await;
+    let stream_result = client.watch_blocks(user, ns_id, vault, 1).await;
 
     assert!(stream_result.is_ok(), "watch_blocks should succeed: {:?}", stream_result.err());
 }
@@ -428,9 +515,8 @@ async fn test_watch_blocks_stream_setup() {
 async fn test_data_persistence_across_sessions() {
     let endpoints = require_cluster!();
 
-    // Setup: create organization/vault
-    let setup_client = create_sdk_client(&endpoints, "setup-client").await;
-    let (ns_id, vault) = setup_test_org_vault(&setup_client).await;
+    // Setup: create user/organization/vault
+    let (user, ns_id, vault) = setup_user_and_org(&endpoints).await;
 
     // First client session — write data
     {
@@ -440,10 +526,7 @@ async fn test_data_persistence_across_sessions() {
             let key = format!("persist:{}", i);
             let value = format!("data-{}", i).into_bytes();
             let ops = vec![Operation::set_entity(&key, value, None, None)];
-            client
-                .write(UserSlug::new(0), ns_id, Some(vault), ops, None)
-                .await
-                .expect("write should succeed");
+            client.write(user, ns_id, Some(vault), ops, None).await.expect("write should succeed");
         }
     } // Client dropped
 
@@ -454,10 +537,8 @@ async fn test_data_persistence_across_sessions() {
         for i in 0..5 {
             let key = format!("persist:{}", i);
             let expected = format!("data-{}", i).into_bytes();
-            let read_result = client
-                .read(UserSlug::new(0), ns_id, Some(vault), &key, None, None)
-                .await
-                .expect("read");
+            let read_result =
+                client.read(user, ns_id, Some(vault), &key, None, None).await.expect("read");
             assert_eq!(read_result, Some(expected), "should read {}", key);
         }
 
@@ -466,15 +547,13 @@ async fn test_data_persistence_across_sessions() {
         let value = b"data-5".to_vec();
         let ops = vec![Operation::set_entity(key, value.clone(), None, None)];
         let result = client
-            .write(UserSlug::new(0), ns_id, Some(vault), ops, None)
+            .write(user, ns_id, Some(vault), ops, None)
             .await
             .expect("write from new session");
         assert!(!result.tx_id.is_empty(), "should have tx_id");
 
-        let read_result = client
-            .read(UserSlug::new(0), ns_id, Some(vault), key, None, None)
-            .await
-            .expect("read new write");
+        let read_result =
+            client.read(user, ns_id, Some(vault), key, None, None).await.expect("read new write");
         assert_eq!(read_result, Some(value));
     }
 }
@@ -488,30 +567,21 @@ async fn test_data_persistence_across_sessions() {
 async fn test_admin_operations() {
     let endpoints = require_cluster!();
 
+    let (user, organization, vault) = setup_user_and_org(&endpoints).await;
     let client = create_sdk_client(&endpoints, "admin-client").await;
 
-    // Create an organization
-    let ns_name = format!("test-admin-{}", uuid::Uuid::new_v4());
-    let org = client
-        .create_organization(&ns_name, Region::US_EAST_VA, UserSlug::new(0), OrganizationTier::Free)
-        .await
-        .expect("create organization");
-    let organization = org.slug;
-    let caller = UserSlug::new(0);
     assert!(organization.value() > 0, "should get valid organization slug");
 
     // Get the organization
-    let org_info =
-        client.get_organization(organization, UserSlug::new(0)).await.expect("get organization");
-    assert_eq!(org_info.name, ns_name);
+    let org_info = client.get_organization(organization, user).await.expect("get organization");
+    assert!(!org_info.name.is_empty(), "organization should have a name");
 
-    // Create a vault
-    let vault_info = client.create_vault(caller, organization).await.expect("create vault");
-    assert!(vault_info.vault.value() > 0, "should get valid vault slug");
+    // Vault was already created by setup
+    assert!(vault.value() > 0, "should get valid vault slug");
 
     // List organizations
     let (organizations, _next) =
-        client.list_organizations(UserSlug::new(0), 0, None).await.expect("list organizations");
+        client.list_organizations(user, 0, None).await.expect("list organizations");
     assert!(
         organizations.iter().any(|org| org.slug == organization),
         "created organization should be in list"

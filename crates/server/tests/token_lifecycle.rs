@@ -1964,7 +1964,15 @@ async fn test_token_maintenance_idempotency() {
 /// in the current rate limiter design — it uses a single tier per org.
 #[tokio::test]
 async fn test_rate_limiting_on_create_vault_token() {
-    let cluster = TestCluster::new(1).await;
+    let rate_limit = inferadb_ledger_types::config::RateLimitConfig::builder()
+        .client_burst(100_u64)
+        .client_rate(1.0)
+        .organization_burst(10_000_u64)
+        .organization_rate(10_000.0)
+        .backpressure_threshold(10_000_u64)
+        .build()
+        .expect("valid rate limit config");
+    let cluster = TestCluster::with_rate_limit(1, rate_limit).await;
     let node = &cluster.nodes()[0];
     let addr = node.addr;
 

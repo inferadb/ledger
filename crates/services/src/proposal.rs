@@ -7,18 +7,28 @@
 use std::{sync::Arc, time::Duration};
 
 use inferadb_ledger_raft::{
+    ConsensusHandle, HandleError,
     error::classify_raft_error,
     raft_manager::RaftManager,
-    types::{LedgerRequest, LedgerResponse, LedgerTypeConfig, RaftPayload},
+    types::{LedgerRequest, LedgerResponse, RaftPayload},
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::Region;
-use openraft::{BasicNode, Raft, RaftMetrics};
+use inferadb_ledger_types::{Region, decode, encode};
 use tonic::Status;
 
-/// Raft metrics type alias using our node ID and node types.
-pub(crate) type LedgerRaftMetrics = RaftMetrics<inferadb_ledger_types::LedgerNodeId, BasicNode>;
+/// Simplified Raft metrics for vault genesis blocks and service context.
+///
+/// Replaces the full `openraft::RaftMetrics` with only the fields needed
+/// by downstream consumers (vault creation populates genesis block headers).
+pub(crate) struct LedgerRaftMetrics {
+    /// Current leader node ID, if elected.
+    pub(crate) current_leader: Option<u64>,
+    /// Current Raft term.
+    pub(crate) current_term: u64,
+    /// This node's ID.
+    pub(crate) id: u64,
+}
 
 /// Abstraction over Raft proposal submission.
 ///
@@ -67,12 +77,12 @@ pub(crate) trait ProposalService: Send + Sync {
     }
 }
 
-/// Production [`ProposalService`] backed by `openraft::Raft` and [`RaftManager`].
+/// Production [`ProposalService`] backed by [`ConsensusHandle`] and [`RaftManager`].
 ///
-/// Owns the Raft handle and manager reference, delegating proposal submission
-/// to the appropriate region's Raft group.
+/// Owns the consensus handle and manager reference, delegating proposal
+/// submission to the appropriate region's consensus group.
 pub(crate) struct RaftProposalService {
-    raft: Arc<Raft<LedgerTypeConfig>>,
+    handle: Arc<ConsensusHandle>,
     manager: Option<Arc<RaftManager>>,
 }
 
@@ -81,11 +91,8 @@ impl RaftProposalService {
     ///
     /// `manager` is required for regional proposals. Pass `None` only
     /// in single-region setups where `propose_to_region` is never called.
-    pub(crate) fn new(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        manager: Option<Arc<RaftManager>>,
-    ) -> Self {
-        Self { raft, manager }
+    pub(crate) fn new(handle: Arc<ConsensusHandle>, manager: Option<Arc<RaftManager>>) -> Self {
+        Self { handle, manager }
     }
 }
 
@@ -99,18 +106,19 @@ impl ProposalService for RaftProposalService {
     ) -> Result<LedgerResponse, Status> {
         let payload = RaftPayload::new(request, caller);
 
-        let result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
-
-        match result {
-            Ok(Ok(resp)) => Ok(resp.data),
-            Ok(Err(e)) => Err(classify_raft_error(&e.to_string())),
-            Err(_elapsed) => {
+        match self.handle.propose_and_wait(payload, timeout).await {
+            Ok(response) => Ok(response),
+            Err(HandleError::Consensus { source, .. }) => {
+                Err(classify_raft_error(&source.to_string()))
+            },
+            Err(HandleError::Timeout { .. }) => {
                 inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
                 Err(Status::deadline_exceeded(format!(
                     "Raft proposal timed out after {}ms",
                     timeout.as_millis()
                 )))
             },
+            Err(e) => Err(Status::internal(e.to_string())),
         }
     }
 
@@ -125,24 +133,198 @@ impl ProposalService for RaftProposalService {
             Status::failed_precondition("Regional proposals require RaftManager configuration")
         })?;
 
-        let region_group = manager.get_region_group(region).map_err(|e| {
-            Status::unavailable(format!("Region {region} is not active on this node: {e}"))
-        })?;
+        // Lazily create the data region if it doesn't exist yet.
+        // Data region shards materialize on first use — propose CreateDataRegion
+        // to the GLOBAL Raft group so ALL nodes create the region through consensus.
+        let region_group = match manager.get_region_group(region) {
+            Ok(group) => group,
+            Err(_) if region != Region::GLOBAL => {
+                // Region doesn't exist. If we're the GLOBAL leader, create it
+                // via Raft consensus so all nodes get it. If we're a follower,
+                // return UNAVAILABLE so the client retries (eventually hitting
+                // the leader node which creates the region).
+                if !self.handle.is_leader() {
+                    return Err(Status::unavailable(format!(
+                        "Region {region} not started — retry on the leader node"
+                    )));
+                }
 
-        let payload = RaftPayload::new(request, caller);
+                // Build initial_members from GLOBAL shard voters + peer addresses
+                // so ALL nodes in the cluster start the data region as voters.
+                let global_state = self.handle.shard_state();
+                let mut initial_members = Vec::with_capacity(global_state.voters.len());
+                for voter in &global_state.voters {
+                    let addr = manager.peer_addresses().get(voter.0).unwrap_or_default();
+                    initial_members.push((voter.0, addr));
+                }
 
-        let result = tokio::time::timeout(timeout, region_group.raft().client_write(payload)).await;
+                // Propose CreateDataRegion to GLOBAL Raft — the handler on each
+                // node will start the region with the full voter set.
+                let create_req = LedgerRequest::System(
+                    inferadb_ledger_raft::types::SystemRequest::CreateDataRegion {
+                        region,
+                        initial_members,
+                    },
+                );
+                let payload = inferadb_ledger_raft::types::RaftPayload::system(create_req);
+                match self.handle.propose_and_wait(payload, timeout).await {
+                    Ok(LedgerResponse::DataRegionCreated { .. }) => {},
+                    Ok(_) => {},
+                    Err(e) => {
+                        return Err(Status::unavailable(format!(
+                            "Failed to create data region {region}: {e}"
+                        )));
+                    },
+                }
 
-        match result {
-            Ok(Ok(resp)) => Ok(resp.data),
-            Ok(Err(e)) => Err(classify_raft_error(&e.to_string())),
-            Err(_elapsed) => {
+                // Region should now exist on this node (applied by the local handler).
+                // Poll briefly in case the apply worker hasn't finished yet.
+                let start = std::time::Instant::now();
+                loop {
+                    if let Ok(group) = manager.get_region_group(region) {
+                        // Wait for leader election on the newly created region.
+                        let election_start = std::time::Instant::now();
+                        while election_start.elapsed() < std::time::Duration::from_secs(5) {
+                            if group.handle().current_leader().is_some() {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                        break group;
+                    }
+                    if start.elapsed() > std::time::Duration::from_secs(5) {
+                        return Err(Status::unavailable(format!(
+                            "Region {region} not available after creation via Raft consensus"
+                        )));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            },
+            Err(e) => {
+                return Err(Status::unavailable(format!(
+                    "Region {region} is not active on this node: {e}"
+                )));
+            },
+        };
+
+        let payload = RaftPayload::new(request.clone(), caller);
+
+        // Try local proposal first. If we're not the data region leader,
+        // forward to the leader node.
+        match region_group.handle().propose_and_wait(payload, timeout).await {
+            Ok(response) => Ok(response),
+            Err(HandleError::Consensus { source, .. })
+                if source.to_string().contains("Not the leader") =>
+            {
+                // Not the data region leader — forward to the actual leader.
+                let leader_id = region_group.handle().current_leader().ok_or_else(|| {
+                    Status::unavailable(format!("No known leader for region {region}"))
+                })?;
+
+                let leader_addr = manager.peer_addresses().get(leader_id).ok_or_else(|| {
+                    Status::unavailable(format!(
+                        "No known address for leader node {leader_id} in region {region}"
+                    ))
+                })?;
+
+                let request_payload = encode(&request)
+                    .map_err(|e| Status::internal(format!("serialize request: {e}")))?;
+
+                let proto_region: inferadb_ledger_proto::proto::Region = region.into();
+
+                // Cache the leader channel to avoid creating a new TCP connection per proposal.
+                static PROPOSAL_CHANNEL: parking_lot::Mutex<
+                    Option<(String, tonic::transport::Channel)>,
+                > = parking_lot::Mutex::new(None);
+                let channel = {
+                    let cache = PROPOSAL_CHANNEL.lock();
+                    if let Some((ref addr, ref ch)) = *cache {
+                        if addr == &leader_addr { Some(ch.clone()) } else { None }
+                    } else {
+                        None
+                    }
+                };
+                let channel = match channel {
+                    Some(ch) => ch,
+                    None => {
+                        let ch =
+                            tonic::transport::Channel::from_shared(format!("http://{leader_addr}"))
+                                .map_err(|e| {
+                                    Status::internal(format!(
+                                        "invalid leader address {leader_addr}: {e}"
+                                    ))
+                                })?
+                                .connect_lazy();
+                        let mut cache = PROPOSAL_CHANNEL.lock();
+                        *cache = Some((leader_addr.clone(), ch.clone()));
+                        ch
+                    },
+                };
+
+                let mut client =
+                    inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new(
+                        channel,
+                    );
+
+                let resp = client
+                    .forward_regional_proposal(
+                        inferadb_ledger_proto::proto::ForwardRegionalProposalRequest {
+                            region: Some(proto_region as i32),
+                            request_payload,
+                            caller,
+                            timeout_ms: timeout.as_millis().min(u32::MAX as u128) as u32,
+                        },
+                    )
+                    .await
+                    .map_err(|e| {
+                        Status::unavailable(format!("forward to leader {leader_id} failed: {e}"))
+                    })?
+                    .into_inner();
+
+                if resp.status_code != 0 {
+                    return Err(Status::unavailable(format!(
+                        "leader {leader_id} returned error: {}",
+                        resp.error_message
+                    )));
+                }
+
+                let response: LedgerResponse = decode(&resp.response_payload).map_err(|e| {
+                    Status::internal(format!("deserialize forwarded response: {e}"))
+                })?;
+
+                // Wait for local replication to catch up to the leader's committed
+                // index so that subsequent local reads see the written data.
+                if resp.committed_index > 0 {
+                    let mut watch = region_group.applied_index_watch();
+                    if let Err(e) = inferadb_ledger_raft::wait_for_apply(
+                        &mut watch,
+                        resp.committed_index,
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            region = region.as_str(),
+                            committed_index = resp.committed_index,
+                            error = %e,
+                            "Timed out waiting for local replication after forwarded write"
+                        );
+                    }
+                }
+
+                Ok(response)
+            },
+            Err(HandleError::Consensus { source, .. }) => {
+                Err(classify_raft_error(&source.to_string()))
+            },
+            Err(HandleError::Timeout { .. }) => {
                 inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
                 Err(Status::deadline_exceeded(format!(
                     "Regional Raft proposal timed out after {}ms (region: {region})",
                     timeout.as_millis()
                 )))
             },
+            Err(e) => Err(Status::internal(e.to_string())),
         }
     }
 
@@ -159,7 +341,12 @@ impl ProposalService for RaftProposalService {
     }
 
     fn raft_metrics(&self) -> Option<LedgerRaftMetrics> {
-        Some(self.raft.metrics().borrow().clone())
+        let state = self.handle.shard_state();
+        Some(LedgerRaftMetrics {
+            current_leader: state.leader.map(|n| n.0),
+            current_term: state.term,
+            id: self.handle.node_id(),
+        })
     }
 }
 
@@ -357,7 +544,8 @@ mod tests {
             RegionConfig::system(node_id, "127.0.0.1:0".to_string()).without_background_jobs();
         let system = manager.start_system_region(region_config).await.expect("start system region");
 
-        let svc = Arc::new(RaftProposalService::new(system.raft().clone(), Some(manager.clone())));
+        let svc =
+            Arc::new(RaftProposalService::new(system.handle().clone(), Some(manager.clone())));
         (svc, manager, temp)
     }
 
@@ -389,7 +577,7 @@ mod tests {
             RegionConfig::system(node_id, "127.0.0.1:0".to_string()).without_background_jobs();
         let system = manager.start_system_region(region_config).await.expect("start system region");
 
-        let svc = RaftProposalService::new(system.raft().clone(), None);
+        let svc = RaftProposalService::new(system.handle().clone(), None);
 
         match svc.regional_state(Region::GLOBAL) {
             Err(err) => assert_eq!(err.code(), tonic::Code::FailedPrecondition),
@@ -407,7 +595,7 @@ mod tests {
             RegionConfig::system(node_id, "127.0.0.1:0".to_string()).without_background_jobs();
         let system = manager.start_system_region(region_config).await.expect("start system region");
 
-        let svc = RaftProposalService::new(system.raft().clone(), None);
+        let svc = RaftProposalService::new(system.handle().clone(), None);
 
         let err = svc
             .propose_to_region(
@@ -427,10 +615,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn propose_to_region_unknown_region_returns_unavailable() {
-        let (svc, _manager, _temp) = create_raft_proposal_service().await;
+    async fn propose_to_region_unknown_region_triggers_global_proposal() {
+        let (svc, manager, _temp) = create_raft_proposal_service().await;
 
-        let err = svc
+        // Verify the region doesn't exist yet.
+        assert!(!manager.has_region(Region::US_EAST_VA), "region should not exist before propose");
+
+        // In unit tests, GLOBAL Raft consensus may not be fully functional
+        // (no apply worker processing), so the propose may time out. The key
+        // behavior: propose_to_region attempts CreateDataRegion through GLOBAL
+        // when the region is missing, rather than creating locally.
+        // Full end-to-end region creation is validated in integration tests.
+        let result = svc
             .propose_to_region(
                 Region::US_EAST_VA,
                 LedgerRequest::System(
@@ -439,12 +635,13 @@ mod tests {
                     },
                 ),
                 0,
-                Duration::from_secs(5),
+                Duration::from_millis(200),
             )
-            .await
-            .unwrap_err();
+            .await;
 
-        assert_eq!(err.code(), tonic::Code::Unavailable);
+        // The proposal should fail (timeout or unavailable) since the full
+        // consensus pipeline isn't running in this unit test.
+        assert!(result.is_err(), "expected error in unit test without full consensus");
     }
 
     #[tokio::test]

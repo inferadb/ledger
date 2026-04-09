@@ -912,6 +912,7 @@ impl RequestContext {
         );
 
         // Export span to OTEL if enabled
+        #[cfg(feature = "observability")]
         if crate::otel::is_otel_enabled() {
             let attrs = crate::otel::SpanAttributes {
                 request_id: Some(self.request_id.to_string()),

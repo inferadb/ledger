@@ -172,7 +172,7 @@ impl<'a, 'db, B: StorageBackend, T: Table> TableIterator<'a, 'db, B, T> {
 
     /// Collects all remaining entries into a `Vec`.
     pub fn collect_entries(mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(self.buffer_size);
         while let Ok(Some(entry)) = self.next_entry() {
             result.push(entry);
         }

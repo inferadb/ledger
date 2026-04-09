@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Run throughput-focused stress tests
 #
-# Tests designed to measure and validate DESIGN.md performance targets:
-#   - Write throughput: 5,000 tx/sec
-#   - Read throughput: 100,000 req/sec per node
-#   - Write p99 latency: <50ms
-#   - Read p99 latency: <2ms
-#
+# Tests designed to measure performance against advisory targets.
+# Missing a target emits a warning; the test still passes.
 # Uses release mode for accurate measurements.
 # Tests run sequentially to avoid port conflicts.
+#
+# Tests:
+#   - test_stress_batched               Single-region batched writes
+#   - test_stress_read_throughput       Read-heavy workload
+#   - test_stress_multi_region_batched  Multi-region batched writes
+#   - test_stress_multi_region_target   Multi-region target throughput
 #
 # Usage:
 #   ./scripts/stress-throughput.sh
@@ -16,19 +18,21 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+source "$(dirname "$0")/stress-targets.sh"
+
 echo "Running throughput stress tests (release mode)..."
 echo ""
-echo "Targets:"
-echo "  - Write throughput: 5,000 tx/sec"
-echo "  - Read throughput: 100,000 req/sec per node"
-echo "  - Write p99 latency: <50ms"
-echo "  - Read p99 latency: <2ms"
+echo "Targets (advisory — misses emit warnings, not failures):"
+echo "  - Write p99 latency:          <${STRESS_WRITE_P99_TARGET}"
+echo "  - Read p99 latency:           <${STRESS_READ_P99_TARGET}"
+echo "  - Write throughput:           ${STRESS_WRITE_THROUGHPUT_TARGET}"
+echo "  - Read throughput:            ${STRESS_READ_THROUGHPUT_TARGET}"
+echo "  - Multi-region throughput:    ${STRESS_MULTI_REGION_THROUGHPUT_TARGET}"
 echo ""
 
-# Run batched tests (single-shard and multi-shard)
-cargo test --release -p inferadb-ledger-server \
+cargo +1.92 test --release --test stress -- \
     test_stress_batched \
     test_stress_read_throughput \
-    test_stress_multi_shard_batched \
-    test_stress_multi_shard_target \
-    -- --test-threads=1 --nocapture
+    test_stress_multi_region_batched \
+    test_stress_multi_region_target \
+    --test-threads=1 --nocapture

@@ -831,41 +831,56 @@ async fn test_idempotency_survives_leader_failover() {
     cluster.wait_for_sync(Duration::from_secs(5)).await;
     cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
-    // Trigger leader failover by having the leader remove itself from the cluster.
-    // This will cause a new leader election among the remaining nodes.
-    let mut admin_client =
-        common::create_admin_client(leader_addr).await.expect("connect to admin service");
+    // Trigger leader failover: transfer GLOBAL leadership to a follower first,
+    // then have the new leader remove the old node via LeaveCluster. This avoids
+    // the self-removal path (where the leader removes itself and remaining nodes
+    // must hold an unassisted re-election).
+    let follower = cluster
+        .nodes()
+        .iter()
+        .find(|n| n.id != original_leader_id)
+        .expect("should have a follower");
+    let transfer_target = follower.id;
 
-    let leave_response = admin_client
+    // Transfer GLOBAL leadership via the consensus handle (no gRPC RPC for this).
+    leader
+        .handle
+        .transfer_leader(transfer_target)
+        .await
+        .expect("GLOBAL leader transfer should succeed");
+
+    // Wait for the new leader to be elected after transfer.
+    let new_leader_id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            for node in cluster.nodes() {
+                if node.id == original_leader_id {
+                    continue;
+                }
+                if let Some(l) = node.current_leader()
+                    && l != original_leader_id
+                {
+                    return l;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("new leader should be elected after transfer");
+
+    // Now have the NEW leader remove the old node from the cluster.
+    let new_leader_node = cluster.node(new_leader_id).expect("new leader should exist");
+    let mut new_admin_client =
+        common::create_admin_client(new_leader_node.addr).await.expect("connect to new leader");
+
+    let leave_response = new_admin_client
         .leave_cluster(inferadb_ledger_proto::proto::LeaveClusterRequest {
             node_id: original_leader_id,
         })
         .await
         .expect("leave_cluster RPC should succeed");
 
-    assert!(leave_response.into_inner().success, "leader should successfully leave cluster");
-
-    // Wait for a new leader to be elected (with timeout).
-    // Standard Raft (single-term-leader) may need extra election rounds on
-    // split votes, and CI contention can delay timers — 20s is generous.
-    let new_leader_id = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            // Check each remaining node for leadership
-            for node in cluster.nodes() {
-                if node.id == original_leader_id {
-                    continue; // Skip the old leader
-                }
-                if let Some(leader) = node.current_leader()
-                    && leader != original_leader_id
-                {
-                    return leader;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect("new leader should be elected within timeout");
+    assert!(leave_response.into_inner().success, "old leader should successfully leave cluster");
 
     assert_ne!(new_leader_id, original_leader_id, "new leader should be different from original");
 

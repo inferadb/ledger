@@ -10,7 +10,6 @@ use crate::{
         missing_response_field, proto_timestamp_to_system_time, user_email_info_from_proto,
         user_info_from_proto,
     },
-    retry::with_retry_cancellable,
     types::admin::{BlindingKeyRehashStatus, BlindingKeyRotationStatus, UserEmailInfo, UserInfo},
 };
 
@@ -31,8 +30,6 @@ impl LedgerClient {
         region: Region,
         role: UserRole,
     ) -> Result<UserInfo> {
-        self.check_shutdown(None)?;
-
         let name = name.into();
         let email = email.into();
         let email_hmac = email_hmac.into();
@@ -41,73 +38,56 @@ impl LedgerClient {
         let proto_role: proto::UserRole = role.into();
         let role_i32: i32 = proto_role.into();
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("create_user", || {
+            let pool = pool.clone();
+            let email = email.clone();
+            let email_hmac = email_hmac.clone();
+            let name = name.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_user_client);
 
-        self.with_metrics(
-            "create_user",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "create_user",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_user_client);
+                let request = proto::CreateUserRequest {
+                    name: name.clone(),
+                    email: email.clone(),
+                    region: region_i32,
+                    role: Some(role_i32),
+                    email_hmac: email_hmac.clone(),
+                    organization_name: String::new(),
+                    organization_tier: None,
+                };
 
-                    let request = proto::CreateUserRequest {
-                        name: name.clone(),
-                        email: email.clone(),
-                        region: region_i32,
-                        role: Some(role_i32),
-                        email_hmac: email_hmac.clone(),
-                        organization_name: String::new(),
-                        organization_tier: None,
-                    };
+                let response = client.create_user(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.create_user(tonic::Request::new(request)).await?.into_inner();
-
-                    response
-                        .user
-                        .map(|u| user_info_from_proto(&u))
-                        .ok_or_else(|| missing_response_field("user", "CreateUserResponse"))
-                },
-            ),
-        )
+                response
+                    .user
+                    .map(|u| user_info_from_proto(&u))
+                    .ok_or_else(|| missing_response_field("user", "CreateUserResponse"))
+            }
+        })
         .await
     }
 
     /// Gets a user by slug.
     pub async fn get_user(&self, user: UserSlug) -> Result<UserInfo> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("get_user", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_user_client);
 
-        self.with_metrics(
-            "get_user",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "get_user",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_user_client);
+                let request = proto::GetUserRequest {
+                    slug: Some(proto::UserSlug { slug: user.value() }),
+                    caller: Some(proto::UserSlug { slug: user.value() }),
+                };
 
-                    let request = proto::GetUserRequest {
-                        slug: Some(proto::UserSlug { slug: user.value() }),
-                        caller: Some(proto::UserSlug { slug: user.value() }),
-                    };
+                let response = client.get_user(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.get_user(tonic::Request::new(request)).await?.into_inner();
-
-                    response
-                        .user
-                        .map(|u| user_info_from_proto(&u))
-                        .ok_or_else(|| missing_response_field("user", "GetUserResponse"))
-                },
-            ),
-        )
+                response
+                    .user
+                    .map(|u| user_info_from_proto(&u))
+                    .ok_or_else(|| missing_response_field("user", "GetUserResponse"))
+            }
+        })
         .await
     }
 
@@ -121,90 +101,69 @@ impl LedgerClient {
         role: Option<UserRole>,
         email: Option<UserEmailId>,
     ) -> Result<UserInfo> {
-        self.check_shutdown(None)?;
-
         let proto_role = role.map(|r| {
             let pr: proto::UserRole = r.into();
             let i: i32 = pr.into();
             i
         });
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("update_user", || {
+            let pool = pool.clone();
+            let name = name.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_user_client);
 
-        self.with_metrics(
-            "update_user",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "update_user",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_user_client);
+                let request = proto::UpdateUserRequest {
+                    slug: Some(proto::UserSlug { slug: user.value() }),
+                    name: name.clone(),
+                    role: proto_role,
+                    primary_email: email.map(|id| proto::UserEmailId { id: id.value() }),
+                    caller: Some(proto::UserSlug { slug: user.value() }),
+                };
 
-                    let request = proto::UpdateUserRequest {
-                        slug: Some(proto::UserSlug { slug: user.value() }),
-                        name: name.clone(),
-                        role: proto_role,
-                        primary_email: email.map(|id| proto::UserEmailId { id: id.value() }),
-                        caller: Some(proto::UserSlug { slug: user.value() }),
-                    };
+                let response = client.update_user(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.update_user(tonic::Request::new(request)).await?.into_inner();
-
-                    response
-                        .user
-                        .map(|u| user_info_from_proto(&u))
-                        .ok_or_else(|| missing_response_field("user", "UpdateUserResponse"))
-                },
-            ),
-        )
+                response
+                    .user
+                    .map(|u| user_info_from_proto(&u))
+                    .ok_or_else(|| missing_response_field("user", "UpdateUserResponse"))
+            }
+        })
         .await
     }
 
     /// Soft-deletes a user, starting the retention countdown.
     pub async fn delete_user(&self, user: UserSlug, caller: UserSlug) -> Result<UserInfo> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("delete_user", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_user_client);
 
-        self.with_metrics(
-            "delete_user",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "delete_user",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_user_client);
+                let request = proto::DeleteUserRequest {
+                    slug: Some(proto::UserSlug { slug: user.value() }),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::DeleteUserRequest {
-                        slug: Some(proto::UserSlug { slug: user.value() }),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response = client.delete_user(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.delete_user(tonic::Request::new(request)).await?.into_inner();
-
-                    let slug_val = response.slug.map_or(0, |s| s.slug);
-                    Ok(UserInfo {
-                        slug: UserSlug::new(slug_val),
-                        name: String::new(),
-                        email: UserEmailId::new(0),
-                        status: UserStatus::Deleted,
-                        role: UserRole::User,
-                        created_at: None,
-                        updated_at: None,
-                        deleted_at: response
-                            .deleted_at
-                            .as_ref()
-                            .and_then(proto_timestamp_to_system_time),
-                        retention_days: Some(response.retention_days),
-                    })
-                },
-            ),
-        )
+                let slug_val = response.slug.map_or(0, |s| s.slug);
+                Ok(UserInfo {
+                    slug: UserSlug::new(slug_val),
+                    name: String::new(),
+                    email: UserEmailId::new(0),
+                    status: UserStatus::Deleted,
+                    role: UserRole::User,
+                    created_at: None,
+                    updated_at: None,
+                    deleted_at: response
+                        .deleted_at
+                        .as_ref()
+                        .and_then(proto_timestamp_to_system_time),
+                    retention_days: Some(response.retention_days),
+                })
+            }
+        })
         .await
     }
 
@@ -219,37 +178,27 @@ impl LedgerClient {
         page_size: u32,
         page_token: Option<Vec<u8>>,
     ) -> Result<(Vec<UserInfo>, Option<Vec<u8>>)> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("list_users", || {
+            let pool = pool.clone();
+            let page_token = page_token.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_user_client);
 
-        self.with_metrics(
-            "list_users",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "list_users",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_user_client);
+                let request = proto::ListUsersRequest {
+                    page_size,
+                    page_token: page_token.clone(),
+                    region: None,
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::ListUsersRequest {
-                        page_size,
-                        page_token: page_token.clone(),
-                        region: None,
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response = client.list_users(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.list_users(tonic::Request::new(request)).await?.into_inner();
-
-                    let users: Vec<UserInfo> =
-                        response.users.iter().map(user_info_from_proto).collect();
-                    Ok((users, response.next_page_token))
-                },
-            ),
-        )
+                let users: Vec<UserInfo> =
+                    response.users.iter().map(user_info_from_proto).collect();
+                Ok((users, response.next_page_token))
+            }
+        })
         .await
     }
 
@@ -263,41 +212,32 @@ impl LedgerClient {
         caller: UserSlug,
         email: impl Into<String>,
     ) -> Result<Vec<UserInfo>> {
-        self.check_shutdown(None)?;
-
         let email = email.into();
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("search_users", || {
+            let pool = pool.clone();
+            let email = email.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_user_client);
 
-        self.with_metrics(
-            "search_users",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "search_users",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_user_client);
+                let request = proto::SearchUsersRequest {
+                    filter: Some(proto::UserSearchFilter {
+                        email: Some(email.clone()),
+                        status: None,
+                        role: None,
+                        name_prefix: None,
+                    }),
+                    page_token: None,
+                    page_size: 100,
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::SearchUsersRequest {
-                        filter: Some(proto::UserSearchFilter {
-                            email: Some(email.clone()),
-                            status: None,
-                            role: None,
-                            name_prefix: None,
-                        }),
-                        page_token: None,
-                        page_size: 100,
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.search_users(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.search_users(tonic::Request::new(request)).await?.into_inner();
-
-                    Ok(response.users.iter().map(user_info_from_proto).collect())
-                },
-            ),
-        )
+                Ok(response.users.iter().map(user_info_from_proto).collect())
+            }
+        })
         .await
     }
 
@@ -312,71 +252,53 @@ impl LedgerClient {
         email: impl Into<String>,
         email_hmac: impl Into<String>,
     ) -> Result<UserEmailInfo> {
-        self.check_shutdown(None)?;
-
         let email = email.into();
         let email_hmac = email_hmac.into();
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("create_user_email", || {
+            let pool = pool.clone();
+            let email = email.clone();
+            let email_hmac = email_hmac.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_user_client);
 
-        self.with_metrics(
-            "create_user_email",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "create_user_email",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_user_client);
+                let request = proto::CreateUserEmailRequest {
+                    user: Some(proto::UserSlug { slug: user.value() }),
+                    email: email.clone(),
+                    email_hmac: email_hmac.clone(),
+                    caller: Some(proto::UserSlug { slug: user.value() }),
+                };
 
-                    let request = proto::CreateUserEmailRequest {
-                        user: Some(proto::UserSlug { slug: user.value() }),
-                        email: email.clone(),
-                        email_hmac: email_hmac.clone(),
-                        caller: Some(proto::UserSlug { slug: user.value() }),
-                    };
+                let response =
+                    client.create_user_email(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.create_user_email(tonic::Request::new(request)).await?.into_inner();
-
-                    response
-                        .email
-                        .map(|e| user_email_info_from_proto(&e))
-                        .ok_or_else(|| missing_response_field("email", "CreateUserEmailResponse"))
-                },
-            ),
-        )
+                response
+                    .email
+                    .map(|e| user_email_info_from_proto(&e))
+                    .ok_or_else(|| missing_response_field("email", "CreateUserEmailResponse"))
+            }
+        })
         .await
     }
 
     /// Deletes an email record from a user.
     pub async fn delete_user_email(&self, user: UserSlug, email_id: UserEmailId) -> Result<()> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("delete_user_email", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_user_client);
 
-        self.with_metrics(
-            "delete_user_email",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "delete_user_email",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_user_client);
+                let request = proto::DeleteUserEmailRequest {
+                    user: Some(proto::UserSlug { slug: user.value() }),
+                    email_id: Some(proto::UserEmailId { id: email_id.value() }),
+                    caller: Some(proto::UserSlug { slug: user.value() }),
+                };
 
-                    let request = proto::DeleteUserEmailRequest {
-                        user: Some(proto::UserSlug { slug: user.value() }),
-                        email_id: Some(proto::UserEmailId { id: email_id.value() }),
-                        caller: Some(proto::UserSlug { slug: user.value() }),
-                    };
-
-                    client.delete_user_email(tonic::Request::new(request)).await?;
-                    Ok(())
-                },
-            ),
-        )
+                client.delete_user_email(tonic::Request::new(request)).await?;
+                Ok(())
+            }
+        })
         .await
     }
 
@@ -391,72 +313,54 @@ impl LedgerClient {
         user: Option<UserSlug>,
         email: Option<String>,
     ) -> Result<Vec<UserEmailInfo>> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("search_user_email", || {
+            let pool = pool.clone();
+            let email = email.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_user_client);
 
-        self.with_metrics(
-            "search_user_email",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "search_user_email",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_user_client);
+                let request = proto::SearchUserEmailRequest {
+                    filter: Some(proto::UserEmailSearchFilter {
+                        user: user.map(|s| proto::UserSlug { slug: s.value() }),
+                        email: email.clone(),
+                        verified_only: None,
+                    }),
+                    page_token: None,
+                    page_size: 100,
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::SearchUserEmailRequest {
-                        filter: Some(proto::UserEmailSearchFilter {
-                            user: user.map(|s| proto::UserSlug { slug: s.value() }),
-                            email: email.clone(),
-                            verified_only: None,
-                        }),
-                        page_token: None,
-                        page_size: 100,
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.search_user_email(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.search_user_email(tonic::Request::new(request)).await?.into_inner();
-
-                    Ok(response.emails.iter().map(user_email_info_from_proto).collect())
-                },
-            ),
-        )
+                Ok(response.emails.iter().map(user_email_info_from_proto).collect())
+            }
+        })
         .await
     }
 
     /// Verifies a user email using a verification token.
     pub async fn verify_user_email(&self, token: impl Into<String>) -> Result<UserEmailInfo> {
-        self.check_shutdown(None)?;
-
         let token = token.into();
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("verify_user_email", || {
+            let pool = pool.clone();
+            let token = token.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_user_client);
 
-        self.with_metrics(
-            "verify_user_email",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "verify_user_email",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_user_client);
+                let request = proto::VerifyUserEmailRequest { token: token.clone() };
 
-                    let request = proto::VerifyUserEmailRequest { token: token.clone() };
+                let response =
+                    client.verify_user_email(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.verify_user_email(tonic::Request::new(request)).await?.into_inner();
-
-                    response
-                        .email
-                        .map(|e| user_email_info_from_proto(&e))
-                        .ok_or_else(|| missing_response_field("email", "VerifyUserEmailResponse"))
-                },
-            ),
-        )
+                response
+                    .email
+                    .map(|e| user_email_info_from_proto(&e))
+                    .ok_or_else(|| missing_response_field("email", "VerifyUserEmailResponse"))
+            }
+        })
         .await
     }
 
@@ -477,39 +381,27 @@ impl LedgerClient {
         caller: UserSlug,
         new_key_version: u32,
     ) -> Result<BlindingKeyRotationStatus> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("rotate_blinding_key", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_admin_client);
 
-        self.with_metrics(
-            "rotate_blinding_key",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "rotate_blinding_key",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_admin_client);
+                let request = proto::RotateBlindingKeyRequest {
+                    new_key_version,
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::RotateBlindingKeyRequest {
-                        new_key_version,
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.rotate_blinding_key(tonic::Request::new(request)).await?.into_inner();
 
-                    let response = client
-                        .rotate_blinding_key(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
-
-                    Ok(BlindingKeyRotationStatus {
-                        total_entries: response.total_entries,
-                        entries_rehashed: response.entries_rehashed,
-                        complete: response.complete,
-                    })
-                },
-            ),
-        )
+                Ok(BlindingKeyRotationStatus {
+                    total_entries: response.total_entries,
+                    entries_rehashed: response.entries_rehashed,
+                    complete: response.complete,
+                })
+            }
+        })
         .await
     }
 
@@ -525,40 +417,30 @@ impl LedgerClient {
         &self,
         caller: UserSlug,
     ) -> Result<BlindingKeyRehashStatus> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("get_blinding_key_rehash_status", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_admin_client);
 
-        self.with_metrics(
-            "get_blinding_key_rehash_status",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "get_blinding_key_rehash_status",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_admin_client);
+                let request = proto::GetBlindingKeyRehashStatusRequest {
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::GetBlindingKeyRehashStatusRequest {
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response = client
+                    .get_blinding_key_rehash_status(tonic::Request::new(request))
+                    .await?
+                    .into_inner();
 
-                    let response = client
-                        .get_blinding_key_rehash_status(tonic::Request::new(request))
-                        .await?
-                        .into_inner();
-
-                    Ok(BlindingKeyRehashStatus {
-                        total_entries: response.total_entries,
-                        entries_rehashed: response.entries_rehashed,
-                        complete: response.complete,
-                        per_region_progress: response.per_region_progress,
-                        active_key_version: response.active_key_version,
-                    })
-                },
-            ),
-        )
+                Ok(BlindingKeyRehashStatus {
+                    total_entries: response.total_entries,
+                    entries_rehashed: response.entries_rehashed,
+                    complete: response.complete,
+                    per_region_progress: response.per_region_progress,
+                    active_key_version: response.active_key_version,
+                })
+            }
+        })
         .await
     }
 }

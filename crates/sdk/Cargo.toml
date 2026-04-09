@@ -14,7 +14,7 @@ categories = ["api-bindings", "authentication"]
 
 [dependencies]
 # Async runtime
-tokio = { workspace = true, features = ["full", "sync"] }
+tokio = { workspace = true, features = ["fs", "io-util", "net"] }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 
@@ -67,7 +67,6 @@ inferadb-ledger-raft = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
-openraft = { workspace = true }
 
 [features]
 serde = []

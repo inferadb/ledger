@@ -27,26 +27,27 @@ use std::sync::Arc;
 
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_raft::{
+    ConsensusHandle, LeaderLease,
     batching::BatchWriterHandle,
     log_storage::AppliedStateAccessor,
     metrics,
     raft_manager::RaftManager,
     region_router::{RegionRouter, RoutingInfo},
-    types::LedgerTypeConfig,
 };
 use inferadb_ledger_state::{BlockArchive, StateLayer};
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{OrganizationId, Region};
-use openraft::Raft;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tonic::Status;
+
+use super::error_classify;
 
 /// Resolved region context for handling a request locally.
 ///
 /// Contains all the resources needed to process a request on a specific region.
 pub struct RegionContext {
-    /// Raft consensus handle for this region's membership queries.
-    pub raft: Arc<Raft<LedgerTypeConfig>>,
+    /// Consensus handle for this region's leadership and proposal operations.
+    pub handle: Arc<ConsensusHandle>,
     /// State layer providing this region's entity and relationship reads.
     pub state: Arc<StateLayer<FileBackend>>,
     /// The block archive for this region.
@@ -66,6 +67,16 @@ pub struct RegionContext {
     pub commitment_buffer: Option<
         std::sync::Arc<std::sync::Mutex<Vec<inferadb_ledger_raft::types::StateRootCommitment>>>,
     >,
+    /// Leader lease for fast linearizable reads on the leader.
+    ///
+    /// When the lease is valid, the leader can serve linearizable reads
+    /// without a quorum round-trip (~50ns check).
+    pub leader_lease: Option<Arc<LeaderLease>>,
+    /// Watch channel receiver for applied index (ReadIndex protocol).
+    ///
+    /// Followers use this to wait until their local applied index catches up
+    /// to the leader's committed index during linearizable reads.
+    pub applied_index_rx: Option<watch::Receiver<u64>>,
 }
 
 /// Information for forwarding a request to a remote region.
@@ -94,17 +105,18 @@ pub enum ResolveResult {
     Remote(RemoteRegionInfo),
 }
 
-// Manual Debug for RegionContext since Raft doesn't implement Debug
 impl std::fmt::Debug for RegionContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegionContext")
-            .field("raft", &"<Raft>")
+            .field("handle", &"<ConsensusHandle>")
             .field("state", &"<StateLayer>")
             .field("block_archive", &"<BlockArchive>")
             .field("applied_state", &"<AppliedState>")
             .field("block_announcements", &self.block_announcements.is_some())
             .field("batch_handle", &self.batch_handle.is_some())
             .field("commitment_buffer", &self.commitment_buffer.is_some())
+            .field("leader_lease", &self.leader_lease.is_some())
+            .field("applied_index_rx", &self.applied_index_rx.is_some())
             .finish()
     }
 }
@@ -165,16 +177,20 @@ pub trait RegionResolver: Send + Sync {
 ///
 /// Used by the multi-region resolver where every region group provides its own
 /// block announcement channel.
-fn region_context_from(region: &inferadb_ledger_raft::raft_manager::RegionGroup) -> RegionContext {
-    RegionContext {
-        raft: region.raft().clone(),
+fn region_context_from(
+    region: &inferadb_ledger_raft::raft_manager::RegionGroup,
+) -> Result<RegionContext, tonic::Status> {
+    Ok(RegionContext {
+        handle: region.handle().clone(),
         state: region.state().clone(),
         block_archive: region.block_archive().clone(),
         applied_state: region.applied_state().clone(),
         block_announcements: Some(region.block_announcements().clone()),
         batch_handle: region.batch_handle().cloned(),
         commitment_buffer: Some(region.commitment_buffer()),
-    }
+        leader_lease: Some(region.leader_lease().clone()),
+        applied_index_rx: Some(region.applied_index_watch()),
+    })
 }
 
 /// Region resolver backed by the [`RaftManager`].
@@ -231,7 +247,7 @@ impl RegionResolver for RegionResolverService {
             }
         })?;
 
-        Ok(region_context_from(&region))
+        region_context_from(&region)
     }
 
     fn resolve_with_forward(&self, organization: OrganizationId) -> Result<ResolveResult, Status> {
@@ -255,10 +271,7 @@ impl RegionResolver for RegionResolverService {
                 status,
                 ..
             } => Status::unavailable(format!("Organization {} is {:?}", organization, status)),
-            _ => {
-                tracing::error!(error = %e, "Routing error");
-                Status::internal("Internal error")
-            },
+            _ => error_classify::storage_error(&e),
         })?;
 
         let org_region = routing.region;
@@ -276,7 +289,7 @@ impl RegionResolver for RegionResolverService {
                 ))
             })?;
 
-            return Ok(ResolveResult::Local(region_context_from(&region)));
+            return Ok(ResolveResult::Local(region_context_from(&region)?));
         }
 
         // Protected region, out-of-region: forward with warning
@@ -297,7 +310,7 @@ impl RegionResolver for RegionResolverService {
             .system_region()
             .map_err(|e| Status::unavailable(format!("System region not available: {}", e)))?;
 
-        Ok(region_context_from(&region))
+        region_context_from(&region)
     }
 
     fn supports_forwarding(&self) -> bool {

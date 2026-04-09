@@ -781,6 +781,338 @@ impl LedgerClient {
     }
 
     // =============================================================================
+    // Block Operations
+    // =============================================================================
+
+    /// Reads a value at a specific past block height.
+    ///
+    /// Useful for audits, compliance queries, and debugging past state.
+    /// Optionally includes Merkle and chain proofs for cryptographic verification.
+    ///
+    /// # Arguments
+    ///
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (omit for organization-level reads).
+    /// * `key` - The key to read.
+    /// * `at_height` - Block height to read from (required, must be >= 1).
+    /// * `include_proof` - When `true`, the response includes `block_header` and `merkle_proof`.
+    /// * `include_chain_proof` - When `true` (requires `include_proof`), includes a chain proof.
+    /// * `trusted_height` - Starting point for chain proof; used only when `include_chain_proof` is
+    ///   `true`.
+    /// * `token` - Optional per-request cancellation token.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`HistoricalRead`] containing the value and any requested proofs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails after retry attempts are exhausted,
+    /// the client has been shut down, or the cancellation token is triggered.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
+    /// let result = client.historical_read(
+    ///     organization,
+    ///     Some(vault),
+    ///     "user:123",
+    ///     42,
+    ///     false,
+    ///     false,
+    ///     None,
+    ///     None,
+    /// ).await?;
+    /// println!("Value at height {}: {:?}", result.block_height, result.value);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    pub async fn historical_read(
+        &self,
+        organization: OrganizationSlug,
+        vault: Option<VaultSlug>,
+        key: impl Into<String>,
+        at_height: u64,
+        include_proof: bool,
+        include_chain_proof: bool,
+        trusted_height: Option<u64>,
+        token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<crate::types::verified_read::HistoricalRead> {
+        self.check_shutdown(token.as_ref())?;
+
+        let token = self.effective_token(token.as_ref());
+        let pool = &self.pool;
+        let retry_policy = self.config().retry_policy().clone();
+        let key = key.into();
+
+        self.with_metrics(
+            "historical_read",
+            with_retry_cancellable(
+                &retry_policy,
+                &token,
+                Some(pool),
+                "historical_read",
+                || async {
+                    let mut client = crate::connected_client!(pool, create_read_client);
+
+                    let request = proto::HistoricalReadRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        vault: vault.map(|v| proto::VaultSlug { slug: v.value() }),
+                        key: key.clone(),
+                        at_height,
+                        include_proof,
+                        include_chain_proof,
+                        trusted_height,
+                    };
+
+                    let response =
+                        client.historical_read(tonic::Request::new(request)).await?.into_inner();
+
+                    Ok(crate::types::verified_read::HistoricalRead {
+                        value: response.value,
+                        block_height: response.block_height,
+                        block_header: response
+                            .block_header
+                            .map(crate::types::verified_read::BlockHeader::from_proto),
+                        merkle_proof: response
+                            .merkle_proof
+                            .map(crate::types::verified_read::MerkleProof::from_proto),
+                        chain_proof: response
+                            .chain_proof
+                            .map(crate::types::verified_read::ChainProof::from_proto),
+                    })
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Retrieves a complete block by height.
+    ///
+    /// Returns the block header and all transactions committed at `height`.
+    ///
+    /// # Arguments
+    ///
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (omit for organization-level blocks).
+    /// * `height` - The block height to fetch.
+    /// * `token` - Optional per-request cancellation token.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`Block`] containing the header and all transactions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the block does not exist, the request fails after
+    /// retry attempts are exhausted, the client has been shut down, or the
+    /// cancellation token is triggered.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
+    /// let block = client.get_block(organization, Some(vault), 42, None).await?;
+    /// if let Some(header) = &block.header {
+    ///     println!("Block {} has {} transactions", header.height, block.transactions.len());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_block(
+        &self,
+        organization: OrganizationSlug,
+        vault: Option<VaultSlug>,
+        height: u64,
+        token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<crate::types::verified_read::Block> {
+        self.check_shutdown(token.as_ref())?;
+
+        let token = self.effective_token(token.as_ref());
+        let pool = &self.pool;
+        let retry_policy = self.config().retry_policy().clone();
+
+        self.with_metrics(
+            "get_block",
+            with_retry_cancellable(&retry_policy, &token, Some(pool), "get_block", || async {
+                let mut client = crate::connected_client!(pool, create_read_client);
+
+                let request = proto::GetBlockRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    vault: vault.map(|v| proto::VaultSlug { slug: v.value() }),
+                    height,
+                };
+
+                let response = client.get_block(tonic::Request::new(request)).await?.into_inner();
+
+                let block = response
+                    .block
+                    .ok_or_else(|| missing_response_field("block", "GetBlockResponse"))?;
+
+                Ok(crate::types::verified_read::Block::from_proto(block))
+            }),
+        )
+        .await
+    }
+
+    /// Retrieves a range of blocks for sync and catchup.
+    ///
+    /// Returns blocks from `start_height` through `end_height` (both inclusive),
+    /// ordered by height ascending. Maximum range is 1000 blocks per request.
+    ///
+    /// # Arguments
+    ///
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (omit for organization-level blocks).
+    /// * `start_height` - First block height to return (inclusive).
+    /// * `end_height` - Last block height to return (inclusive, max `start + 999`).
+    /// * `token` - Optional per-request cancellation token.
+    ///
+    /// # Returns
+    ///
+    /// Returns a tuple `(Vec<Block>, u64)` where the second element is the
+    /// current chain tip height (useful for detecting whether more syncing is needed).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the range is invalid, the request fails after retry
+    /// attempts are exhausted, the client has been shut down, or the cancellation
+    /// token is triggered.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
+    /// let (blocks, current_tip) = client.get_block_range(organization, Some(vault), 10, 20, None).await?;
+    /// println!("Got {} blocks, chain tip is {}", blocks.len(), current_tip);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_block_range(
+        &self,
+        organization: OrganizationSlug,
+        vault: Option<VaultSlug>,
+        start_height: u64,
+        end_height: u64,
+        token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<(Vec<crate::types::verified_read::Block>, u64)> {
+        self.check_shutdown(token.as_ref())?;
+
+        let token = self.effective_token(token.as_ref());
+        let pool = &self.pool;
+        let retry_policy = self.config().retry_policy().clone();
+
+        self.with_metrics(
+            "get_block_range",
+            with_retry_cancellable(
+                &retry_policy,
+                &token,
+                Some(pool),
+                "get_block_range",
+                || async {
+                    let mut client = crate::connected_client!(pool, create_read_client);
+
+                    let request = proto::GetBlockRangeRequest {
+                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                        vault: vault.map(|v| proto::VaultSlug { slug: v.value() }),
+                        start_height,
+                        end_height,
+                    };
+
+                    let response =
+                        client.get_block_range(tonic::Request::new(request)).await?.into_inner();
+
+                    let blocks = response
+                        .blocks
+                        .into_iter()
+                        .map(crate::types::verified_read::Block::from_proto)
+                        .collect();
+
+                    Ok((blocks, response.current_tip))
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Retrieves the current chain tip for a vault.
+    ///
+    /// Returns the latest committed block height and its cryptographic commitments.
+    /// Useful for checking chain progress and as an anchor for chain proofs.
+    ///
+    /// # Arguments
+    ///
+    /// * `organization` - Organization slug (external identifier).
+    /// * `vault` - Optional vault slug (omit for organization-level tip).
+    /// * `token` - Optional per-request cancellation token.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`ChainTip`] with the current block height, block hash, and state root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails after retry attempts are exhausted,
+    /// the client has been shut down, or the cancellation token is triggered.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, VaultSlug};
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
+    /// # let (organization, vault) = (OrganizationSlug::new(1), VaultSlug::new(1));
+    /// let tip = client.get_tip(organization, Some(vault), None).await?;
+    /// println!("Current chain tip: height={}", tip.height);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_tip(
+        &self,
+        organization: OrganizationSlug,
+        vault: Option<VaultSlug>,
+        token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<crate::types::verified_read::ChainTip> {
+        self.check_shutdown(token.as_ref())?;
+
+        let token = self.effective_token(token.as_ref());
+        let pool = &self.pool;
+        let retry_policy = self.config().retry_policy().clone();
+
+        self.with_metrics(
+            "get_tip",
+            with_retry_cancellable(&retry_policy, &token, Some(pool), "get_tip", || async {
+                let mut client = crate::connected_client!(pool, create_read_client);
+
+                let request = proto::GetTipRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    vault: vault.map(|v| proto::VaultSlug { slug: v.value() }),
+                };
+
+                let response = client.get_tip(tonic::Request::new(request)).await?.into_inner();
+
+                Ok(crate::types::verified_read::ChainTip {
+                    height: response.height,
+                    block_hash: response.block_hash.map(|h| h.value).unwrap_or_default(),
+                    state_root: response.state_root.map(|h| h.value).unwrap_or_default(),
+                })
+            }),
+        )
+        .await
+    }
+
+    // =============================================================================
     // Streaming Operations
     // =============================================================================
 

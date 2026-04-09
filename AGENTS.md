@@ -2,208 +2,144 @@
 
 InferaDB Ledger: blockchain database for cryptographically verifiable authorization. Rust 1.92 (2024 edition), gRPC API.
 
-## Critical Constraints
+## Constraints
 
-**These rules are non-negotiable:**
-
-- No `unsafe` code
-- No `panic!`, `todo!()`, `unimplemented!()`
-- No placeholder stubs — fully implement or don't write
-- No TODO/FIXME/HACK comments
-- No backwards compatibility shims or feature flags
-- Write tests before implementation, target 90%+ coverage
+- No `unsafe`, `panic!`, `todo!()`, `unimplemented!()`
+- No placeholder stubs, TODO/FIXME/HACK comments, backwards-compat shims, or feature flags
+- Write tests before implementation; target 90%+ coverage
 - Never make git commits
 
-## Serena (MCP Server)
+## Serena (MCP)
 
 Activate at session start: `mcp__plugin_serena_serena__activate_project`
 
-**Use semantic tools, not file operations:**
+| Task                 | Tool                                           | Not              |
+| -------------------- | ---------------------------------------------- | ---------------- |
+| Understand file      | `get_symbols_overview`                         | Read entire file |
+| Find function/struct | `find_symbol` (pattern)                        | Grep/glob        |
+| Find usages          | `find_referencing_symbols`                     | Text grep        |
+| Edit function        | `replace_symbol_body`                          | Raw text edit    |
+| Add code             | `insert_after_symbol` / `insert_before_symbol` | Line numbers     |
+| Search patterns      | `search_for_pattern` (use `relative_path`)     | Global grep      |
 
-| Task                 | Use                                            | Not                  |
-| -------------------- | ---------------------------------------------- | -------------------- |
-| Understand file      | `get_symbols_overview`                         | Reading entire file  |
-| Find function/struct | `find_symbol` with pattern                     | Grep/glob            |
-| Find usages          | `find_referencing_symbols`                     | Grep for text        |
-| Edit function        | `replace_symbol_body`                          | Raw text replacement |
-| Add code             | `insert_after_symbol` / `insert_before_symbol` | Line number editing  |
-| Search patterns      | `search_for_pattern` with `relative_path`      | Global grep          |
+Symbol paths: `ClassName/method_name`. Patterns: `Foo` (any), `Foo/bar` (nested), `/Foo/bar` (exact root).
 
-**Symbol paths:** `ClassName/method_name` format. Patterns: `Foo` (any), `Foo/bar` (nested), `/Foo/bar` (exact root path).
+Workflow: `get_symbols_overview` â†' `find_symbol` with `depth=1` â†' `include_body=True` only when needed â†' `find_referencing_symbols` before refactors.
 
-**Workflow:**
+## CI / Task Completion
 
-1. `get_symbols_overview` first
-2. `find_symbol` with `depth=1` to see methods without bodies
-3. `include_body=True` only when needed
-4. `find_referencing_symbols` before any refactor
+A task is complete only when all pass â€" no "pre-existing issue" exceptions:
 
-## Task Completion
-
-**A task is not complete until all of these pass — no "pre-existing issue" exceptions:**
-
-- `cargo +1.92 build --workspace` — no errors or warnings
-- `cargo +1.92 test --workspace --lib` — all unit tests pass
-- `cargo +1.92 clippy --workspace --all-targets -- -D warnings` — no warnings
-- `cargo +nightly fmt --check` — no formatting issues
-
-**Review workflow:**
-
-1. Run `just ci` — all checks must pass
-2. Fix all identified issues — no exceptions
-
-## Code Conventions
-
-**Builders (bon):**
-
-- `#[builder(into)]` for `String` fields to accept `&str`
-- Match `#[builder(default)]` with `#[serde(default)]` for config
-- Fallible builders via `#[bon]` impl block when validation needed
-- Prefer compile-time required fields over runtime checks
-
-**Doc comments:** Use ` ```no_run ` for Rust examples — `cargo test` skips, `cargo doc` validates. Use ` ```text ` for non-Rust content (CLI output, diagrams, pseudocode). Never use ` ```ignore `. To avoid documentation compiling problems, use hidden setup lines.
-
-**Linting:** `cargo +1.92 clippy --workspace --all-targets -- -D warnings`
-
-**Formatting:** `cargo +nightly fmt` (nightly required)
-
-**Writing:** No filler (very, really, basically), no wordiness (in order to → to), active voice, specific language.
-
-**Markdown:** Concise, kebab-case filenames, specify language in code blocks.
+```bash
+just ci                    # fmt + clippy + doc-check + test (primary gate)
+cargo +1.92 build --workspace
+cargo +1.92 test --workspace --lib
+cargo +1.92 clippy --workspace --all-targets -- -D warnings
+cargo +nightly fmt --check
+```
 
 ## Commands
 
-Use `just` for common tasks (see `Justfile` for all commands):
-
 ```bash
-just              # list available commands
-just check        # pre-commit: fmt + clippy + test
-just check-quick  # fast pre-commit: fmt + clippy only
-just ci           # CI validation: fmt + clippy + doc-check + test
-just ready        # pre-PR: proto + fmt + clippy + test
-just test         # unit tests only
-just test-ff      # unit tests, stop on first failure
-just test-integration     # integration tests (spawns clusters)
-just test-integration-ff  # integration tests, stop on first failure
-just test-stress  # stress/scale tests
-just test-stress-ff       # stress tests, stop on first failure
-just test-recovery        # crash recovery tests (store crate)
-just test-recovery-ff     # crash recovery tests, stop on first failure
-just test-all     # all tests including slow/ignored
-just test-proptest        # property tests with high iterations (default: 10000)
-just test-external        # tests against a live cluster (requires LEDGER_ENDPOINTS)
-just fmt          # format code
-just fmt-check    # check formatting without modifying
-just clippy       # run linter
-just doc          # build rustdoc
-just doc-check    # build rustdoc with -D warnings
-just proto        # generate protobuf code
-just run          # run server (dev mode)
-just clean        # cargo clean
-just clean-stale  # prune stale build artifacts (default: >7 days old)
-just udeps        # check for unused dependencies
+just check          # fmt + clippy + test
+just check-quick    # fmt + clippy only
+just ci             # fmt + clippy + doc-check + test
+just ready          # proto + fmt + clippy + test
+just test           # unit tests
+just test-ff        # unit tests, fail-fast
+just test-integration[-ff]
+just test-stress[-ff]
+just test-recovery[-ff]
+just test-all
+just test-proptest  # property tests (default 10000 iterations)
+just test-external  # requires LEDGER_ENDPOINTS
+just fmt / fmt-check
+just clippy
+just doc / doc-check
+just proto
+just run
+just clean / clean-stale
+just udeps
 ```
 
-Or use cargo directly:
-
 ```bash
-cargo +1.92 build -p <crate>               # build specific crate
-cargo +1.92 test -p <crate>                # test specific crate
-cargo +1.92 test <name> -- --nocapture     # run single test with output
-cargo +nightly fmt                         # format (nightly required)
-cargo +1.92 clippy --workspace --all-targets -- -D warnings
+cargo +1.92 build -p <crate>
+cargo +1.92 test -p <crate>
+cargo +1.92 test <name> -- --nocapture
+cargo +nightly fmt
 ```
 
 ## Architecture
 
 ```
-gRPC Services (13): Read, Write, Admin, Organization, Vault, User, App, Token, Invitation, Events, Health, Discovery, Raft
-       ↓
-inferadb-ledger-services — gRPC service implementations, ProposalService trait, JWT engine, server assembly
-       ↓
-inferadb-ledger-raft     — Raft consensus, log storage, batching, saga orchestrator, background jobs
-       ↓
-inferadb-ledger-state    — Entity/Relationship stores, state roots, system services (users, keys, tokens)
-       ↓
-inferadb-ledger-store    — B+ tree engine, pages, transactions, backends, crypto (key management)
-       ↓
-inferadb-ledger-types    — Hash primitives, Merkle proofs, config, errors, token types, newtype IDs
+gRPC (13 services): Read, Write, Admin, Organization, Vault, User, App, Token, Invitation, Events, Health, Discovery, Raft
+  â†" inferadb-ledger-services   â€" gRPC impls, ProposalService trait, JWT engine, server assembly
+  â†" inferadb-ledger-raft       â€" Saga orchestrator, background jobs, rate limiting, coordination
+  â†" inferadb-ledger-consensus  â€" Multi-shard Raft, event-driven reactor, segmented WAL, pipelined replication
+  â†" inferadb-ledger-state      â€" Entity/Relationship stores, state roots, system services
+  â†" inferadb-ledger-store      â€" B+ tree, pages, transactions, backends, crypto (key management)
+  â†" inferadb-ledger-types      â€" Hash primitives, Merkle proofs, config, errors, token types, newtype IDs
 
-inferadb-ledger-proto    — Protobuf codegen, From/TryFrom conversions (cross-cutting: used by raft, services, server, sdk)
+inferadb-ledger-proto          â€" Protobuf codegen, From/TryFrom conversions (cross-cutting)
 ```
 
-**Crates (9):**
-
-- `types` — SHA-256/seahash, merkle tree, snafu errors, config types, token claims, newtype identifiers
-- `store` — B+ tree engine, page management, memory/file backends, envelope encryption (RegionMasterKey/DEK)
-- `proto` — Protobuf code generation and From/TryFrom conversions
-- `state` — Domain state, entity/relationship CRUD, state root computation, system services (users, signing keys, refresh tokens, invitations)
-- `raft` — openraft 0.9 integration, transaction batching, rate limiting, saga orchestrator, background jobs
-- `services` — gRPC service implementations, ProposalService trait (testable Raft abstraction), JwtEngine, LedgerServer assembly
-- `server` — Binary, bootstrap, CLI configuration, node ID generation
-- `sdk` — Client library, retry/circuit-breaker, cancellation, metrics
-- `test-utils` — Test fixtures, mock backends, crash injection, proptest strategies
+**Crates:** `types`, `store`, `proto`, `state`, `consensus`, `raft`, `services`, `server`, `sdk`, `test-utils`
 
 **Key types:**
 
-- `StorageEngine` (state/engine.rs) — store wrapper with transaction helpers
-- `StateLayer` (state/state.rs) — applies blocks, computes state roots
-- `LedgerServer` (services/server.rs) — gRPC server combining all 13 services with Raft
+- `ConsensusEngine` (consensus/lib.rs) â€" multi-shard Raft: propose/read_index/membership
+- `Reactor` (consensus/reactor.rs) â€" single-task event loop, batches WAL writes and network sends
+- `Shard` (consensus/core.rs) â€" single Raft instance, event-driven (returns `Action`, no I/O)
+- `SharedWal` (consensus/wal.rs) â€" segmented WAL, per-vault AES-256-GCM, single fsync
+- `StorageEngine` (state/engine.rs) â€" store wrapper with transaction helpers
+- `StateLayer` (state/state.rs) â€" `StateMachine` impl, applies blocks, computes state roots
+- `LedgerServer` (services/server.rs) â€" gRPC server, all 13 services + consensus
 
-**Data model:**
+## Data Model
 
-- Organization → isolated storage per tenant
-- Vault → relationship store within organization, owns its blockchain (conceptual entity — no `Vault` struct; represented by `VaultId`/`VaultSlug` + `VaultBlock`/`VaultEntry`)
-- Entity → key-value with TTL and versioning
-- Relationship → authorization tuple (resource, relation, subject)
-- User → identity with email, role, status, token version
-- App → organization-scoped client application
-- Team → organization-scoped user group
-- SigningKey → Ed25519 JWT signing key with scope (Global/Organization) and status (Active/Rotated/Revoked)
-- RefreshToken → session token family with poison detection and TTL
-- OrganizationInvitation → invitation lifecycle (REGIONAL-only, Pattern 1)
-- Shard → organizations sharing a Raft group (conceptual — managed by `ShardManager` in `state/src/shard.rs`, not a persisted type)
+- Organization â†' isolated tenant storage
+- Vault â†' relationship store per org, owns its blockchain (no `Vault` struct; represented by `VaultId`/`VaultSlug` + `VaultBlock`/`VaultEntry`)
+- Entity â†' key-value with TTL and versioning
+- Relationship â†' authorization tuple (resource, relation, subject)
+- User â†' identity with email, role, status, token version
+- App â†' org-scoped client application
+- Team â†' org-scoped user group
+- SigningKey â†' Ed25519 JWT key with scope (Global/Organization) and status (Active/Rotated/Revoked)
+- RefreshToken â†' session token family with poison detection and TTL
+- OrganizationInvitation â†' invitation lifecycle (REGIONAL-only, Pattern 1)
+- Shard â†' orgs sharing a Raft group (managed by `ShardManager` in `state/src/shard.rs`, not persisted)
 
-**Dual-ID architecture:** Internal sequential IDs (`i64`) for storage, Snowflake slugs (`u64`) for external APIs. The `SlugResolver` translates at gRPC service boundaries.
+**Dual-ID:** Internal sequential `i64` IDs for storage; Snowflake `u64` slugs for external APIs. `SlugResolver` translates at gRPC boundaries.
 
-| Internal ID (storage) | External Slug (API)     |
-| --------------------- | ----------------------- |
-| `OrganizationId(i64)` | `OrganizationSlug(u64)` |
-| `VaultId(i64)`        | `VaultSlug(u64)`        |
-| `UserId(i64)`         | `UserSlug(u64)`         |
-| `AppId(i64)`          | `AppSlug(u64)`          |
-| `TeamId(i64)`         | `TeamSlug(u64)`         |
-| `InviteId(i64)`       | `InviteSlug(u64)`       |
+- `OrganizationId(i64)` / `OrganizationSlug(u64)`, `VaultId`/`VaultSlug`, `UserId`/`UserSlug`, `AppId`/`AppSlug`, `TeamId`/`TeamSlug`, `InviteId`/`InviteSlug`
+- Others: `SigningKeyId`, `RefreshTokenId`, `UserEmailId`, `EmailVerifyTokenId`, `ClientAssertionId`, `UserCredentialId`, `TokenVersion(u64)`
+- Defined in `types/src/types/ids.rs` via `define_id!`/`define_slug!` macros; `TokenVersion` manual (needs `Default` + `increment()`)
 
-Other newtypes: `SigningKeyId(i64)`, `RefreshTokenId(i64)`, `UserEmailId(i64)`, `EmailVerifyTokenId(i64)`, `ClientAssertionId(i64)`, `UserCredentialId(i64)`, `TokenVersion(u64)`. All defined in `types/src/types/ids.rs` — most via `define_id!`/`define_slug!` macros, `TokenVersion` is manually implemented (needs `Default` and `increment()`).
+**Storage key prefixes:**
 
-**Storage key conventions:**
+| Prefix    | Purpose                                       | Tier     |
+| --------- | --------------------------------------------- | -------- |
+| _(bare)_  | Primary domain record                         | varies   |
+| `_dir:`   | Directory routing (ID â†' region/slug/status) | GLOBAL   |
+| `_idx:`   | Secondary index                               | varies   |
+| `_meta:`  | Sequences, saga state, node membership        | GLOBAL   |
+| `_shred:` | Crypto-shredding keys (destroyed on erasure)  | REGIONAL |
+| `_tmp:`   | TTL-bound ephemeral onboarding records        | REGIONAL |
+| `_audit:` | Compliance erasure records                    | GLOBAL   |
 
-Underscore-prefixed keys (`_xxx:`) are system infrastructure; bare keys are domain entities.
+**Data residency:**
 
-| Prefix    | Purpose                                               | Tier     |
-| --------- | ----------------------------------------------------- | -------- |
-| _(bare)_  | Primary record (domain entity)                        | varies   |
-| `_dir:`   | Directory routing (ID → region/slug/status)           | GLOBAL   |
-| `_idx:`   | Secondary index (attribute → primary key)             | varies   |
-| `_meta:`  | Bookkeeping (sequences, saga state, node membership)  | GLOBAL   |
-| `_shred:` | Crypto-shredding keys (AES-256, destroyed on erasure) | REGIONAL |
-| `_tmp:`   | Ephemeral state (TTL-bound onboarding records)        | REGIONAL |
-| `_audit:` | Compliance trail (erasure records)                    | GLOBAL   |
+- **Pattern 1 (REGIONAL-only):** Full record under bare key. No GLOBAL counterpart. (`user:`, `team:`, `user_email:`, `invite:`)
+- **Pattern 2 (skeleton+overlay):** GLOBAL skeleton (PII empty) + REGIONAL PII under `{entity}_profile:`. Merged on read. (`app:` + `app_profile:`, `org:` + `org_profile:`)
+- **Pattern 3 (GLOBAL-only):** No PII, no regional presence. (`signing_key:`, `refresh_token:`)
 
-**Data residency patterns:**
+Note: `:` (0x3A) < `_` (0x5F), so `app:{org}:` scans never match `app_profile:` keys.
 
-- **Pattern 1 (REGIONAL-only)**: Full record in REGIONAL under bare key. No GLOBAL counterpart. Examples: `user:`, `team:`, `user_email:`, `invite:`.
-- **Pattern 2 (skeleton+overlay)**: GLOBAL skeleton under bare key (PII fields empty), REGIONAL PII under `{entity}_profile:` key. Service layer merges on read. Examples: `app:` + `app_profile:`, `org:` + `org_profile:`.
-- **Pattern 3 (GLOBAL-only)**: No PII, no regional presence. Examples: `signing_key:`, `refresh_token:`.
-
-**Prefix collision safety**: `:` (0x3A) < `_` (0x5F) in ASCII, so `app:{org}:` scans never match `app_profile:` keys.
-
-**Tier-key safeguards**: `SystemKeys::validate_key_tier(key, expected_tier)` catches cross-tier write bugs. `KeyTier` enum in `state/src/system/keys.rs`.
+`SystemKeys::validate_key_tier(key, expected_tier)` catches cross-tier write bugs. `KeyTier` in `state/src/system/keys.rs`.
 
 ## Error Handling
 
-**Server crates** (`types`, `store`, `proto`, `state`, `raft`, `services`, `server`): Use `snafu` with implicit location tracking. Never use `thiserror` or `anyhow`.
+**Server crates** (`types`, `store`, `proto`, `state`, `raft`, `services`, `server`): `snafu` only â€" never `thiserror` or `anyhow`.
 
 ```rust
 #[derive(Debug, Snafu)]
@@ -215,36 +151,33 @@ pub enum MyError {
         location: snafu::Location,
     },
 }
-
-// Propagate with context selectors:
+// Propagate:
 some_operation().context(StorageSnafu)?;
 ```
 
-- Add `#[snafu(implicit)] location: snafu::Location` to all variants with `source` fields
-- Use `.context(XxxSnafu)?` for propagation, never manual error construction
-- Leaf variants (no source) don't need location fields
-- API-facing errors use `message: String` for gRPC serialization
-- Structured `ErrorCode` enum in `types/src/error_code.rs` for SDK/gRPC error classification
+- All variants with `source` fields: add `#[snafu(implicit)] location: snafu::Location`
+- Propagate via `.context(XxxSnafu)?`, never manual construction
+- Leaf variants (no source): no location field needed
+- API-facing errors: `message: String` for gRPC serialization
+- `ErrorCode` enum in `types/src/error_code.rs` for SDK/gRPC classification
 
-**SDK crate**: Uses `thiserror` for consumer-facing error types (`SdkError`, `ResolverError`). Errors are constructed at point of failure — snafu's context selectors add no value here.
+**SDK crate:** `thiserror` for consumer-facing types (`SdkError`, `ResolverError`).
 
 ## Builder Pattern (bon)
 
-Use the `bon` crate for type-safe builders. Two patterns:
-
-**Simple structs** — `#[derive(bon::Builder)]`:
+**Simple struct:**
 
 ```rust
 #[derive(bon::Builder)]
 struct Config {
     #[builder(default = 100)]
     max_connections: u32,
-    #[builder(into)]  // accepts &str, String, etc.
+    #[builder(into)]
     name: String,
 }
 ```
 
-**Fallible constructors** — `#[bon]` on impl block:
+**Fallible constructor:**
 
 ```rust
 #[bon]
@@ -253,8 +186,27 @@ impl TlsConfig {
     pub fn new(
         #[builder(into)] ca_cert: Option<String>,
         use_native_roots: bool,
-    ) -> Result<Self, ConfigError> {
-        // Validation logic here
-    }
+    ) -> Result<Self, ConfigError> { ... }
 }
 ```
+
+- `#[builder(into)]` for `String` fields
+- Match `#[builder(default)]` with `#[serde(default)]` for config
+- Prefer compile-time required fields over runtime checks
+
+## Code Conventions
+
+**Doc comments:** Use ` ```no_run ` for Rust examples (skipped by `cargo test`, validated by `cargo doc`). Use ` ```text ` for non-Rust content. Never use ` ```ignore `.
+
+**Writing:** No filler words (very, really, basically); active voice; specific language.
+
+**Markdown:** Concise, kebab-case filenames, always specify language in code blocks.
+
+## Coding Behavior
+
+- State assumptions explicitly; ask when uncertain
+- Present multiple interpretations rather than silently choosing
+- Minimum code that solves the problem â€" no speculative features, abstractions, or flexibility
+- When editing: match existing style, don't improve adjacent code, don't refactor unrelated things
+- Remove imports/vars/functions YOUR changes made unused; leave pre-existing dead code alone
+- Transform tasks into verifiable goals; state a brief plan for multi-step tasks

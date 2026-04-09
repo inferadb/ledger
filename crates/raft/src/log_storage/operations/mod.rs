@@ -382,13 +382,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 // Update last write timestamp from latest transaction (deterministic)
                 if let Some(last_tx) = transactions.last()
-                    && let Some(vault_meta) = state.vaults.get_mut(&key)
+                    && let Some(vault_meta) = state.vaults.get(&key)
                 {
+                    let mut vault_meta = vault_meta.clone();
                     vault_meta.last_write_timestamp = last_tx.timestamp.timestamp() as u64;
-                    // Re-serialize after in-place mutation
-                    if let Some(blob) = try_encode(vault_meta, "vault_meta") {
+                    // Re-serialize after mutation
+                    if let Some(blob) = try_encode(&vault_meta, "vault_meta") {
                         pending.vaults.push((vault_meta.vault, blob));
                     }
+                    state.vaults.insert(key, vault_meta);
                 }
 
                 // Compute read-only aggregates before mutating transactions.
@@ -396,22 +398,25 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let ops_count: u32 = transactions.iter().map(|tx| tx.operations.len() as u32).sum();
 
                 // Update organization storage accounting.
-                let storage_entry =
-                    state.organization_storage_bytes.entry(*organization).or_insert(0);
-                if storage_delta >= 0 {
-                    *storage_entry = storage_entry.saturating_add(storage_delta as u64);
+                let current =
+                    state.organization_storage_bytes.get(organization).copied().unwrap_or(0);
+                let updated = if storage_delta >= 0 {
+                    current.saturating_add(storage_delta as u64)
                 } else {
-                    *storage_entry = storage_entry.saturating_sub(storage_delta.unsigned_abs());
-                }
-                crate::metrics::set_organization_storage_bytes(*organization, *storage_entry);
+                    current.saturating_sub(storage_delta.unsigned_abs())
+                };
+                state.organization_storage_bytes.insert(*organization, updated);
+                crate::metrics::set_organization_storage_bytes(*organization, updated);
                 crate::metrics::record_organization_operation(*organization, "write");
 
                 // Mirror updated OrganizationMeta (with new storage_bytes) to pending
-                if let Some(org_meta) = state.organizations.get_mut(organization) {
-                    org_meta.storage_bytes = *storage_entry;
-                    if let Some(blob) = try_encode(org_meta, "org_meta") {
+                if let Some(org_meta) = state.organizations.get(organization) {
+                    let mut org_meta = org_meta.clone();
+                    org_meta.storage_bytes = updated;
+                    if let Some(blob) = try_encode(&org_meta, "org_meta") {
                         pending.organizations.push((*organization, blob));
                     }
+                    state.organizations.insert(*organization, org_meta);
                 }
 
                 // Server-assigned sequences: assign monotonic sequence to each transaction.
@@ -589,7 +594,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // Capture slug before potential state changes
                 let org_slug = state.id_to_slug.get(organization).copied();
 
-                let response = if let Some(org) = state.organizations.get_mut(organization) {
+                let response = if let Some(org) = state.organizations.get(organization) {
                     if org.status == OrganizationStatus::Deleted {
                         LedgerResponse::Error {
                             code: ErrorCode::FailedPrecondition,
@@ -600,11 +605,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         // (slug cleanup deferred to PurgeOrganization)
                         let deleted_at = block_timestamp;
                         let retention_days = org.region.retention_days();
+                        let mut org = org.clone();
                         org.status = OrganizationStatus::Deleted;
-                        // Re-serialize after in-place mutation
-                        if let Some(blob) = try_encode(org, "organization") {
+                        // Re-serialize after mutation
+                        if let Some(blob) = try_encode(&org, "organization") {
                             pending.organizations.push((*organization, blob));
                         }
+                        state.organizations.insert(*organization, org);
 
                         // Update OrganizationRegistry in state layer so the purge
                         // job can discover this org's deleted_at timestamp.
@@ -718,12 +725,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // Capture vault slug before state mutation removes it
                 let vault_slug_for_audit = state.vault_id_to_slug.get(vault).copied();
                 // Mark vault as deleted (keep heights for historical queries)
-                let response = if let Some(vault_meta) = state.vaults.get_mut(&key) {
+                let response = if let Some(vault_meta) = state.vaults.get(&key) {
+                    let mut vault_meta = vault_meta.clone();
                     vault_meta.deleted = true;
-                    // Re-serialize vault meta after in-place mutation
-                    if let Some(blob) = try_encode(vault_meta, "vault_meta") {
+                    // Re-serialize vault meta after mutation
+                    if let Some(blob) = try_encode(&vault_meta, "vault_meta") {
                         pending.vaults.push((vault_meta.vault, blob));
                     }
+                    state.vaults.insert(key, vault_meta);
 
                     // Clean up vault slug index
                     if let Some(slug) = state.vault_id_to_slug.remove(vault) {
@@ -783,18 +792,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             LedgerRequest::UpdateVault { organization, vault, retention_policy } => {
                 let key = (*organization, *vault);
-                let response = if let Some(vault_meta) = state.vaults.get_mut(&key) {
+                let response = if let Some(vault_meta) = state.vaults.get(&key) {
                     if vault_meta.deleted {
                         LedgerResponse::Error {
                             code: ErrorCode::NotFound,
                             message: format!("Vault {}:{} is deleted", organization, vault),
                         }
                     } else if let Some(policy) = retention_policy {
+                        let mut vault_meta = vault_meta.clone();
                         vault_meta.retention_policy = *policy;
                         // Re-serialize vault meta after mutation
-                        if let Some(blob) = try_encode(vault_meta, "vault_meta") {
+                        if let Some(blob) = try_encode(&vault_meta, "vault_meta") {
                             pending.vaults.push((vault_meta.vault, blob));
                         }
+                        state.vaults.insert(key, vault_meta);
                         LedgerResponse::VaultUpdated { success: true }
                     } else {
                         // No fields to update — return success without re-serialization.
@@ -853,15 +864,18 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 return (e, None);
                             }
                             // Update user→org index
-                            if let Some(orgs) = state.user_org_index.get_mut(target) {
+                            if let Some(orgs) = state.user_org_index.get(target) {
+                                let mut orgs = orgs.clone();
                                 orgs.remove(organization);
                                 if orgs.is_empty() {
                                     state.user_org_index.remove(target);
+                                } else {
+                                    state.user_org_index.insert(*target, orgs);
                                 }
                             }
                             // Re-serialize org meta
-                            if let Some(org_mut) = state.organizations.get_mut(organization)
-                                && let Ok(blob) = encode(org_mut)
+                            if let Some(org_ref) = state.organizations.get(organization)
+                                && let Ok(blob) = encode(org_ref)
                             {
                                 pending.organizations.push((*organization, blob));
                             }
@@ -931,8 +945,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 return (e, None);
                             }
                             // Re-serialize org meta
-                            if let Some(org_mut) = state.organizations.get_mut(organization)
-                                && let Ok(blob) = encode(org_mut)
+                            if let Some(org_ref) = state.organizations.get(organization)
+                                && let Ok(blob) = encode(org_ref)
                             {
                                 pending.organizations.push((*organization, blob));
                             }
@@ -1007,14 +1021,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     return (e, None);
                                 }
                                 // Update user→org index
-                                state
-                                    .user_org_index
-                                    .entry(*user)
-                                    .or_default()
-                                    .insert(*organization);
+                                let mut orgs =
+                                    state.user_org_index.get(user).cloned().unwrap_or_default();
+                                orgs.insert(*organization);
+                                state.user_org_index.insert(*user, orgs);
                                 // Re-serialize org meta
-                                if let Some(org_mut) = state.organizations.get_mut(organization)
-                                    && let Ok(blob) = encode(org_mut)
+                                if let Some(org_ref) = state.organizations.get(organization)
+                                    && let Ok(blob) = encode(org_ref)
                                 {
                                     pending.organizations.push((*organization, blob));
                                 }
@@ -2294,13 +2307,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             .collect();
 
                         for key in &vault_keys {
-                            if let Some(vault_meta) = state.vaults.get_mut(key)
+                            if let Some(vault_meta) = state.vaults.get(key)
                                 && !vault_meta.deleted
                             {
+                                let mut vault_meta = vault_meta.clone();
                                 vault_meta.deleted = true;
-                                if let Some(blob) = try_encode(vault_meta, "vault_meta") {
+                                if let Some(blob) = try_encode(&vault_meta, "vault_meta") {
                                     pending.vaults.push((vault_meta.vault, blob));
                                 }
+                                state.vaults.insert(*key, vault_meta);
                             }
                             // Clean up vault slug index
                             if let Some(slug) = state.vault_id_to_slug.remove(&key.1) {
@@ -2339,10 +2354,25 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         }
 
                         // Clean up user→org index entries for this organization
-                        state.user_org_index.retain(|_, orgs| {
-                            orgs.remove(organization);
-                            !orgs.is_empty()
-                        });
+                        {
+                            let updates: Vec<_> = state
+                                .user_org_index
+                                .iter()
+                                .filter(|(_, orgs)| orgs.contains(organization))
+                                .map(|(uid, _)| *uid)
+                                .collect();
+                            for uid in updates {
+                                if let Some(orgs) = state.user_org_index.get(&uid) {
+                                    let mut updated = orgs.clone();
+                                    updated.remove(organization);
+                                    if updated.is_empty() {
+                                        state.user_org_index.remove(&uid);
+                                    } else {
+                                        state.user_org_index.insert(uid, updated);
+                                    }
+                                }
+                            }
+                        }
 
                         // Remove organization slug index entries
                         if let Some(slug) = state.id_to_slug.remove(organization) {
@@ -2497,7 +2527,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             LedgerRequest::SuspendOrganization { organization, reason } => {
                 let org_slug = state.id_to_slug.get(organization).copied();
-                let response = if let Some(org) = state.organizations.get_mut(organization) {
+                let response = if let Some(org) = state.organizations.get(organization) {
                     match org.status {
                         OrganizationStatus::Deleted => LedgerResponse::Error {
                             code: ErrorCode::FailedPrecondition,
@@ -2511,10 +2541,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             message: format!("Organization {} is already suspended", organization),
                         },
                         _ => {
+                            let mut org = org.clone();
                             org.status = OrganizationStatus::Suspended;
-                            if let Some(blob) = try_encode(org, "organization") {
+                            if let Some(blob) = try_encode(&org, "organization") {
                                 pending.organizations.push((*organization, blob));
                             }
+                            state.organizations.insert(*organization, org);
                             LedgerResponse::OrganizationSuspended { organization: *organization }
                         },
                     }
@@ -2567,13 +2599,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             LedgerRequest::ResumeOrganization { organization } => {
                 let org_slug = state.id_to_slug.get(organization).copied();
-                let response = if let Some(org) = state.organizations.get_mut(organization) {
+                let response = if let Some(org) = state.organizations.get(organization) {
                     match org.status {
                         OrganizationStatus::Suspended => {
+                            let mut org = org.clone();
                             org.status = OrganizationStatus::Active;
-                            if let Some(blob) = try_encode(org, "organization") {
+                            if let Some(blob) = try_encode(&org, "organization") {
                                 pending.organizations.push((*organization, blob));
                             }
+                            state.organizations.insert(*organization, org);
                             LedgerResponse::OrganizationResumed { organization: *organization }
                         },
                         OrganizationStatus::Active => LedgerResponse::Error {
@@ -2616,7 +2650,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             },
 
             LedgerRequest::StartMigration { organization, target_region_group } => {
-                let response = if let Some(org) = state.organizations.get_mut(organization) {
+                let response = if let Some(org) = state.organizations.get(organization) {
                     match org.status {
                         OrganizationStatus::Active => {
                             // Validate target region is different
@@ -2629,11 +2663,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     ),
                                 }
                             } else {
+                                let mut org = org.clone();
                                 org.status = OrganizationStatus::Migrating;
                                 org.pending_region = Some(*target_region_group);
-                                if let Some(blob) = try_encode(org, "organization") {
+                                if let Some(blob) = try_encode(&org, "organization") {
                                     pending.organizations.push((*organization, blob));
                                 }
+                                state.organizations.insert(*organization, org);
                                 LedgerResponse::MigrationStarted {
                                     organization: *organization,
                                     target_region_group: *target_region_group,
@@ -2689,17 +2725,19 @@ impl<B: StorageBackend> RaftLogStore<B> {
             },
 
             LedgerRequest::CompleteMigration { organization } => {
-                let response = if let Some(org) = state.organizations.get_mut(organization) {
+                let response = if let Some(org) = state.organizations.get(organization) {
                     match org.status {
                         OrganizationStatus::Migrating => {
                             if let Some(target_region_group) = org.pending_region {
                                 let old_region = org.region;
+                                let mut org = org.clone();
                                 org.region = target_region_group;
                                 org.status = OrganizationStatus::Active;
                                 org.pending_region = None;
-                                if let Some(blob) = try_encode(org, "organization") {
+                                if let Some(blob) = try_encode(&org, "organization") {
                                     pending.organizations.push((*organization, blob));
                                 }
+                                state.organizations.insert(*organization, org);
                                 LedgerResponse::MigrationCompleted {
                                     organization: *organization,
                                     old_region,
@@ -2953,11 +2991,68 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             LedgerResponse::Empty
                         }
                     },
-                    SystemRequest::AddNode { .. } | SystemRequest::RemoveNode { .. } => {
+                    SystemRequest::SetNodeStatus { node_id, status } => {
+                        // Store node status in state layer at _meta:node_status:{node_id}
+                        if let Some(ref sl) = self.state_layer {
+                            let key = format!("_meta:node_status:{node_id}");
+                            let value = encode(status).unwrap_or_default();
+                            let ops = vec![Operation::SetEntity {
+                                key,
+                                value,
+                                condition: None,
+                                expires_at: None,
+                            }];
+                            if let Err(e) = sl.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                                tracing::error!(
+                                    node_id,
+                                    ?status,
+                                    error = %e,
+                                    "Failed to persist NodeStatus"
+                                );
+                            }
+                        }
+                        LedgerResponse::Empty
+                    },
+                    SystemRequest::CreateDataRegion { region, initial_members } => {
+                        // Signal the region creation handler to start this region locally.
+                        // Each node runs this apply handler independently, ensuring all
+                        // nodes create the region through Raft consensus.
+                        if let Some(ref sender) = self.region_creation_sender
+                            && sender.send((*region, initial_members.clone())).is_err()
+                        {
+                            tracing::error!(
+                                region = region.as_str(),
+                                "Region handler channel closed — CreateDataRegion signal dropped"
+                            );
+                        }
+                        LedgerResponse::DataRegionCreated { region: *region }
+                    },
+                    SystemRequest::RegisterPeerAddress { node_id, address } => {
+                        // Store the address in the peer_addresses map so all nodes
+                        // can reach the new peer for data region transport.
+                        if let Some(ref peer_addresses) = self.peer_addresses {
+                            peer_addresses.insert(*node_id, address.clone());
+                        }
+                        // Trigger immediate transport channel reconciliation by
+                        // sending an AddPeerTransport signal through the region
+                        // creation channel. Sentinel: Region::GLOBAL with empty
+                        // node_id (0) signals "reconcile transport channels now".
+                        if let Some(ref sender) = self.region_creation_sender
+                            && sender
+                                .send((
+                                    inferadb_ledger_types::Region::GLOBAL,
+                                    vec![(0, "reconcile_transport".to_string())],
+                                ))
+                                .is_err()
+                        {
+                            tracing::error!(
+                                "Region handler channel closed — transport reconciliation signal dropped"
+                            );
+                        }
                         LedgerResponse::Empty
                     },
                     SystemRequest::UpdateOrganizationRouting { organization, region } => {
-                        if let Some(org) = state.organizations.get_mut(organization) {
+                        if let Some(org) = state.organizations.get(organization) {
                             if org.status == OrganizationStatus::Deleted {
                                 LedgerResponse::Error {
                                     code: ErrorCode::FailedPrecondition,
@@ -2968,10 +3063,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 }
                             } else {
                                 let old_region = org.region;
+                                let mut org = org.clone();
                                 org.region = *region;
-                                if let Some(blob) = try_encode(org, "organization") {
+                                if let Some(blob) = try_encode(&org, "organization") {
                                     pending.organizations.push((*organization, blob));
                                 }
+                                state.organizations.insert(*organization, org);
                                 LedgerResponse::OrganizationMigrated {
                                     organization: *organization,
                                     old_region,
@@ -3159,9 +3256,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 region: *region,
                                 member_nodes: state
                                     .membership
-                                    .membership()
-                                    .nodes()
-                                    .map(|(id, _)| NodeId::new(id.to_string()))
+                                    .voter_ids
+                                    .iter()
+                                    .map(|id| NodeId::new(id.to_string()))
                                     .collect(),
                                 status: OrganizationStatus::Provisioning,
                                 config_version: 1,
@@ -3224,7 +3321,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         }
 
                         // Update user→org index for initial admin member
-                        state.user_org_index.entry(*admin).or_default().insert(organization_id);
+                        {
+                            let mut orgs =
+                                state.user_org_index.get(admin).cloned().unwrap_or_default();
+                            orgs.insert(organization_id);
+                            state.user_org_index.insert(*admin, orgs);
+                        }
 
                         // Audit: organization creation
                         let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
@@ -3370,12 +3472,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         }
                     },
                     SystemRequest::UpdateOrganizationStatus { organization, status } => {
-                        if let Some(org_meta) = state.organizations.get_mut(organization) {
+                        if let Some(org_meta) = state.organizations.get(organization) {
+                            let mut org_meta = org_meta.clone();
                             org_meta.status = *status;
                             let slug = org_meta.slug;
-                            if let Some(blob) = try_encode(org_meta, "org_meta") {
+                            if let Some(blob) = try_encode(&org_meta, "org_meta") {
                                 pending.organizations.push((*organization, blob));
                             }
+                            state.organizations.insert(*organization, org_meta);
 
                             // Sync OrganizationRegistry so RegionRouter and PurgeJob
                             // see the updated status.
@@ -3778,9 +3882,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 region: *region,
                                 member_nodes: state
                                     .membership
-                                    .membership()
-                                    .nodes()
-                                    .map(|(id, _)| NodeId::new(id.to_string()))
+                                    .voter_ids
+                                    .iter()
+                                    .map(|id| NodeId::new(id.to_string()))
                                     .collect(),
                                 status: OrganizationStatus::Provisioning,
                                 config_version: 1,
@@ -3825,6 +3929,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             {
                                 return (e, None);
                             }
+
+                            // Populate user→org membership index so list_organizations
+                            // can find this org for the admin user.
+                            let mut user_orgs =
+                                state.user_org_index.get(&user_id).cloned().unwrap_or_default();
+                            user_orgs.insert(organization_id);
+                            state.user_org_index.insert(user_id, user_orgs);
 
                             LedgerResponse::OnboardingUserCreated { user_id, organization_id }
                         } else {
@@ -4103,11 +4214,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }
 
                             // 3. Update in-memory org meta status + persist to B+ tree
-                            if let Some(meta) = state.organizations.get_mut(organization_id) {
+                            if let Some(meta) = state.organizations.get(organization_id) {
+                                let mut meta = meta.clone();
                                 meta.status = OrganizationStatus::Active;
-                                if let Some(blob) = try_encode(meta, "org_meta") {
+                                if let Some(blob) = try_encode(&meta, "org_meta") {
                                     pending.organizations.push((*organization_id, blob));
                                 }
+                                state.organizations.insert(*organization_id, meta);
                             }
 
                             // 4. Update org registry status
@@ -4129,8 +4242,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }
 
                             // Ensure slug indices are up to date
-                            state.slug_index.entry(*organization_slug).or_insert(*organization_id);
-                            state.user_slug_index.entry(*user_slug).or_insert(*user_id);
+                            if !state.slug_index.contains_key(organization_slug) {
+                                state.slug_index.insert(*organization_slug, *organization_id);
+                            }
+                            if !state.user_slug_index.contains_key(user_slug) {
+                                state.user_slug_index.insert(*user_slug, *user_id);
+                            }
 
                             LedgerResponse::OnboardingUserActivated
                         } else {
@@ -5303,6 +5420,80 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             )
                         }
                     },
+
+                    // ── RegionMembershipReport (GLOBAL) ──
+                    // DR leaders report their current membership so the drain monitor
+                    // can determine when a decommissioning node has been fully removed
+                    // from all data regions.
+                    SystemRequest::RegionMembershipReport {
+                        region,
+                        voters,
+                        learners,
+                        conf_epoch,
+                    } => {
+                        if let Some(state_layer) = &self.state_layer {
+                            let key = format!("_meta:region_membership:{}", region.as_str());
+
+                            // Reject stale reports — only write if conf_epoch >= existing.
+                            #[derive(serde::Deserialize)]
+                            struct ReportEpoch {
+                                conf_epoch: u64,
+                            }
+                            let should_update =
+                                match state_layer.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
+                                    Ok(Some(entity)) => {
+                                        match decode::<ReportEpoch>(&entity.value) {
+                                            Ok(existing) => *conf_epoch >= existing.conf_epoch,
+                                            // Corrupt entry — overwrite.
+                                            Err(_) => true,
+                                        }
+                                    },
+                                    // No existing record — write.
+                                    _ => true,
+                                };
+
+                            if should_update {
+                                #[derive(serde::Serialize)]
+                                struct ReportData<'a> {
+                                    voters: &'a [u64],
+                                    learners: &'a [u64],
+                                    conf_epoch: u64,
+                                }
+                                let data = ReportData {
+                                    voters: voters.as_slice(),
+                                    learners: learners.as_slice(),
+                                    conf_epoch: *conf_epoch,
+                                };
+                                match encode(&data) {
+                                    Ok(value) => {
+                                        let ops = vec![Operation::SetEntity {
+                                            key,
+                                            value,
+                                            condition: None,
+                                            expires_at: None,
+                                        }];
+                                        if let Err(e) =
+                                            state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
+                                        {
+                                            tracing::warn!(
+                                                region = region.as_str(),
+                                                error = %e,
+                                                "Failed to store region membership report"
+                                            );
+                                        }
+                                    },
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            region = region.as_str(),
+                                            error = %e,
+                                            "Failed to encode region membership report"
+                                        );
+                                    },
+                                }
+                            }
+                        }
+                        LedgerResponse::Empty
+                    },
                 };
 
                 // Emit events for system request variants
@@ -5323,22 +5514,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         );
                         *op_index += 1;
                     },
-                    (LedgerResponse::Empty, SystemRequest::AddNode { node_id, address }) => {
+                    (
+                        LedgerResponse::DataRegionCreated { region },
+                        SystemRequest::CreateDataRegion { .. },
+                    ) => {
                         events.push(
-                            ApplyPhaseEmitter::for_system(EventAction::NodeJoinedCluster)
+                            ApplyPhaseEmitter::for_system(EventAction::RoutingUpdated)
                                 .principal("system")
-                                .detail("node_id", &node_id.to_string())
-                                .detail("address", address)
-                                .outcome(EventOutcome::Success)
-                                .build(block_height, *op_index, block_timestamp, ttl_days),
-                        );
-                        *op_index += 1;
-                    },
-                    (LedgerResponse::Empty, SystemRequest::RemoveNode { node_id }) => {
-                        events.push(
-                            ApplyPhaseEmitter::for_system(EventAction::NodeLeftCluster)
-                                .principal("system")
-                                .detail("node_id", &node_id.to_string())
+                                .detail("action", "create_data_region")
+                                .detail("region", region.as_str())
                                 .outcome(EventOutcome::Success)
                                 .build(block_height, *op_index, block_timestamp, ttl_days),
                         );

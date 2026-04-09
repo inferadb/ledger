@@ -5,7 +5,10 @@
 
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use parking_lot::RwLock;
@@ -35,8 +38,8 @@ pub struct PageCache {
 
 /// Cache entry with access tracking.
 struct CacheEntry {
-    /// The cached page.
-    page: Page,
+    /// The cached page (shared via `Arc` for zero-copy reads).
+    page: Arc<Page>,
     /// Whether page was accessed since last clock sweep (second chance).
     accessed: bool,
 }
@@ -54,17 +57,24 @@ impl PageCache {
         }
     }
 
-    /// Returns a clone of the cached page, or `None` if not present.
-    pub fn get(&self, page_id: PageId) -> Option<Page> {
+    /// Returns a shared reference to the cached page, or `None` if not present.
+    ///
+    /// Prefer this over [`get`](Self::get) to avoid cloning 4KB pages on every hit.
+    pub fn get_shared(&self, page_id: PageId) -> Option<Arc<Page>> {
         let mut pages = self.pages.write();
         if let Some(entry) = pages.get_mut(&page_id) {
             entry.accessed = true;
             self.hits.fetch_add(1, Ordering::Relaxed);
-            Some(entry.page.clone())
+            Some(Arc::clone(&entry.page))
         } else {
             self.misses.fetch_add(1, Ordering::Relaxed);
             None
         }
+    }
+
+    /// Returns a clone of the cached page, or `None` if not present.
+    pub fn get(&self, page_id: PageId) -> Option<Page> {
+        self.get_shared(page_id).map(|arc| (*arc).clone())
     }
 
     /// Inserts a page into the cache.
@@ -77,7 +87,7 @@ impl PageCache {
         let mut pages = self.pages.write();
 
         if let Some(entry) = pages.get_mut(&page_id) {
-            entry.page = page;
+            entry.page = Arc::new(page);
             entry.accessed = true;
             return;
         }
@@ -107,7 +117,7 @@ impl PageCache {
         let mut page_order = self.page_order.write();
         page_order.push(page_id);
 
-        pages.insert(page_id, CacheEntry { page, accessed: true });
+        pages.insert(page_id, CacheEntry { page: Arc::new(page), accessed: true });
     }
 
     /// Removes a page from the cache.
@@ -117,7 +127,7 @@ impl PageCache {
 
         if let Some(entry) = pages.remove(&page_id) {
             page_order.retain(|&id| id != page_id);
-            Some(entry.page)
+            Some(Arc::unwrap_or_clone(entry.page))
         } else {
             None
         }
@@ -204,14 +214,14 @@ impl PageCache {
     }
 
     /// Returns all dirty pages (for flushing).
-    pub fn dirty_pages(&self) -> Vec<Page> {
-        self.pages.read().values().filter(|e| e.page.dirty).map(|e| e.page.clone()).collect()
+    pub fn dirty_pages(&self) -> Vec<Arc<Page>> {
+        self.pages.read().values().filter(|e| e.page.dirty).map(|e| Arc::clone(&e.page)).collect()
     }
 
     /// Marks a page as clean (after flushing).
     pub fn mark_clean(&self, page_id: PageId) {
         if let Some(entry) = self.pages.write().get_mut(&page_id) {
-            entry.page.dirty = false;
+            Arc::make_mut(&mut entry.page).dirty = false;
         }
     }
 
@@ -221,7 +231,7 @@ impl PageCache {
     /// matches the on-disk version.
     pub fn update_checksum(&self, page_id: PageId) {
         if let Some(entry) = self.pages.write().get_mut(&page_id) {
-            entry.page.update_checksum();
+            Arc::make_mut(&mut entry.page).update_checksum();
         }
     }
 

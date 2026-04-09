@@ -5,29 +5,32 @@
 //! Organization lifecycle is handled by [`super::OrganizationService`].
 //! Vault CRUD is handled by [`super::VaultService`].
 
-use std::{collections::BTreeSet, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use inferadb_ledger_proto::proto::{
-    BackupInfo, CheckIntegrityRequest, CheckIntegrityResponse, ClusterMember, ClusterMemberRole,
-    CreateBackupRequest, CreateBackupResponse, CreateSnapshotRequest, CreateSnapshotResponse,
+    BackupInfo, CheckIntegrityRequest, CheckIntegrityResponse, CheckPeerLivenessRequest,
+    CheckPeerLivenessResponse, ClusterMember, CreateBackupRequest, CreateBackupResponse,
+    CreateSnapshotRequest, CreateSnapshotResponse, DataRegionReplica,
     GetBlindingKeyRehashStatusRequest, GetBlindingKeyRehashStatusResponse, GetClusterInfoRequest,
-    GetClusterInfoResponse, GetConfigRequest, GetConfigResponse, GetNodeInfoRequest,
-    GetNodeInfoResponse, GetRewrapStatusRequest, GetRewrapStatusResponse, Hash, IntegrityIssue,
-    JoinClusterRequest, JoinClusterResponse, LeaveClusterRequest, LeaveClusterResponse,
-    ListBackupsRequest, ListBackupsResponse, MigrateExistingUsersRequest,
-    MigrateExistingUsersResponse, ProvisionRegionRequest, ProvisionRegionResponse,
-    RecoverVaultRequest, RecoverVaultResponse, Region as ProtoRegion, RestoreBackupRequest,
-    RestoreBackupResponse, RotateBlindingKeyRequest, RotateBlindingKeyResponse,
-    RotateRegionKeyRequest, RotateRegionKeyResponse, TransferLeadershipRequest,
-    TransferLeadershipResponse, UpdateConfigRequest, UpdateConfigResponse, VaultHealthProto,
+    GetClusterInfoResponse, GetConfigRequest, GetConfigResponse, GetDecommissionStatusRequest,
+    GetDecommissionStatusResponse, GetNodeInfoRequest, GetNodeInfoResponse, GetRewrapStatusRequest,
+    GetRewrapStatusResponse, Hash, IntegrityIssue, JoinClusterRequest, JoinClusterResponse,
+    LeaveClusterRequest, LeaveClusterResponse, ListBackupsRequest, ListBackupsResponse,
+    MigrateExistingUsersRequest, MigrateExistingUsersResponse, ProvisionRegionRequest,
+    ProvisionRegionResponse, RecoverVaultRequest, RecoverVaultResponse, Region as ProtoRegion,
+    RestoreBackupRequest, RestoreBackupResponse, RotateBlindingKeyRequest,
+    RotateBlindingKeyResponse, RotateRegionKeyRequest, RotateRegionKeyResponse,
+    TransferLeadershipRequest, TransferLeadershipResponse, UpdateConfigRequest,
+    UpdateConfigResponse, VaultHealthProto,
 };
 use inferadb_ledger_raft::{
+    ConsensusHandle, HandleError, NodeStatus,
     error::classify_raft_error,
     event_writer::HandlerPhaseEmitter,
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
     logging::{OperationType, RequestContext, Sampler},
     metrics, trace_context,
-    types::{LedgerRequest, LedgerResponse, LedgerTypeConfig, RaftPayload, SystemRequest},
+    types::{LedgerRequest, LedgerResponse, RaftPayload, SystemRequest},
 };
 use inferadb_ledger_state::{BlockArchive, StateLayer, system::SystemOrganizationService};
 use inferadb_ledger_store::FileBackend;
@@ -39,18 +42,17 @@ use inferadb_ledger_types::{
     events::{EventAction, EventOutcome as EventOutcomeType},
     hash_eq,
 };
-use openraft::{BasicNode, Raft};
 use sha2::{Digest, Sha256};
 use tonic::{Request, Response, Status};
 
-use super::slug_resolver::SlugResolver;
+use super::{error_classify, slug_resolver::SlugResolver};
 
 /// gRPC handler for cluster administration operations.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct AdminService {
-    /// Raft consensus handle for proposing admin operations.
-    raft: Arc<Raft<LedgerTypeConfig>>,
+    /// Consensus handle for proposing admin operations and leadership checks.
+    handle: Arc<ConsensusHandle>,
     /// State layer for entity and relationship reads during admin operations.
     state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (vault heights, health).
@@ -58,8 +60,12 @@ pub struct AdminService {
     /// Block archive for integrity verification.
     #[builder(default)]
     block_archive: Option<Arc<BlockArchive<FileBackend>>>,
-    /// The node's listen address (for GetNodeInfo RPC).
-    listen_addr: SocketAddr,
+    /// The address other nodes should use to reach this node.
+    ///
+    /// Set from `--advertise` (or `--listen` as fallback). Used in
+    /// `GetNodeInfo` responses and data region initial_members.
+    #[builder(into)]
+    advertise_addr: String,
     /// Sampler for log tail sampling.
     #[builder(default)]
     sampler: Option<Sampler>,
@@ -105,6 +111,37 @@ pub struct AdminService {
     /// Raft manager for lazy region provisioning.
     #[builder(default)]
     raft_manager: Option<Arc<inferadb_ledger_raft::raft_manager::RaftManager>>,
+    /// Shared peer address map for resolving peer network addresses.
+    ///
+    /// Used by admin RPCs that need to contact specific peers.
+    #[builder(default)]
+    peer_addresses: Option<inferadb_ledger_raft::PeerAddressMap>,
+    /// GLOBAL region consensus transport for registering new peer channels
+    /// during dynamic cluster membership changes (JoinCluster/LeaveCluster).
+    #[builder(default)]
+    consensus_transport: Option<inferadb_ledger_raft::GrpcConsensusTransport>,
+    /// Initialization signal sender for fresh (uninitialized) nodes.
+    ///
+    /// When present, `init_cluster()` generates a cluster ID, persists it to
+    /// `init_data_dir`, and sends `Some(cluster_id)` through this channel to
+    /// unblock bootstrap. When absent (restart path), `init_cluster()` returns
+    /// `already_initialized = true`.
+    #[builder(default)]
+    init_sender: Option<Arc<tokio::sync::watch::Sender<Option<u64>>>>,
+    /// Data directory path for cluster ID persistence (used by `init_cluster`).
+    #[builder(default)]
+    init_data_dir: Option<std::path::PathBuf>,
+    /// Static cluster ID for restarted (already-initialized) nodes.
+    ///
+    /// Set during bootstrap for the restart path. For fresh nodes, this is `None`
+    /// and `get_node_info` reads the cluster ID from the `init_sender` channel.
+    #[builder(default)]
+    cluster_id: Option<u64>,
+    /// Per-node liveness timestamps. Updated on every successful RPC or Raft message.
+    /// Shared with the Raft service and bootstrap liveness checker.
+    #[builder(default)]
+    peer_liveness:
+        Option<Arc<parking_lot::RwLock<std::collections::HashMap<u64, std::time::Instant>>>>,
 }
 
 impl AdminService {
@@ -178,6 +215,56 @@ impl AdminService {
         self
     }
 
+    /// Attaches the GLOBAL consensus transport for peer channel management.
+    ///
+    /// When set, `JoinCluster` and `LeaveCluster` will register/unregister
+    /// gRPC channels for the affected nodes, enabling Raft replication to
+    /// dynamically-added cluster members.
+    #[must_use]
+    pub fn with_consensus_transport(
+        mut self,
+        transport: inferadb_ledger_raft::GrpcConsensusTransport,
+    ) -> Self {
+        self.consensus_transport = Some(transport);
+        self
+    }
+
+    /// Attaches the initialization signal sender and data directory.
+    ///
+    /// Used on fresh (uninitialized) nodes so the `InitCluster` RPC can generate
+    /// a cluster ID, persist it, and signal bootstrap to proceed.
+    #[must_use]
+    pub fn with_init_sender(
+        mut self,
+        sender: Arc<tokio::sync::watch::Sender<Option<u64>>>,
+        data_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        self.init_sender = Some(sender);
+        self.init_data_dir = data_dir;
+        self
+    }
+
+    /// Sets the static cluster ID for already-initialized nodes.
+    ///
+    /// On the restart path, the cluster ID is loaded from disk during bootstrap
+    /// and passed here so `get_node_info` and `init_cluster` can return it
+    /// without needing the init sender channel.
+    #[must_use]
+    pub fn with_cluster_id(mut self, cluster_id: u64) -> Self {
+        self.cluster_id = Some(cluster_id);
+        self
+    }
+
+    /// Attaches a shared peer liveness map for quorum-based dead node detection.
+    #[must_use]
+    pub fn with_peer_liveness(
+        mut self,
+        liveness: Arc<parking_lot::RwLock<std::collections::HashMap<u64, std::time::Instant>>>,
+    ) -> Self {
+        self.peer_liveness = Some(liveness);
+        self
+    }
+
     /// Creates a `RequestContext` for an admin operation, filling common fields
     /// from gRPC metadata and trace context.
     fn make_request_context(
@@ -228,21 +315,23 @@ impl AdminService {
             inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
         let payload = RaftPayload::system(request);
 
-        let result = tokio::time::timeout(timeout, self.raft.client_write(payload)).await;
-
-        match result {
-            Ok(Ok(resp)) => Ok(resp.data),
-            Ok(Err(e)) => {
-                ctx.set_error("RaftError", &e.to_string());
-                Err(classify_raft_error(&e.to_string()))
+        match self.handle.propose_and_wait(payload, timeout).await {
+            Ok(response) => Ok(response),
+            Err(HandleError::Consensus { source, .. }) => {
+                ctx.set_error("RaftError", &source.to_string());
+                Err(classify_raft_error(&source.to_string()))
             },
-            Err(_) => {
+            Err(HandleError::Timeout { .. }) => {
                 inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
                 ctx.set_error("Timeout", "Raft proposal timed out");
                 Err(Status::deadline_exceeded(format!(
                     "Raft proposal timed out after {}ms",
                     timeout.as_millis()
                 )))
+            },
+            Err(e) => {
+                ctx.set_error("RaftError", &e.to_string());
+                Err(Status::internal(e.to_string()))
             },
         }
     }
@@ -257,18 +346,26 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
     ) -> Result<Response<CreateSnapshotResponse>, Status> {
         // Extract trace context and transport metadata from gRPC headers before consuming
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
+
+        let mut ctx = self.make_request_context("create_snapshot", request.metadata(), &trace_ctx);
         let _req = request.into_inner();
 
-        let mut ctx = self.make_request_context("create_snapshot", &grpc_metadata, &trace_ctx);
-
-        // Trigger Raft snapshot
+        // Trigger a Raft snapshot via the consensus engine.
         ctx.start_raft_timer();
-        let _ = self.raft.trigger().snapshot().await.map_err(|e| {
-            ctx.end_raft_timer();
-            ctx.set_error("SnapshotError", &e.to_string());
-            Status::failed_precondition(format!("Snapshot error: {}", e))
-        })?;
+        match self.handle.trigger_snapshot().await {
+            Ok((idx, _term)) if idx > 0 => {
+                tracing::info!(
+                    last_included_index = idx,
+                    "Snapshot triggered via CreateSnapshot RPC"
+                );
+            },
+            Ok(_) => {
+                tracing::info!("No new snapshot needed (commit index unchanged)");
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "Snapshot trigger failed");
+            },
+        }
         ctx.end_raft_timer();
 
         // Get actual region height from applied state
@@ -305,11 +402,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
     ) -> Result<Response<CheckIntegrityResponse>, Status> {
         // Extract trace context and transport metadata from gRPC headers before consuming
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
         let mut issues = Vec::new();
 
-        let mut ctx = self.make_request_context("check_integrity", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.make_request_context("check_integrity", request.metadata(), &trace_ctx);
+        let req = request.into_inner();
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
         let organization_slug_val =
@@ -578,156 +674,108 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         super::helpers::check_not_draining(self.health_state.as_ref())?;
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
+
+        let mut ctx = self.make_request_context("join_cluster", request.metadata(), &trace_ctx);
         let req = request.into_inner();
 
-        let mut ctx = self.make_request_context("join_cluster", &grpc_metadata, &trace_ctx);
-
-        // Get current metrics to check if we're the leader
-        let metrics = self.raft.metrics().borrow().clone();
-        let current_leader = metrics.current_leader;
-        ctx.set_raft_term(metrics.current_term);
-        ctx.set_is_leader(current_leader == Some(metrics.id));
+        // Check if we're the leader via consensus handle
+        let node_id = self.handle.node_id();
+        let current_leader = self.handle.current_leader();
+        let current_term = self.handle.current_term();
+        ctx.set_raft_term(current_term);
+        ctx.set_is_leader(self.handle.is_leader());
 
         // If we're not the leader, return the leader info for redirect
-        if current_leader != Some(metrics.id) {
-            // Get leader address from membership
-            let leader_addr = current_leader
-                .and_then(|leader_id| {
-                    metrics
-                        .membership_config
-                        .membership()
-                        .nodes()
-                        .find(|(id, _)| **id == leader_id)
-                        .map(|(_, node)| node.addr.clone())
-                })
-                .unwrap_or_default();
-
+        if !self.handle.is_leader() {
             ctx.set_error("NotLeader", "Not the leader, redirect to leader");
+            let leader_id = current_leader.unwrap_or(0);
             return Ok(Response::new(JoinClusterResponse {
                 success: false,
                 message: "Not the leader, redirect to leader".to_string(),
-                leader_id: current_leader.unwrap_or(0),
-                leader_address: leader_addr,
+                leader_id,
+                leader_address: self
+                    .peer_addresses
+                    .as_ref()
+                    .and_then(|m| m.get(leader_id))
+                    .unwrap_or_default(),
             }));
         }
 
-        // We are the leader - add the new node as a learner first
-        let node = BasicNode { addr: req.address.clone() };
+        // Check existing membership via the RaftManager's openraft handle
+        // (ConsensusHandle doesn't expose full membership with node addresses).
+        let already_voter = self
+            .raft_manager
+            .as_ref()
+            .and_then(|m| m.system_region().ok())
+            .map(|s| {
+                let state = s.handle().shard_state();
+                state.voters.iter().any(|n| n.0 == req.node_id)
+            })
+            .unwrap_or(false);
 
-        // Check if node is already in the membership (idempotent handling)
-        let current_membership = metrics.membership_config.membership();
-        let already_voter = current_membership.voter_ids().any(|id| id == req.node_id);
-        let already_in_membership = current_membership.nodes().any(|(id, _)| *id == req.node_id);
+        // Pre-compute this node's address once (we're the leader for all remaining responses).
+        let my_address =
+            self.peer_addresses.as_ref().and_then(|m| m.get(node_id)).unwrap_or_default();
 
         if already_voter {
-            // Already a voter, nothing to do
             ctx.set_success();
             return Ok(Response::new(JoinClusterResponse {
                 success: true,
                 message: "Node is already a voter in the cluster".to_string(),
-                leader_id: metrics.id,
-                leader_address: String::new(),
+                leader_id: node_id,
+                leader_address: my_address.clone(),
             }));
         }
 
-        // Step 1: Add as learner if not already in membership
-        // Use blocking=false so we don't wait for replication - the new node
-        // might not be ready yet. We'll wait for the config change to commit below.
-        // Retry with backoff if there's a pending config change.
+        // Register the joining node's gRPC channel so the consensus transport
+        // can send AppendEntries for replication. Without this, the leader
+        // cannot replicate entries to the new node, and multi-voter quorum
+        // commits would stall.
+        if let Some(ref transport) = self.consensus_transport
+            && let Ok(endpoint) =
+                tonic::transport::Channel::from_shared(format!("http://{}", req.address))
+        {
+            transport.set_peer(req.node_id, endpoint.connect_lazy());
+        }
+        // Also update the peer address map for forwarding.
+        if let Some(ref peers) = self.peer_addresses {
+            peers.insert(req.node_id, req.address.clone());
+        }
+
+        // Replicate the peer address to all nodes via GLOBAL Raft so that
+        // data region leaders on other nodes can reach the new peer.
+        // Fire-and-forget — we don't need to wait for this to commit before
+        // proceeding with the membership change. The address will replicate
+        // through normal Raft flow.
+        let register_handle = self.handle.clone();
+        let register_node_id = req.node_id;
+        let register_address = req.address.clone();
+        tokio::spawn(async move {
+            let register_request = inferadb_ledger_raft::types::LedgerRequest::System(
+                inferadb_ledger_raft::types::SystemRequest::RegisterPeerAddress {
+                    node_id: register_node_id,
+                    address: register_address,
+                },
+            );
+            let _ = register_handle
+                .propose_and_wait(
+                    inferadb_ledger_raft::types::RaftPayload::system(register_request),
+                    std::time::Duration::from_secs(5),
+                )
+                .await;
+        });
+
+        // Step 1: Add as learner via ConsensusHandle
         ctx.start_raft_timer();
-        if !already_in_membership {
-            let mut add_success = false;
-            for attempt in 0..10 {
-                match self.raft.add_learner(req.node_id, node.clone(), false).await {
-                    Ok(_) => {
-                        add_success = true;
-                        break;
-                    },
-                    Err(e) => {
-                        let err_str = format!("{}", e);
-                        if err_str.contains("already undergoing a configuration change") {
-                            tokio::time::sleep(std::time::Duration::from_millis(
-                                100 * (attempt + 1) as u64,
-                            ))
-                            .await;
-                        } else {
-                            ctx.end_raft_timer();
-                            ctx.set_error("AddLearnerFailed", &e.to_string());
-                            return Ok(Response::new(JoinClusterResponse {
-                                success: false,
-                                message: format!("Failed to add learner: {}", e),
-                                leader_id: metrics.id,
-                                leader_address: String::new(),
-                            }));
-                        }
-                    },
-                }
-            }
-            if !add_success {
-                ctx.end_raft_timer();
-                ctx.set_error("Timeout", "Cluster membership changes not completing");
-                return Ok(Response::new(JoinClusterResponse {
-                    success: false,
-                    message: "Timeout: cluster membership changes not completing".to_string(),
-                    leader_id: metrics.id,
-                    leader_address: String::new(),
-                }));
-            }
-        }
-
-        // Step 2: Wait for the learner membership change to commit
-        // OpenRaft requires serialized membership changes - we must wait for the
-        // add_learner to commit before we can change_membership
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(5);
-
-        loop {
-            let fresh_metrics = self.raft.metrics().borrow().clone();
-            let membership = fresh_metrics.membership_config.membership();
-
-            // Check if the node is now in the membership as a learner
-            let is_in_membership = membership.nodes().any(|(id, _)| *id == req.node_id);
-
-            if is_in_membership {
-                break;
-            }
-
-            if start.elapsed() > timeout {
-                ctx.end_raft_timer();
-                ctx.set_error("Timeout", "Waiting for learner membership to commit");
-                return Ok(Response::new(JoinClusterResponse {
-                    success: false,
-                    message: "Timeout waiting for learner membership to commit".to_string(),
-                    leader_id: metrics.id,
-                    leader_address: String::new(),
-                }));
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-
-        // Step 3: Promote to voter by changing membership
-        // Retry with backoff if there's still a pending config change
+        let mut add_success = false;
         for attempt in 0..10 {
-            let fresh_metrics = self.raft.metrics().borrow().clone();
-            let current_membership = fresh_metrics.membership_config.membership();
-            let mut new_voters: BTreeSet<u64> = current_membership.voter_ids().collect();
-            new_voters.insert(req.node_id);
-
-            match self.raft.change_membership(new_voters, false).await {
-                Ok(_) => {
-                    ctx.end_raft_timer();
-                    ctx.set_success();
-                    return Ok(Response::new(JoinClusterResponse {
-                        success: true,
-                        message: "Node joined cluster successfully".to_string(),
-                        leader_id: fresh_metrics.id,
-                        leader_address: String::new(),
-                    }));
+            match self.handle.add_learner(req.node_id, false).await {
+                Ok(()) => {
+                    add_success = true;
+                    break;
                 },
                 Err(e) => {
-                    let err_str = format!("{}", e);
+                    let err_str = e.to_string();
                     if err_str.contains("already undergoing a configuration change") {
                         tokio::time::sleep(std::time::Duration::from_millis(
                             100 * (attempt + 1) as u64,
@@ -735,12 +783,72 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                         .await;
                     } else {
                         ctx.end_raft_timer();
-                        ctx.set_error("PromotionFailed", &e.to_string());
+                        ctx.set_error("AddLearnerFailed", &err_str);
                         return Ok(Response::new(JoinClusterResponse {
                             success: false,
-                            message: format!("Failed to promote to voter: {}", e),
-                            leader_id: fresh_metrics.id,
-                            leader_address: String::new(),
+                            message: format!("Failed to add learner: {}", err_str),
+                            leader_id: node_id,
+                            leader_address: my_address.clone(),
+                        }));
+                    }
+                },
+            }
+        }
+        if !add_success {
+            ctx.end_raft_timer();
+            ctx.set_error("Timeout", "Cluster membership changes not completing");
+            return Ok(Response::new(JoinClusterResponse {
+                success: false,
+                message: "Timeout: cluster membership changes not completing".to_string(),
+                leader_id: node_id,
+                leader_address: my_address.clone(),
+            }));
+        }
+
+        // Step 2: Wait for the learner to appear in membership, then promote.
+        // Use a short delay to let the membership change commit.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Step 3: Promote to voter via ConsensusHandle
+        for attempt in 0..10 {
+            match self.handle.promote_voter(req.node_id).await {
+                Ok(()) => {
+                    ctx.end_raft_timer();
+
+                    // After the node is a GLOBAL voter, add it to all existing
+                    // data regions where this node is the data region leader.
+                    if let Some(ref manager) = self.raft_manager {
+                        add_node_to_data_regions(manager, req.node_id, &req.address).await;
+                    }
+
+                    // The joining node just communicated with us — mark it live.
+                    if let Some(ref liveness) = self.peer_liveness {
+                        liveness.write().insert(req.node_id, std::time::Instant::now());
+                    }
+
+                    ctx.set_success();
+                    return Ok(Response::new(JoinClusterResponse {
+                        success: true,
+                        message: "Node joined cluster successfully".to_string(),
+                        leader_id: node_id,
+                        leader_address: my_address.clone(),
+                    }));
+                },
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if err_str.contains("already undergoing a configuration change") {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            100 * (attempt + 1) as u64,
+                        ))
+                        .await;
+                    } else {
+                        ctx.end_raft_timer();
+                        ctx.set_error("PromotionFailed", &err_str);
+                        return Ok(Response::new(JoinClusterResponse {
+                            success: false,
+                            message: format!("Failed to promote to voter: {}", err_str),
+                            leader_id: node_id,
+                            leader_address: my_address.clone(),
                         }));
                     }
                 },
@@ -752,8 +860,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         Ok(Response::new(JoinClusterResponse {
             success: false,
             message: "Timeout: could not complete voter promotion".to_string(),
-            leader_id: metrics.id,
-            leader_address: String::new(),
+            leader_id: node_id,
+            leader_address: my_address,
         }))
     }
 
@@ -766,19 +874,17 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         super::helpers::check_not_draining(self.health_state.as_ref())?;
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
+
+        let mut ctx = self.make_request_context("leave_cluster", request.metadata(), &trace_ctx);
         let req = request.into_inner();
 
-        let mut ctx = self.make_request_context("leave_cluster", &grpc_metadata, &trace_ctx);
-
-        // Get current metrics
-        let metrics = self.raft.metrics().borrow().clone();
-        let current_leader = metrics.current_leader;
-        ctx.set_raft_term(metrics.current_term);
-        ctx.set_is_leader(current_leader == Some(metrics.id));
+        // Check leadership via consensus handle
+        let current_term = self.handle.current_term();
+        ctx.set_raft_term(current_term);
+        ctx.set_is_leader(self.handle.is_leader());
 
         // Only the leader can change membership
-        if current_leader != Some(metrics.id) {
+        if !self.handle.is_leader() {
             ctx.set_error("NotLeader", "Cannot process leave request");
             return Ok(Response::new(LeaveClusterResponse {
                 success: false,
@@ -786,13 +892,11 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             }));
         }
 
-        // Remove the node from voters
-        let current_membership = metrics.membership_config.membership();
-        let new_voters: BTreeSet<u64> =
-            current_membership.voter_ids().filter(|id| *id != req.node_id).collect();
-
-        // Prevent removing the last voter
-        if new_voters.is_empty() {
+        // Check current voters from shard state.
+        // If there's only one voter left, refuse the removal regardless of who
+        // it is — removing the last voter would make the cluster unrecoverable.
+        let state = self.handle.shard_state();
+        if state.voters.len() <= 1 {
             ctx.set_error("InvalidOperation", "Cannot remove the last voter");
             return Ok(Response::new(LeaveClusterResponse {
                 success: false,
@@ -802,59 +906,116 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
         ctx.start_raft_timer();
 
-        // Cascade: remove from ALL data region Raft clusters FIRST.
-        // Data region removal must happen BEFORE the GLOBAL leave because
-        // after the node leaves GLOBAL, other nodes may refuse connections
-        // from the departed node, preventing data region membership changes.
+        // Mark the node as Decommissioning in GLOBAL state.
+        // The DR scheduler (B3) reads this status to derive desired DR
+        // membership and generates RemoveVoter operators. The drain
+        // monitor (B4) removes the node from GLOBAL once fully drained.
+        let set_status = LedgerRequest::System(SystemRequest::SetNodeStatus {
+            node_id: req.node_id,
+            status: NodeStatus::Decommissioning,
+        });
+        match self
+            .handle
+            .propose_and_wait(RaftPayload::system(set_status), std::time::Duration::from_secs(5))
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(node_id = req.node_id, "Node marked as Decommissioning");
+            },
+            Err(e) => {
+                ctx.set_error("RaftProposalFailed", &e.to_string());
+                return Ok(Response::new(LeaveClusterResponse {
+                    success: false,
+                    message: format!("Failed to mark node as Decommissioning: {e}"),
+                }));
+            },
+        }
+
+        // Synchronously remove the departing node from data regions BEFORE
+        // removing from GLOBAL. After GLOBAL removal, the node stops receiving
+        // Raft entries and can't process DR changes. The DR scheduler handles
+        // normal async operations; this synchronous path ensures correctness
+        // when nodes are killed immediately after leave_cluster returns.
         if let Some(ref manager) = self.raft_manager {
+            let target = inferadb_ledger_consensus::types::NodeId(req.node_id);
+            let local_node_id = manager.config().node_id;
+
             for region in manager.list_regions() {
                 if region == inferadb_ledger_types::Region::GLOBAL {
-                    continue; // Handled below
+                    continue;
                 }
-                if let Ok(rg) = manager.get_region_group(region) {
-                    let region_metrics = rg.raft().metrics().borrow().clone();
-                    // Only attempt if this node is the leader for this region
-                    if region_metrics.current_leader == Some(region_metrics.id) {
-                        let region_voters: std::collections::BTreeSet<u64> = region_metrics
-                            .membership_config
-                            .membership()
-                            .voter_ids()
-                            .filter(|id| *id != req.node_id)
-                            .collect();
-                        if !region_voters.is_empty() {
-                            // Use a timeout to prevent blocking indefinitely if the
-                            // data region's Raft can't achieve quorum.
-                            let result = tokio::time::timeout(
-                                std::time::Duration::from_secs(5),
-                                rg.raft().change_membership(region_voters, false),
-                            )
-                            .await;
-                            match result {
-                                Ok(Ok(_)) => {},
-                                Ok(Err(e)) => {
-                                    tracing::warn!(
-                                        region = region.as_str(),
-                                        node_id = req.node_id,
-                                        error = %e,
-                                        "Failed to remove node from data region (non-fatal)"
-                                    );
-                                },
-                                Err(_) => {
-                                    tracing::warn!(
-                                        region = region.as_str(),
-                                        node_id = req.node_id,
-                                        "Timed out removing node from data region (non-fatal)"
-                                    );
-                                },
+                let Ok(group) = manager.get_region_group(region) else { continue };
+                if !group.handle().is_leader() {
+                    continue;
+                }
+                let state = group.handle().shard_state();
+                if !state.voters.contains(&target) && !state.learners.contains(&target) {
+                    continue;
+                }
+
+                // Self-removal: transfer DR leadership to a surviving voter first.
+                if req.node_id == local_node_id {
+                    let global_state_reader = manager.system_state_reader();
+                    let other_voter = state.voters.iter().find(|n| {
+                        n.0 != local_node_id
+                            && global_state_reader.as_ref().is_none_or(|r| {
+                                r.node_status(n.0)
+                                    == inferadb_ledger_raft::types::NodeStatus::Active
+                            })
+                    });
+                    if let Some(transfer_target) = other_voter {
+                        tracing::info!(
+                            region = region.as_str(),
+                            transfer_to = transfer_target.0,
+                            "Transferring DR leadership before self-removal"
+                        );
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(3),
+                            group.handle().transfer_leader(transfer_target.0),
+                        )
+                        .await;
+                        // Wait for transfer to complete.
+                        for _ in 0..30 {
+                            if !group.handle().is_leader() {
+                                break;
                             }
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
+                    }
+                    continue; // New DR leader handles removal via scheduler.
+                }
+
+                // Other-removal: remove directly with retry.
+                for attempt in 0..10u32 {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        group.handle().remove_node(req.node_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            tracing::info!(
+                                region = region.as_str(),
+                                node_id = req.node_id,
+                                "Removed departing node from data region"
+                            );
+                            break;
+                        },
+                        Ok(Err(e)) if e.to_string().contains("already undergoing") => {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                200 * u64::from(attempt + 1),
+                            ))
+                            .await;
+                        },
+                        Ok(Err(e)) if e.to_string().contains("no-op") => break,
+                        _ => break,
                     }
                 }
             }
         }
 
-        // Remove from GLOBAL Raft last (after data regions are updated)
-        if let Err(e) = self.raft.change_membership(new_voters, false).await {
+        // Remove from GLOBAL.
+        if let Err(e) = self.handle.remove_node(req.node_id).await {
             ctx.end_raft_timer();
             ctx.set_error("MembershipChangeFailed", &e.to_string());
             return Ok(Response::new(LeaveClusterResponse {
@@ -863,12 +1024,112 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             }));
         }
 
+        // Wait for the GLOBAL membership change to commit and apply.
+        let target_node = inferadb_ledger_consensus::types::NodeId(req.node_id);
+        for _ in 0..50 {
+            let state = self.handle.shard_state();
+            if !state.voters.contains(&target_node) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
         ctx.end_raft_timer();
         ctx.set_success();
         Ok(Response::new(LeaveClusterResponse {
             success: true,
-            message: "Node left cluster successfully".to_string(),
+            message: "Node decommissioned.".to_string(),
         }))
+    }
+
+    /// Returns decommission progress for a node.
+    ///
+    /// Callers poll this after `LeaveCluster` to determine when it is safe to
+    /// shut down the departing node. The response reports:
+    /// - `status`: the node's `NodeStatus` from GLOBAL state
+    /// - `remaining`: DR regions where the node still holds a replica
+    /// - `global_removed`: whether the node has been removed from GLOBAL membership
+    async fn get_decommission_status(
+        &self,
+        request: Request<GetDecommissionStatusRequest>,
+    ) -> Result<Response<GetDecommissionStatusResponse>, Status> {
+        let req = request.into_inner();
+
+        // Read node status from GLOBAL state.
+        let status_str = if let Some(ref manager) = self.raft_manager {
+            if let Some(reader) = manager.system_state_reader() {
+                match reader.node_status(req.node_id) {
+                    NodeStatus::Active => "active",
+                    NodeStatus::Decommissioning => "decommissioning",
+                    NodeStatus::Dead => "dead",
+                    NodeStatus::Removed => "removed",
+                }
+            } else {
+                "unknown"
+            }
+        } else {
+            "unknown"
+        };
+
+        // Check remaining DR replicas for the target node.
+        let mut remaining = Vec::new();
+        if let Some(ref manager) = self.raft_manager {
+            let target = inferadb_ledger_consensus::types::NodeId(req.node_id);
+            for region in manager.list_regions() {
+                if region == inferadb_ledger_types::Region::GLOBAL {
+                    continue;
+                }
+                if let Ok(group) = manager.get_region_group(region) {
+                    let state = group.handle().shard_state();
+                    if state.voters.contains(&target) {
+                        remaining.push(DataRegionReplica {
+                            region: region.to_string(),
+                            role: "voter".to_string(),
+                        });
+                    } else if state.learners.contains(&target) {
+                        remaining.push(DataRegionReplica {
+                            region: region.to_string(),
+                            role: "learner".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Check if GLOBAL membership removal is complete.
+        let global_removed = {
+            let state = self.handle.shard_state();
+            let target = inferadb_ledger_consensus::types::NodeId(req.node_id);
+            !state.voters.contains(&target) && !state.learners.contains(&target)
+        };
+
+        Ok(Response::new(GetDecommissionStatusResponse {
+            status: status_str.to_string(),
+            remaining,
+            global_removed,
+        }))
+    }
+
+    async fn check_peer_liveness(
+        &self,
+        request: Request<CheckPeerLivenessRequest>,
+    ) -> Result<Response<CheckPeerLivenessResponse>, Status> {
+        let req = request.into_inner();
+        let (reachable, last_seen_ago_ms) = if let Some(ref liveness) = self.peer_liveness {
+            let map = liveness.read();
+            match map.get(&req.target_node_id) {
+                Some(last_seen) => {
+                    let ago = last_seen.elapsed();
+                    // Consider reachable if seen within 5 minutes (dead_node_timeout default).
+                    (ago < std::time::Duration::from_secs(300), ago.as_millis() as u64)
+                },
+                None => (false, u64::MAX),
+            }
+        } else {
+            (false, u64::MAX)
+        };
+
+        Ok(Response::new(CheckPeerLivenessResponse { reachable, last_seen_ago_ms }))
     }
 
     /// Returns current cluster membership, leader ID, and Raft term.
@@ -877,35 +1138,46 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         request: Request<GetClusterInfoRequest>,
     ) -> Result<Response<GetClusterInfoResponse>, Status> {
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
+
+        let mut ctx = self.make_request_context("get_cluster_info", request.metadata(), &trace_ctx);
         let _req = request.into_inner();
 
-        let mut ctx = self.make_request_context("get_cluster_info", &grpc_metadata, &trace_ctx);
+        let current_leader = self.handle.current_leader();
+        let current_term = self.handle.current_term();
 
-        let metrics = self.raft.metrics().borrow().clone();
-        let membership = metrics.membership_config.membership();
-        let current_leader = metrics.current_leader;
+        ctx.set_raft_term(current_term);
+        ctx.set_is_leader(self.handle.is_leader());
 
-        ctx.set_raft_term(metrics.vote.leader_id().term);
-        ctx.set_is_leader(current_leader == Some(metrics.id));
-
-        // Build member list from membership config
-        let mut members = Vec::new();
-
-        // Add voters
-        for (node_id, node) in membership.nodes() {
-            let is_voter = membership.voter_ids().any(|id| id == *node_id);
-            members.push(ClusterMember {
-                node_id: *node_id,
-                address: node.addr.clone(),
-                role: if is_voter {
-                    ClusterMemberRole::Voter.into()
-                } else {
-                    ClusterMemberRole::Learner.into()
-                },
-                is_leader: current_leader == Some(*node_id),
-            });
-        }
+        let shard_state = self.handle.shard_state();
+        let mut members: Vec<ClusterMember> = shard_state
+            .voters
+            .iter()
+            .map(|node_id| {
+                let address =
+                    self.peer_addresses.as_ref().and_then(|m| m.get(node_id.0)).unwrap_or_default();
+                ClusterMember {
+                    node_id: node_id.0,
+                    address,
+                    role: inferadb_ledger_proto::proto::ClusterMemberRole::Voter.into(),
+                    is_leader: shard_state.leader == Some(*node_id),
+                }
+            })
+            .collect();
+        let learner_members: Vec<ClusterMember> = shard_state
+            .learners
+            .iter()
+            .map(|node_id| {
+                let address =
+                    self.peer_addresses.as_ref().and_then(|m| m.get(node_id.0)).unwrap_or_default();
+                ClusterMember {
+                    node_id: node_id.0,
+                    address,
+                    role: inferadb_ledger_proto::proto::ClusterMemberRole::Learner.into(),
+                    is_leader: false,
+                }
+            })
+            .collect();
+        members.extend(learner_members);
 
         ctx.set_keys_count(members.len());
         ctx.set_success();
@@ -913,7 +1185,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         Ok(Response::new(GetClusterInfoResponse {
             members,
             leader_id: current_leader.unwrap_or(0),
-            term: metrics.vote.leader_id().term,
+            term: current_term,
         }))
     }
 
@@ -955,28 +1227,102 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         request: Request<GetNodeInfoRequest>,
     ) -> Result<Response<GetNodeInfoResponse>, Status> {
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
+
+        let mut ctx = self.make_request_context("get_node_info", request.metadata(), &trace_ctx);
         let _req = request.into_inner();
 
-        let mut ctx = self.make_request_context("get_node_info", &grpc_metadata, &trace_ctx);
+        let current_term = self.handle.current_term();
+        let node_id = self.handle.node_id();
 
-        let metrics = self.raft.metrics().borrow().clone();
+        ctx.set_raft_term(current_term);
+        ctx.set_is_leader(self.handle.is_leader());
 
-        ctx.set_raft_term(metrics.current_term);
-        ctx.set_is_leader(metrics.current_leader == Some(metrics.id));
+        // Resolve cluster_id: use the static value (restart path) or check
+        // the init sender's current value (fresh path, set after InitCluster).
+        let cluster_id = self
+            .cluster_id
+            .or_else(|| self.init_sender.as_ref().and_then(|s| *s.borrow()))
+            .unwrap_or(0);
 
-        // Node is a cluster member if it has a leader or is in membership
-        // (has at least one voter including itself)
-        let is_cluster_member = metrics.current_leader.is_some()
-            || metrics.membership_config.membership().voter_ids().count() > 0;
+        // Node is a cluster member only if it has been initialized (cluster_id assigned).
+        // Fresh nodes start with themselves as a voter, so checking voters is unreliable.
+        let is_cluster_member = cluster_id != 0;
 
         ctx.set_success();
 
         Ok(Response::new(GetNodeInfoResponse {
-            node_id: metrics.id,
-            address: self.listen_addr.to_string(),
+            node_id,
+            address: self.advertise_addr.clone(),
             is_cluster_member,
-            term: metrics.current_term,
+            term: current_term,
+            cluster_id,
+            state: if cluster_id != 0 {
+                "running".to_string()
+            } else {
+                "uninitialized".to_string()
+            },
+        }))
+    }
+
+    /// Initialize a new cluster.
+    ///
+    /// On fresh nodes, generates a cluster ID, persists it to disk, and signals
+    /// bootstrap to start background jobs. On already-initialized nodes, returns
+    /// `already_initialized = true` with the existing cluster ID.
+    async fn init_cluster(
+        &self,
+        _request: tonic::Request<inferadb_ledger_proto::proto::InitClusterRequest>,
+    ) -> Result<tonic::Response<inferadb_ledger_proto::proto::InitClusterResponse>, tonic::Status>
+    {
+        // Restart path: node was already initialized (cluster_id loaded from disk).
+        if let Some(cid) = self.cluster_id {
+            return Ok(tonic::Response::new(inferadb_ledger_proto::proto::InitClusterResponse {
+                initialized: false,
+                cluster_id: cid,
+                already_initialized: true,
+            }));
+        }
+
+        // Fresh path: check if already initialized via a prior InitCluster or seed join.
+        if let Some(ref sender) = self.init_sender {
+            if let Some(cid) = *sender.borrow() {
+                return Ok(tonic::Response::new(
+                    inferadb_ledger_proto::proto::InitClusterResponse {
+                        initialized: false,
+                        cluster_id: cid,
+                        already_initialized: true,
+                    },
+                ));
+            }
+        } else {
+            // No init_sender and no cluster_id — should not happen, but guard against it.
+            return Ok(tonic::Response::new(inferadb_ledger_proto::proto::InitClusterResponse {
+                initialized: false,
+                cluster_id: 0,
+                already_initialized: true,
+            }));
+        }
+
+        // Generate a new cluster ID.
+        let cluster_id = inferadb_ledger_types::snowflake::generate()
+            .map_err(|e| tonic::Status::internal(format!("failed to generate cluster_id: {e}")))?;
+
+        // Persist to disk so restarts skip the init flow.
+        if let Some(ref dir) = self.init_data_dir {
+            write_cluster_id_to_disk(dir, cluster_id)?;
+        }
+
+        // Signal bootstrap to proceed.
+        if let Some(ref sender) = self.init_sender {
+            let _ = sender.send(Some(cluster_id));
+        }
+
+        tracing::info!(cluster_id, "Cluster initialized via InitCluster RPC");
+
+        Ok(tonic::Response::new(inferadb_ledger_proto::proto::InitClusterResponse {
+            initialized: true,
+            cluster_id,
+            already_initialized: false,
         }))
     }
 
@@ -995,10 +1341,9 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         super::helpers::check_not_draining(self.health_state.as_ref())?;
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
 
-        let mut ctx = self.make_request_context("recover_vault", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.make_request_context("recover_vault", request.metadata(), &trace_ctx);
+        let req = request.into_inner();
         ctx.set_recovery_force(req.force);
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
@@ -1242,7 +1587,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 recovery_started_at: None,
             };
 
-            if let Err(e) = self.raft.client_write(RaftPayload::system(health_request)).await {
+            if let Err(e) = self.handle.propose(RaftPayload::system(health_request)).await {
                 tracing::error!("Failed to update vault health via Raft: {}", e);
                 // Continue with response - the local state will be inconsistent but
                 // the next recovery attempt can retry
@@ -1293,7 +1638,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 recovery_started_at: None,
             };
 
-            if let Err(e) = self.raft.client_write(RaftPayload::system(health_request)).await {
+            if let Err(e) = self.handle.propose(RaftPayload::system(health_request)).await {
                 tracing::error!("Failed to update vault health via Raft: {}", e);
                 // The vault was successfully recovered locally - log error but return success
             }
@@ -1339,10 +1684,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
     ) -> Result<Response<inferadb_ledger_proto::proto::SimulateDivergenceResponse>, Status> {
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
 
-        let mut ctx = self.make_request_context("simulate_divergence", &grpc_metadata, &trace_ctx);
+        let mut ctx =
+            self.make_request_context("simulate_divergence", request.metadata(), &trace_ctx);
+        let req = request.into_inner();
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
         let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
@@ -1406,11 +1751,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         ctx.start_raft_timer();
 
         // GLOBAL write (for HealthService)
-        if let Err(e) = self.raft.client_write(RaftPayload::system(health_request.clone())).await {
+        if let Err(e) = self.handle.propose(RaftPayload::system(health_request.clone())).await {
             ctx.end_raft_timer();
             ctx.set_error("RaftError", &e.to_string());
-            tracing::error!(error = %e, "Failed to update vault health (GLOBAL)");
-            return Err(Status::internal("Internal error"));
+            return Err(error_classify::storage_error(&e));
         }
 
         // DATA REGION write (for WriteService apply-time checks)
@@ -1420,7 +1764,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             if let Ok(Some(region)) = sys_svc.get_region_for_organization(organization_id)
                 && let Ok(rg) = manager.get_region_group(region)
             {
-                let _ = rg.raft().client_write(RaftPayload::system(health_request)).await;
+                let _ = rg.handle().propose(RaftPayload::system(health_request)).await;
             }
         }
 
@@ -1450,18 +1794,15 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         super::helpers::check_not_draining(self.health_state.as_ref())?;
         // Extract trace context from gRPC metadata before consuming the request
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
+
+        let mut ctx = self.make_request_context("force_gc", request.metadata(), &trace_ctx);
         let req = request.into_inner();
 
-        let mut ctx = self.make_request_context("force_gc", &grpc_metadata, &trace_ctx);
-
         // Check if this node is the leader
-        let metrics = self.raft.metrics().borrow().clone();
-        let node_id = metrics.id;
-        ctx.set_raft_term(metrics.current_term);
-        ctx.set_is_leader(metrics.current_leader == Some(node_id));
+        ctx.set_raft_term(self.handle.current_term());
+        ctx.set_is_leader(self.handle.is_leader());
 
-        if metrics.current_leader != Some(node_id) {
+        if !self.handle.is_leader() {
             ctx.set_error("NotLeader", "Only the leader can run garbage collection");
             return Err(Status::failed_precondition("Only the leader can run garbage collection"));
         }
@@ -1501,7 +1842,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
             // Resolve the vault's region to read entities from the correct state layer.
             // Entity data lives in REGIONAL state, not GLOBAL.
-            let (regional_state, regional_raft) = if let Some(ref manager) = self.raft_manager {
+            let (regional_state, regional_handle) = if let Some(ref manager) = self.raft_manager {
                 let sys_svc = inferadb_ledger_state::system::SystemOrganizationService::new(
                     self.state.clone(),
                 );
@@ -1511,7 +1852,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                     .flatten()
                     .unwrap_or(inferadb_ledger_types::Region::GLOBAL);
                 if let Ok(rg) = manager.get_region_group(region) {
-                    (rg.state().clone(), Some(rg.raft().clone()))
+                    (rg.state().clone(), Some(rg.handle().clone()))
                 } else {
                     (self.state.clone(), None)
                 }
@@ -1569,9 +1910,9 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 request_hash: 0,
             };
 
-            // Propose to REGIONAL Raft (where entity data lives), or fall back to GLOBAL
-            let raft_target = regional_raft.as_ref().unwrap_or(&self.raft);
-            match raft_target.client_write(RaftPayload::system(gc_request)).await {
+            // Propose to REGIONAL handle (where entity data lives), or fall back to GLOBAL
+            let handle_target = regional_handle.as_ref().unwrap_or(&self.handle);
+            match handle_target.propose(RaftPayload::system(gc_request)).await {
                 Ok(_) => {
                     total_expired += count as u64;
                 },
@@ -1694,10 +2035,9 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         request: Request<CreateBackupRequest>,
     ) -> Result<Response<CreateBackupResponse>, Status> {
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
 
-        let mut ctx = self.make_request_context("create_backup", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.make_request_context("create_backup", request.metadata(), &trace_ctx);
+        let req = request.into_inner();
 
         let backup_manager = self
             .backup_manager
@@ -1726,8 +2066,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 )
                 .map_err(|e| {
                     ctx.set_error("BackupError", &e.to_string());
-                    tracing::error!(error = %e, "Failed to create incremental backup");
-                    Status::internal("Internal error")
+                    error_classify::storage_error(&e)
                 })?;
 
             // Clear dirty bitmap after successful incremental backup
@@ -1758,16 +2097,15 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 let bucket_roots =
                     self.state.get_bucket_roots(*vault_id).unwrap_or([EMPTY_HASH; NUM_BUCKETS]);
 
-                let entities =
-                    self.state.list_entities(*vault_id, None, None, usize::MAX).map_err(|e| {
-                        tracing::error!(error = %e, vault_id = %vault_id, "Failed to list entities for vault");
-                        Status::internal("Internal error")
-                    })?;
+                let entities = self
+                    .state
+                    .list_entities(*vault_id, None, None, usize::MAX)
+                    .map_err(|e| error_classify::storage_error(&e))?;
 
-                let state_root = self.state.compute_state_root(*vault_id).map_err(|e| {
-                    tracing::error!(error = %e, vault_id = %vault_id, "Failed to compute state root for vault");
-                    Status::internal("Internal error")
-                })?;
+                let state_root = self
+                    .state
+                    .compute_state_root(*vault_id)
+                    .map_err(|e| error_classify::storage_error(&e))?;
 
                 vault_states.push(VaultSnapshotMeta::new(
                     *vault_id,
@@ -1790,14 +2128,12 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             )
             .map_err(|e: inferadb_ledger_state::SnapshotError| {
                 ctx.set_error("SnapshotError", &e.to_string());
-                tracing::error!(error = %e, "Failed to create snapshot");
-                Status::internal("Internal error")
+                error_classify::storage_error(&e)
             })?;
 
             backup_manager.create_backup(&snapshot, &tag).map_err(|e| {
                 ctx.set_error("BackupError", &e.to_string());
-                tracing::error!(error = %e, "Failed to create backup");
-                Status::internal("Internal error")
+                error_classify::storage_error(&e)
             })?
         };
 
@@ -1840,10 +2176,9 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             .as_ref()
             .ok_or_else(|| Status::failed_precondition("Backup is not configured on this node"))?;
 
-        let backups = backup_manager.list_backups(req.limit as usize).map_err(|e| {
-            tracing::error!(error = %e, "Failed to list backups");
-            Status::internal("Internal error")
-        })?;
+        let backups = backup_manager
+            .list_backups(req.limit as usize)
+            .map_err(|e| error_classify::storage_error(&e))?;
 
         let backup_infos: Vec<BackupInfo> = backups
             .into_iter()
@@ -1888,10 +2223,9 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
 
-        let mut ctx = self.make_request_context("restore_backup", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.make_request_context("restore_backup", request.metadata(), &trace_ctx);
+        let req = request.into_inner();
 
         // Safety gate: require explicit confirmation
         if !req.confirm {
@@ -1915,15 +2249,13 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             // Page-level backup (full page or incremental): resolve chain and restore pages
             let chain = backup_manager.resolve_backup_chain(&req.backup_id).map_err(|e| {
                 ctx.set_error("ChainResolutionError", &e.to_string());
-                tracing::error!(error = %e, "Failed to resolve backup chain");
-                Status::internal("Internal error")
+                error_classify::storage_error(&e)
             })?;
 
             let db = self.state.database();
             let height = backup_manager.restore_page_chain(&chain, db.as_ref()).map_err(|e| {
                 ctx.set_error("RestoreError", &e.to_string());
-                tracing::error!(error = %e, "Failed to restore page backup chain");
-                Status::internal("Internal error")
+                error_classify::storage_error(&e)
             })?;
 
             let msg = format!(
@@ -1937,8 +2269,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             // Snapshot-based backup (existing behavior)
             let snapshot = backup_manager.load_backup(&req.backup_id).map_err(|e| {
                 ctx.set_error("BackupLoadError", &e.to_string());
-                tracing::error!(error = %e, "Failed to load backup");
-                Status::internal("Internal error")
+                error_classify::storage_error(&e)
             })?;
 
             // Verify schema version compatibility
@@ -1964,8 +2295,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
             snapshot_manager.save(&snapshot).map_err(|e| {
                 ctx.set_error("RestoreError", &e.to_string());
-                tracing::error!(error = %e, "Failed to save backup as snapshot");
-                Status::internal("Internal error")
+                error_classify::storage_error(&e)
             })?;
 
             let height = snapshot.header.region_height;
@@ -2000,10 +2330,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         request: Request<TransferLeadershipRequest>,
     ) -> Result<Response<TransferLeadershipResponse>, Status> {
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
 
-        let mut ctx = self.make_request_context("transfer_leadership", &grpc_metadata, &trace_ctx);
+        let mut ctx =
+            self.make_request_context("transfer_leadership", request.metadata(), &trace_ctx);
+        let req = request.into_inner();
 
         // Validate and default timeout
         let timeout_ms = if req.timeout_ms == 0 { 10_000u32 } else { req.timeout_ms.min(60_000) };
@@ -2016,7 +2346,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
         let start = std::time::Instant::now();
         let result = inferadb_ledger_raft::leader_transfer::transfer_leadership(
-            &self.raft,
+            &self.handle,
             target,
             &self.transfer_lock,
             &config,
@@ -2053,8 +2383,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                     },
                     inferadb_ledger_raft::leader_transfer::LeaderTransferError::Connection { .. }
                     | inferadb_ledger_raft::leader_transfer::LeaderTransferError::Rpc { .. } => {
-                        tracing::error!(error = %e, "Leader transfer failed");
-                        Status::internal("Internal error")
+                        error_classify::storage_error(&e)
                     },
                 };
                 Err(status)
@@ -2090,10 +2419,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let system_service = SystemOrganizationService::new(Arc::clone(&self.state));
         let current_version = system_service
             .get_blinding_key_version()
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read blinding key version");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::crypto_error(&e))?
             .unwrap_or(0);
 
         if req.new_key_version <= current_version {
@@ -2108,10 +2434,9 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         }
 
         // Check if a rotation is already in progress
-        let rotation_in_progress = system_service.is_rotation_in_progress().map_err(|e| {
-            tracing::error!(error = %e, "Failed to check rotation status");
-            Status::internal("Internal error")
-        })?;
+        let rotation_in_progress = system_service
+            .is_rotation_in_progress()
+            .map_err(|e| error_classify::crypto_error(&e))?;
 
         if rotation_in_progress {
             ctx.set_error("FailedPrecondition", "A blinding key rotation is already in progress");
@@ -2172,20 +2497,19 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         request: Request<GetBlindingKeyRehashStatusRequest>,
     ) -> Result<Response<GetBlindingKeyRehashStatusResponse>, Status> {
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let _req = request.into_inner();
 
-        let mut ctx =
-            self.make_request_context("get_blinding_key_rehash_status", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.make_request_context(
+            "get_blinding_key_rehash_status",
+            request.metadata(),
+            &trace_ctx,
+        );
+        let _req = request.into_inner();
 
         let system_service = SystemOrganizationService::new(Arc::clone(&self.state));
 
         let active_key_version = system_service
             .get_blinding_key_version()
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read blinding key version");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::crypto_error(&e))?
             .unwrap_or(0);
 
         // Collect per-region progress
@@ -2201,8 +2525,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 Ok(None) => {},
                 Err(e) => {
                     ctx.set_error("Internal", &e.to_string());
-                    tracing::error!(error = %e, region = region.as_str(), "Failed to read rehash progress");
-                    return Err(Status::internal("Internal error"));
+                    return Err(error_classify::storage_error(&e));
                 },
             }
         }
@@ -2230,10 +2553,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
 
-        let mut ctx = self.make_request_context("rotate_region_key", &grpc_metadata, &trace_ctx);
+        let mut ctx =
+            self.make_request_context("rotate_region_key", request.metadata(), &trace_ctx);
+        let req = request.into_inner();
 
         let progress = self.rewrap_progress.as_ref().ok_or_else(|| {
             Status::failed_precondition("DEK re-wrapping not configured for this node")
@@ -2242,8 +2565,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         // Get total page count from the state layer
         let total_pages = self.state.sidecar_page_count().map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
-            tracing::error!(error = %e, "Failed to read sidecar page count");
-            Status::internal("Internal error")
+            error_classify::storage_error(&e)
         })?;
 
         let target_version = if req.target_version > 0 { req.target_version } else { 0 };
@@ -2277,10 +2599,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         request: Request<GetRewrapStatusRequest>,
     ) -> Result<Response<GetRewrapStatusResponse>, Status> {
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let _req = request.into_inner();
 
-        let mut ctx = self.make_request_context("get_rewrap_status", &grpc_metadata, &trace_ctx);
+        let mut ctx =
+            self.make_request_context("get_rewrap_status", request.metadata(), &trace_ctx);
+        let _req = request.into_inner();
 
         let progress = self.rewrap_progress.as_ref().ok_or_else(|| {
             Status::failed_precondition("DEK re-wrapping not configured for this node")
@@ -2360,8 +2682,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             Ok(u) => u,
             Err(e) => {
                 ctx.set_error("Internal", &format!("failed to list users: {e}"));
-                tracing::error!(error = %e, "Failed to list users");
-                return Err(Status::internal("Internal error"));
+                return Err(error_classify::storage_error(&e));
             },
         };
 
@@ -2501,10 +2822,9 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
         let start = std::time::Instant::now();
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
 
-        let mut ctx = self.make_request_context("provision_region", &grpc_metadata, &trace_ctx);
+        let mut ctx = self.make_request_context("provision_region", request.metadata(), &trace_ctx);
+        let req = request.into_inner();
 
         let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
 
@@ -2522,13 +2842,12 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let node_id = self.node_id.ok_or_else(|| {
             Status::failed_precondition("Node ID not configured for region provisioning")
         })?;
-        let addr = self.listen_addr.to_string();
+        let addr = self.advertise_addr.clone();
         let region_config =
             inferadb_ledger_raft::raft_manager::RegionConfig::data(region, vec![(node_id, addr)]);
         let (_group, created) = manager.ensure_data_region(region_config).await.map_err(|e| {
             ctx.set_error("Internal", &format!("{e}"));
-            tracing::error!(error = %e, region = region.as_str(), "Failed to provision region");
-            Status::internal("Internal error")
+            error_classify::raft_error(&e)
         })?;
 
         tracing::info!(
@@ -2559,6 +2878,194 @@ fn compute_vault_block_hash(entry: &VaultEntry) -> [u8; 32] {
     hasher.update(entry.state_root);
 
     hasher.finalize().into()
+}
+
+/// Persists a cluster ID to `{data_dir}/cluster_id`.
+///
+/// Thin wrapper matching the format used by the server crate's `cluster_id` module.
+/// Duplicated here because the services crate cannot depend on the server crate.
+fn write_cluster_id_to_disk(data_dir: &std::path::Path, cluster_id: u64) -> Result<(), Status> {
+    let path = data_dir.join("cluster_id");
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| Status::internal(format!("failed to create cluster_id directory: {e}")))?;
+    }
+    std::fs::write(&path, cluster_id.to_string())
+        .map_err(|e| Status::internal(format!("failed to persist cluster_id: {e}")))?;
+    Ok(())
+}
+
+/// Adds a newly-joined node to all existing data region Raft groups.
+///
+/// After a node joins the GLOBAL cluster, it must also join each data region
+/// so that regional Raft replication includes the new node. This follows the
+/// same `add_learner` → `promote_voter` pattern as the GLOBAL join.
+///
+/// Errors are logged but not propagated — data region membership is
+/// best-effort during the join. The node will participate after the next
+/// region creation if any regions fail to add it.
+async fn add_node_to_data_regions(
+    manager: &inferadb_ledger_raft::raft_manager::RaftManager,
+    node_id: u64,
+    address: &str,
+) {
+    let regions = manager.list_regions();
+    for region in regions {
+        if region == inferadb_ledger_types::Region::GLOBAL {
+            continue;
+        }
+        let group = match manager.get_region_group(region) {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+
+        // Skip if this node is already a member.
+        let state = group.handle().shard_state();
+        let node = inferadb_ledger_consensus::types::NodeId(node_id);
+        if state.voters.contains(&node) || state.learners.contains(&node) {
+            continue;
+        }
+
+        // Wait for a data region leader to be elected (may be in progress).
+        let mut leader = None;
+        for _ in 0..50 {
+            if let Some(lid) = group.handle().current_leader() {
+                leader = Some(lid);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let Some(leader_id) = leader else {
+            tracing::warn!(
+                region = region.as_str(),
+                node_id,
+                "No data region leader elected — skipping join"
+            );
+            continue;
+        };
+
+        if group.handle().is_leader() {
+            // We ARE the data region leader — add directly.
+            if let Some(transport) = group.consensus_transport()
+                && let Ok(endpoint) =
+                    tonic::transport::Channel::from_shared(format!("http://{address}"))
+            {
+                transport.set_peer(node_id, endpoint.connect_lazy());
+            }
+            add_member_to_region(&group, node_id, region).await;
+        } else {
+            // Forward the join to the data region leader.
+            let leader_addr = match manager.peer_addresses().get(leader_id) {
+                Some(a) => a,
+                None => {
+                    tracing::warn!(
+                        region = region.as_str(),
+                        leader_id,
+                        "No address for data region leader — skipping join"
+                    );
+                    continue;
+                },
+            };
+            forward_data_region_join(&leader_addr, node_id, address).await;
+        }
+    }
+}
+
+/// Adds a node as learner then promotes to voter on a data region group.
+async fn add_member_to_region(
+    group: &inferadb_ledger_raft::raft_manager::RegionGroup,
+    node_id: u64,
+    region: inferadb_ledger_types::Region,
+) {
+    for attempt in 0..5u32 {
+        match group.handle().add_learner(node_id, false).await {
+            Ok(()) => break,
+            Err(e) if e.to_string().contains("already undergoing") => {
+                tokio::time::sleep(std::time::Duration::from_millis(100 * u64::from(attempt + 1)))
+                    .await;
+            },
+            Err(e) => {
+                tracing::warn!(
+                    region = region.as_str(),
+                    node_id,
+                    error = %e,
+                    "Failed to add node as learner to data region"
+                );
+                return;
+            },
+        }
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    for attempt in 0..5u32 {
+        match group.handle().promote_voter(node_id).await {
+            Ok(()) => {
+                tracing::info!(region = region.as_str(), node_id, "Added node to data region");
+                return;
+            },
+            Err(e) if e.to_string().contains("already undergoing") => {
+                tokio::time::sleep(std::time::Duration::from_millis(100 * u64::from(attempt + 1)))
+                    .await;
+            },
+            Err(e) => {
+                tracing::warn!(
+                    region = region.as_str(),
+                    node_id,
+                    error = %e,
+                    "Failed to promote node to voter in data region"
+                );
+                return;
+            },
+        }
+    }
+}
+
+/// Forwards a data region join request to the data region leader via JoinCluster RPC.
+///
+/// The JoinCluster RPC is reused — the leader handles it the same way as a
+/// GLOBAL join but the data region membership change happens through
+/// `add_node_to_data_regions` on the receiving leader.
+async fn forward_data_region_join(leader_addr: &str, node_id: u64, address: &str) {
+    let endpoint = format!("http://{leader_addr}");
+    let channel = match tonic::transport::Channel::from_shared(endpoint) {
+        Ok(ep) => ep.connect_timeout(std::time::Duration::from_secs(5)).connect_lazy(),
+        Err(e) => {
+            tracing::warn!(leader_addr, error = %e, "Invalid data region leader address");
+            return;
+        },
+    };
+
+    // Use JoinCluster on the leader — the leader's JoinCluster handler will
+    // call add_node_to_data_regions which adds this node to data regions where
+    // the leader IS the data region leader.
+    let mut client =
+        inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::new(channel);
+    match client
+        .join_cluster(inferadb_ledger_proto::proto::JoinClusterRequest {
+            node_id,
+            address: address.to_string(),
+        })
+        .await
+    {
+        Ok(resp) => {
+            let inner = resp.into_inner();
+            if inner.success {
+                tracing::info!(node_id, "Data region join forwarded successfully");
+            } else {
+                tracing::info!(
+                    node_id,
+                    message = %inner.message,
+                    "Data region join forwarded (already member or non-leader)"
+                );
+            }
+        },
+        Err(e) => {
+            tracing::warn!(node_id, error = %e, "Failed to forward data region join");
+        },
+    }
 }
 
 #[cfg(test)]

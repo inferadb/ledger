@@ -152,7 +152,8 @@ impl<B: StorageBackend> EncryptedBackend<B> {
             reason: format!(
                 "Failed to unwrap DEK for page {page_id} (RMK version {})",
                 meta.rmk_version
-            ),
+            )
+            .into(),
         })?;
 
         // Re-wrap with target RMK
@@ -215,12 +216,13 @@ impl<B: StorageBackend> EncryptedBackend<B> {
         if let (Some(manager), Some(region)) = (&self.key_manager, self.region) {
             let rmk = manager.current_rmk(region)?;
             self.rmk_cache.insert(rmk);
-            return self.rmk_cache.current().ok_or_else(|| Error::Encryption {
-                reason: "Failed to cache loaded RMK".to_string(),
-            });
+            return self
+                .rmk_cache
+                .current()
+                .ok_or_else(|| Error::Encryption { reason: "Failed to cache loaded RMK".into() });
         }
 
-        Err(Error::Encryption { reason: "No Region Master Key loaded".to_string() })
+        Err(Error::Encryption { reason: "No Region Master Key loaded".into() })
     }
 
     /// Looks up an RMK by version, lazy-loading from the key manager on cache miss.
@@ -234,12 +236,13 @@ impl<B: StorageBackend> EncryptedBackend<B> {
             let rmk = manager.rmk_by_version(region, version)?;
             self.rmk_cache.insert(rmk);
             return self.rmk_cache.get(version).ok_or_else(|| Error::Encryption {
-                reason: format!("Failed to cache loaded RMK version {version}"),
+                reason: format!("Failed to cache loaded RMK version {version}").into(),
             });
         }
 
         Err(Error::Encryption {
-            reason: format!("RMK version {version} not found (may have been decommissioned)"),
+            reason: format!("RMK version {version} not found (may have been decommissioned)")
+                .into(),
         })
     }
 }
@@ -270,7 +273,7 @@ impl<B: StorageBackend> StorageBackend for EncryptedBackend<B> {
 
         if raw.len() < PAGE_HEADER_SIZE {
             return Err(Error::Corrupted {
-                reason: format!("Page {page_id} too small for header: {} bytes", raw.len()),
+                reason: format!("Page {page_id} too small for header: {} bytes", raw.len()).into(),
             });
         }
 
@@ -308,7 +311,8 @@ impl<B: StorageBackend> StorageBackend for EncryptedBackend<B> {
 
         if data.len() < PAGE_HEADER_SIZE {
             return Err(Error::Corrupted {
-                reason: format!("Page {page_id} data too small for header: {} bytes", data.len()),
+                reason: format!("Page {page_id} data too small for header: {} bytes", data.len())
+                    .into(),
             });
         }
 
@@ -673,7 +677,7 @@ mod tests {
             if version == self.rmk.version {
                 Ok(RegionMasterKey::new(version, *self.rmk.as_bytes()))
             } else {
-                Err(Error::Encryption { reason: format!("Unknown version {version}") })
+                Err(Error::Encryption { reason: format!("Unknown version {version}").into() })
             }
         }
 
@@ -685,11 +689,11 @@ mod tests {
         }
 
         fn rotate_rmk(&self, _region: Region) -> crate::error::Result<u32> {
-            Err(Error::Encryption { reason: "not supported".to_string() })
+            Err(Error::Encryption { reason: "not supported".into() })
         }
 
         fn decommission_rmk(&self, _region: Region, _version: u32) -> crate::error::Result<()> {
-            Err(Error::Encryption { reason: "not supported".to_string() })
+            Err(Error::Encryption { reason: "not supported".into() })
         }
 
         fn health_check(&self, _region: Region) -> crate::error::Result<()> {

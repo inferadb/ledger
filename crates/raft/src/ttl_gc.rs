@@ -15,14 +15,14 @@ use std::{sync::Arc, time::Duration};
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{ClientId, Operation, OrganizationId, Transaction, VaultId};
-use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::{
+    consensus_handle::ConsensusHandle,
     log_storage::AppliedStateAccessor,
     trace_context::TraceContext,
-    types::{LedgerNodeId, LedgerRequest, LedgerTypeConfig, RaftPayload},
+    types::{LedgerRequest, RaftPayload},
 };
 
 /// Default interval between GC cycles.
@@ -41,10 +41,8 @@ const GC_CLIENT_ID: &str = "system:gc";
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct TtlGarbageCollector<B: StorageBackend + 'static> {
-    /// Raft consensus handle for proposing TTL expiration operations.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// This node's ID.
-    node_id: LedgerNodeId,
+    /// Consensus handle for proposing TTL expiration operations.
+    handle: Arc<ConsensusHandle>,
     /// The shared state layer (internally thread-safe via inferadb-ledger-store MVCC).
     state: Arc<StateLayer<B>>,
     /// Accessor for applied state (vault registry).
@@ -63,8 +61,7 @@ pub struct TtlGarbageCollector<B: StorageBackend + 'static> {
 impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
     /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader == Some(self.node_id)
+        self.handle.is_leader()
     }
 
     /// Scans for expired entities in a vault.
@@ -133,8 +130,8 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
             request_hash: 0,
         };
 
-        self.raft
-            .client_write(RaftPayload::system(request))
+        self.handle
+            .propose(RaftPayload::system(request))
             .await
             .map_err(|e| format!("Raft write failed: {}", e))?;
 

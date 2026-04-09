@@ -25,15 +25,13 @@ inferadb-ledger-proto.workspace = true
 inferadb-ledger-state.workspace = true
 inferadb-ledger-raft.workspace = true
 inferadb-ledger-services.workspace = true
-
-# Raft consensus
-openraft.workspace = true
+inferadb-ledger-consensus = { path = "../consensus" }
 
 # Storage
 inferadb-ledger-store.workspace = true
 
 # Async runtime
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "signal"] }
 
 # gRPC
 tonic.workspace = true
@@ -52,11 +50,11 @@ parking_lot.workspace = true
 # Error handling
 snafu.workspace = true
 
-# DNS discovery
-hickory-resolver.workspace = true
-
 # Random number generation
 rand.workspace = true
+
+# Hashing
+seahash.workspace = true
 
 # Builder pattern
 bon.workspace = true

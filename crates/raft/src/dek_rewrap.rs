@@ -21,17 +21,16 @@ use std::{
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::config::RewrapConfig;
-use openraft::Raft;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::{
+    consensus_handle::ConsensusHandle,
     metrics::{
         record_background_job_duration, record_background_job_items, record_background_job_run,
         record_rewrap_duration, record_rewrap_pages, record_rewrap_remaining,
     },
     trace_context::TraceContext,
-    types::{LedgerNodeId, LedgerTypeConfig},
 };
 
 /// Shared re-wrapping progress for status queries.
@@ -121,10 +120,8 @@ impl Default for RewrapProgress {
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct DekRewrapJob<B: StorageBackend + 'static> {
-    /// Raft consensus handle for leadership checks.
-    raft: Arc<Raft<LedgerTypeConfig>>,
-    /// This node's ID.
-    node_id: LedgerNodeId,
+    /// Consensus handle for leadership checks.
+    handle: Arc<ConsensusHandle>,
     /// State layer providing database access.
     state: Arc<StateLayer<B>>,
     /// Shared progress tracker (read by admin service).
@@ -143,15 +140,13 @@ pub struct DekRewrapJob<B: StorageBackend + 'static> {
 impl<B: StorageBackend + 'static> DekRewrapJob<B> {
     /// Creates a job from a configuration struct.
     pub fn from_config(
-        raft: Arc<Raft<LedgerTypeConfig>>,
-        node_id: LedgerNodeId,
+        handle: Arc<ConsensusHandle>,
         state: Arc<StateLayer<B>>,
         progress: Arc<RewrapProgress>,
         config: &RewrapConfig,
     ) -> Self {
         Self {
-            raft,
-            node_id,
+            handle,
             state,
             progress,
             batch_size: config.batch_size,
@@ -162,8 +157,7 @@ impl<B: StorageBackend + 'static> DekRewrapJob<B> {
 
     /// Checks if this node is the current leader.
     fn is_leader(&self) -> bool {
-        let metrics = self.raft.metrics().borrow().clone();
-        metrics.current_leader == Some(self.node_id)
+        self.handle.is_leader()
     }
 
     /// Runs a single re-wrapping batch cycle.

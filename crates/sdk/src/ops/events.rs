@@ -7,7 +7,6 @@ use crate::{
     LedgerClient,
     error::{self, Result},
     proto_util::non_empty,
-    retry::with_retry_cancellable,
     types::events::{
         EventFilter, EventPage, EventSource, IngestRejection, IngestResult, SdkEventEntry,
         SdkIngestEventEntry,
@@ -109,45 +108,31 @@ impl LedgerClient {
         limit: u32,
         page_token: String,
     ) -> Result<EventPage> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("list_events", || {
+            let pool = pool.clone();
+            let filter = filter.clone();
+            let page_token = page_token.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_events_client);
 
-        self.with_metrics(
-            "list_events",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "list_events",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_events_client);
+                let request = proto::ListEventsRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    filter: Some(filter.to_proto()),
+                    limit,
+                    page_token: page_token.clone(),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::ListEventsRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        filter: Some(filter.to_proto()),
-                        limit,
-                        page_token: page_token.clone(),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response = client.list_events(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.list_events(tonic::Request::new(request)).await?.into_inner();
+                let entries = response.entries.into_iter().map(SdkEventEntry::from_proto).collect();
 
-                    let entries =
-                        response.entries.into_iter().map(SdkEventEntry::from_proto).collect();
+                let next_page_token = non_empty(response.next_page_token);
 
-                    let next_page_token = non_empty(response.next_page_token);
-
-                    Ok(EventPage {
-                        entries,
-                        next_page_token,
-                        total_estimate: response.total_estimate,
-                    })
-                },
-            ),
-        )
+                Ok(EventPage { entries, next_page_token, total_estimate: response.total_estimate })
+            }
+        })
         .await
     }
 
@@ -181,43 +166,33 @@ impl LedgerClient {
         organization: OrganizationSlug,
         event_id: &str,
     ) -> Result<SdkEventEntry> {
-        self.check_shutdown(None)?;
-
         let event_id_bytes =
             uuid::Uuid::parse_str(event_id).map(|u| u.into_bytes().to_vec()).map_err(|e| {
                 error::SdkError::Validation { message: format!("invalid event_id: {e}") }
             })?;
 
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("get_event", || {
+            let pool = pool.clone();
+            let event_id_bytes = event_id_bytes.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_events_client);
 
-        self.with_metrics(
-            "get_event",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "get_event",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_events_client);
+                let request = proto::GetEventRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    event_id: event_id_bytes.clone(),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::GetEventRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        event_id: event_id_bytes.clone(),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response = client.get_event(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.get_event(tonic::Request::new(request)).await?.into_inner();
+                let entry = response
+                    .entry
+                    .ok_or_else(|| tonic::Status::not_found("event not found in response"))?;
 
-                    let entry = response
-                        .entry
-                        .ok_or_else(|| tonic::Status::not_found("event not found in response"))?;
-
-                    Ok(SdkEventEntry::from_proto(entry))
-                },
-            ),
-        )
+                Ok(SdkEventEntry::from_proto(entry))
+            }
+        })
         .await
     }
 
@@ -251,34 +226,25 @@ impl LedgerClient {
         organization: OrganizationSlug,
         filter: EventFilter,
     ) -> Result<u64> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("count_events", || {
+            let pool = pool.clone();
+            let filter = filter.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_events_client);
 
-        self.with_metrics(
-            "count_events",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "count_events",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_events_client);
+                let request = proto::CountEventsRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    filter: Some(filter.to_proto()),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::CountEventsRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        filter: Some(filter.to_proto()),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.count_events(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.count_events(tonic::Request::new(request)).await?.into_inner();
-
-                    Ok(response.count)
-                },
-            ),
-        )
+                Ok(response.count)
+            }
+        })
         .await
     }
 
@@ -327,47 +293,38 @@ impl LedgerClient {
         source: EventSource,
         events: Vec<SdkIngestEventEntry>,
     ) -> Result<IngestResult> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("ingest_events", || {
+            let pool = pool.clone();
+            let events = events.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_events_client);
 
-        self.with_metrics(
-            "ingest_events",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "ingest_events",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_events_client);
+                let request = proto::IngestEventsRequest {
+                    source_service: source.as_str().to_owned(),
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    entries: events
+                        .clone()
+                        .into_iter()
+                        .map(SdkIngestEventEntry::into_proto)
+                        .collect(),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::IngestEventsRequest {
-                        source_service: source.as_str().to_owned(),
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        entries: events
-                            .clone()
-                            .into_iter()
-                            .map(SdkIngestEventEntry::into_proto)
-                            .collect(),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.ingest_events(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.ingest_events(tonic::Request::new(request)).await?.into_inner();
-
-                    Ok(IngestResult {
-                        accepted_count: response.accepted_count,
-                        rejected_count: response.rejected_count,
-                        rejections: response
-                            .rejections
-                            .into_iter()
-                            .map(|r| IngestRejection { index: r.index, reason: r.reason })
-                            .collect(),
-                    })
-                },
-            ),
-        )
+                Ok(IngestResult {
+                    accepted_count: response.accepted_count,
+                    rejected_count: response.rejected_count,
+                    rejections: response
+                        .rejections
+                        .into_iter()
+                        .map(|r| IngestRejection { index: r.index, reason: r.reason })
+                        .collect(),
+                })
+            }
+        })
         .await
     }
 }

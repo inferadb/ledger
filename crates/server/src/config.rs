@@ -6,7 +6,7 @@
 // The schemars `JsonSchema` derive macro internally uses `.unwrap()`.
 #![allow(clippy::disallowed_methods)]
 
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use bon::Builder;
 use clap::Parser;
@@ -35,6 +35,7 @@ pub struct LoggingConfig {
 
 impl LoggingConfig {
     /// Creates a configuration with test-suitable values.
+    #[cfg(test)]
     pub fn for_test() -> Self {
         Self { otel: OtelConfig::for_test() }
     }
@@ -47,6 +48,59 @@ impl LoggingConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.otel.validate()?;
         Ok(())
+    }
+}
+
+/// Configuration for background job startup timing.
+///
+/// Controls how long to wait before starting the first background task after
+/// bootstrap, and the stagger delay between successive task starts.
+#[derive(Debug, Clone, Deserialize, JsonSchema, Builder)]
+#[builder(derive(Debug))]
+pub struct BackgroundJobTimingConfig {
+    /// Initial delay (seconds) before starting the first background job after bootstrap.
+    ///
+    /// Allows Raft leader election and cluster stabilization to complete before
+    /// background tasks begin contending for resources.
+    #[serde(default = "default_background_initial_delay_secs")]
+    #[builder(default = default_background_initial_delay_secs())]
+    pub initial_delay_secs: u64,
+
+    /// Delay (seconds) between starting successive background jobs.
+    ///
+    /// Staggers job startup to spread initial load across several seconds rather
+    /// than bursting all tasks simultaneously.
+    #[serde(default = "default_background_stagger_delay_secs")]
+    #[builder(default = default_background_stagger_delay_secs())]
+    pub stagger_delay_secs: u64,
+}
+
+fn default_background_initial_delay_secs() -> u64 {
+    2
+}
+
+fn default_background_stagger_delay_secs() -> u64 {
+    5
+}
+
+impl BackgroundJobTimingConfig {
+    /// Returns the initial delay as a `Duration`.
+    pub fn initial_delay(&self) -> Duration {
+        Duration::from_secs(self.initial_delay_secs)
+    }
+
+    /// Returns the stagger delay as a `Duration`.
+    pub fn stagger_delay(&self) -> Duration {
+        Duration::from_secs(self.stagger_delay_secs)
+    }
+}
+
+impl Default for BackgroundJobTimingConfig {
+    fn default() -> Self {
+        Self {
+            initial_delay_secs: default_background_initial_delay_secs(),
+            stagger_delay_secs: default_background_stagger_delay_secs(),
+        }
     }
 }
 
@@ -74,14 +128,14 @@ const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
 /// # CLI Example
 ///
 /// ```bash
-/// # Single-node cluster
-/// inferadb-ledger --single --data /data
+/// # Start a node (listens for connections)
+/// inferadb-ledger --data /data
 ///
-/// # Join existing cluster
-/// inferadb-ledger --join --data /data --peers ledger.example.com
+/// # Start a node with seed peers
+/// inferadb-ledger --data /data --join node1:9090,node2:9090
 ///
-/// # Coordinated 3-node bootstrap (default)
-/// inferadb-ledger --cluster 3 --data /data --peers ledger.example.com
+/// # Initialize the cluster (one-time, after nodes are running)
+/// inferadb-ledger init --host node1:9090
 /// ```
 ///
 /// # Environment Variables
@@ -91,7 +145,6 @@ const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
 /// ```bash
 /// INFERADB__LEDGER__LISTEN=0.0.0.0:9000 \
 /// INFERADB__LEDGER__DATA=/data/ledger \
-/// INFERADB__LEDGER__CLUSTER=3 \
 /// inferadb-ledger
 /// ```
 ///
@@ -110,7 +163,6 @@ const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
 /// let config = Config::builder()
 ///     .listen_addr("0.0.0.0:9000".parse().unwrap())
 ///     .data_dir(PathBuf::from("/data/ledger"))
-///     .cluster(3)
 ///     .build();
 /// ```
 #[derive(Debug, Clone, Deserialize, JsonSchema, Builder, Parser)]
@@ -166,64 +218,27 @@ pub struct Config {
     #[builder(default = default_region())]
     pub region: inferadb_ledger_types::Region,
 
-    // === Bootstrap Mode ===
-    /// Run as a single-node cluster (no coordination needed).
-    /// Mutually exclusive with --join and --cluster.
-    #[arg(long, group = "bootstrap_mode")]
-    #[serde(skip)]
-    #[builder(skip)]
-    pub single: bool,
-
-    /// Joins an existing cluster (wait to be added via AdminService).
-    /// Mutually exclusive with --single and --cluster.
-    #[arg(long, group = "bootstrap_mode")]
-    #[serde(skip)]
-    #[builder(skip)]
-    pub join: bool,
-
-    /// Coordinated bootstrap: wait for N nodes, then lowest-ID bootstraps.
-    /// Mutually exclusive with --single and --join. Defaults to 3 if no mode specified.
-    #[arg(long, env = "INFERADB__LEDGER__CLUSTER", group = "bootstrap_mode", value_name = "N")]
-    #[serde(default = "default_cluster")]
-    pub cluster: Option<u32>,
-
-    // === Discovery ===
-    /// How to find peer nodes: DNS domain or file path.
+    // === Networking ===
+    /// Address other nodes should use to reach this node.
     ///
-    /// Automatically detected based on the value:
-    /// - Contains `/` or `\` or ends with `.json` → file path (JSON peer list)
-    /// - Otherwise → DNS domain for A record lookup
-    ///
-    /// Examples:
-    /// - `ledger.default.svc.cluster.local` → DNS lookup
-    /// - `/var/lib/ledger/peers.json` → file path
-    #[arg(long = "peers", env = "INFERADB__LEDGER__PEERS")]
+    /// Overrides `--listen` for inter-node communication. Required in
+    /// NAT/container environments where the listen address (e.g., `0.0.0.0`)
+    /// isn't routable from other nodes. When unset, defaults to `--listen`.
+    #[arg(long = "advertise", env = "INFERADB__LEDGER__ADVERTISE")]
     #[serde(default)]
-    pub peers: Option<String>,
+    pub advertise: Option<String>,
 
-    /// TTL for cached peers, in seconds.
-    #[arg(long = "peers-ttl", env = "INFERADB__LEDGER__PEERS_TTL", default_value_t = 3600)]
-    #[serde(default = "default_peers_ttl_secs")]
-    #[builder(default = default_peers_ttl_secs())]
-    pub peers_ttl_secs: u64,
-
-    /// Timeout waiting for peers, in seconds.
+    // === Seed Discovery ===
+    /// Comma-separated list of seed addresses for cluster discovery.
     ///
-    /// If the expected node count is not reached within this timeout,
-    /// the node will fail to start. Ignored when --expect <= 1.
-    #[arg(long = "peers-timeout", env = "INFERADB__LEDGER__PEERS_TIMEOUT", default_value_t = 60)]
-    #[serde(default = "default_peers_timeout_secs")]
-    #[builder(default = default_peers_timeout_secs())]
-    pub peers_timeout_secs: u64,
-
-    /// Peer discovery polling interval, in seconds.
-    ///
-    /// How frequently the node polls for new peers during the bootstrap
-    /// coordination phase. Ignored when --expect <= 1.
-    #[arg(long = "peers-poll", env = "INFERADB__LEDGER__PEERS_POLL", default_value_t = 2)]
-    #[serde(default = "default_peers_poll_secs")]
-    #[builder(default = default_peers_poll_secs())]
-    pub peers_poll_secs: u64,
+    /// Used during initial bootstrap to find other nodes. NOT an exhaustive
+    /// peer list — just "introductions." One address is sufficient (e.g.,
+    /// `--join=node1:9090`). On restart, persisted Raft membership is used;
+    /// `--join` is ignored unless all persisted peers are unreachable.
+    /// Optional — if omitted, the node listens for incoming connections.
+    #[arg(long = "join", env = "INFERADB__LEDGER__JOIN", value_delimiter = ',')]
+    #[serde(default)]
+    pub join: Option<Vec<String>>,
 
     // === Request Limits ===
     /// Maximum concurrent requests.
@@ -346,21 +361,6 @@ pub struct Config {
     #[serde(default)]
     pub health_check: Option<inferadb_ledger_types::config::HealthCheckConfig>,
 
-    // === Read Forwarding ===
-    /// Maximum Raft log lag before forwarding reads to the leader.
-    ///
-    /// When a follower's applied index trails its last log index by more
-    /// than this threshold, reads are transparently forwarded to the leader
-    /// to avoid serving stale data. Default: 0 (forward unless fully caught up).
-    #[arg(
-        long = "max-read-lag",
-        env = "INFERADB__LEDGER__MAX_READ_FORWARD_LAG",
-        default_value_t = 0
-    )]
-    #[serde(default)]
-    #[builder(default)]
-    pub max_read_forward_lag: u64,
-
     // === gRPC Reflection ===
     /// Enable gRPC server reflection for service discovery.
     ///
@@ -386,10 +386,21 @@ pub struct Config {
     ///
     /// Controls how often expired refresh tokens are cleaned up and rotated
     /// signing keys past their grace period are transitioned to revoked.
-    #[arg(skip)]
+    #[arg(skip = default_token_maintenance_interval_secs())]
     #[serde(default = "default_token_maintenance_interval_secs")]
     #[builder(default = default_token_maintenance_interval_secs())]
     pub token_maintenance_interval_secs: u64,
+
+    // === Background Job Timing ===
+    /// Background job startup timing configuration.
+    ///
+    /// Controls the initial delay before the first background job starts and the
+    /// stagger interval between successive job starts. Defaults preserve the
+    /// original 2s initial / 5s stagger behavior.
+    #[arg(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub background_jobs: BackgroundJobTimingConfig,
 }
 
 // Default value functions
@@ -402,20 +413,8 @@ fn default_region() -> inferadb_ledger_types::Region {
     inferadb_ledger_types::Region::GLOBAL
 }
 
-fn default_cluster() -> Option<u32> {
-    Some(3)
-}
 fn default_token_maintenance_interval_secs() -> u64 {
     300 // 5 minutes
-}
-fn default_peers_ttl_secs() -> u64 {
-    3600 // 1 hour
-}
-fn default_peers_timeout_secs() -> u64 {
-    60
-}
-fn default_peers_poll_secs() -> u64 {
-    2
 }
 fn default_max_concurrent() -> usize {
     100
@@ -432,13 +431,8 @@ impl Default for Config {
             log_format: LogFormat::default(),
             data_dir: None,
             region: default_region(),
-            single: false,
-            join: false,
-            cluster: default_cluster(),
-            peers: None,
-            peers_ttl_secs: default_peers_ttl_secs(),
-            peers_timeout_secs: default_peers_timeout_secs(),
-            peers_poll_secs: default_peers_poll_secs(),
+            advertise: None,
+            join: None,
             max_concurrent: default_max_concurrent(),
             timeout_secs: default_timeout_secs(),
             raft: None,
@@ -450,22 +444,23 @@ impl Default for Config {
             cleanup: inferadb_ledger_types::config::CleanupConfig::default(),
             integrity: inferadb_ledger_types::config::IntegrityConfig::default(),
             tiered_storage: inferadb_ledger_types::config::TieredStorageConfig::default(),
-            max_read_forward_lag: 0,
             health_check: None,
             enable_grpc_reflection: false,
             rate_limit: None,
             token_maintenance_interval_secs: default_token_maintenance_interval_secs(),
             email_blinding_key: None,
+            background_jobs: BackgroundJobTimingConfig::default(),
         }
     }
 }
 
 impl Config {
-    /// Creates a configuration with test-suitable values (single-node, deterministic ID).
+    /// Creates a configuration with test-suitable values (deterministic ID).
     ///
     /// Writes the given `node_id` to the data directory for deterministic
-    /// node IDs in tests. Uses single-node mode.
-    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, dead_code)]
+    /// node IDs in tests.
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
     pub fn for_test(node_id: u64, port: u16, data_dir: PathBuf) -> Self {
         // Write the node_id file for deterministic test behavior
         node_id::write_node_id(&data_dir, node_id).expect("failed to write test node_id");
@@ -474,37 +469,8 @@ impl Config {
             listen_addr: format!("127.0.0.1:{}", port).parse().unwrap(),
             metrics_addr: None,
             data_dir: Some(data_dir),
-            single: true,
-            join: false,
-            cluster: None,
             logging: LoggingConfig::for_test(),
             ..Self::default()
-        }
-    }
-
-    /// Creates a configuration for single-node deployments.
-    ///
-    /// Sets single-node mode for immediate bootstrap without coordination.
-    /// Primarily for testing or development scenarios.
-    #[allow(dead_code)] // convenience constructor for single-node deployments
-    pub fn for_single_node() -> Self {
-        Self { single: true, join: false, cluster: None, ..Self::default() }
-    }
-
-    /// Returns the effective bootstrap_expect value.
-    ///
-    /// Computed from the bootstrap mode flags:
-    /// - `--single` → 1
-    /// - `--join` → 0
-    /// - `--cluster N` → N
-    /// - default → 3
-    pub fn bootstrap_expect(&self) -> u32 {
-        if self.single {
-            1
-        } else if self.join {
-            0
-        } else {
-            self.cluster.unwrap_or(3)
         }
     }
 
@@ -514,6 +480,13 @@ impl Config {
     /// will not be able to connect.
     pub fn is_localhost_only(&self) -> bool {
         self.listen_addr.ip().is_loopback()
+    }
+
+    /// Returns the address other nodes should use to reach this node.
+    ///
+    /// Uses `--advertise` when set, otherwise falls back to `--listen`.
+    pub fn advertise_addr(&self) -> String {
+        self.advertise.clone().unwrap_or_else(|| self.listen_addr.to_string())
     }
 
     /// Returns true if the server is running in ephemeral mode.
@@ -574,27 +547,13 @@ impl Config {
 
     /// Validates the configuration.
     ///
-    /// Validates bootstrap mode settings and logging configuration:
-    /// - `--single`: Single-node deployment
-    /// - `--join`: Join existing cluster
-    /// - `--cluster N`: Coordinated bootstrap (N must be >= 2)
-    /// - OTEL configuration must be valid
+    /// Validates logging, events, saga, cleanup, integrity, and tiered storage
+    /// configuration.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError`] if cluster size is less than 2 or logging
-    /// configuration is invalid.
+    /// Returns [`ConfigError`] if any sub-configuration is invalid.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if let Some(n) = self.cluster
-            && n < 2
-        {
-            return Err(ConfigError::Validation {
-                message: format!(
-                    "--cluster requires at least 2 nodes, got {}. Use --single for single-node or --join to join existing cluster",
-                    n
-                ),
-            });
-        }
         self.logging.validate()?;
         self.events.validate()?;
         self.saga.validate().map_err(|e| ConfigError::Validation { message: e.to_string() })?;
@@ -606,46 +565,6 @@ impl Config {
             .validate()
             .map_err(|e| ConfigError::Validation { message: e.to_string() })?;
         Ok(())
-    }
-
-    /// Returns true if this is a single-node deployment (no coordination needed).
-    pub fn is_single_node(&self) -> bool {
-        self.bootstrap_expect() == 1
-    }
-
-    /// Returns true if this node should wait to join an existing cluster.
-    ///
-    /// When in join mode, the node starts without initializing a Raft
-    /// cluster and waits to be added via AdminService's JoinCluster RPC.
-    pub fn is_join_mode(&self) -> bool {
-        self.bootstrap_expect() == 0
-    }
-
-    /// Returns the peers value as a DNS domain if it looks like a domain.
-    ///
-    /// A value is treated as a DNS domain if it does NOT:
-    /// - Contain `/` or `\` (path separators)
-    /// - End with `.json`
-    pub fn peers_as_dns_domain(&self) -> Option<&str> {
-        self.peers
-            .as_ref()
-            .and_then(|p| if Self::is_file_path(p) { None } else { Some(p.as_str()) })
-    }
-
-    /// Returns the peers value as a file path if it looks like a file path.
-    ///
-    /// A value is treated as a file path if it:
-    /// - Contains `/` or `\` (path separators), OR
-    /// - Ends with `.json`
-    pub fn peers_as_file_path(&self) -> Option<&str> {
-        self.peers
-            .as_ref()
-            .and_then(|p| if Self::is_file_path(p) { Some(p.as_str()) } else { None })
-    }
-
-    /// Detects whether a peers value looks like a file path.
-    fn is_file_path(value: &str) -> bool {
-        value.contains('/') || value.contains('\\') || value.ends_with(".json")
     }
 }
 
@@ -689,6 +608,15 @@ pub enum CliCommand {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Initialize a new cluster (one-time operation per cluster lifetime).
+    ///
+    /// Sends a Bootstrap RPC to the target node, creating the GLOBAL shard
+    /// with all discovered peers as voters. Returns the cluster ID.
+    Init {
+        /// Address of the node to bootstrap (e.g., "node1:9090").
+        #[arg(long = "host")]
+        host: String,
+    },
 }
 
 /// Configuration subcommand actions.
@@ -722,14 +650,9 @@ mod tests {
     #[test]
     fn default_config_has_expected_field_values() {
         let config = Config::default();
-        assert_eq!(config.bootstrap_expect(), 3);
-        assert_eq!(config.cluster, Some(3));
-        assert_eq!(config.peers_timeout_secs, 60);
-        assert_eq!(config.peers_poll_secs, 2);
         assert_eq!(config.max_concurrent, 100);
         assert_eq!(config.timeout_secs, 30);
-        assert_eq!(config.peers_ttl_secs, 3600);
-        assert!(config.peers.is_none());
+        assert!(config.join.is_none());
         assert!(config.data_dir.is_none());
     }
 
@@ -738,8 +661,6 @@ mod tests {
         let config = Config::default();
         assert!(config.is_ephemeral());
         assert!(config.is_localhost_only());
-        assert!(!config.is_single_node());
-        assert!(!config.is_join_mode());
     }
 
     #[test]
@@ -748,8 +669,6 @@ mod tests {
         let data_dir = temp_dir.path().to_path_buf();
         let config = Config::for_test(1, 50051, data_dir.clone());
         assert_eq!(config.listen_addr.port(), 50051);
-        assert_eq!(config.bootstrap_expect(), 1);
-        assert!(config.is_single_node());
         assert!(!config.is_ephemeral());
 
         // Verify node_id was written to file
@@ -758,53 +677,9 @@ mod tests {
     }
 
     #[test]
-    fn test_config_for_single_node() {
-        let config = Config::for_single_node();
-        assert_eq!(config.bootstrap_expect(), 1);
-        assert!(config.is_single_node());
+    fn validate_accepts_default_config() {
+        let config = Config::default();
         assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn validate_accepts_cluster_size_at_least_two() {
-        let config = Config { cluster: Some(3), ..Config::default() };
-        assert!(config.validate().is_ok());
-
-        let config = Config { cluster: Some(5), ..Config::default() };
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn validate_rejects_cluster_size_below_two() {
-        let config = Config { cluster: Some(1), ..Config::default() };
-        assert!(config.validate().is_err());
-
-        let config = Config { cluster: Some(0), ..Config::default() };
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn validate_accepts_no_cluster_using_default() {
-        let config = Config { cluster: None, ..Config::default() };
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_config_join_mode() {
-        let config = Config { join: true, cluster: None, ..Config::default() };
-        assert!(config.validate().is_ok());
-        assert!(config.is_join_mode());
-        assert!(!config.is_single_node());
-        assert_eq!(config.bootstrap_expect(), 0);
-    }
-
-    #[test]
-    fn test_config_single_mode() {
-        let config = Config { single: true, cluster: None, ..Config::default() };
-        assert!(config.validate().is_ok());
-        assert!(config.is_single_node());
-        assert!(!config.is_join_mode());
-        assert_eq!(config.bootstrap_expect(), 1);
     }
 
     #[test]
@@ -872,14 +747,7 @@ mod tests {
         assert_eq!(from_builder.listen_addr, from_default.listen_addr);
         assert_eq!(from_builder.metrics_addr, from_default.metrics_addr);
         assert_eq!(from_builder.data_dir, from_default.data_dir);
-        // Note: cluster field differs (builder=None, default=Some(3)), but bootstrap_expect() is
-        // same
-        assert_eq!(from_builder.bootstrap_expect(), from_default.bootstrap_expect());
-        assert_eq!(from_builder.bootstrap_expect(), 3); // Both default to 3-node cluster
-        assert_eq!(from_builder.peers, from_default.peers);
-        assert_eq!(from_builder.peers_ttl_secs, from_default.peers_ttl_secs);
-        assert_eq!(from_builder.peers_timeout_secs, from_default.peers_timeout_secs);
-        assert_eq!(from_builder.peers_poll_secs, from_default.peers_poll_secs);
+        assert_eq!(from_builder.join, from_default.join);
         assert_eq!(from_builder.max_concurrent, from_default.max_concurrent);
         assert_eq!(from_builder.timeout_secs, from_default.timeout_secs);
     }
@@ -890,11 +758,7 @@ mod tests {
             .listen_addr("127.0.0.1:9999".parse().unwrap())
             .metrics_addr("127.0.0.1:9090".parse().unwrap())
             .data_dir(PathBuf::from("/custom/data"))
-            .cluster(5)
-            .peers("ledger.example.com".to_string())
-            .peers_ttl_secs(7200)
-            .peers_timeout_secs(120)
-            .peers_poll_secs(5)
+            .join(vec!["node1:9090".to_string(), "node2:9090".to_string()])
             .max_concurrent(200)
             .timeout_secs(60)
             .build();
@@ -902,80 +766,9 @@ mod tests {
         assert_eq!(config.listen_addr.port(), 9999);
         assert!(config.metrics_addr.is_some());
         assert_eq!(config.data_dir, Some(PathBuf::from("/custom/data")));
-        assert_eq!(config.cluster, Some(5));
-        assert_eq!(config.bootstrap_expect(), 5);
-        assert_eq!(config.peers, Some("ledger.example.com".to_string()));
-        assert_eq!(config.peers_ttl_secs, 7200);
-        assert_eq!(config.peers_timeout_secs, 120);
-        assert_eq!(config.peers_poll_secs, 5);
+        assert_eq!(config.join, Some(vec!["node1:9090".to_string(), "node2:9090".to_string()]));
         assert_eq!(config.max_concurrent, 200);
         assert_eq!(config.timeout_secs, 60);
-    }
-
-    #[test]
-    fn test_config_builder_cluster_mode() {
-        // Builder can create cluster configs
-        let config = Config::builder().cluster(5).build();
-
-        assert!(!config.is_single_node());
-        assert!(!config.is_join_mode());
-        assert_eq!(config.bootstrap_expect(), 5);
-        assert!(config.validate().is_ok());
-    }
-
-    // === Peers Detection Tests ===
-
-    #[test]
-    fn test_peers_as_dns_domain() {
-        // DNS domains (no path separators, not .json)
-        let config = Config { peers: Some("ledger.example.com".to_string()), ..Config::default() };
-        assert_eq!(config.peers_as_dns_domain(), Some("ledger.example.com"));
-        assert!(config.peers_as_file_path().is_none());
-
-        let config = Config {
-            peers: Some("ledger.default.svc.cluster.local".to_string()),
-            ..Config::default()
-        };
-        assert_eq!(config.peers_as_dns_domain(), Some("ledger.default.svc.cluster.local"));
-        assert!(config.peers_as_file_path().is_none());
-    }
-
-    #[test]
-    fn test_peers_as_file_path_with_slash() {
-        // File paths with forward slash
-        let config =
-            Config { peers: Some("/var/lib/ledger/peers.json".to_string()), ..Config::default() };
-        assert_eq!(config.peers_as_file_path(), Some("/var/lib/ledger/peers.json"));
-        assert!(config.peers_as_dns_domain().is_none());
-
-        // Relative path
-        let config = Config { peers: Some("./peers.json".to_string()), ..Config::default() };
-        assert_eq!(config.peers_as_file_path(), Some("./peers.json"));
-        assert!(config.peers_as_dns_domain().is_none());
-    }
-
-    #[test]
-    fn test_peers_as_file_path_with_backslash() {
-        // Windows-style paths
-        let config =
-            Config { peers: Some("C:\\ledger\\peers.json".to_string()), ..Config::default() };
-        assert_eq!(config.peers_as_file_path(), Some("C:\\ledger\\peers.json"));
-        assert!(config.peers_as_dns_domain().is_none());
-    }
-
-    #[test]
-    fn test_peers_as_file_path_json_extension() {
-        // Just filename with .json extension (treated as file)
-        let config = Config { peers: Some("peers.json".to_string()), ..Config::default() };
-        assert_eq!(config.peers_as_file_path(), Some("peers.json"));
-        assert!(config.peers_as_dns_domain().is_none());
-    }
-
-    #[test]
-    fn test_peers_none() {
-        let config = Config::default();
-        assert!(config.peers_as_dns_domain().is_none());
-        assert!(config.peers_as_file_path().is_none());
     }
 
     // === Logging Config Tests ===

@@ -6,7 +6,6 @@ use inferadb_ledger_types::{OrganizationSlug, UserSlug, VaultSlug};
 use crate::{
     LedgerClient,
     error::Result,
-    retry::with_retry_cancellable,
     types::admin::{VaultInfo, VaultStatus},
 };
 
@@ -48,45 +47,35 @@ impl LedgerClient {
         caller: UserSlug,
         organization: OrganizationSlug,
     ) -> Result<VaultInfo> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("create_vault", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_vault_client);
 
-        self.with_metrics(
-            "create_vault",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "create_vault",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_vault_client);
+                let request = proto::CreateVaultRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    replication_factor: 0,  // Use default
+                    initial_nodes: vec![],  // Auto-assigned
+                    retention_policy: None, // Default: FULL
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::CreateVaultRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        replication_factor: 0,  // Use default
-                        initial_nodes: vec![],  // Auto-assigned
-                        retention_policy: None, // Default: FULL
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.create_vault(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.create_vault(tonic::Request::new(request)).await?.into_inner();
-
-                    let genesis = response.genesis.unwrap_or_default();
-                    Ok(VaultInfo {
-                        organization,
-                        vault: VaultSlug::new(response.vault.map_or(0, |v| v.slug)),
-                        height: genesis.height,
-                        state_root: genesis.state_root.map(|h| h.value).unwrap_or_default(),
-                        nodes: vec![],
-                        leader: None,
-                        status: VaultStatus::Active,
-                    })
-                },
-            ),
-        )
+                let genesis = response.genesis.unwrap_or_default();
+                Ok(VaultInfo {
+                    organization,
+                    vault: VaultSlug::new(response.vault.map_or(0, |v| v.slug)),
+                    height: genesis.height,
+                    state_root: genesis.state_root.map(|h| h.value).unwrap_or_default(),
+                    nodes: vec![],
+                    leader: None,
+                    status: VaultStatus::Active,
+                })
+            }
+        })
         .await
     }
 
@@ -126,34 +115,23 @@ impl LedgerClient {
         organization: OrganizationSlug,
         vault: VaultSlug,
     ) -> Result<VaultInfo> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("get_vault", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_vault_client);
 
-        self.with_metrics(
-            "get_vault",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "get_vault",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_vault_client);
+                let request = proto::GetVaultRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    vault: Some(proto::VaultSlug { slug: vault.value() }),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::GetVaultRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault: Some(proto::VaultSlug { slug: vault.value() }),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response = client.get_vault(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.get_vault(tonic::Request::new(request)).await?.into_inner();
-
-                    Ok(VaultInfo::from_proto(response))
-                },
-            ),
-        )
+                Ok(VaultInfo::from_proto(response))
+            }
+        })
         .await
     }
 
@@ -199,38 +177,27 @@ impl LedgerClient {
         page_token: Option<Vec<u8>>,
         organization: Option<OrganizationSlug>,
     ) -> Result<(Vec<VaultInfo>, Option<Vec<u8>>)> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("list_vaults", || {
+            let pool = pool.clone();
+            let page_token = page_token.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_vault_client);
 
-        self.with_metrics(
-            "list_vaults",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "list_vaults",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_vault_client);
+                let request = proto::ListVaultsRequest {
+                    page_token: page_token.clone(),
+                    page_size,
+                    organization: organization.map(|o| proto::OrganizationSlug { slug: o.value() }),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::ListVaultsRequest {
-                        page_token: page_token.clone(),
-                        page_size,
-                        organization: organization
-                            .map(|o| proto::OrganizationSlug { slug: o.value() }),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response = client.list_vaults(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.list_vaults(tonic::Request::new(request)).await?.into_inner();
+                let vaults = response.vaults.into_iter().map(VaultInfo::from_proto).collect();
 
-                    let vaults = response.vaults.into_iter().map(VaultInfo::from_proto).collect();
-
-                    Ok((vaults, response.next_page_token))
-                },
-            ),
-        )
+                Ok((vaults, response.next_page_token))
+            }
+        })
         .await
     }
 
@@ -266,33 +233,23 @@ impl LedgerClient {
         organization: OrganizationSlug,
         vault: VaultSlug,
     ) -> Result<()> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("delete_vault", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_vault_client);
 
-        self.with_metrics(
-            "delete_vault",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "delete_vault",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_vault_client);
+                let request = proto::DeleteVaultRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    vault: Some(proto::VaultSlug { slug: vault.value() }),
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::DeleteVaultRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault: Some(proto::VaultSlug { slug: vault.value() }),
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                client.delete_vault(tonic::Request::new(request)).await?;
 
-                    client.delete_vault(tonic::Request::new(request)).await?;
-
-                    Ok(())
-                },
-            ),
-        )
+                Ok(())
+            }
+        })
         .await
     }
 
@@ -308,34 +265,24 @@ impl LedgerClient {
         vault: VaultSlug,
         retention_policy: Option<proto::BlockRetentionPolicy>,
     ) -> Result<()> {
-        self.check_shutdown(None)?;
-
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("update_vault", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_vault_client);
 
-        self.with_metrics(
-            "update_vault",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "update_vault",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_vault_client);
+                let request = proto::UpdateVaultRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    vault: Some(proto::VaultSlug { slug: vault.value() }),
+                    retention_policy,
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::UpdateVaultRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault: Some(proto::VaultSlug { slug: vault.value() }),
-                        retention_policy,
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                client.update_vault(tonic::Request::new(request)).await?;
 
-                    client.update_vault(tonic::Request::new(request)).await?;
-
-                    Ok(())
-                },
-            ),
-        )
+                Ok(())
+            }
+        })
         .await
     }
 }

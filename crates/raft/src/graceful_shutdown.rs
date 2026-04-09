@@ -41,11 +41,10 @@ use std::{
 };
 
 use inferadb_ledger_types::config::ShutdownConfig;
-use openraft::Raft;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::types::LedgerTypeConfig;
+use crate::consensus_handle::ConsensusHandle;
 
 /// Node lifecycle phase.
 ///
@@ -374,9 +373,10 @@ pub struct GracefulShutdown {
     health_state: HealthState,
     /// Sender to signal the gRPC server to stop accepting connections.
     server_shutdown_tx: watch::Sender<bool>,
-    /// Raft handle for leader transfer during shutdown.
-    raft: Option<Arc<Raft<LedgerTypeConfig>>>,
+    /// Consensus handle for leader transfer during shutdown.
+    handle: Option<Arc<ConsensusHandle>>,
     /// Lock to prevent concurrent leader transfer attempts.
+    #[allow(dead_code)]
     transfer_lock: Arc<AtomicBool>,
 }
 
@@ -392,17 +392,17 @@ impl GracefulShutdown {
                 config,
                 health_state,
                 server_shutdown_tx: tx,
-                raft: None,
+                handle: None,
                 transfer_lock: Arc::new(AtomicBool::new(false)),
             },
             rx,
         )
     }
 
-    /// Attaches a Raft handle for leader transfer during shutdown.
+    /// Attaches a consensus handle for leader transfer during shutdown.
     #[must_use]
-    pub fn with_raft(mut self, raft: Arc<Raft<LedgerTypeConfig>>) -> Self {
-        self.raft = Some(raft);
+    pub fn with_handle(mut self, handle: Arc<ConsensusHandle>) -> Self {
+        self.handle = Some(handle);
         self
     }
 
@@ -424,23 +424,34 @@ impl GracefulShutdown {
         info!("Graceful shutdown initiated, entering draining phase");
         self.health_state.mark_draining();
 
-        if let Some(raft) = &self.raft {
+        if let Some(ref handle) = self.handle {
             let timeout = Duration::from_secs(self.config.leader_transfer_timeout_secs);
-            if !timeout.is_zero() {
-                let config = crate::leader_transfer::LeaderTransferConfig::builder()
+            if !timeout.is_zero() && handle.is_leader() {
+                let transfer_config = crate::leader_transfer::LeaderTransferConfig::builder()
                     .timeout(timeout)
                     .build();
-                match crate::leader_transfer::transfer_leadership(
-                    raft,
-                    None,
-                    &self.transfer_lock,
-                    &config,
+                match tokio::time::timeout(
+                    timeout,
+                    crate::leader_transfer::transfer_leadership(
+                        handle,
+                        None,
+                        &self.transfer_lock,
+                        &transfer_config,
+                    ),
                 )
                 .await
                 {
-                    Ok(new_leader) => info!(new_leader, "Leadership transferred during shutdown"),
-                    Err(e) => {
-                        warn!(error = %e, "Leadership transfer failed, proceeding with shutdown")
+                    Ok(Ok(new_leader)) => {
+                        info!(new_leader, "Leadership transferred during shutdown");
+                    },
+                    Ok(Err(e)) => {
+                        warn!(error = %e, "Leader transfer during shutdown failed");
+                    },
+                    Err(_) => {
+                        warn!(
+                            timeout_secs = timeout.as_secs(),
+                            "Leader transfer during shutdown timed out"
+                        );
                     },
                 }
             }

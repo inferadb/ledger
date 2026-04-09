@@ -227,6 +227,103 @@ impl ChainProof {
     }
 }
 
+/// A single transaction stored in a block.
+///
+/// Contains the operations that were applied atomically when the block was
+/// committed to the vault's chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Transaction {
+    /// Hex-encoded transaction ID.
+    pub tx_id: String,
+    /// Client ID that submitted this transaction.
+    pub client_id: String,
+    /// Client-assigned sequence number.
+    pub sequence: u64,
+    /// Timestamp when the transaction was submitted.
+    pub timestamp: Option<std::time::SystemTime>,
+}
+
+impl Transaction {
+    /// Converts from protobuf message.
+    pub(crate) fn from_proto(proto: proto::Transaction) -> Self {
+        use std::fmt::Write;
+        let tx_id = proto
+            .id
+            .map(|t| {
+                t.id.iter().fold(String::with_capacity(t.id.len() * 2), |mut acc, b| {
+                    let _ = write!(acc, "{b:02x}");
+                    acc
+                })
+            })
+            .unwrap_or_default();
+        let timestamp = proto.timestamp.and_then(|ts| proto_timestamp_to_system_time(&ts));
+        Self {
+            tx_id,
+            client_id: proto.client_id.map(|c| c.id).unwrap_or_default(),
+            sequence: proto.sequence,
+            timestamp,
+        }
+    }
+}
+
+/// A complete block including its header and all transactions.
+///
+/// Returned by [`LedgerClient::get_block`] and [`LedgerClient::get_block_range`].
+/// Contains the full transaction set committed in a single Raft round.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Block {
+    /// Cryptographic header for this block.
+    pub header: Option<BlockHeader>,
+    /// All transactions committed in this block.
+    pub transactions: Vec<Transaction>,
+}
+
+impl Block {
+    /// Converts from protobuf message.
+    pub(crate) fn from_proto(proto: proto::Block) -> Self {
+        Self {
+            header: proto.header.map(BlockHeader::from_proto),
+            transactions: proto.transactions.into_iter().map(Transaction::from_proto).collect(),
+        }
+    }
+}
+
+/// Result of a historical read at a specific block height.
+///
+/// Returned by [`LedgerClient::historical_read`]. Contains the value at the
+/// requested height, and optionally Merkle and chain proofs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct HistoricalRead {
+    /// Value at `block_height`, or `None` if the key did not exist.
+    pub value: Option<Vec<u8>>,
+    /// Block height at which the value was read (echoes the request).
+    pub block_height: u64,
+    /// Block header at `block_height` (present only when `include_proof` was requested).
+    pub block_header: Option<BlockHeader>,
+    /// Merkle proof for the value (present only when `include_proof` was requested).
+    pub merkle_proof: Option<MerkleProof>,
+    /// Chain proof from a trusted height (present only when `include_chain_proof` was requested).
+    pub chain_proof: Option<ChainProof>,
+}
+
+/// Current chain tip information for a vault.
+///
+/// Returned by [`LedgerClient::get_tip`]. Contains the latest committed block
+/// height and its cryptographic commitments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ChainTip {
+    /// Current block height (0 if no blocks have been committed).
+    pub height: u64,
+    /// Hash of the tip block header.
+    pub block_hash: Vec<u8>,
+    /// Merkle root of the state tree at the tip.
+    pub state_root: Vec<u8>,
+}
+
 /// Options for verified read operations.
 ///
 /// Controls which proofs to include and at what height to read.

@@ -1,58 +1,52 @@
 //! Raft service implementation for inter-node communication.
 //!
-//! This service handles incoming Raft RPC calls from peer nodes:
-//! - Vote requests during leader election
-//! - AppendEntries for log replication
-//! - InstallSnapshot for follower catch-up
+//! This service handles incoming consensus protocol messages from peer nodes.
+//! The legacy openraft RPC methods (vote, append_entries, install_snapshot)
+//! are retained for proto compatibility but return `UNIMPLEMENTED`.
+//! Active consensus messaging uses `forward_consensus`.
 
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 
 use inferadb_ledger_proto::proto::{
-    RaftAppendEntriesRequest, RaftAppendEntriesResponse, RaftInstallSnapshotRequest,
-    RaftInstallSnapshotResponse, RaftLogId, RaftVoteRequest, RaftVoteResponse,
-    TriggerElectionRequest, TriggerElectionResponse,
+    BatchRaftRequest, BatchRaftResponse, ConsensusForwardRequest, ConsensusForwardResponse,
+    ForwardRegionalProposalRequest, ForwardRegionalProposalResponse, RaftAppendEntriesRequest,
+    RaftAppendEntriesResponse, RaftInstallSnapshotRequest, RaftInstallSnapshotResponse,
+    RaftVoteRequest, RaftVoteResponse, ReadIndexRequest, ReadIndexResponse, TriggerElectionRequest,
+    TriggerElectionResponse,
 };
 use inferadb_ledger_raft::{
     raft_manager::RaftManager,
-    types::{LedgerNodeId, LedgerTypeConfig},
+    types::{LedgerRequest, RaftPayload},
 };
-use inferadb_ledger_types::decode;
-use openraft::{Raft, Vote, raft::AppendEntriesRequest};
+use inferadb_ledger_types::{decode, encode};
 use tonic::{Request, Response, Status};
 
-/// Handles incoming vote, append-entries, and install-snapshot RPCs from peer Raft nodes.
+/// Handles incoming consensus RPCs from peer nodes.
 ///
-/// Routes requests to the correct region's Raft group via the manager.
-/// Defaults to the system region (GLOBAL) when no region is specified.
+/// Routes `forward_consensus` requests to the correct region's consensus engine.
+/// Legacy openraft RPCs (vote, append_entries, etc.) are no longer functional.
 pub struct RaftService {
     manager: Arc<RaftManager>,
+    /// Per-node liveness timestamps. Updated on every successful Raft message.
+    /// Shared with the admin service and bootstrap liveness checker.
+    peer_liveness:
+        Option<Arc<parking_lot::RwLock<std::collections::HashMap<u64, std::time::Instant>>>>,
 }
 
 impl RaftService {
     /// Creates a new Raft service backed by a region-aware manager.
     pub fn new(manager: Arc<RaftManager>) -> Self {
-        Self { manager }
+        Self { manager, peer_liveness: None }
     }
 
-    /// Resolves a proto Region field to the corresponding Raft instance.
-    ///
-    /// Validates that the region value is a known variant, then looks up the
-    /// region's Raft group. Defaults to GLOBAL when no region is specified.
-    fn resolve_region(&self, region: Option<i32>) -> Result<Arc<Raft<LedgerTypeConfig>>, Status> {
-        if let Some(value) = region
-            && inferadb_ledger_proto::proto::Region::try_from(value).is_err()
-        {
-            return Err(Status::invalid_argument(format!("unknown region value: {value}")));
-        }
-
-        let region = region
-            .and_then(|v| inferadb_ledger_proto::proto::Region::try_from(v).ok())
-            .and_then(|p| inferadb_ledger_types::Region::try_from(p).ok())
-            .unwrap_or(inferadb_ledger_types::Region::GLOBAL);
-        self.manager
-            .get_region_group(region)
-            .map(|g| g.raft().clone())
-            .map_err(|_| Status::not_found("region Raft group not found"))
+    /// Attaches a shared peer liveness map for tracking when peers were last heard from.
+    #[must_use]
+    pub fn with_peer_liveness(
+        mut self,
+        liveness: Arc<parking_lot::RwLock<std::collections::HashMap<u64, std::time::Instant>>>,
+    ) -> Self {
+        self.peer_liveness = Some(liveness);
+        self
     }
 }
 
@@ -60,916 +54,426 @@ impl RaftService {
 impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftService {
     async fn vote(
         &self,
-        request: Request<RaftVoteRequest>,
+        _request: Request<RaftVoteRequest>,
     ) -> Result<Response<RaftVoteResponse>, Status> {
-        let req = request.into_inner();
-
-        let raft = self.resolve_region(req.region)?;
-
-        let vote =
-            req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
-
-        let raft_vote: Vote<LedgerNodeId> = vote.into();
-        let last_log_id = req.last_log_id.map(|id| {
-            openraft::LogId::new(openraft::CommittedLeaderId::new(id.term, vote.node_id), id.index)
-        });
-
-        let vote_request = openraft::raft::VoteRequest { vote: raft_vote, last_log_id };
-
-        let response = raft.vote(vote_request).await.map_err(|e| {
-            tracing::error!(error = %e, "Vote failed");
-            Status::internal("Internal error")
-        })?;
-
-        Ok(Response::new(RaftVoteResponse {
-            vote: Some((&response.vote).into()),
-            vote_granted: response.vote_granted,
-            last_log_id: response
-                .last_log_id
-                .map(|id| RaftLogId { term: id.leader_id.term, index: id.index }),
-        }))
+        Err(Status::unimplemented(
+            "Legacy openraft vote RPC is no longer supported. Use forward_consensus instead.",
+        ))
     }
 
     async fn append_entries(
         &self,
-        request: Request<RaftAppendEntriesRequest>,
+        _request: Request<RaftAppendEntriesRequest>,
     ) -> Result<Response<RaftAppendEntriesResponse>, Status> {
-        let req = request.into_inner();
-
-        let raft = self.resolve_region(req.region)?;
-
-        let vote =
-            req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
-
-        let entries: Vec<_> = req.entries.iter().filter_map(|bytes| decode(bytes).ok()).collect();
-
-        let raft_vote: Vote<LedgerNodeId> = vote.into();
-        let leader_node_id = vote.node_id;
-        let prev_log_id = req.prev_log_id.map(|id| {
-            openraft::LogId::new(
-                openraft::CommittedLeaderId::new(id.term, leader_node_id),
-                id.index,
-            )
-        });
-        let leader_commit = req.leader_commit.map(|id| {
-            openraft::LogId::new(
-                openraft::CommittedLeaderId::new(id.term, leader_node_id),
-                id.index,
-            )
-        });
-
-        let append_request: AppendEntriesRequest<LedgerTypeConfig> =
-            AppendEntriesRequest { vote: raft_vote, prev_log_id, entries, leader_commit };
-
-        let response = raft.append_entries(append_request).await.map_err(|e| {
-            tracing::error!(error = %e, "AppendEntries failed");
-            Status::internal("Internal error")
-        })?;
-
-        use openraft::raft::AppendEntriesResponse::*;
-        let (success, conflict, higher_vote) = match response {
-            Success => (true, false, None),
-            Conflict => (false, true, None),
-            HigherVote(v) => (false, false, Some((&v).into())),
-            PartialSuccess(_) => (true, false, None),
-        };
-
-        Ok(Response::new(RaftAppendEntriesResponse { success, conflict, vote: higher_vote }))
+        Err(Status::unimplemented(
+            "Legacy openraft append_entries RPC is no longer supported. Use forward_consensus instead.",
+        ))
     }
 
     async fn install_snapshot(
         &self,
-        request: Request<RaftInstallSnapshotRequest>,
+        _request: Request<RaftInstallSnapshotRequest>,
     ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
-        let req = request.into_inner();
-
-        let raft = self.resolve_region(req.region)?;
-
-        let vote =
-            req.vote.as_ref().ok_or_else(|| Status::invalid_argument("Missing vote field"))?;
-
-        let meta =
-            req.meta.as_ref().ok_or_else(|| Status::invalid_argument("Missing meta field"))?;
-
-        let leader_node_id = vote.node_id;
-        let last_log_id = meta.last_log_id.as_ref().map(|id| {
-            openraft::LogId::new(
-                openraft::CommittedLeaderId::new(id.term, leader_node_id),
-                id.index,
-            )
-        });
-
-        let membership_proto = meta
-            .last_membership
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument("Missing last_membership"))?;
-
-        use std::collections::BTreeMap;
-
-        use openraft::BasicNode;
-
-        let mut all_nodes: BTreeMap<u64, BasicNode> = BTreeMap::new();
-        for config in &membership_proto.configs {
-            for (node_id, addr) in &config.members {
-                all_nodes.insert(*node_id, BasicNode { addr: addr.clone() });
-            }
-        }
-
-        let voter_ids: std::collections::BTreeSet<u64> = all_nodes.keys().copied().collect();
-        let membership = openraft::Membership::new(vec![voter_ids], all_nodes);
-        let stored_membership = openraft::StoredMembership::new(last_log_id, membership);
-
-        let snapshot_meta = openraft::SnapshotMeta {
-            last_log_id,
-            last_membership: stored_membership,
-            snapshot_id: meta.snapshot_id.clone(),
-        };
-
-        let install_request = openraft::raft::InstallSnapshotRequest {
-            vote: vote.into(),
-            meta: snapshot_meta,
-            offset: req.offset,
-            data: req.data,
-            done: req.done,
-        };
-
-        let response = raft.install_snapshot(install_request).await.map_err(|e| {
-            tracing::error!(error = %e, "InstallSnapshot failed");
-            Status::internal("Internal error")
-        })?;
-
-        Ok(Response::new(RaftInstallSnapshotResponse { vote: Some((&response.vote).into()) }))
+        Err(Status::unimplemented(
+            "Legacy openraft install_snapshot RPC is no longer supported. Use forward_consensus instead.",
+        ))
     }
 
     async fn trigger_election(
         &self,
-        request: Request<TriggerElectionRequest>,
+        _request: Request<TriggerElectionRequest>,
     ) -> Result<Response<TriggerElectionResponse>, Status> {
+        Err(Status::unimplemented("Legacy openraft trigger_election RPC is no longer supported."))
+    }
+
+    async fn batch_send(
+        &self,
+        _request: Request<BatchRaftRequest>,
+    ) -> Result<Response<BatchRaftResponse>, Status> {
+        Err(Status::unimplemented("Legacy openraft batch_send RPC is no longer supported."))
+    }
+
+    async fn read_index(
+        &self,
+        request: Request<ReadIndexRequest>,
+    ) -> Result<Response<ReadIndexResponse>, Status> {
         let req = request.into_inner();
 
-        // TriggerElection is a cluster-wide operation, always routes to GLOBAL.
-        let raft = self.resolve_region(None)?;
-
-        let current_term = {
-            let metrics = raft.metrics().borrow().clone();
-            metrics.current_term
+        // Resolve region from string field — empty means GLOBAL, non-empty must parse.
+        let region = if req.region.is_empty() {
+            inferadb_ledger_types::Region::GLOBAL
+        } else {
+            inferadb_ledger_types::Region::from_str(&req.region)
+                .map_err(|_| Status::invalid_argument(format!("invalid region: {}", req.region)))?
         };
 
-        if req.leader_term < current_term {
-            inferadb_ledger_raft::metrics::record_trigger_election(false);
-            return Err(Status::failed_precondition(format!(
-                "Stale leader term: request term {} < current term {}",
-                req.leader_term, current_term
+        let group = self
+            .manager
+            .get_region_group(region)
+            .map_err(|_| Status::not_found("region group not found"))?;
+
+        let handle = group.handle();
+
+        // Must be leader to serve ReadIndex.
+        if !handle.is_leader() {
+            return Err(Status::failed_precondition("Not the leader"));
+        }
+
+        // Fast path: valid lease means we're still the leader without a quorum check.
+        if group.leader_lease().is_valid() {
+            return Ok(Response::new(ReadIndexResponse {
+                committed_index: handle.commit_index(),
+                leader_term: handle.current_term(),
+            }));
+        }
+
+        // Slow path: lease expired (idle cluster, just elected, etc.).
+        // Confirm leadership via the consensus engine's read_index, which
+        // performs a quorum heartbeat round.
+        let committed_index = handle
+            .engine_read_index()
+            .await
+            .map_err(|e| Status::unavailable(format!("ReadIndex quorum check failed: {e}")))?;
+
+        Ok(Response::new(ReadIndexResponse { committed_index, leader_term: handle.current_term() }))
+    }
+
+    async fn forward_consensus(
+        &self,
+        request: Request<ConsensusForwardRequest>,
+    ) -> Result<Response<ConsensusForwardResponse>, Status> {
+        let req = request.into_inner();
+
+        // Resolve the target region from the request — None means GLOBAL,
+        // Some(invalid) is an error.
+        let region = match req.region {
+            None => inferadb_ledger_types::Region::GLOBAL,
+            Some(v) => {
+                let proto_region = inferadb_ledger_proto::proto::Region::try_from(v)
+                    .map_err(|_| Status::invalid_argument(format!("invalid region enum: {v}")))?;
+                inferadb_ledger_types::Region::try_from(proto_region)
+                    .map_err(|_| Status::invalid_argument(format!("unsupported region: {v}")))?
+            },
+        };
+
+        let group = self
+            .manager
+            .get_region_group(region)
+            .map_err(|_| Status::not_found("region group not found"))?;
+
+        // Validate that the sender is a known cluster member (voter or learner).
+        // Skip validation when:
+        // - This node is the sole voter (freshly bootstrapped)
+        // - This node is NOT in the voter set (newly joined node with stale initial membership —
+        //   must accept messages to receive updated membership)
+        let from_node = inferadb_ledger_consensus::types::NodeId(req.from_node);
+        let local_node = inferadb_ledger_consensus::types::NodeId(group.handle().node_id());
+        let state = group.handle().shard_state();
+        let is_sole_voter = state.voters.len() == 1 && state.voters.contains(&local_node);
+        let is_non_member =
+            !state.voters.contains(&local_node) && !state.learners.contains(&local_node);
+        if !is_sole_voter
+            && !is_non_member
+            && !state.voters.contains(&from_node)
+            && !state.learners.contains(&from_node)
+        {
+            return Err(Status::permission_denied(format!(
+                "node {} is not a member of the cluster",
+                req.from_node
             )));
         }
 
-        raft.trigger().elect().await.map_err(|e| {
-            inferadb_ledger_raft::metrics::record_trigger_election(false);
-            tracing::error!(error = %e, "Failed to trigger election");
-            Status::internal("Internal error")
-        })?;
+        // Auto-register the sender's transport channel if not yet known.
+        // This enables the return path: when the leader sends AppendEntries to a
+        // joining node, the joining node needs a channel back to the leader for
+        // AppendEntriesResponse.
+        if !req.from_address.is_empty() {
+            if let Some(transport) = group.consensus_transport()
+                && !transport.peers().contains(&req.from_node)
+                && let Ok(endpoint) =
+                    tonic::transport::Channel::from_shared(format!("http://{}", req.from_address))
+            {
+                transport.set_peer(req.from_node, endpoint.connect_lazy());
+            }
+            // Also update the peer address map so future lookups work.
+            self.manager.peer_addresses().insert(req.from_node, req.from_address.clone());
+        }
 
-        inferadb_ledger_raft::metrics::record_trigger_election(true);
-        Ok(Response::new(TriggerElectionResponse {
-            accepted: true,
-            message: "Election triggered".to_string(),
-        }))
+        // Deserialize the consensus message from postcard bytes.
+        let message: inferadb_ledger_consensus::Message = decode(&req.payload)
+            .map_err(|e| Status::invalid_argument(format!("deserialize: {e}")))?;
+
+        // Route to the consensus engine via the handle.
+        group
+            .handle()
+            .peer_message(req.from_node, message)
+            .await
+            .map_err(|e| Status::internal(format!("consensus: {e}")))?;
+
+        // Update peer liveness for the sender.
+        if let Some(ref liveness) = self.peer_liveness {
+            liveness.write().insert(req.from_node, std::time::Instant::now());
+        }
+
+        Ok(Response::new(ConsensusForwardResponse {}))
+    }
+
+    async fn forward_regional_proposal(
+        &self,
+        request: Request<ForwardRegionalProposalRequest>,
+    ) -> Result<Response<ForwardRegionalProposalResponse>, Status> {
+        let req = request.into_inner();
+
+        // Resolve the target region — None means GLOBAL (same logic as forward_consensus).
+        let region = match req.region {
+            None => inferadb_ledger_types::Region::GLOBAL,
+            Some(v) => {
+                let proto_region = inferadb_ledger_proto::proto::Region::try_from(v)
+                    .map_err(|_| Status::invalid_argument(format!("invalid region enum: {v}")))?;
+                inferadb_ledger_types::Region::try_from(proto_region)
+                    .map_err(|_| Status::invalid_argument(format!("unsupported region: {v}")))?
+            },
+        };
+
+        let group = self
+            .manager
+            .get_region_group(region)
+            .map_err(|_| Status::not_found("region group not found"))?;
+
+        // Deserialize the proposal payload.
+        let ledger_request: LedgerRequest = decode(&req.request_payload)
+            .map_err(|e| Status::invalid_argument(format!("deserialize request: {e}")))?;
+
+        let payload = RaftPayload::new(ledger_request, req.caller);
+        let timeout = std::time::Duration::from_millis(u64::from(req.timeout_ms));
+
+        match group.handle().propose_and_wait(payload, timeout).await {
+            Ok(response) => {
+                let response_bytes = encode(&response)
+                    .map_err(|e| Status::internal(format!("serialize response: {e}")))?;
+                let committed_index = group.handle().commit_index();
+                Ok(Response::new(ForwardRegionalProposalResponse {
+                    response_payload: response_bytes,
+                    status_code: 0,
+                    error_message: String::new(),
+                    committed_index,
+                }))
+            },
+            Err(e) => Ok(Response::new(ForwardRegionalProposalResponse {
+                response_payload: Vec::new(),
+                status_code: tonic::Code::Internal as i32,
+                error_message: e.to_string(),
+                committed_index: 0,
+            })),
+        }
     }
 }
-
-// ============================================================================
-// Byzantine fault tests
-// ============================================================================
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
     use std::sync::Arc;
 
+    use inferadb_ledger_consensus::Message;
     use inferadb_ledger_proto::proto::{
-        RaftAppendEntriesRequest, RaftInstallSnapshotRequest, RaftLogId, RaftMembership,
-        RaftMembershipConfig, RaftSnapshotMeta, RaftVote, RaftVoteRequest,
+        ConsensusForwardRequest, RaftAppendEntriesRequest, RaftInstallSnapshotRequest,
+        RaftVoteRequest, Region as ProtoRegion,
         raft_service_server::RaftService as RaftServiceProto,
     };
     use inferadb_ledger_raft::{RaftManager, RaftManagerConfig, RegionConfig};
     use inferadb_ledger_test_utils::TestDir;
-    use inferadb_ledger_types::Region;
+    use inferadb_ledger_types::{Region, encode};
     use tonic::Request;
 
     use super::RaftService;
 
-    /// Creates a RaftService backed by a real single-node Raft instance.
-    ///
-    /// Uses RaftManager to bootstrap a single system region. The Raft
-    /// instance runs a full consensus engine in-process with no networking.
-    async fn create_test_service() -> (RaftService, Arc<RaftManager>, u64, TestDir) {
+    fn create_basic_service() -> (RaftService, TestDir) {
         let temp = TestDir::new();
-        let node_id = 1u64;
-        let config = RaftManagerConfig::new(temp.path().to_path_buf(), node_id, Region::GLOBAL);
+        let config = RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::GLOBAL);
         let manager = Arc::new(RaftManager::new(config));
+        (RaftService::new(manager), temp)
+    }
 
+    async fn create_service_with_region() -> (RaftService, Arc<RaftManager>, TestDir) {
+        let temp = TestDir::new();
+        let config = RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::GLOBAL);
+        let manager = Arc::new(RaftManager::new(config));
         let region_config =
-            RegionConfig::system(node_id, "127.0.0.1:50099".to_string()).without_background_jobs();
-        let region = manager.start_system_region(region_config).await.expect("start system region");
-        let raft = region.raft().clone();
-
-        // Wait for the single-node to become leader
-        let start = tokio::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_secs(5) {
-            let metrics = raft.metrics().borrow().clone();
-            if metrics.current_leader == Some(node_id) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        let metrics = raft.metrics().borrow().clone();
-        assert_eq!(metrics.current_leader, Some(node_id), "Single-node failed to become leader");
-
-        let service = RaftService::new(manager.clone());
-        (service, manager, node_id, temp)
+            RegionConfig::system(1, "127.0.0.1:50051".to_string()).without_background_jobs();
+        manager.start_system_region(region_config).await.expect("start system region");
+        let service = RaftService::new(Arc::clone(&manager));
+        (service, manager, temp)
     }
 
-    fn make_vote(term: u64, node_id: u64) -> RaftVote {
-        RaftVote { term, node_id, committed: false }
-    }
-
-    fn make_committed_vote(term: u64, node_id: u64) -> RaftVote {
-        RaftVote { term, node_id, committed: true }
-    }
-
-    fn make_log_id(term: u64, index: u64) -> RaftLogId {
-        RaftLogId { term, index }
-    }
-
-    fn make_snapshot_meta(
-        last_log_term: u64,
-        last_log_index: u64,
-        membership_nodes: Vec<(u64, String)>,
-        snapshot_id: &str,
-    ) -> RaftSnapshotMeta {
-        let config = RaftMembershipConfig { members: membership_nodes.into_iter().collect() };
-        RaftSnapshotMeta {
-            last_log_id: Some(make_log_id(last_log_term, last_log_index)),
-            last_membership: Some(RaftMembership { configs: vec![config] }),
-            snapshot_id: snapshot_id.to_string(),
-        }
-    }
-
-    /// Returns the current term from the Raft instance via the manager.
-    fn get_term(manager: &RaftManager, region: Region) -> u64 {
-        manager
-            .get_region_group(region)
-            .expect("region exists")
-            .raft()
-            .metrics()
-            .borrow()
-            .current_term
-    }
-
-    /// Returns the last applied index from the Raft instance.
-    fn get_applied(manager: &RaftManager, region: Region) -> u64 {
-        manager
-            .get_region_group(region)
-            .expect("region exists")
-            .raft()
-            .metrics()
-            .borrow()
-            .last_applied
-            .map_or(0, |id| id.index)
-    }
-
-    // ====================================================================
-    // Test 1: Malformed message rejection
-    // ====================================================================
-
-    /// Vote request with missing vote field → INVALID_ARGUMENT.
     #[tokio::test]
-    async fn byzantine_vote_missing_vote_field() {
-        let (service, _mgr, _id, _dir) = create_test_service().await;
-
-        let request = Request::new(RaftVoteRequest { vote: None, last_log_id: None, region: None });
-        let result = service.vote(request).await;
-
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
-    }
-
-    /// AppendEntries with missing vote field → INVALID_ARGUMENT.
-    #[tokio::test]
-    async fn byzantine_append_entries_missing_vote_field() {
-        let (service, _mgr, _id, _dir) = create_test_service().await;
-
-        let request = Request::new(RaftAppendEntriesRequest {
-            vote: None,
-            prev_log_id: None,
-            entries: vec![],
-            leader_commit: None,
-            region: None,
-        });
-        let result = service.append_entries(request).await;
-
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
-    }
-
-    /// InstallSnapshot with missing meta field → INVALID_ARGUMENT.
-    #[tokio::test]
-    async fn byzantine_snapshot_missing_meta_field() {
-        let (service, _mgr, _id, _dir) = create_test_service().await;
-
-        let request = Request::new(RaftInstallSnapshotRequest {
-            vote: Some(make_vote(1, 999)),
-            meta: None,
-            offset: 0,
-            data: vec![],
-            done: true,
-            region: None,
-        });
-        let result = service.install_snapshot(request).await;
-
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
-    }
-
-    /// InstallSnapshot with missing membership in meta → INVALID_ARGUMENT.
-    #[tokio::test]
-    async fn byzantine_snapshot_missing_membership() {
-        let (service, _mgr, _id, _dir) = create_test_service().await;
-
-        let request = Request::new(RaftInstallSnapshotRequest {
-            vote: Some(make_vote(1, 999)),
-            meta: Some(RaftSnapshotMeta {
-                last_log_id: Some(make_log_id(1, 5)),
-                last_membership: None,
-                snapshot_id: "fake".to_string(),
-            }),
-            offset: 0,
-            data: vec![],
-            done: true,
-            region: None,
-        });
-        let result = service.install_snapshot(request).await;
-
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
-    }
-
-    // ====================================================================
-    // Test 2: Conflicting log entries from Byzantine leader
-    // ====================================================================
-
-    /// Stale-term AppendEntries should be rejected or return higher vote.
-    #[tokio::test]
-    async fn byzantine_stale_term_append_entries() {
-        let (service, _mgr, _id, _dir) = create_test_service().await;
-
-        let request = Request::new(RaftAppendEntriesRequest {
-            vote: Some(make_vote(0, 999)),
-            prev_log_id: None,
-            entries: vec![],
-            leader_commit: None,
-            region: None,
-        });
-        let result = service.append_entries(request).await;
-
-        if let Ok(response) = result {
-            let resp = response.into_inner();
-            assert!(
-                !resp.success || resp.vote.is_some(),
-                "Should reject stale term or return higher vote"
-            );
-        }
-    }
-
-    /// Garbage (non-deserializable) log entries should be silently dropped.
-    #[tokio::test]
-    async fn byzantine_garbage_log_entries() {
-        let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, Region::GLOBAL);
-        let applied_before = get_applied(&mgr, Region::GLOBAL);
-
-        let garbage_entries = vec![
-            vec![0xFF, 0xFE, 0xFD],
-            vec![],
-            vec![0x00; 1024],
-            b"not a valid postcard encoded entry".to_vec(),
-        ];
-
-        let request = Request::new(RaftAppendEntriesRequest {
-            vote: Some(make_vote(current_term, node_id)),
-            prev_log_id: None,
-            entries: garbage_entries,
-            leader_commit: None,
-            region: None,
-        });
-        let _result = service.append_entries(request).await;
-
-        let applied_after = get_applied(&mgr, Region::GLOBAL);
-        assert!(
-            applied_after >= applied_before,
-            "Applied index must not regress: before={}, after={}",
-            applied_before,
-            applied_after
-        );
-    }
-
-    /// Conflicting prev_log_id (non-existent index) → conflict response.
-    #[tokio::test]
-    async fn byzantine_conflicting_prev_log_id() {
-        let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, Region::GLOBAL);
-
-        let request = Request::new(RaftAppendEntriesRequest {
-            vote: Some(make_vote(current_term, node_id)),
-            prev_log_id: Some(make_log_id(current_term, 999_999)),
-            entries: vec![],
-            leader_commit: None,
-            region: None,
-        });
-        let result = service.append_entries(request).await;
-
-        if let Ok(response) = result {
-            let resp = response.into_inner();
-            assert!(
-                resp.conflict || !resp.success,
-                "Should detect log conflict for non-existent prev_log_id"
-            );
-        }
-    }
-
-    // ====================================================================
-    // Test 3: Vote manipulation
-    // ====================================================================
-
-    /// High-term vote request should not crash the node.
-    #[tokio::test]
-    async fn byzantine_high_term_vote_request() {
-        let (service, mgr, _id, _dir) = create_test_service().await;
-
-        let request = Request::new(RaftVoteRequest {
-            vote: Some(make_vote(999, 12345)),
-            last_log_id: Some(make_log_id(999, 100)),
-            region: None,
-        });
-        let result = service.vote(request).await;
-
-        match result {
-            Ok(response) => {
-                assert!(
-                    response.into_inner().vote.is_some(),
-                    "Vote response should contain a vote"
-                );
-            },
-            Err(status) => {
-                assert!(
-                    status.code() == tonic::Code::Internal
-                        || status.code() == tonic::Code::InvalidArgument,
-                    "Unexpected error code: {:?}",
-                    status
-                );
-            },
-        }
-
-        // Wait for re-election in the single-node cluster
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        let metrics =
-            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
-        assert!(metrics.id > 0, "Node should still be responsive");
-    }
-
-    /// Competing vote in the same term should be handled gracefully.
-    #[tokio::test]
-    async fn byzantine_competing_vote_same_term() {
-        let (service, mgr, _id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, Region::GLOBAL);
-
-        let request = Request::new(RaftVoteRequest {
-            vote: Some(make_vote(current_term, 99999)),
-            last_log_id: None,
-            region: None,
-        });
-        let result = service.vote(request).await;
-
-        if let Ok(response) = result {
-            assert!(response.into_inner().vote.is_some(), "Should return a vote in the response");
-        }
-    }
-
-    // ====================================================================
-    // Test 4: Corrupted snapshot data
-    // ====================================================================
-
-    /// Corrupted snapshot data should not corrupt node state.
-    #[tokio::test]
-    async fn byzantine_corrupted_snapshot_data() {
-        let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, Region::GLOBAL);
-        let applied_before = get_applied(&mgr, Region::GLOBAL);
-
-        let meta = make_snapshot_meta(
-            current_term,
-            1,
-            vec![(node_id, "127.0.0.1:50099".to_string())],
-            "byzantine-corrupt",
-        );
-
-        let request = Request::new(RaftInstallSnapshotRequest {
-            vote: Some(make_committed_vote(current_term, node_id)),
-            meta: Some(meta),
-            offset: 0,
-            data: vec![0xFF; 4096],
-            done: true,
-            region: None,
-        });
-        let _result = service.install_snapshot(request).await;
-
-        // Wait for potential recovery
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let applied_after = get_applied(&mgr, Region::GLOBAL);
-        assert!(
-            applied_after >= applied_before,
-            "State must not regress: before={}, after={}",
-            applied_before,
-            applied_after
-        );
-    }
-
-    /// Forged membership containing attacker nodes.
-    #[tokio::test]
-    async fn byzantine_forged_membership_in_snapshot() {
-        let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, Region::GLOBAL);
-
-        let meta = make_snapshot_meta(
-            current_term,
-            1,
-            vec![
-                (node_id, "127.0.0.1:50099".to_string()),
-                (88888, "attacker.evil.com:9999".to_string()),
-                (99999, "attacker2.evil.com:9999".to_string()),
-            ],
-            "byzantine-forged",
-        );
-
-        let request = Request::new(RaftInstallSnapshotRequest {
-            vote: Some(make_committed_vote(current_term, node_id)),
-            meta: Some(meta),
-            offset: 0,
-            data: vec![0x00; 64],
-            done: true,
-            region: None,
-        });
-        let _result = service.install_snapshot(request).await;
-
-        // Node should still be responsive
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let metrics =
-            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
-        assert!(metrics.id > 0, "Node should still be responsive");
-    }
-
-    /// Snapshot with impossibly high log index.
-    #[tokio::test]
-    async fn byzantine_snapshot_future_log_index() {
-        let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, Region::GLOBAL);
-
-        let meta = make_snapshot_meta(
-            current_term,
-            999_999_999,
-            vec![(node_id, "127.0.0.1:50099".to_string())],
-            "byzantine-future",
-        );
-
-        let request = Request::new(RaftInstallSnapshotRequest {
-            vote: Some(make_committed_vote(current_term, node_id)),
-            meta: Some(meta),
-            offset: 0,
-            data: vec![0x00; 64],
-            done: true,
-            region: None,
-        });
-        let _result = service.install_snapshot(request).await;
-
-        // Node should still be responsive
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let metrics =
-            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
-        assert!(metrics.id > 0, "Node should still be responsive");
-    }
-
-    // ====================================================================
-    // Test 5: Replay attacks
-    // ====================================================================
-
-    /// Replayed AppendEntries from a stale term should be rejected.
-    #[tokio::test]
-    async fn byzantine_replay_old_term_entries() {
-        let (service, mgr, _id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, Region::GLOBAL);
-        let applied_before = get_applied(&mgr, Region::GLOBAL);
-        let old_term = current_term.saturating_sub(1);
-
-        let request = Request::new(RaftAppendEntriesRequest {
-            vote: Some(make_vote(old_term, 42)),
-            prev_log_id: Some(make_log_id(old_term, 1)),
-            entries: vec![vec![0xDE, 0xAD, 0xBE, 0xEF]],
-            leader_commit: Some(make_log_id(old_term, 1)),
-            region: None,
-        });
-        let result = service.append_entries(request).await;
-
-        if let Ok(response) = result {
-            let resp = response.into_inner();
-            assert!(
-                !resp.success || resp.vote.is_some(),
-                "Should not accept entries from an old term"
-            );
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let applied_after = get_applied(&mgr, Region::GLOBAL);
-        assert!(
-            applied_after >= applied_before,
-            "Applied must not regress: before={}, after={}",
-            applied_before,
-            applied_after
-        );
-    }
-
-    /// Replayed AppendEntries at already-committed log index.
-    #[tokio::test]
-    async fn byzantine_replay_committed_index() {
-        let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, Region::GLOBAL);
-
-        let request = Request::new(RaftAppendEntriesRequest {
-            vote: Some(make_vote(current_term, node_id)),
-            prev_log_id: None,
-            entries: vec![vec![0xBA, 0xD0, 0x00]],
-            leader_commit: Some(make_log_id(current_term, 1)),
-            region: None,
-        });
-        let _result = service.append_entries(request).await;
-
-        // Node should remain operational
-        let metrics =
-            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
-        assert!(metrics.id > 0, "Node should be responsive");
-    }
-
-    // ====================================================================
-    // Test 6: Protocol violation edge cases
-    // ====================================================================
-
-    /// u64::MAX term vote should not crash or overflow.
-    #[tokio::test]
-    async fn byzantine_max_term_vote() {
-        let (service, mgr, _id, _dir) = create_test_service().await;
-
-        let request = Request::new(RaftVoteRequest {
-            vote: Some(make_vote(u64::MAX, 77777)),
-            last_log_id: Some(make_log_id(u64::MAX, u64::MAX)),
-            region: None,
-        });
-        let _result = service.vote(request).await;
-
-        // Wait for potential re-election
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        let metrics =
-            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
-        assert!(metrics.id > 0, "Node should still be responsive after max-term vote");
-    }
-
-    /// Empty snapshot with done=true should not corrupt state.
-    #[tokio::test]
-    async fn byzantine_empty_snapshot_marked_done() {
-        let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, Region::GLOBAL);
-        let applied_before = get_applied(&mgr, Region::GLOBAL);
-
-        let meta = make_snapshot_meta(
-            current_term,
-            1,
-            vec![(node_id, "127.0.0.1:50099".to_string())],
-            "empty-snapshot",
-        );
-
-        let request = Request::new(RaftInstallSnapshotRequest {
-            vote: Some(make_committed_vote(current_term, node_id)),
-            meta: Some(meta),
-            offset: 0,
-            data: vec![],
-            done: true,
-            region: None,
-        });
-        let _result = service.install_snapshot(request).await;
-
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let applied_after = get_applied(&mgr, Region::GLOBAL);
-        assert!(
-            applied_after >= applied_before,
-            "State must not regress: before={}, after={}",
-            applied_before,
-            applied_after,
-        );
-    }
-
-    /// Out-of-order snapshot chunks should be handled gracefully.
-    #[tokio::test]
-    async fn byzantine_out_of_order_snapshot_chunks() {
-        let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, Region::GLOBAL);
-
-        let meta = make_snapshot_meta(
-            current_term,
-            1,
-            vec![(node_id, "127.0.0.1:50099".to_string())],
-            "ooo-snapshot",
-        );
-
-        // Send chunk at offset 1000 without preceding offset 0
-        let request = Request::new(RaftInstallSnapshotRequest {
-            vote: Some(make_committed_vote(current_term, node_id)),
-            meta: Some(meta),
-            offset: 1000,
-            data: vec![0xCC; 128],
-            done: false,
-            region: None,
-        });
-        let _result = service.install_snapshot(request).await;
-
-        let metrics =
-            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
-        assert!(metrics.id > 0, "Node should remain responsive");
-    }
-
-    /// Oversized snapshot chunk should not cause OOM.
-    #[tokio::test]
-    async fn byzantine_oversized_snapshot_chunk() {
-        let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, Region::GLOBAL);
-
-        let meta = make_snapshot_meta(
-            current_term,
-            1,
-            vec![(node_id, "127.0.0.1:50099".to_string())],
-            "oversized-snapshot",
-        );
-
-        let request = Request::new(RaftInstallSnapshotRequest {
-            vote: Some(make_committed_vote(current_term, node_id)),
-            meta: Some(meta),
-            offset: 0,
-            data: vec![0xAB; 1024 * 1024], // 1MB
-            done: true,
-            region: None,
-        });
-        let _result = service.install_snapshot(request).await;
-
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let metrics =
-            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
-        assert!(metrics.id > 0, "Node should survive oversized snapshot");
-    }
-
-    // ====================================================================
-    // Test: Region routing in unified RaftService
-    // ====================================================================
-
-    /// Unknown region value → INVALID_ARGUMENT error.
-    #[tokio::test]
-    async fn byzantine_multi_region_invalid_region() {
-        let (service, _mgr, _id, _dir) = create_test_service().await;
-
-        let request = Request::new(RaftAppendEntriesRequest {
-            vote: Some(make_vote(1, 999)),
-            prev_log_id: None,
-            entries: vec![],
-            leader_commit: None,
-            region: Some(99999), // Unknown region value
-        });
-        let result = service.append_entries(request).await;
-
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
-    }
-
-    /// Missing region defaults to GLOBAL (system).
-    #[tokio::test]
-    async fn byzantine_multi_region_default_routing() {
-        let (service, _mgr, _id, _dir) = create_test_service().await;
-
-        // Request without region and missing vote → should route to GLOBAL
-        // and return InvalidArgument (not NotFound)
-        let request = Request::new(RaftVoteRequest { vote: None, last_log_id: None, region: None });
-        let result = service.vote(request).await;
-
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().code(),
-            tonic::Code::InvalidArgument,
-            "Should route to GLOBAL region and fail on missing vote, not on region lookup"
-        );
-    }
-
-    /// Malformed messages to a specific data region → still rejected properly.
-    #[tokio::test]
-    async fn byzantine_multi_region_malformed_to_global_region() {
-        let (service, _mgr, _id, _dir) = create_test_service().await;
-
-        let request = Request::new(RaftVoteRequest {
-            vote: None,
-            last_log_id: None,
-            region: Some(inferadb_ledger_proto::proto::Region::Global.into()),
-        });
-        let result = service.vote(request).await;
-
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
-    }
-
-    // ====================================================================
-    // Test 7: Comprehensive integrity after multiple attacks
-    // ====================================================================
-
-    /// Sequential Byzantine attacks should not corrupt cumulative state.
-    #[tokio::test]
-    async fn byzantine_cluster_integrity_after_attacks() {
-        let (service, mgr, node_id, _dir) = create_test_service().await;
-        let current_term = get_term(&mgr, Region::GLOBAL);
-        let initial_applied = get_applied(&mgr, Region::GLOBAL);
-
-        // Attack 1: Stale term
-        let _ = service
-            .append_entries(Request::new(RaftAppendEntriesRequest {
-                vote: Some(make_vote(0, 42)),
-                prev_log_id: None,
-                entries: vec![vec![0xFF; 32]],
-                leader_commit: None,
-                region: None,
-            }))
-            .await;
-
-        // Attack 2: Garbage entries
-        let _ = service
-            .append_entries(Request::new(RaftAppendEntriesRequest {
-                vote: Some(make_vote(current_term, node_id)),
-                prev_log_id: None,
-                entries: vec![vec![0xDE; 1024], vec![0xAD; 512]],
-                leader_commit: None,
-                region: None,
-            }))
-            .await;
-
-        // Attack 3: Missing-field vote
-        let _ = service
+    async fn vote_returns_unimplemented() {
+        let (service, _temp) = create_basic_service();
+        let result = service
             .vote(Request::new(RaftVoteRequest { vote: None, last_log_id: None, region: None }))
             .await;
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Unimplemented);
+    }
 
-        // Attack 4: Corrupt snapshot
-        let meta = make_snapshot_meta(
-            current_term,
-            1,
-            vec![(node_id, "127.0.0.1:50099".to_string())],
-            "capstone-test",
-        );
-        let _ = service
-            .install_snapshot(Request::new(RaftInstallSnapshotRequest {
-                vote: Some(make_committed_vote(current_term, node_id)),
-                meta: Some(meta),
-                offset: 0,
-                data: vec![0xDE, 0xAD],
-                done: true,
-                region: None,
-            }))
-            .await;
-
-        // Attack 5: Conflicting prev_log_id
-        let _ = service
+    #[tokio::test]
+    async fn append_entries_returns_unimplemented() {
+        let (service, _temp) = create_basic_service();
+        let result = service
             .append_entries(Request::new(RaftAppendEntriesRequest {
-                vote: Some(make_vote(current_term, node_id)),
-                prev_log_id: Some(make_log_id(current_term, 999_999)),
+                vote: None,
+                prev_log_id: None,
                 entries: vec![],
                 leader_commit: None,
                 region: None,
             }))
             .await;
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Unimplemented);
+    }
 
-        // Wait for stabilization
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    #[tokio::test]
+    async fn install_snapshot_returns_unimplemented() {
+        let (service, _temp) = create_basic_service();
+        let result = service
+            .install_snapshot(Request::new(RaftInstallSnapshotRequest {
+                vote: None,
+                meta: None,
+                offset: 0,
+                data: vec![],
+                done: true,
+                region: None,
+            }))
+            .await;
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Unimplemented);
+    }
 
-        // Verify integrity
-        let metrics =
-            mgr.get_region_group(Region::GLOBAL).expect("region").raft().metrics().borrow().clone();
-        assert!(metrics.id > 0, "Node should be responsive after attacks");
+    // Byzantine fault tests for forward_consensus
 
-        let final_applied = get_applied(&mgr, Region::GLOBAL);
-        assert!(
-            final_applied >= initial_applied,
-            "Applied index regressed: {} -> {}",
-            initial_applied,
-            final_applied
-        );
+    /// A request targeting a region that has not been started returns NotFound.
+    /// This prevents a rogue node from probing which regions exist before they
+    /// are announced.
+    #[tokio::test]
+    async fn forward_consensus_unknown_region_returns_not_found() {
+        let (service, _temp) = create_basic_service();
+        let result = service
+            .forward_consensus(Request::new(ConsensusForwardRequest {
+                shard_id: 0,
+                from_node: 1,
+                region: Some(ProtoRegion::Global as i32),
+                payload: vec![0xde, 0xad],
+                from_address: String::new(),
+                cluster_id: 0,
+            }))
+            .await;
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    /// A sole-voter node (fresh/uninitialized) accepts messages from any sender
+    /// to enable bootstrap replication. The message passes membership validation
+    /// but fails on payload deserialization (InvalidArgument for corrupt data).
+    #[tokio::test]
+    async fn forward_consensus_sole_voter_accepts_unknown_sender() {
+        let (service, _manager, _temp) = create_service_with_region().await;
+        // Node 99 is not in the cluster, but sole-voter bypass lets it through.
+        // The corrupt payload triggers InvalidArgument on deserialization.
+        let result = service
+            .forward_consensus(Request::new(ConsensusForwardRequest {
+                shard_id: 0,
+                from_node: 99,
+                region: Some(ProtoRegion::Global as i32),
+                payload: vec![0xde, 0xad],
+                from_address: String::new(),
+                cluster_id: 0,
+            }))
+            .await;
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    /// from_node=0 on a sole-voter node passes membership check (sole-voter bypass)
+    /// but fails on deserialization since the payload is corrupt.
+    #[tokio::test]
+    async fn forward_consensus_zero_node_id_sole_voter_accepts() {
+        let (service, _manager, _temp) = create_service_with_region().await;
+        let result = service
+            .forward_consensus(Request::new(ConsensusForwardRequest {
+                shard_id: 0,
+                from_node: 0,
+                region: Some(ProtoRegion::Global as i32),
+                payload: vec![0x01],
+                from_address: String::new(),
+                cluster_id: 0,
+            }))
+            .await;
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    /// A member node sending a corrupt (non-postcard) payload is rejected.
+    /// Corruption in transit or an intentionally malformed message must not
+    /// reach the consensus engine.
+    #[tokio::test]
+    async fn forward_consensus_corrupt_payload_returns_invalid_argument() {
+        let (service, _manager, _temp) = create_service_with_region().await;
+        // Node 1 is the sole voter, so membership check passes.
+        // Payload is random bytes that cannot deserialize to `Message`.
+        let result = service
+            .forward_consensus(Request::new(ConsensusForwardRequest {
+                shard_id: 0,
+                from_node: 1,
+                region: Some(ProtoRegion::Global as i32),
+                payload: vec![0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+                from_address: String::new(),
+                cluster_id: 0,
+            }))
+            .await;
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    /// An empty payload from a known member is rejected during deserialization.
+    /// Empty messages carry no consensus content and signal a buggy or
+    /// malicious peer.
+    #[tokio::test]
+    async fn forward_consensus_empty_payload_returns_invalid_argument() {
+        let (service, _manager, _temp) = create_service_with_region().await;
+        let result = service
+            .forward_consensus(Request::new(ConsensusForwardRequest {
+                shard_id: 0,
+                from_node: 1,
+                region: Some(ProtoRegion::Global as i32),
+                payload: vec![],
+                from_address: String::new(),
+                cluster_id: 0,
+            }))
+            .await;
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    /// A well-formed message from a known member reaches the consensus engine.
+    /// The engine will reject it (single-node cluster in test mode has no peers
+    /// to route to), but the service layer must not block it before delivery.
+    /// The response is either Ok or an internal engine error — never a
+    /// membership or deserialization rejection.
+    #[tokio::test]
+    async fn forward_consensus_valid_message_from_member_passes_validation() {
+        let (service, _manager, _temp) = create_service_with_region().await;
+        let msg = Message::TimeoutNow;
+        let payload = encode(&msg).expect("encode");
+        let result = service
+            .forward_consensus(Request::new(ConsensusForwardRequest {
+                shard_id: 0,
+                from_node: 1,
+                region: Some(ProtoRegion::Global as i32),
+                payload,
+                from_address: String::new(),
+                cluster_id: 0,
+            }))
+            .await;
+        // The single-node cluster may return Ok or Internal depending on engine
+        // state, but must not return NotFound, PermissionDenied, or
+        // InvalidArgument — those indicate a validation failure, not an engine
+        // decision.
+        if let Err(status) = result {
+            let code = status.code();
+            assert_ne!(code, tonic::Code::NotFound);
+            assert_ne!(code, tonic::Code::PermissionDenied);
+            assert_ne!(code, tonic::Code::InvalidArgument);
+        }
     }
 }

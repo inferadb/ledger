@@ -24,7 +24,7 @@ pub enum Error {
     #[snafu(display("Corrupted database: {reason}"))]
     Corrupted {
         /// Description of what was corrupted.
-        reason: String,
+        reason: std::borrow::Cow<'static, str>,
     },
 
     /// Database header checksum verification failed.
@@ -126,7 +126,7 @@ pub enum Error {
     #[snafu(display("Encryption error: {reason}"))]
     Encryption {
         /// Description of the encryption failure.
-        reason: String,
+        reason: std::borrow::Cow<'static, str>,
     },
 
     /// Authentication tag verification failed (data tampered or wrong key).
@@ -175,7 +175,7 @@ impl TryFrom<u8> for PageType {
             3 => Ok(Self::Overflow),
             4 => Ok(Self::FreeList),
             5 => Ok(Self::TableDirectory),
-            _ => Err(Error::Corrupted { reason: format!("Invalid page type: {}", value) }),
+            _ => Err(Error::Corrupted { reason: format!("Invalid page type: {}", value).into() }),
         }
     }
 }

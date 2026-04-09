@@ -42,7 +42,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use sha2::{Digest, Sha256};
 use tonic::{Request, Response, Status};
 
-use super::{service_infra::ServiceContext, slug_resolver::SlugResolver};
+use super::{error_classify, service_infra::ServiceContext, slug_resolver::SlugResolver};
 use crate::{
     jwt::{JwtEngine, encrypt_private_key, generate_family_id, generate_refresh_token},
     proto_compat::datetime_to_proto,
@@ -98,18 +98,13 @@ impl TokenServiceImpl {
             return Ok(());
         }
         let scope = &key.scope;
-        let region = crate::jwt::scope_to_region(scope, &self.system_service()).map_err(|e| {
-            tracing::error!(error = %e, "Failed to resolve region for key");
-            Status::internal("Internal error")
-        })?;
-        let rmk = self.key_manager.rmk_by_version(region, key.rmk_version).map_err(|e| {
-            tracing::error!(error = %e, "Failed to load RMK");
-            Status::internal("Internal error")
-        })?;
-        self.jwt_engine.load_key(key, &rmk).map_err(|e| {
-            tracing::error!(error = %e, "Failed to load signing key");
-            Status::internal("Internal error")
-        })?;
+        let region = crate::jwt::scope_to_region(scope, &self.system_service())
+            .map_err(|e| error_classify::crypto_error(&e))?;
+        let rmk = self
+            .key_manager
+            .rmk_by_version(region, key.rmk_version)
+            .map_err(|e| error_classify::crypto_error(&e))?;
+        self.jwt_engine.load_key(key, &rmk).map_err(|e| error_classify::crypto_error(&e))?;
         Ok(())
     }
 
@@ -129,14 +124,10 @@ impl TokenServiceImpl {
         drop(signing_key_dalek); // Triggers Zeroize on Drop (ed25519-dalek "zeroize" feature)
         let kid = uuid::Uuid::new_v4().to_string();
 
-        let region = crate::jwt::scope_to_region(scope, &self.system_service()).map_err(|e| {
-            tracing::error!(error = %e, "Failed to resolve region");
-            Status::internal("Internal error")
-        })?;
-        let rmk = self.key_manager.current_rmk(region).map_err(|e| {
-            tracing::error!(error = %e, "Failed to load RMK");
-            Status::internal("Internal error")
-        })?;
+        let region = crate::jwt::scope_to_region(scope, &self.system_service())
+            .map_err(|e| error_classify::crypto_error(&e))?;
+        let rmk =
+            self.key_manager.current_rmk(region).map_err(|e| error_classify::crypto_error(&e))?;
         let (envelope, rmk_version) = encrypt_private_key(secret_bytes.as_ref(), &kid, &rmk)
             .map_err(Self::jwt_error_to_status)?;
 
@@ -149,10 +140,7 @@ impl TokenServiceImpl {
         let sys = self.system_service();
         let key = sys
             .get_active_signing_key(scope)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read signing key");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::storage_error(&e))?
             .ok_or_else(|| Status::failed_precondition("No active signing key for scope"))?;
         self.ensure_key_cached(&key)?;
         Ok(key)
@@ -294,10 +282,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let sys = self.system_service();
         let user = sys
             .get_user(user_id)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read user");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::storage_error(&e))?
             .ok_or_else(|| Status::not_found("User not found"))?;
 
         // Verify user is active (suspended/pending users cannot get session tokens)
@@ -428,10 +413,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             let sys = self.system_service();
             let user = sys
                 .get_user(user_id)
-                .map_err(|e| {
-                    tracing::error!(error = %e, "Failed to read user");
-                    Status::internal("Internal error")
-                })?
+                .map_err(|e| error_classify::storage_error(&e))?
                 .ok_or_else(|| Status::unauthenticated("User not found"))?;
 
             // Defense-in-depth: reject suspended/deactivated users even if
@@ -578,10 +560,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let sys = self.system_service();
         let old_token = sys
             .get_refresh_token_by_hash(&old_hash)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to look up refresh token");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::storage_error(&e))?
             .ok_or_else(|| Status::unauthenticated("Invalid refresh token"))?;
 
         // Determine the signing key scope and expected_version
@@ -598,10 +577,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
                 let user_id = resolver.resolve_user(user_slug)?;
                 let user = sys
                     .get_user(user_id)
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "Failed to read user");
-                        Status::internal("Internal error")
-                    })?
+                    .map_err(|e| error_classify::storage_error(&e))?
                     .ok_or_else(|| Status::unauthenticated("User not found"))?;
                 (SigningKeyScope::Global, Some(user.version))
             },
@@ -646,8 +622,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
                 return Err(super::helpers::error_code_to_status(code, message));
             },
             other => {
-                tracing::error!(response = %other, "Unexpected Raft response for UseRefreshToken");
-                return Err(Status::internal("Internal error"));
+                return Err(error_classify::raft_error(&other));
             },
         };
 
@@ -669,10 +644,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
                 let user = self
                     .system_service()
                     .get_user(user_id)
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "Failed to read user");
-                        Status::internal("Internal error")
-                    })?
+                    .map_err(|e| error_classify::storage_error(&e))?
                     .ok_or_else(|| Status::unauthenticated("User not found"))?;
                 let role = match user.role {
                     UserRole::Admin => "admin",
@@ -761,10 +733,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let sys = self.system_service();
         let token = sys
             .get_refresh_token_by_hash(&hash)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to look up refresh token");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::storage_error(&e))?
             .ok_or_else(|| Status::unauthenticated("Invalid refresh token"))?;
 
         // Propose RevokeTokenFamily through Raft
@@ -812,8 +781,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
                 return Err(super::helpers::error_code_to_status(code, message));
             },
             other => {
-                tracing::error!(response = %other, "Unexpected Raft response for RevokeAllUserSessions");
-                return Err(Status::internal("Internal error"));
+                return Err(error_classify::raft_error(&other));
             },
         };
 
@@ -928,10 +896,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let sys = self.system_service();
         let stored_key = sys
             .get_signing_key_by_kid(&kid)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read signing key");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::storage_error(&e))?
             .ok_or_else(|| Status::internal("Signing key not found after creation"))?;
 
         if let Err(e) = self.ensure_key_cached(&stored_key) {
@@ -973,10 +938,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let sys = self.system_service();
         let old_key = sys
             .get_signing_key_by_kid(&req.kid)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read signing key");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::storage_error(&e))?
             .ok_or_else(|| Status::not_found("Signing key not found"))?;
 
         if old_key.status != SigningKeyStatus::Active {
@@ -1011,10 +973,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let sys = self.system_service();
         let stored_key = sys
             .get_signing_key_by_kid(&new_kid)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read signing key");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::storage_error(&e))?
             .ok_or_else(|| Status::internal("Signing key not found after rotation"))?;
 
         if let Err(e) = self.ensure_key_cached(&stored_key) {
@@ -1088,10 +1047,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         };
 
         let sys = self.system_service();
-        let keys = sys.list_signing_keys(&scope).map_err(|e| {
-            tracing::error!(error = %e, "Failed to list signing keys");
-            Status::internal("Internal error")
-        })?;
+        let keys = sys.list_signing_keys(&scope).map_err(|e| error_classify::storage_error(&e))?;
 
         // Filter to Active + Rotated (exclude Revoked)
         let keys: Vec<PublicKeyInfo> = keys
@@ -1321,16 +1277,11 @@ impl TokenServiceImpl {
             .ctx
             .state
             .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read client assertion entry");
-                Status::internal("Internal error")
-            })?
+            .map_err(|e| error_classify::storage_error(&e))?
             .ok_or_else(|| Status::unauthenticated("Unknown client assertion"))?;
 
-        decode::<ClientAssertionEntry>(&entity.value).map_err(|e| {
-            tracing::error!(error = %e, "Failed to decode client assertion entry");
-            Status::internal("Internal error")
-        })
+        decode::<ClientAssertionEntry>(&entity.value)
+            .map_err(|e| error_classify::serialization_error(&e))
     }
 
     /// Verifies the assertion JWT signature and validates standard claims.

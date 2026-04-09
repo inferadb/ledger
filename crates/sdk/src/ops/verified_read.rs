@@ -6,7 +6,6 @@ use inferadb_ledger_types::{OrganizationSlug, UserSlug, VaultSlug};
 use crate::{
     LedgerClient,
     error::Result,
-    retry::with_retry_cancellable,
     types::{query::VerifiedValue, verified_read::VerifyOpts},
 };
 
@@ -62,44 +61,35 @@ impl LedgerClient {
         key: impl Into<String>,
         opts: VerifyOpts,
     ) -> Result<Option<VerifiedValue>> {
-        self.check_shutdown(None)?;
-
         let key = key.into();
         let pool = self.pool.clone();
-        let retry_policy = self.pool.config().retry_policy().clone();
+        self.call_with_retry("verified_read", || {
+            let pool = pool.clone();
+            let key = key.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_read_client);
 
-        self.with_metrics(
-            "verified_read",
-            with_retry_cancellable(
-                &retry_policy,
-                &self.cancellation,
-                Some(&pool),
-                "verified_read",
-                || async {
-                    let mut client = crate::connected_client!(pool, create_read_client);
+                let request = proto::VerifiedReadRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    vault: vault.map(|v| proto::VaultSlug { slug: v.value() }),
+                    key: key.clone(),
+                    at_height: opts.at_height,
+                    include_chain_proof: opts.include_chain_proof,
+                    trusted_height: opts.trusted_height,
+                    caller: Some(proto::UserSlug { slug: caller.value() }),
+                };
 
-                    let request = proto::VerifiedReadRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault: vault.map(|v| proto::VaultSlug { slug: v.value() }),
-                        key: key.clone(),
-                        at_height: opts.at_height,
-                        include_chain_proof: opts.include_chain_proof,
-                        trusted_height: opts.trusted_height,
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
+                let response =
+                    client.verified_read(tonic::Request::new(request)).await?.into_inner();
 
-                    let response =
-                        client.verified_read(tonic::Request::new(request)).await?.into_inner();
+                // If no value and no block header, key was not found
+                if response.value.is_none() && response.block_header.is_none() {
+                    return Ok(None);
+                }
 
-                    // If no value and no block header, key was not found
-                    if response.value.is_none() && response.block_header.is_none() {
-                        return Ok(None);
-                    }
-
-                    Ok(VerifiedValue::from_proto(response))
-                },
-            ),
-        )
+                Ok(VerifiedValue::from_proto(response))
+            }
+        })
         .await
     }
 }

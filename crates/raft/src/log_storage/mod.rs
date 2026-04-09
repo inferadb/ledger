@@ -63,9 +63,10 @@ pub struct RegionChainState {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::sync::Arc;
 
     use chrono::{DateTime, Duration, Utc};
+    use inferadb_ledger_consensus::{committed::CommittedEntry, types::EntryKind};
     use inferadb_ledger_state::{
         EventStore, EventsDatabase,
         system::{OrganizationMemberRole, OrganizationStatus, OrganizationTier},
@@ -79,22 +80,25 @@ mod tests {
         VaultSlug,
         events::{EventAction, EventConfig, EventEntry, EventScope},
     };
-    use openraft::{
-        CommittedLeaderId, Entry, EntryPayload, LogId, RaftStorage, Vote, storage::RaftLogReader,
-    };
     use tempfile::tempdir;
     use tokio::sync::broadcast;
 
     use super::{types::estimate_write_storage_delta, *};
-    use crate::types::{
-        BlockRetentionPolicy, LedgerNodeId, LedgerRequest, LedgerResponse, LedgerTypeConfig,
-        RaftPayload, SystemRequest,
+    use crate::{
+        log_storage::types::{LogId, Vote},
+        types::{BlockRetentionPolicy, LedgerRequest, LedgerResponse, RaftPayload, SystemRequest},
     };
 
     /// Helper to create log IDs for tests.
     #[cfg(test)]
-    fn make_log_id(term: u64, index: u64) -> LogId<LedgerNodeId> {
-        LogId::new(CommittedLeaderId::new(term, 0), index)
+    fn make_log_id(term: u64, index: u64) -> LogId {
+        LogId::new(term, 0, index)
+    }
+
+    /// Converts a `RaftPayload` to a `CommittedEntry` for test use.
+    fn make_committed_entry(term: u64, index: u64, payload: RaftPayload) -> CommittedEntry {
+        let data = inferadb_ledger_types::encode(&payload).expect("encode payload");
+        CommittedEntry { index, term, data: data.into(), kind: EntryKind::Normal }
     }
 
     /// Wraps a `LedgerRequest` into a `RaftPayload` with `Utc::now()` for test entries.
@@ -155,9 +159,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
-        let vote = Vote::new(1, 42);
+        let vote = Vote { term: 1, node_id: 42, committed: false };
         store.save_vote(&vote).await.expect("save vote");
 
         let read_vote = store.read_vote().await.expect("read vote");
@@ -186,7 +190,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let request = LedgerRequest::System(SystemRequest::CreateOrganization {
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
@@ -217,13 +221,13 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         state.sequences.organization = OrganizationId::new(1);
 
-        drop(state);
+        store.applied_state.store(Arc::new(state));
 
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
         let request = LedgerRequest::System(SystemRequest::CreateOrganization {
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
             region: Region::US_EAST_VA,
@@ -249,7 +253,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Pre-populate: region 0 has fewer organizations
         state.organizations.insert(
@@ -297,7 +301,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -330,7 +334,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -369,7 +373,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Start with a diverged vault
         state.vault_health.insert(
@@ -411,7 +415,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Start healthy
         state
@@ -456,7 +460,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Start with a diverged vault
         state.vault_health.insert(
@@ -500,7 +504,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Start with a vault already in recovery attempt 1
         state.vault_health.insert(
@@ -554,7 +558,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
         let organization_id = create_active_organization(
@@ -621,7 +625,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
         let organization_id = create_active_organization(
@@ -677,7 +681,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization with no vaults
         let organization_id = create_active_organization(
@@ -705,7 +709,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Try to delete non-existent organization
         let delete_ns =
@@ -727,7 +731,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
         let organization_id = create_active_organization(
@@ -804,7 +808,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization on US_EAST_VA
         let organization_id = create_active_organization(
@@ -851,7 +855,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Try to migrate non-existent organization
         let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
@@ -875,7 +879,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and delete organization
         let organization_id = create_active_organization(
@@ -918,7 +922,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization on US_EAST_VA
         let organization_id = create_active_organization(
@@ -960,7 +964,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
         let organization_id = create_active_organization(
@@ -1030,7 +1034,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
         let organization_id = create_active_organization(
@@ -1069,7 +1073,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and suspend organization
         let organization_id = create_active_organization(
@@ -1113,7 +1117,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization on region 0
         let organization_id = create_active_organization(
@@ -1151,7 +1155,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let start_migration = LedgerRequest::StartMigration {
             organization: OrganizationId::new(999),
@@ -1173,7 +1177,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
         let organization_id = create_active_organization(
@@ -1212,7 +1216,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and suspend organization
         let organization_id = create_active_organization(
@@ -1247,7 +1251,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization on region 0
         let organization_id = create_active_organization(
@@ -1290,7 +1294,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization (Active state)
         let organization_id = create_active_organization(
@@ -1318,7 +1322,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization and vault
         let organization_id = create_active_organization(
@@ -1371,7 +1375,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
         let organization_id = create_active_organization(
@@ -1415,7 +1419,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
         let organization_id = create_active_organization(
@@ -1486,7 +1490,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization and vault
         let organization_id = create_active_organization(
@@ -1536,7 +1540,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization with a vault
         let organization_id = create_active_organization(
@@ -1581,7 +1585,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and suspend organization with a vault
         let organization_id = create_active_organization(
@@ -1637,7 +1641,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and suspend organization
         let organization_id = create_active_organization(
@@ -1683,7 +1687,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and suspend organization
         let organization_id = create_active_organization(
@@ -1726,7 +1730,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization (active after activation)
         let organization_id = create_active_organization(
@@ -1754,7 +1758,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and delete organization
         let organization_id = create_active_organization(
@@ -1790,7 +1794,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Try to suspend non-existent organization
         let suspend = LedgerRequest::SuspendOrganization {
@@ -1817,7 +1821,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Try to resume non-existent organization
         let resume = LedgerRequest::ResumeOrganization { organization: OrganizationId::new(999) };
@@ -1840,7 +1844,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and suspend organization (no vaults)
         let organization_id = create_active_organization(
@@ -1974,29 +1978,29 @@ mod tests {
         ];
 
         // Apply to node A
-        let mut state_a = store_a.applied_state.write();
+        let mut state_a = (*store_a.applied_state.load_full()).clone();
         let mut results_a = Vec::new();
         for request in &requests {
             let (response, _) = store_a.apply_request(request, &mut state_a);
             results_a.push(response);
         }
-        drop(state_a);
+        store_a.applied_state.store(Arc::new(state_a));
 
         // Apply to node B
-        let mut state_b = store_b.applied_state.write();
+        let mut state_b = (*store_b.applied_state.load_full()).clone();
         let mut results_b = Vec::new();
         for request in &requests {
             let (response, _) = store_b.apply_request(request, &mut state_b);
             results_b.push(response);
         }
-        drop(state_b);
+        store_b.applied_state.store(Arc::new(state_b));
 
         // Results must be identical
         assert_eq!(results_a, results_b, "Same inputs must produce identical results on all nodes");
 
         // Final state must be identical
-        let final_state_a = store_a.applied_state.read();
-        let final_state_b = store_b.applied_state.read();
+        let final_state_a = store_a.applied_state.load();
+        let final_state_b = store_b.applied_state.load();
 
         assert_eq!(
             final_state_a.sequences, final_state_b.sequences,
@@ -2027,8 +2031,8 @@ mod tests {
             .expect("open store b");
 
         // Apply same sequence on both nodes
-        let mut state_a = store_a.applied_state.write();
-        let mut state_b = store_b.applied_state.write();
+        let mut state_a = (*store_a.applied_state.load_full()).clone();
+        let mut state_b = (*store_b.applied_state.load_full()).clone();
 
         // Organization IDs
         let ns_id_a1 = state_a.sequences.next_organization();
@@ -2071,8 +2075,8 @@ mod tests {
         let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.db"))
             .expect("open store b");
 
-        let mut state_a = store_a.applied_state.write();
-        let mut state_b = store_b.applied_state.write();
+        let mut state_a = (*store_a.applied_state.load_full()).clone();
+        let mut state_b = (*store_b.applied_state.load_full()).clone();
 
         // Register active org on both nodes
         let org_slug = inferadb_ledger_types::OrganizationSlug::new(100);
@@ -2132,8 +2136,8 @@ mod tests {
         let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.db"))
             .expect("open store b");
 
-        let mut state_a = store_a.applied_state.write();
-        let mut state_b = store_b.applied_state.write();
+        let mut state_a = (*store_a.applied_state.load_full()).clone();
+        let mut state_b = (*store_b.applied_state.load_full()).clone();
 
         // Create organization and vaults
         let requests: Vec<LedgerRequest> = vec![
@@ -2300,7 +2304,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Setup: create organization and vault
         create_active_organization(
@@ -2375,42 +2379,18 @@ mod tests {
         // After applying entries, region height should increment
         // Note: full region height increment requires apply_to_state_machine
         // which creates RegionBlocks. This test verifies the accessor.
-        let state = store.applied_state.read();
+        let state = store.applied_state.load();
         assert_eq!(state.region_height, 0, "Initial region height should be 0");
     }
 
     /// Test that AppliedState serialization preserves all fields including region tracking.
     #[tokio::test]
     async fn test_applied_state_snapshot_round_trip() {
-        use openraft::StoredMembership;
-
         let mut original = AppliedState {
             last_applied: Some(make_log_id(1, 10)),
-            membership: StoredMembership::default(),
-            sequences: SequenceCounters::new(),
-            vault_heights: HashMap::new(),
-            vault_health: HashMap::new(),
-            previous_vault_hashes: HashMap::new(),
-            organizations: HashMap::new(),
-            vaults: HashMap::new(),
             region_height: 42,
             previous_region_hash: [0xAB; 32],
-            client_sequences: HashMap::new(),
-            organization_storage_bytes: HashMap::new(),
-            slug_index: HashMap::new(),
-            id_to_slug: HashMap::new(),
-            vault_slug_index: HashMap::new(),
-            vault_id_to_slug: HashMap::new(),
-            user_slug_index: HashMap::new(),
-            user_id_to_slug: HashMap::new(),
-            team_slug_index: HashMap::new(),
-            team_id_to_slug: HashMap::new(),
-            team_name_index: HashMap::new(),
-            user_org_index: HashMap::new(),
-            app_slug_index: HashMap::new(),
-            app_id_to_slug: HashMap::new(),
-            app_name_index: HashMap::new(),
-            last_applied_timestamp_ns: 0,
+            ..Default::default()
         };
 
         // Add some data
@@ -2483,7 +2463,7 @@ mod tests {
 
         // Setup some state
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
             state.vault_heights.insert((OrganizationId::new(1), VaultId::new(1)), 42);
             state.vault_heights.insert((OrganizationId::new(1), VaultId::new(2)), 100);
             state.region_height = 99;
@@ -2499,6 +2479,7 @@ mod tests {
                     storage_bytes: 0,
                 },
             );
+            store.applied_state.store(Arc::new(state));
         }
 
         // Test accessor methods
@@ -2557,56 +2538,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_append_and_read_log_entries() {
-        // This test simulates what openraft does during replication
-        let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.db");
-
-        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-
-        // Create 100 log entries (enough to cause multiple leaf nodes in the B-tree)
-        let entries: Vec<Entry<LedgerTypeConfig>> = (1..=100u64)
-            .map(|i| Entry {
-                log_id: make_log_id(1, i),
-                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
-                    SystemRequest::CreateOrganization {
-                        slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                        region: Region::US_EAST_VA,
-                        tier: Default::default(),
-                        admin: UserId::new(1),
-                    },
-                ))),
-            })
-            .collect();
-
-        // Append entries
-        store.append_to_log(entries).await.expect("append entries");
-
-        // Get log state
-        let log_state = store.get_log_state().await.expect("get log state");
-        assert_eq!(log_state.last_log_id.map(|id| id.index), Some(100));
-
-        // Read all entries back (what openraft does during replication)
-        let read_entries = store.try_get_log_entries(1u64..=100u64).await.expect("read entries");
-
-        assert_eq!(read_entries.len(), 100, "Expected 100 entries, got {}", read_entries.len());
-
-        // Verify each entry exists and has correct index
-        for (i, entry) in read_entries.iter().enumerate() {
-            let expected_index = (i + 1) as u64;
-            assert_eq!(
-                entry.log_id.index, expected_index,
-                "Entry at position {} has wrong index: expected {}, got {}",
-                i, expected_index, entry.log_id.index
-            );
-        }
-
-        // Test partial range (what openraft does when replicating to a follower)
-        let partial = store.try_get_log_entries(50u64..=75u64).await.expect("read partial");
-        assert_eq!(partial.len(), 26, "Expected 26 entries, got {}", partial.len());
-    }
-
-    #[tokio::test]
     async fn test_apply_to_state_machine_broadcasts_block_announcements() {
         use std::time::{Duration, Instant};
 
@@ -2614,7 +2545,7 @@ mod tests {
             BlockAnnouncement, OrganizationSlug as ProtoOrganizationSlug,
             VaultSlug as ProtoVaultSlug,
         };
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
@@ -2627,7 +2558,7 @@ mod tests {
 
         // First, create organization and vault using apply_request (sets up state)
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
 
             let organization_id = create_active_organization(
                 &store,
@@ -2649,6 +2580,7 @@ mod tests {
                 _ => panic!("expected VaultCreated"),
             };
             assert_eq!(vault_id, VaultId::new(1));
+            store.applied_state.store(Arc::new(state));
         }
 
         // Now call apply_to_state_machine with a Write entry
@@ -2661,13 +2593,10 @@ mod tests {
             request_hash: 0,
         };
 
-        let entry = Entry {
-            log_id: make_log_id(1, 1),
-            payload: EntryPayload::Normal(wrap_payload(write_request)),
-        };
+        let entry = make_committed_entry(1, 1, wrap_payload(write_request));
 
         let _start = Instant::now();
-        let responses = store.apply_to_state_machine(&[entry]).await.expect("apply");
+        let responses = store.apply_committed_entries(&[entry], None).await.expect("apply");
 
         // Verify response is WriteCompleted
         assert_eq!(responses.len(), 1);
@@ -2699,7 +2628,7 @@ mod tests {
     async fn test_apply_to_state_machine_no_broadcast_without_sender() {
         // Verify that without a sender, apply_to_state_machine still works
         // (graceful handling of None sender)
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
@@ -2709,7 +2638,7 @@ mod tests {
 
         // Create organization and vault
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
 
             create_active_organization(
                 &store,
@@ -2725,6 +2654,7 @@ mod tests {
                 retention_policy: None,
             };
             store.apply_request(&create_vault, &mut state);
+            store.applied_state.store(Arc::new(state));
         }
 
         // Apply write - should not panic even without sender
@@ -2736,12 +2666,9 @@ mod tests {
             request_hash: 0,
         };
 
-        let entry = Entry {
-            log_id: make_log_id(1, 1),
-            payload: EntryPayload::Normal(wrap_payload(write_request)),
-        };
+        let entry = make_committed_entry(1, 1, wrap_payload(write_request));
 
-        let responses = store.apply_to_state_machine(&[entry]).await.expect("apply");
+        let responses = store.apply_committed_entries(&[entry], None).await.expect("apply");
         assert_eq!(responses.len(), 1);
         match &responses[0] {
             LedgerResponse::Write { .. } => {},
@@ -2762,15 +2689,16 @@ mod tests {
         // Critical test: apply with proposed_at set to year 2099 — if any code
         // path still calls Utc::now(), timestamps will be ~2026 instead of 2099.
         use chrono::{Datelike, TimeZone};
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let mut store = store_with_events(dir.path());
 
         // Set up org and vault
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
             setup_org_and_vault(&mut state);
+            store.applied_state.store(Arc::new(state));
         }
 
         let far_future = Utc.with_ymd_and_hms(2099, 6, 15, 12, 0, 0).unwrap();
@@ -2801,9 +2729,9 @@ mod tests {
             caller: 0,
         };
 
-        let entry = Entry { log_id: make_log_id(1, 1), payload: EntryPayload::Normal(payload) };
+        let entry = make_committed_entry(1, 1, payload);
 
-        let responses = store.apply_to_state_machine(&[entry]).await.expect("apply");
+        let responses = store.apply_committed_entries(&[entry], None).await.expect("apply");
         assert_eq!(responses.len(), 1);
 
         // Read events from the events DB
@@ -2831,7 +2759,7 @@ mod tests {
         // not a separate Utc::now() call.
         use chrono::TimeZone;
         use inferadb_ledger_proto::proto::BlockAnnouncement;
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
@@ -2843,7 +2771,7 @@ mod tests {
 
         // Create org + vault
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
             create_active_organization(
                 &store,
                 &mut state,
@@ -2858,6 +2786,7 @@ mod tests {
                 retention_policy: None,
             };
             store.apply_request(&create_vault, &mut state);
+            store.applied_state.store(Arc::new(state));
         }
 
         let far_future = Utc.with_ymd_and_hms(2099, 12, 31, 23, 59, 59).unwrap();
@@ -2876,9 +2805,9 @@ mod tests {
             state_root_commitments: vec![],
             caller: 0,
         };
-        let entry = Entry { log_id: make_log_id(1, 1), payload: EntryPayload::Normal(payload) };
+        let entry = make_committed_entry(1, 1, payload);
 
-        store.apply_to_state_machine(&[entry]).await.expect("apply");
+        store.apply_committed_entries(&[entry], None).await.expect("apply");
 
         // Check the broadcast announcement timestamp
         let announcement = receiver.try_recv().expect("should have received block announcement");
@@ -2897,7 +2826,7 @@ mod tests {
         // With deterministic timestamps, resulting EventEntry records must be
         // byte-identical.
         use chrono::TimeZone;
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let far_future = Utc.with_ymd_and_hms(2099, 3, 14, 15, 9, 26).unwrap();
 
@@ -2924,8 +2853,9 @@ mod tests {
         let apply_on_fresh_store = |dir: &std::path::Path| {
             let store = store_with_events(dir);
             {
-                let mut state = store.applied_state.write();
+                let mut state = (*store.applied_state.load_full()).clone();
                 setup_org_and_vault(&mut state);
+                store.applied_state.store(Arc::new(state));
             }
             let payload = RaftPayload {
                 request: write_request.clone(),
@@ -2933,7 +2863,7 @@ mod tests {
                 state_root_commitments: vec![],
                 caller: 0,
             };
-            let entry = Entry { log_id: make_log_id(1, 1), payload: EntryPayload::Normal(payload) };
+            let entry = make_committed_entry(1, 1, payload);
             (store, entry)
         };
 
@@ -2943,8 +2873,8 @@ mod tests {
         let (mut store1, entry1) = apply_on_fresh_store(dir1.path());
         let (mut store2, entry2) = apply_on_fresh_store(dir2.path());
 
-        store1.apply_to_state_machine(&[entry1]).await.expect("apply1");
-        store2.apply_to_state_machine(&[entry2]).await.expect("apply2");
+        store1.apply_committed_entries(&[entry1], None).await.expect("apply1");
+        store2.apply_committed_entries(&[entry2], None).await.expect("apply2");
 
         // Read events from both stores
         let read_events = |store: &RaftLogStore<FileBackend>| {
@@ -2984,7 +2914,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // 1. Start healthy
         state
@@ -3060,7 +2990,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Start diverged
         state.vault_health.insert(
@@ -3104,7 +3034,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Start diverged
         state.vault_health.insert(
@@ -3152,7 +3082,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization so writes don't fail for missing organization
         create_active_organization(
@@ -3207,7 +3137,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Mark healthy twice
         let healthy = LedgerRequest::UpdateVaultHealth {
@@ -3374,7 +3304,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Setup organization + vault
         create_active_organization(
@@ -3464,7 +3394,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Setup
         create_active_organization(
@@ -3541,7 +3471,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         create_active_organization(
             &store,
@@ -3592,7 +3522,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create two organizations, each with a vault
         create_active_organization(
@@ -3689,9 +3619,9 @@ mod tests {
         assert_eq!(store.accessor().organization_storage_bytes(OrganizationId::new(1)), 0);
 
         // Write some data
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
         state.organization_storage_bytes.insert(OrganizationId::new(1), 42);
-        drop(state);
+        store.applied_state.store(Arc::new(state));
 
         assert_eq!(store.accessor().organization_storage_bytes(OrganizationId::new(1)), 42);
         assert_eq!(
@@ -3707,7 +3637,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization with two vaults
         create_active_organization(
@@ -3758,7 +3688,7 @@ mod tests {
             },
             &mut state,
         );
-        drop(state);
+        store.applied_state.store(Arc::new(state));
 
         let usage = store.accessor().organization_usage(OrganizationId::new(1));
         assert_eq!(usage.storage_bytes, 8, "key(3) + value(5) = 8 bytes");
@@ -3776,7 +3706,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         create_active_organization(
             &store,
@@ -3803,11 +3733,11 @@ mod tests {
             &mut state,
         );
 
-        drop(state);
+        store.applied_state.store(Arc::new(state));
         assert_eq!(store.accessor().organization_usage(OrganizationId::new(1)).vault_count, 2);
 
         // Delete one vault
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
         store.apply_request(
             &LedgerRequest::DeleteVault {
                 organization: OrganizationId::new(1),
@@ -3815,7 +3745,7 @@ mod tests {
             },
             &mut state,
         );
-        drop(state);
+        store.applied_state.store(Arc::new(state));
 
         assert_eq!(
             store.accessor().organization_usage(OrganizationId::new(1)).vault_count,
@@ -3835,7 +3765,7 @@ mod tests {
 
         // Set up state with known storage bytes
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
             create_active_organization(
                 &store,
                 &mut state,
@@ -3874,6 +3804,7 @@ mod tests {
                 },
                 &mut state,
             );
+            store.applied_state.store(Arc::new(state));
         }
 
         // Spawn 50 concurrent readers — all must see consistent state
@@ -3982,7 +3913,7 @@ mod tests {
     fn event_write_committed_has_correct_block_height() {
         let dir = tempdir().expect("create temp dir");
         let store = store_with_events(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
         let request = simple_write_request(org_id, vault_id);
@@ -4038,10 +3969,10 @@ mod tests {
         let store_b = store_with_events(dir_b.path());
 
         // Set up identical state in both
-        let mut state_a = store_a.applied_state.write();
+        let mut state_a = (*store_a.applied_state.load_full()).clone();
         let (org_id_a, vault_id_a) = setup_org_and_vault(&mut state_a);
 
-        let mut state_b = store_b.applied_state.write();
+        let mut state_b = (*store_b.applied_state.load_full()).clone();
         let (org_id_b, vault_id_b) = setup_org_and_vault(&mut state_b);
 
         // Both should have assigned the same IDs (sequential from zero)
@@ -4100,7 +4031,7 @@ mod tests {
     fn event_entity_expired_emits_per_key() {
         let dir = tempdir().expect("create temp dir");
         let store = store_with_events(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
         // Write request with two ExpireEntity operations
@@ -4170,7 +4101,7 @@ mod tests {
             .expect("open store")
             .with_event_writer(writer);
 
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
         let request = simple_write_request(org_id, vault_id);
@@ -4219,7 +4150,7 @@ mod tests {
     fn event_organization_created_has_slug_detail() {
         let dir = tempdir().expect("create temp dir");
         let store = store_with_events(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let request = LedgerRequest::System(SystemRequest::CreateOrganization {
             slug: inferadb_ledger_types::OrganizationSlug::new(42_000),
@@ -4262,12 +4193,16 @@ mod tests {
     fn event_organization_deleted_captures_vault_count() {
         let dir = tempdir().expect("create temp dir");
         let store = store_with_events(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
         // Mark the vault as deleted so DeleteOrganization goes straight to Deleted
         let key = (org_id, vault_id);
-        state.vaults.get_mut(&key).expect("vault exists").deleted = true;
+        {
+            let mut vault = state.vaults.get(&key).expect("vault exists").clone();
+            vault.deleted = true;
+            state.vaults.insert(key, vault);
+        }
 
         let request = LedgerRequest::DeleteOrganization { organization: org_id };
 
@@ -4307,86 +4242,10 @@ mod tests {
     }
 
     #[test]
-    fn event_node_joined_cluster_emitted() {
-        let dir = tempdir().expect("create temp dir");
-        let store = store_with_events(dir.path());
-        let mut state = store.applied_state.write();
-
-        let request = LedgerRequest::System(SystemRequest::AddNode {
-            node_id: 7,
-            address: "10.0.0.7:9090".to_string(),
-        });
-
-        let mut events: Vec<EventEntry> = Vec::new();
-        let mut op_index = 0u32;
-        let ts = fixed_timestamp();
-
-        store.apply_request_with_events(
-            &request,
-            &mut state,
-            ts,
-            &mut op_index,
-            &mut events,
-            90,
-            &mut PendingExternalWrites::default(),
-            None,
-            false,
-            0,
-        );
-
-        let join_event = events
-            .iter()
-            .find(|e| e.action == EventAction::NodeJoinedCluster)
-            .expect("NodeJoinedCluster event should be emitted");
-
-        assert_eq!(join_event.details.get("node_id").map(|s| s.as_str()), Some("7"));
-        assert_eq!(join_event.details.get("address").map(|s| s.as_str()), Some("10.0.0.7:9090"));
-        assert_eq!(
-            join_event.organization_id,
-            OrganizationId::new(0),
-            "NodeJoinedCluster is system-scoped"
-        );
-    }
-
-    #[test]
-    fn event_node_left_cluster_emitted() {
-        let dir = tempdir().expect("create temp dir");
-        let store = store_with_events(dir.path());
-        let mut state = store.applied_state.write();
-
-        let request = LedgerRequest::System(SystemRequest::RemoveNode { node_id: 3 });
-
-        let mut events: Vec<EventEntry> = Vec::new();
-        let mut op_index = 0u32;
-        let ts = fixed_timestamp();
-
-        store.apply_request_with_events(
-            &request,
-            &mut state,
-            ts,
-            &mut op_index,
-            &mut events,
-            90,
-            &mut PendingExternalWrites::default(),
-            None,
-            false,
-            0,
-        );
-
-        let leave_event = events
-            .iter()
-            .find(|e| e.action == EventAction::NodeLeftCluster)
-            .expect("NodeLeftCluster event should be emitted");
-
-        assert_eq!(leave_event.details.get("node_id").map(|s| s.as_str()), Some("3"));
-        assert_eq!(leave_event.organization_id, OrganizationId::new(0));
-    }
-
-    #[test]
     fn event_user_created_has_details() {
         let dir = tempdir().expect("create temp dir");
         let store = store_with_events(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let request = LedgerRequest::System(SystemRequest::CreateUser {
             user: UserId::new(1),
@@ -4429,7 +4288,7 @@ mod tests {
     fn event_suspend_resume_org_has_details() {
         let dir = tempdir().expect("create temp dir");
         let store = store_with_events(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
         let (org_id, _vault_id) = setup_org_and_vault(&mut state);
 
         // Suspend with reason
@@ -4505,7 +4364,7 @@ mod tests {
             .expect("open store")
             .with_event_writer(writer);
 
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
         // Emit a system event (OrganizationCreated via CreateOrganization)
@@ -4575,65 +4434,10 @@ mod tests {
     }
 
     #[test]
-    fn event_node_join_leave_determinism() {
-        // Two independent stores applying the same AddNode should produce identical events
-        let dir_a = tempdir().expect("create temp dir a");
-        let dir_b = tempdir().expect("create temp dir b");
-        let store_a = store_with_events(dir_a.path());
-        let store_b = store_with_events(dir_b.path());
-
-        let mut state_a = store_a.applied_state.write();
-        let mut state_b = store_b.applied_state.write();
-
-        let request = LedgerRequest::System(SystemRequest::AddNode {
-            node_id: 5,
-            address: "10.0.0.5:8080".to_string(),
-        });
-
-        let ts = fixed_timestamp();
-        let mut events_a: Vec<EventEntry> = Vec::new();
-        let mut events_b: Vec<EventEntry> = Vec::new();
-        let mut idx_a = 0u32;
-        let mut idx_b = 0u32;
-
-        store_a.apply_request_with_events(
-            &request,
-            &mut state_a,
-            ts,
-            &mut idx_a,
-            &mut events_a,
-            90,
-            &mut PendingExternalWrites::default(),
-            None,
-            false,
-            0,
-        );
-        store_b.apply_request_with_events(
-            &request,
-            &mut state_b,
-            ts,
-            &mut idx_b,
-            &mut events_b,
-            90,
-            &mut PendingExternalWrites::default(),
-            None,
-            false,
-            0,
-        );
-
-        assert_eq!(events_a.len(), events_b.len());
-        for (a, b) in events_a.iter().zip(events_b.iter()) {
-            assert_eq!(a.event_id, b.event_id, "node join events must be deterministic");
-            assert_eq!(a.action, b.action);
-            assert_eq!(a.details, b.details);
-        }
-    }
-
-    #[test]
     fn event_vault_created_has_org_scope() {
         let dir = tempdir().expect("create temp dir");
         let store = store_with_events(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create an organization first
         let org_id = create_active_organization(
@@ -4685,7 +4489,7 @@ mod tests {
     fn event_vault_deleted_has_org_scope() {
         let dir = tempdir().expect("create temp dir");
         let store = store_with_events(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
         let delete_vault = LedgerRequest::DeleteVault { organization: org_id, vault: vault_id };
@@ -4727,7 +4531,7 @@ mod tests {
     fn event_batch_write_committed_emitted() {
         let dir = tempdir().expect("create temp dir");
         let store = store_with_events(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
         // Create a batch of two writes
@@ -4792,7 +4596,7 @@ mod tests {
     fn event_vault_health_updated_emitted() {
         let dir = tempdir().expect("create temp dir");
         let store = store_with_events(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
         // Mark vault as diverged
@@ -4838,7 +4642,7 @@ mod tests {
     fn event_org_isolation_across_organizations() {
         let dir = tempdir().expect("create temp dir");
         let store = store_with_events(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create two organizations with vaults
         let (org_a, vault_a) = setup_org_and_vault(&mut state);
@@ -4962,7 +4766,7 @@ mod tests {
         let writer = crate::event_writer::EventWriter::new(Arc::clone(&events_db_arc), config);
         let store = store.with_event_writer(writer);
 
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
         let ts = fixed_timestamp();
@@ -5009,7 +4813,7 @@ mod tests {
     fn event_write_committed_includes_block_height_reference() {
         let dir = tempdir().expect("create temp dir");
         let store = store_with_events(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
         let ts = fixed_timestamp();
@@ -5093,7 +4897,8 @@ mod tests {
 
         use chrono::{TimeZone, Utc};
         use inferadb_ledger_types::events::{EventEmission, EventOutcome};
-        use openraft::SnapshotMeta;
+
+        use crate::log_storage::types::SnapshotMeta;
 
         let source_dir = tempdir().expect("create source dir");
         let target_dir = tempdir().expect("create target dir");
@@ -5101,8 +4906,9 @@ mod tests {
         // Create source store with events and minimal Raft state
         let mut source_store = store_with_events(source_dir.path());
         {
-            let mut state = source_store.applied_state.write();
+            let mut state = (*source_store.applied_state.load_full()).clone();
             state.last_applied = Some(make_log_id(1, 10));
+            source_store.applied_state.store(Arc::new(state));
         }
         // Insert OrganizationMeta so event collection can find org IDs
         {
@@ -5122,7 +4928,7 @@ mod tests {
         }
         // Persist core to database — snapshot builder reads from DB, not in-memory state
         {
-            let state = source_store.applied_state.read();
+            let state = source_store.applied_state.load();
             source_store
                 .save_state_core(&state, &PendingExternalWrites::default())
                 .expect("persist core");
@@ -5167,17 +4973,17 @@ mod tests {
         // Copy snapshot file for install on target
         let snapshot_path = target_dir.path().join("snapshot_copy.bin");
         {
-            let mut src_file = snapshot.snapshot;
+            let mut src_file = snapshot.0;
             let mut dst_file =
                 tokio::fs::File::create(&snapshot_path).await.expect("create snapshot copy");
-            tokio::io::copy(&mut *src_file, &mut dst_file).await.expect("copy snapshot data");
+            tokio::io::copy(&mut src_file, &mut dst_file).await.expect("copy snapshot data");
         }
 
         // Install snapshot on target
         let mut target_store = store_with_events(target_dir.path());
         let meta = SnapshotMeta {
-            last_log_id: snapshot.meta.last_log_id,
-            last_membership: snapshot.meta.last_membership,
+            last_log_id: snapshot.1.last_log_id,
+            last_membership: snapshot.1.last_membership,
             snapshot_id: "test-snapshot".to_string(),
         };
         let install_file = tokio::fs::File::open(&snapshot_path).await.expect("open snapshot copy");
@@ -5205,15 +5011,17 @@ mod tests {
 
         use chrono::{TimeZone, Utc};
         use inferadb_ledger_types::events::{EventEmission, EventOutcome};
-        use openraft::SnapshotMeta;
+
+        use crate::log_storage::types::SnapshotMeta;
 
         let source_dir = tempdir().expect("create source dir");
         let target_dir = tempdir().expect("create target dir");
 
         let mut source_store = store_with_events(source_dir.path());
         {
-            let mut state = source_store.applied_state.write();
+            let mut state = (*source_store.applied_state.load_full()).clone();
             state.last_applied = Some(make_log_id(1, 10));
+            source_store.applied_state.store(Arc::new(state));
         }
         // Insert OrganizationMeta so event collection can find org IDs
         {
@@ -5233,7 +5041,7 @@ mod tests {
         }
         // Persist core to database — snapshot builder reads from DB, not in-memory state
         {
-            let state = source_store.applied_state.read();
+            let state = source_store.applied_state.load();
             source_store
                 .save_state_core(&state, &PendingExternalWrites::default())
                 .expect("persist core");
@@ -5302,17 +5110,17 @@ mod tests {
         // Copy snapshot file for install on target
         let snapshot_path = target_dir.path().join("snapshot_copy.bin");
         {
-            let mut src_file = snapshot.snapshot;
+            let mut src_file = snapshot.0;
             let mut dst_file =
                 tokio::fs::File::create(&snapshot_path).await.expect("create snapshot copy");
-            tokio::io::copy(&mut *src_file, &mut dst_file).await.expect("copy snapshot data");
+            tokio::io::copy(&mut src_file, &mut dst_file).await.expect("copy snapshot data");
         }
 
         // Install snapshot on target
         let mut target_store = store_with_events(target_dir.path());
         let meta = SnapshotMeta {
-            last_log_id: snapshot.meta.last_log_id,
-            last_membership: snapshot.meta.last_membership,
+            last_log_id: snapshot.1.last_log_id,
+            last_membership: snapshot.1.last_membership,
             snapshot_id: "test-snapshot".to_string(),
         };
         let install_file = tokio::fs::File::open(&snapshot_path).await.expect("open snapshot copy");
@@ -5659,7 +5467,7 @@ mod tests {
     /// (pure function of compressed bytes).
     #[tokio::test(flavor = "multi_thread")]
     async fn test_snapshot_determinism_build_and_get_current_produce_identical_files() {
-        use openraft::{RaftSnapshotBuilder, RaftStorage};
+        // openraft traits removed
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
         let dir = tempdir().expect("create temp dir");
@@ -5670,94 +5478,94 @@ mod tests {
         // apply_to_state_machine persists state via save_state_core + flush_external_writes.
         let entries = vec![
             // Entry 1: Create organization
-            Entry {
-                log_id: make_log_id(1, 1),
-                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
-                    SystemRequest::CreateOrganization {
-                        slug: inferadb_ledger_types::OrganizationSlug::new(1000),
-                        region: Region::US_EAST_VA,
-                        tier: Default::default(),
-                        admin: UserId::new(1),
-                    },
-                ))),
-            },
+            make_committed_entry(
+                1,
+                1,
+                wrap_payload(LedgerRequest::System(SystemRequest::CreateOrganization {
+                    slug: inferadb_ledger_types::OrganizationSlug::new(1000),
+                    region: Region::US_EAST_VA,
+                    tier: Default::default(),
+                    admin: UserId::new(1),
+                })),
+            ),
             // Entry 2: Activate org 1
-            Entry {
-                log_id: make_log_id(1, 2),
-                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
-                    SystemRequest::UpdateOrganizationStatus {
-                        organization: OrganizationId::new(1),
-                        status: OrganizationStatus::Active,
-                    },
-                ))),
-            },
+            make_committed_entry(
+                1,
+                2,
+                wrap_payload(LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+                    organization: OrganizationId::new(1),
+                    status: OrganizationStatus::Active,
+                })),
+            ),
             // Entry 3: Create vault in org 1
-            Entry {
-                log_id: make_log_id(1, 3),
-                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateVault {
+            make_committed_entry(
+                1,
+                3,
+                wrap_payload(LedgerRequest::CreateVault {
                     organization: OrganizationId::new(1),
                     slug: VaultSlug::new(100),
                     name: Some("vault-1".to_string()),
                     retention_policy: None,
-                })),
-            },
+                }),
+            ),
             // Entry 4: Write to vault (populates vault_heights, vault_hashes, client_sequences)
-            Entry {
-                log_id: make_log_id(1, 4),
-                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::Write {
+            make_committed_entry(
+                1,
+                4,
+                wrap_payload(LedgerRequest::Write {
                     organization: OrganizationId::new(1),
                     vault: VaultId::new(1),
                     transactions: vec![],
                     idempotency_key: [1u8; 16],
                     request_hash: 42,
-                })),
-            },
+                }),
+            ),
             // Entry 5: Create second organization
-            Entry {
-                log_id: make_log_id(1, 5),
-                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
-                    SystemRequest::CreateOrganization {
-                        slug: inferadb_ledger_types::OrganizationSlug::new(2000),
-                        region: Region::US_EAST_VA,
-                        tier: Default::default(),
-                        admin: UserId::new(1),
-                    },
-                ))),
-            },
+            make_committed_entry(
+                1,
+                5,
+                wrap_payload(LedgerRequest::System(SystemRequest::CreateOrganization {
+                    slug: inferadb_ledger_types::OrganizationSlug::new(2000),
+                    region: Region::US_EAST_VA,
+                    tier: Default::default(),
+                    admin: UserId::new(1),
+                })),
+            ),
             // Entry 6: Activate org 2
-            Entry {
-                log_id: make_log_id(1, 6),
-                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
-                    SystemRequest::UpdateOrganizationStatus {
-                        organization: OrganizationId::new(2),
-                        status: OrganizationStatus::Active,
-                    },
-                ))),
-            },
+            make_committed_entry(
+                1,
+                6,
+                wrap_payload(LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+                    organization: OrganizationId::new(2),
+                    status: OrganizationStatus::Active,
+                })),
+            ),
             // Entry 7: Create vault in org 2
-            Entry {
-                log_id: make_log_id(1, 7),
-                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::CreateVault {
+            make_committed_entry(
+                1,
+                7,
+                wrap_payload(LedgerRequest::CreateVault {
                     organization: OrganizationId::new(2),
                     slug: VaultSlug::new(200),
                     name: Some("vault-2".to_string()),
                     retention_policy: None,
-                })),
-            },
+                }),
+            ),
             // Entry 8: Write to second vault
-            Entry {
-                log_id: make_log_id(1, 8),
-                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::Write {
+            make_committed_entry(
+                1,
+                8,
+                wrap_payload(LedgerRequest::Write {
                     organization: OrganizationId::new(2),
                     vault: VaultId::new(2),
                     transactions: vec![],
                     idempotency_key: [2u8; 16],
                     request_hash: 99,
-                })),
-            },
+                }),
+            ),
         ];
 
-        store.apply_to_state_machine(&entries).await.expect("apply batch");
+        store.apply_committed_entries(&entries, None).await.expect("apply batch");
 
         // Now take two snapshots via different code paths.
         // No events DB configured, so event section is deterministically empty.
@@ -5770,17 +5578,17 @@ mod tests {
             .expect("snapshot should exist");
 
         // Snapshot B via build_snapshot() (on LedgerSnapshotBuilder)
-        let mut builder = store.get_snapshot_builder().await;
+        let mut builder = store.get_snapshot_builder();
         let snapshot_b = builder.build_snapshot().await.expect("build_snapshot");
 
         // Read both files completely
         let mut bytes_a = Vec::new();
-        let mut file_a = snapshot_a.snapshot;
+        let mut file_a = snapshot_a.0;
         file_a.seek(std::io::SeekFrom::Start(0)).await.expect("seek a");
         file_a.read_to_end(&mut bytes_a).await.expect("read a");
 
         let mut bytes_b = Vec::new();
-        let mut file_b = snapshot_b.snapshot;
+        let mut file_b = snapshot_b.0;
         file_b.seek(std::io::SeekFrom::Start(0)).await.expect("seek b");
         file_b.read_to_end(&mut bytes_b).await.expect("read b");
 
@@ -5801,7 +5609,7 @@ mod tests {
 
         // Verify both snapshots report the same last_applied
         assert_eq!(
-            snapshot_a.meta.last_log_id, snapshot_b.meta.last_log_id,
+            snapshot_a.1.last_log_id, snapshot_b.1.last_log_id,
             "both snapshots should report the same last_applied"
         );
     }
@@ -5951,27 +5759,26 @@ mod tests {
     async fn test_apply_emits_commitments_to_buffer() {
         // When apply_to_state_machine processes a Write that creates vault entries,
         // it should buffer StateRootCommitments.
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let (mut store, _archive) = store_with_archive(dir.path());
 
         // Set up org and vault
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
             setup_org_and_vault(&mut state);
+            store.applied_state.store(Arc::new(state));
         }
 
         // Apply a write entry
-        let entry = Entry {
-            log_id: make_log_id(1, 1),
-            payload: EntryPayload::Normal(wrap_payload(simple_write_request(
-                OrganizationId::new(1),
-                VaultId::new(1),
-            ))),
-        };
+        let entry = make_committed_entry(
+            1,
+            1,
+            wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
+        );
 
-        store.apply_to_state_machine(&[entry]).await.expect("apply");
+        store.apply_committed_entries(&[entry], None).await.expect("apply");
 
         // Buffer should contain a commitment for this vault
         let commitments = store.drain_state_root_commitments();
@@ -5988,24 +5795,23 @@ mod tests {
     async fn test_apply_no_commitments_for_non_write_entries() {
         // CreateOrganization / CreateVault don't produce vault entries,
         // so no commitments should be buffered.
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let (mut store, _archive) = store_with_archive(dir.path());
 
-        let entry = Entry {
-            log_id: make_log_id(1, 1),
-            payload: EntryPayload::Normal(wrap_payload(LedgerRequest::System(
-                SystemRequest::CreateOrganization {
-                    slug: inferadb_ledger_types::OrganizationSlug::new(999),
-                    region: Region::US_EAST_VA,
-                    tier: Default::default(),
-                    admin: UserId::new(1),
-                },
-            ))),
-        };
+        let entry = make_committed_entry(
+            1,
+            1,
+            wrap_payload(LedgerRequest::System(SystemRequest::CreateOrganization {
+                slug: inferadb_ledger_types::OrganizationSlug::new(999),
+                region: Region::US_EAST_VA,
+                tier: Default::default(),
+                admin: UserId::new(1),
+            })),
+        );
 
-        store.apply_to_state_machine(&[entry]).await.expect("apply");
+        store.apply_committed_entries(&[entry], None).await.expect("apply");
 
         let commitments = store.drain_state_root_commitments();
         assert!(commitments.is_empty(), "admin ops should not produce commitments");
@@ -6014,14 +5820,14 @@ mod tests {
     #[tokio::test]
     async fn test_apply_multiple_writes_emits_multiple_commitments() {
         // Two writes in one batch → two commitments.
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let (mut store, _archive) = store_with_archive(dir.path());
 
         // Set up org with two vaults
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
             let (org_id, _vault1) = setup_org_and_vault(&mut state);
 
             // Add second vault
@@ -6046,16 +5852,15 @@ mod tests {
         }
 
         let entries = vec![
-            Entry {
-                log_id: make_log_id(1, 1),
-                payload: EntryPayload::Normal(wrap_payload(simple_write_request(
-                    OrganizationId::new(1),
-                    VaultId::new(1),
-                ))),
-            },
-            Entry {
-                log_id: make_log_id(1, 2),
-                payload: EntryPayload::Normal(wrap_payload(LedgerRequest::Write {
+            make_committed_entry(
+                1,
+                1,
+                wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
+            ),
+            make_committed_entry(
+                1,
+                2,
+                wrap_payload(LedgerRequest::Write {
                     organization: OrganizationId::new(1),
                     vault: VaultId::new(2),
                     transactions: vec![Transaction {
@@ -6072,11 +5877,11 @@ mod tests {
                     }],
                     idempotency_key: [0u8; 16],
                     request_hash: 0,
-                })),
-            },
+                }),
+            ),
         ];
 
-        store.apply_to_state_machine(&entries).await.expect("apply");
+        store.apply_committed_entries(&entries, None).await.expect("apply");
 
         let commitments = store.drain_state_root_commitments();
         assert_eq!(commitments.len(), 2, "two writes → two commitments");
@@ -6091,26 +5896,25 @@ mod tests {
         // Full end-to-end: apply a write (which archives the block), then apply
         // a second entry piggybacking the correct commitment. Verification should
         // succeed silently (no divergence event).
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let (mut store, _archive, mut divergence_rx) =
             store_with_archive_and_divergence(dir.path());
 
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
             setup_org_and_vault(&mut state);
+            store.applied_state.store(Arc::new(state));
         }
 
         // Step 1: Apply a write → archives block, buffers commitment
-        let write_entry = Entry {
-            log_id: make_log_id(1, 1),
-            payload: EntryPayload::Normal(wrap_payload(simple_write_request(
-                OrganizationId::new(1),
-                VaultId::new(1),
-            ))),
-        };
-        store.apply_to_state_machine(&[write_entry]).await.expect("apply write");
+        let write_entry = make_committed_entry(
+            1,
+            1,
+            wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
+        );
+        store.apply_committed_entries(&[write_entry], None).await.expect("apply write");
 
         // Drain the commitment (simulating leader draining for next payload)
         let commitments = store.drain_state_root_commitments();
@@ -6118,9 +5922,10 @@ mod tests {
 
         // Step 2: Apply a second entry carrying the commitment from step 1.
         // The commitment's state_root matches the archived block's state_root.
-        let second_entry = Entry {
-            log_id: make_log_id(1, 2),
-            payload: EntryPayload::Normal(RaftPayload {
+        let second_entry = make_committed_entry(
+            1,
+            2,
+            RaftPayload {
                 request: LedgerRequest::System(SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(9999),
                     region: Region::US_EAST_VA,
@@ -6130,9 +5935,9 @@ mod tests {
                 proposed_at: Utc::now(),
                 state_root_commitments: commitments,
                 caller: 0,
-            }),
-        };
-        store.apply_to_state_machine(&[second_entry]).await.expect("apply verify");
+            },
+        );
+        store.apply_committed_entries(&[second_entry], None).await.expect("apply verify");
 
         // No divergence should have been sent
         assert!(
@@ -6145,26 +5950,25 @@ mod tests {
     async fn test_verify_commitment_mismatching_state_root_sends_divergence() {
         // Piggyback a commitment with a deliberately wrong state_root.
         // The verification should detect the mismatch and send a divergence event.
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let (mut store, _archive, mut divergence_rx) =
             store_with_archive_and_divergence(dir.path());
 
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
             setup_org_and_vault(&mut state);
+            store.applied_state.store(Arc::new(state));
         }
 
         // Apply a write to archive a block
-        let write_entry = Entry {
-            log_id: make_log_id(1, 1),
-            payload: EntryPayload::Normal(wrap_payload(simple_write_request(
-                OrganizationId::new(1),
-                VaultId::new(1),
-            ))),
-        };
-        store.apply_to_state_machine(&[write_entry]).await.expect("apply write");
+        let write_entry = make_committed_entry(
+            1,
+            1,
+            wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
+        );
+        store.apply_committed_entries(&[write_entry], None).await.expect("apply write");
 
         // Drain and tamper with the state root
         let mut commitments = store.drain_state_root_commitments();
@@ -6172,9 +5976,10 @@ mod tests {
         commitments[0].state_root = [0xFF; 32]; // Wrong state root
 
         // Apply entry carrying the tampered commitment
-        let verify_entry = Entry {
-            log_id: make_log_id(1, 2),
-            payload: EntryPayload::Normal(RaftPayload {
+        let verify_entry = make_committed_entry(
+            1,
+            2,
+            RaftPayload {
                 request: LedgerRequest::System(SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(8888),
                     region: Region::US_EAST_VA,
@@ -6184,9 +5989,9 @@ mod tests {
                 proposed_at: Utc::now(),
                 state_root_commitments: commitments,
                 caller: 0,
-            }),
-        };
-        store.apply_to_state_machine(&[verify_entry]).await.expect("apply verify");
+            },
+        );
+        store.apply_committed_entries(&[verify_entry], None).await.expect("apply verify");
 
         // Should have received a divergence event
         let divergence = divergence_rx.try_recv().expect("should receive divergence event");
@@ -6202,22 +6007,24 @@ mod tests {
     async fn test_verify_commitment_missing_block_skips_silently() {
         // If the commitment references a vault height not yet archived
         // (e.g., after snapshot install), verification should skip without error.
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let (mut store, _archive, mut divergence_rx) =
             store_with_archive_and_divergence(dir.path());
 
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
             setup_org_and_vault(&mut state);
+            store.applied_state.store(Arc::new(state));
         }
 
         // Don't apply any writes — no blocks exist in the archive.
         // Piggyback a commitment referencing a non-existent vault height.
-        let entry = Entry {
-            log_id: make_log_id(1, 1),
-            payload: EntryPayload::Normal(RaftPayload {
+        let entry = make_committed_entry(
+            1,
+            1,
+            RaftPayload {
                 request: LedgerRequest::System(SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(7777),
                     region: Region::US_EAST_VA,
@@ -6232,9 +6039,9 @@ mod tests {
                     state_root: [0xDD; 32],
                 }],
                 caller: 0,
-            }),
-        };
-        store.apply_to_state_machine(&[entry]).await.expect("apply");
+            },
+        );
+        store.apply_committed_entries(&[entry], None).await.expect("apply");
 
         // No divergence — just skipped
         assert!(
@@ -6246,21 +6053,23 @@ mod tests {
     #[tokio::test]
     async fn test_verify_commitment_no_archive_skips() {
         // Without a block archive configured, verification is a no-op.
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let mut store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
 
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
             setup_org_and_vault(&mut state);
+            store.applied_state.store(Arc::new(state));
         }
 
         // Apply entry with commitments but no archive — should not panic
-        let entry = Entry {
-            log_id: make_log_id(1, 1),
-            payload: EntryPayload::Normal(RaftPayload {
+        let entry = make_committed_entry(
+            1,
+            1,
+            RaftPayload {
                 request: LedgerRequest::System(SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(6666),
                     region: Region::US_EAST_VA,
@@ -6275,22 +6084,26 @@ mod tests {
                     state_root: [0xEE; 32],
                 }],
                 caller: 0,
-            }),
-        };
-        store.apply_to_state_machine(&[entry]).await.expect("apply should succeed without archive");
+            },
+        );
+        store
+            .apply_committed_entries(&[entry], None)
+            .await
+            .expect("apply should succeed without archive");
     }
 
     #[tokio::test]
     async fn test_commitment_buffer_cap_during_apply() {
         // Verify the 10K cap works during apply_to_state_machine.
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let (mut store, _archive) = store_with_archive(dir.path());
 
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
             setup_org_and_vault(&mut state);
+            store.applied_state.store(Arc::new(state));
         }
 
         // Pre-fill buffer to capacity so the next apply triggers overflow
@@ -6307,14 +6120,12 @@ mod tests {
         }
 
         // Apply a write — should add one commitment and drop the oldest
-        let entry = Entry {
-            log_id: make_log_id(1, 1),
-            payload: EntryPayload::Normal(wrap_payload(simple_write_request(
-                OrganizationId::new(1),
-                VaultId::new(1),
-            ))),
-        };
-        store.apply_to_state_machine(&[entry]).await.expect("apply");
+        let entry = make_committed_entry(
+            1,
+            1,
+            wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
+        );
+        store.apply_committed_entries(&[entry], None).await.expect("apply");
 
         let buf = store.state_root_commitments.lock().unwrap();
         assert!(buf.len() <= 10_000, "buffer should not exceed 10K cap, got {}", buf.len());
@@ -6324,35 +6135,35 @@ mod tests {
     async fn test_divergence_sender_none_does_not_panic() {
         // When no divergence sender is configured, mismatches should be
         // logged but not panic.
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let (mut store, _archive) = store_with_archive(dir.path());
         // Note: no with_divergence_sender — sender is None
 
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
             setup_org_and_vault(&mut state);
+            store.applied_state.store(Arc::new(state));
         }
 
         // Apply a write to archive a block
-        let write_entry = Entry {
-            log_id: make_log_id(1, 1),
-            payload: EntryPayload::Normal(wrap_payload(simple_write_request(
-                OrganizationId::new(1),
-                VaultId::new(1),
-            ))),
-        };
-        store.apply_to_state_machine(&[write_entry]).await.expect("apply");
+        let write_entry = make_committed_entry(
+            1,
+            1,
+            wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
+        );
+        store.apply_committed_entries(&[write_entry], None).await.expect("apply");
 
         // Drain and tamper
         let mut commitments = store.drain_state_root_commitments();
         commitments[0].state_root = [0xFF; 32];
 
         // Apply with tampered commitment — should not panic despite no sender
-        let verify_entry = Entry {
-            log_id: make_log_id(1, 2),
-            payload: EntryPayload::Normal(RaftPayload {
+        let verify_entry = make_committed_entry(
+            1,
+            2,
+            RaftPayload {
                 request: LedgerRequest::System(SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(5555),
                     region: Region::US_EAST_VA,
@@ -6362,10 +6173,10 @@ mod tests {
                 proposed_at: Utc::now(),
                 state_root_commitments: commitments,
                 caller: 0,
-            }),
-        };
+            },
+        );
         store
-            .apply_to_state_machine(&[verify_entry])
+            .apply_committed_entries(&[verify_entry], None)
             .await
             .expect("should not panic without divergence sender");
     }
@@ -6374,41 +6185,41 @@ mod tests {
     async fn test_piggybacking_end_to_end() {
         // Full piggybacking cycle: write → buffer → drain → piggyback → verify.
         // Simulates two consecutive apply batches.
-        use openraft::RaftStorage;
+        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let (mut store, _archive, mut divergence_rx) =
             store_with_archive_and_divergence(dir.path());
 
         {
-            let mut state = store.applied_state.write();
+            let mut state = (*store.applied_state.load_full()).clone();
             setup_org_and_vault(&mut state);
+            store.applied_state.store(Arc::new(state));
         }
 
         // Batch 1: Write to vault → buffers commitment
-        let batch1 = vec![Entry {
-            log_id: make_log_id(1, 1),
-            payload: EntryPayload::Normal(wrap_payload(simple_write_request(
-                OrganizationId::new(1),
-                VaultId::new(1),
-            ))),
-        }];
-        store.apply_to_state_machine(&batch1).await.expect("apply batch 1");
+        let batch1 = vec![make_committed_entry(
+            1,
+            1,
+            wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
+        )];
+        store.apply_committed_entries(&batch1, None).await.expect("apply batch 1");
 
         let commitments_from_batch1 = store.drain_state_root_commitments();
         assert_eq!(commitments_from_batch1.len(), 1);
 
         // Batch 2: Another write, piggybacking batch 1's commitments
-        let batch2 = vec![Entry {
-            log_id: make_log_id(1, 2),
-            payload: EntryPayload::Normal(RaftPayload {
+        let batch2 = vec![make_committed_entry(
+            1,
+            2,
+            RaftPayload {
                 request: simple_write_request(OrganizationId::new(1), VaultId::new(1)),
                 proposed_at: Utc::now(),
                 state_root_commitments: commitments_from_batch1,
                 caller: 0,
-            }),
-        }];
-        store.apply_to_state_machine(&batch2).await.expect("apply batch 2");
+            },
+        )];
+        store.apply_committed_entries(&batch2, None).await.expect("apply batch 2");
 
         // Verification passed — no divergence
         assert!(
@@ -6435,7 +6246,7 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
             .expect("open store")
             .with_state_layer(state_layer);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_slug = inferadb_ledger_types::OrganizationSlug::new(5000);
         let user_slug = UserSlug::new(6000);
@@ -6523,7 +6334,7 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
             .expect("open store")
             .with_state_layer(state_layer.clone());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_slug = inferadb_ledger_types::OrganizationSlug::new(7000);
 
@@ -6609,7 +6420,7 @@ mod tests {
         let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
             .expect("open store")
             .with_state_layer(state_layer.clone());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_slug = inferadb_ledger_types::OrganizationSlug::new(8000);
 
@@ -6833,7 +6644,7 @@ mod tests {
     fn test_apply_create_user_credential_passkey() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
         let cred_id = create_passkey_credential(&store, &mut state, user_id);
@@ -6845,7 +6656,7 @@ mod tests {
     fn test_apply_create_user_credential_totp() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
@@ -6876,7 +6687,7 @@ mod tests {
     fn test_apply_create_user_credential_recovery_codes() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
@@ -6905,7 +6716,7 @@ mod tests {
     fn test_apply_create_user_credential_duplicate_totp_rejected() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
@@ -6950,7 +6761,7 @@ mod tests {
     fn test_apply_update_user_credential() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
         let cred_id = create_passkey_credential(&store, &mut state, user_id);
@@ -6978,7 +6789,7 @@ mod tests {
     fn test_apply_update_user_credential_not_found() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
@@ -7003,7 +6814,7 @@ mod tests {
     fn test_apply_delete_user_credential() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
@@ -7032,7 +6843,7 @@ mod tests {
     fn test_apply_delete_last_credential_rejected() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
         let cred_id = create_passkey_credential(&store, &mut state, user_id);
@@ -7058,7 +6869,7 @@ mod tests {
     fn test_apply_sequential_credential_ids() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
@@ -7073,7 +6884,7 @@ mod tests {
     fn test_apply_create_duplicate_recovery_code_rejected() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
@@ -7106,7 +6917,7 @@ mod tests {
     fn test_apply_create_duplicate_passkey_credential_id_rejected() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
@@ -7149,7 +6960,7 @@ mod tests {
     fn test_apply_create_totp_challenge() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
         let nonce = [0xAA; 32];
@@ -7169,7 +6980,7 @@ mod tests {
     fn test_apply_create_totp_challenge_rate_limited() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
         let expires_at = Utc::now() + Duration::minutes(5);
@@ -7214,7 +7025,7 @@ mod tests {
     fn test_apply_consume_totp_and_create_session() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_slug = UserSlug::new(100);
         let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
@@ -7248,7 +7059,7 @@ mod tests {
     fn test_apply_consume_totp_expired_challenge() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_slug = UserSlug::new(100);
         let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
@@ -7286,7 +7097,7 @@ mod tests {
     fn test_apply_consume_totp_not_found() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
@@ -7315,7 +7126,7 @@ mod tests {
     fn test_apply_consume_totp_max_attempts_exceeded() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_slug = UserSlug::new(100);
         let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
@@ -7365,7 +7176,7 @@ mod tests {
     fn test_apply_increment_totp_attempt() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_slug = UserSlug::new(100);
         let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
@@ -7403,7 +7214,7 @@ mod tests {
     fn test_apply_increment_totp_attempt_max_reached() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_slug = UserSlug::new(100);
         let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
@@ -7438,7 +7249,7 @@ mod tests {
     fn test_apply_increment_totp_attempt_not_found() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
@@ -7466,7 +7277,7 @@ mod tests {
     fn test_apply_consume_recovery_and_create_session() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_slug = UserSlug::new(100);
         let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
@@ -7508,7 +7319,7 @@ mod tests {
     fn test_apply_consume_recovery_wrong_code() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_slug = UserSlug::new(100);
         let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
@@ -7550,7 +7361,7 @@ mod tests {
     fn test_apply_consume_recovery_expired_challenge() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_slug = UserSlug::new(100);
         let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
@@ -7591,7 +7402,7 @@ mod tests {
     fn test_apply_consume_totp_challenge_one_time_use() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_slug = UserSlug::new(100);
         let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
@@ -7656,7 +7467,7 @@ mod tests {
     async fn test_add_organization_member() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -7692,7 +7503,7 @@ mod tests {
     async fn test_add_organization_member_idempotent() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -7733,7 +7544,7 @@ mod tests {
     async fn test_add_member_to_nonexistent_organization() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let request = LedgerRequest::AddOrganizationMember {
             organization: OrganizationId::new(9999),
@@ -7759,7 +7570,7 @@ mod tests {
     async fn test_create_organization_invite() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -7816,7 +7627,7 @@ mod tests {
     async fn test_create_invite_nonexistent_org() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let request = LedgerRequest::CreateOrganizationInvite {
             organization: OrganizationId::new(9999),
@@ -7839,7 +7650,7 @@ mod tests {
     async fn test_resolve_organization_invite_accept() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -7884,7 +7695,7 @@ mod tests {
     async fn test_resolve_invite_cas_already_resolved() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -7940,7 +7751,7 @@ mod tests {
     async fn test_resolve_invite_accept_after_revoke_rejected() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -7996,7 +7807,7 @@ mod tests {
     async fn test_resolve_invite_expire_after_accept_rejected() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8052,7 +7863,7 @@ mod tests {
     async fn test_resolve_invite_decline_after_expire_rejected() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8108,7 +7919,7 @@ mod tests {
     async fn test_rehash_invite_email_index_replaces_old_with_new() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8178,7 +7989,7 @@ mod tests {
     async fn test_accept_then_add_member_partial_failure_recovery() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8248,7 +8059,7 @@ mod tests {
     async fn test_create_invite_proposed_at_based_expiry() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8295,7 +8106,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8341,7 +8152,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store.apply_request(
             &LedgerRequest::DeleteVault {
@@ -8362,7 +8173,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8419,7 +8230,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8463,7 +8274,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store.apply_request(
             &LedgerRequest::UpdateVault {
@@ -8485,7 +8296,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8540,7 +8351,7 @@ mod tests {
     async fn test_create_organization_team_success() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8571,7 +8382,7 @@ mod tests {
     async fn test_create_organization_team_duplicate_slug() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8606,7 +8417,7 @@ mod tests {
     async fn test_delete_organization_team_success() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8647,7 +8458,7 @@ mod tests {
     async fn test_delete_organization_team_not_found() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8675,7 +8486,7 @@ mod tests {
     async fn test_create_app_success() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8706,7 +8517,7 @@ mod tests {
     async fn test_create_app_duplicate_slug() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8741,7 +8552,7 @@ mod tests {
     async fn test_delete_app_success() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8782,7 +8593,7 @@ mod tests {
     async fn test_delete_app_not_found() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8809,7 +8620,7 @@ mod tests {
     async fn test_set_app_enabled() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8848,7 +8659,7 @@ mod tests {
 
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8890,7 +8701,7 @@ mod tests {
     async fn test_rotate_app_client_secret() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8930,7 +8741,7 @@ mod tests {
     async fn test_create_app_client_assertion() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -8971,7 +8782,7 @@ mod tests {
     async fn test_delete_app_client_assertion() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -9027,7 +8838,7 @@ mod tests {
     async fn test_set_app_client_assertion_enabled() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -9084,7 +8895,7 @@ mod tests {
     async fn test_add_app_vault_connection() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -9143,7 +8954,7 @@ mod tests {
     async fn test_add_app_vault_duplicate() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -9212,7 +9023,7 @@ mod tests {
     async fn test_remove_app_vault_connection() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -9277,7 +9088,7 @@ mod tests {
     async fn test_update_app_vault_scopes() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -9351,7 +9162,7 @@ mod tests {
     async fn test_create_signing_key_success() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store.apply_request(
             &LedgerRequest::CreateSigningKey {
@@ -9377,7 +9188,7 @@ mod tests {
     async fn test_create_signing_key_idempotent() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create initial key
         store.apply_request(
@@ -9415,7 +9226,7 @@ mod tests {
     async fn test_create_signing_key_active_exists_fails() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create initial key
         store.apply_request(
@@ -9453,7 +9264,7 @@ mod tests {
     async fn test_rotate_signing_key_success() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create initial key
         store.apply_request(
@@ -9493,7 +9304,7 @@ mod tests {
     async fn test_rotate_signing_key_immediate_revocation() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         store.apply_request(
             &LedgerRequest::CreateSigningKey {
@@ -9532,7 +9343,7 @@ mod tests {
     async fn test_revoke_signing_key() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         store.apply_request(
             &LedgerRequest::CreateSigningKey {
@@ -9562,7 +9373,7 @@ mod tests {
     async fn test_revoke_signing_key_not_found() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store.apply_request(
             &LedgerRequest::RevokeSigningKey { kid: "nonexistent".to_string() },
@@ -9579,7 +9390,7 @@ mod tests {
     async fn test_transition_signing_key_revoked() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and rotate (with grace period) to get a Rotated key
         store.apply_request(
@@ -9626,7 +9437,7 @@ mod tests {
     async fn test_create_refresh_token() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Need a signing key for token creation
         store.apply_request(
@@ -9668,7 +9479,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store.apply_request(
             &LedgerRequest::RevokeAllUserSessions { user: UserId::new(42) },
@@ -9687,7 +9498,7 @@ mod tests {
     async fn test_revoke_all_app_sessions() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -9725,7 +9536,7 @@ mod tests {
     async fn test_revoke_token_family() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store
             .apply_request(&LedgerRequest::RevokeTokenFamily { family: [0xBB; 16] }, &mut state);
@@ -9743,7 +9554,7 @@ mod tests {
     async fn test_delete_expired_refresh_tokens() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) =
             store.apply_request(&LedgerRequest::DeleteExpiredRefreshTokens, &mut state);
@@ -9764,7 +9575,7 @@ mod tests {
     async fn test_create_user() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = UserId::new(42);
         let user_slug = UserSlug::new(4200);
@@ -9791,7 +9602,7 @@ mod tests {
     async fn test_create_user_updates_slug_indexes() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = UserId::new(42);
         let user_slug = UserSlug::new(4200);
@@ -9816,7 +9627,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store.apply_request(
             &LedgerRequest::System(SystemRequest::UpdateUser {
@@ -9838,7 +9649,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store.apply_request(
             &LedgerRequest::System(SystemRequest::DeleteUser { user_id: UserId::new(42) }),
@@ -9859,7 +9670,7 @@ mod tests {
     async fn test_register_email_hash() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = UserId::new(42);
         store.apply_request(
@@ -9894,7 +9705,7 @@ mod tests {
     async fn test_remove_email_hash() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = UserId::new(42);
         store.apply_request(
@@ -9934,7 +9745,7 @@ mod tests {
     async fn test_set_blinding_key_version() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store.apply_request(
             &LedgerRequest::System(SystemRequest::SetBlindingKeyVersion { version: 2 }),
@@ -9952,7 +9763,7 @@ mod tests {
     async fn test_update_rehash_progress() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store.apply_request(
             &LedgerRequest::System(SystemRequest::UpdateRehashProgress {
@@ -9972,7 +9783,7 @@ mod tests {
     async fn test_clear_rehash_progress() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Set progress first
         store.apply_request(
@@ -10001,7 +9812,7 @@ mod tests {
     async fn test_update_organization_routing() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -10028,37 +9839,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_add_and_remove_node() {
-        let dir = tempdir().expect("create temp dir");
-        let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
-
-        // AddNode/RemoveNode return Empty (state stored elsewhere)
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::AddNode {
-                node_id: 5,
-                address: "127.0.0.1:8080".to_string(),
-            }),
-            &mut state,
-        );
-
-        match response {
-            LedgerResponse::Empty => {},
-            other => panic!("expected Empty, got {other}"),
-        }
-
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::RemoveNode { node_id: 5 }),
-            &mut state,
-        );
-
-        match response {
-            LedgerResponse::Empty => {},
-            other => panic!("expected Empty, got {other}"),
-        }
-    }
-
     // ========================================================================
     // Organization status operations
     // ========================================================================
@@ -10067,7 +9847,7 @@ mod tests {
     async fn test_update_organization_status() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -10108,7 +9888,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -10157,7 +9937,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, vault_entry) =
             store.apply_request(&LedgerRequest::BatchWrite { requests: vec![] }, &mut state);
@@ -10180,7 +9960,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -10218,7 +9998,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -10271,7 +10051,7 @@ mod tests {
     async fn test_update_organization_member_role() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -10314,7 +10094,7 @@ mod tests {
     async fn test_remove_organization_member() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -10353,7 +10133,7 @@ mod tests {
     async fn test_remove_last_admin_blocked() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -10387,7 +10167,7 @@ mod tests {
     async fn test_purge_organization() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -10422,7 +10202,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store.apply_request(
             &LedgerRequest::System(SystemRequest::UpdateUserDirectoryStatus {
@@ -10448,7 +10228,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create org but DON'T activate it (stays in Provisioning)
         let (response, _) = store.apply_request(
@@ -10495,7 +10275,7 @@ mod tests {
     async fn test_use_refresh_token_success() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Create a signing key (required for token operations)
         store.apply_request(
@@ -10585,7 +10365,7 @@ mod tests {
     async fn test_use_refresh_token_reuse_detected() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         store.apply_request(
             &LedgerRequest::CreateSigningKey {
@@ -10661,7 +10441,7 @@ mod tests {
     async fn test_use_refresh_token_not_found() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let response = apply_at_fixed_time(
             &store,
@@ -10692,7 +10472,7 @@ mod tests {
     async fn test_revoke_token_family_with_tokens() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         store.apply_request(
             &LedgerRequest::CreateSigningKey {
@@ -10742,7 +10522,7 @@ mod tests {
     async fn test_revoke_all_user_sessions_with_user() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_slug = UserSlug::new(500);
         let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
@@ -10786,7 +10566,7 @@ mod tests {
     async fn test_revoke_all_user_sessions_user_not_found() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // User slug not in the index
         let (response, _) = store.apply_request(
@@ -10810,7 +10590,7 @@ mod tests {
     async fn test_revoke_signing_key_idempotent() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         store.apply_request(
             &LedgerRequest::CreateSigningKey {
@@ -10851,7 +10631,7 @@ mod tests {
     async fn test_transition_signing_key_active_is_noop() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         store.apply_request(
             &LedgerRequest::CreateSigningKey {
@@ -10882,7 +10662,7 @@ mod tests {
     async fn test_transition_signing_key_not_found_is_noop() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store.apply_request(
             &LedgerRequest::TransitionSigningKeyRevoked { kid: "nonexistent".to_string() },
@@ -10905,7 +10685,7 @@ mod tests {
     async fn test_create_email_verification() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store.apply_request(
             &LedgerRequest::System(SystemRequest::CreateEmailVerification {
@@ -10927,7 +10707,7 @@ mod tests {
     async fn test_verify_email_code_new_user() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let email_hmac = "hmac-new-user".to_string();
         let code_hash = [0xBB; 32];
@@ -10974,7 +10754,7 @@ mod tests {
     async fn test_verify_email_code_wrong_code() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let email_hmac = "hmac-wrong-code".to_string();
         let code_hash = [0xBB; 32];
@@ -11017,7 +10797,7 @@ mod tests {
     async fn test_verify_email_code_not_found() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let response = apply_at_fixed_time(
             &store,
@@ -11049,7 +10829,7 @@ mod tests {
     async fn test_cleanup_expired_onboarding_empty() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let response = apply_at_fixed_time(
             &store,
@@ -11076,7 +10856,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store.apply_request(
             &LedgerRequest::System(SystemRequest::CleanupExpiredOnboarding),
@@ -11092,49 +10872,6 @@ mod tests {
     }
 
     // ========================================================================
-    // System: AddNode and RemoveNode return Empty
-    // ========================================================================
-
-    #[test]
-    fn test_add_node_returns_empty() {
-        let dir = tempdir().expect("create temp dir");
-        let store =
-            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
-
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::AddNode {
-                node_id: 1,
-                address: "127.0.0.1:9000".to_string(),
-            }),
-            &mut state,
-        );
-
-        match response {
-            LedgerResponse::Empty => {},
-            other => panic!("expected Empty, got {other}"),
-        }
-    }
-
-    #[test]
-    fn test_remove_node_returns_empty() {
-        let dir = tempdir().expect("create temp dir");
-        let store =
-            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
-
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::RemoveNode { node_id: 1 }),
-            &mut state,
-        );
-
-        match response {
-            LedgerResponse::Empty => {},
-            other => panic!("expected Empty, got {other}"),
-        }
-    }
-
-    // ========================================================================
     // UpdateOrganizationRouting
     // ========================================================================
 
@@ -11142,7 +10879,7 @@ mod tests {
     async fn test_update_organization_routing_not_found() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store.apply_request(
             &LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
@@ -11164,7 +10901,7 @@ mod tests {
     async fn test_update_organization_routing_deleted_org() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11202,7 +10939,7 @@ mod tests {
     fn test_write_team_creates_new_team() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11239,7 +10976,7 @@ mod tests {
     fn test_write_team_rename_updates_index() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11283,7 +11020,7 @@ mod tests {
     fn test_write_team_duplicate_name_rejected() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11332,7 +11069,7 @@ mod tests {
     fn test_add_team_member_success() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11378,7 +11115,7 @@ mod tests {
     fn test_add_team_member_duplicate_rejected() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11434,7 +11171,7 @@ mod tests {
     fn test_remove_team_member_success() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11500,7 +11237,7 @@ mod tests {
     fn test_remove_last_team_manager_blocked() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11556,7 +11293,7 @@ mod tests {
     fn test_remove_team_member_not_found() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11599,7 +11336,7 @@ mod tests {
     fn test_update_team_member_role() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11654,7 +11391,7 @@ mod tests {
     fn test_update_team_member_role_not_found() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11702,7 +11439,7 @@ mod tests {
     fn test_write_app_profile_creates_new() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11739,7 +11476,7 @@ mod tests {
     fn test_write_app_profile_duplicate_name_rejected() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11782,7 +11519,7 @@ mod tests {
     fn test_delete_app_profile_success() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11833,7 +11570,7 @@ mod tests {
     fn test_write_client_assertion_name() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let response = apply_at_fixed_time(
             &store,
@@ -11853,7 +11590,7 @@ mod tests {
     fn test_delete_client_assertion_name() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Write first
         apply_at_fixed_time(
@@ -11889,7 +11626,7 @@ mod tests {
     fn test_delete_team_success() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11935,7 +11672,7 @@ mod tests {
     fn test_delete_team_not_found_idempotent() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -11967,7 +11704,7 @@ mod tests {
     fn test_delete_team_move_to_same_team_rejected() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -12014,7 +11751,7 @@ mod tests {
     fn test_purge_organization_regional() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -12084,7 +11821,7 @@ mod tests {
     fn test_write_organization_invite_success() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -12117,7 +11854,7 @@ mod tests {
     fn test_update_organization_invite_status() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -12163,7 +11900,7 @@ mod tests {
     fn test_delete_organization_invite() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -12208,7 +11945,7 @@ mod tests {
     fn test_rehash_invitation_email_hmac() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -12258,7 +11995,7 @@ mod tests {
     fn test_update_organization_profile() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
             &store,
@@ -12293,7 +12030,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let response = apply_at_fixed_time(
             &store,
@@ -12316,7 +12053,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let response = apply_at_fixed_time(
             &store,
@@ -12336,7 +12073,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let response = apply_at_fixed_time(
             &store,
@@ -12361,7 +12098,7 @@ mod tests {
     fn test_create_onboarding_user_email_already_active() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         // Register an active email hash
         apply_at_fixed_time(
@@ -12397,7 +12134,7 @@ mod tests {
     fn test_create_onboarding_user_idempotent_retry() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let user_slug = UserSlug::new(7001);
         let org_slug = inferadb_ledger_types::OrganizationSlug::new(7001);
@@ -12451,7 +12188,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let response = apply_at_fixed_time(
             &store,
@@ -12481,7 +12218,7 @@ mod tests {
     fn test_batch_write_with_system_requests() {
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state(dir.path());
-        let mut state = store.applied_state.write();
+        let mut state = (*store.applied_state.load_full()).clone();
 
         let requests = vec![
             LedgerRequest::System(SystemRequest::CreateUser {
@@ -12522,76 +12259,10 @@ mod tests {
     // ========================================================================
 
     #[tokio::test]
-    async fn test_purge_logs_and_get_log_state() {
-        let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.db");
-        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-
-        // Append some entries
-        let entries = vec![
-            Entry::<LedgerTypeConfig> { log_id: make_log_id(1, 1), payload: EntryPayload::Blank },
-            Entry::<LedgerTypeConfig> { log_id: make_log_id(1, 2), payload: EntryPayload::Blank },
-            Entry::<LedgerTypeConfig> { log_id: make_log_id(1, 3), payload: EntryPayload::Blank },
-        ];
-        store.append_to_log(entries).await.expect("append");
-
-        // Purge up to index 2
-        store.purge_logs_upto(make_log_id(1, 2)).await.expect("purge");
-
-        // Check log state
-        let log_state = store.get_log_state().await.expect("get log state");
-        assert_eq!(log_state.last_purged_log_id, Some(make_log_id(1, 2)));
-        assert_eq!(log_state.last_log_id, Some(make_log_id(1, 3)));
-
-        // Only entry 3 should remain
-        let remaining = store.try_get_log_entries(1u64..4u64).await.expect("read logs");
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].log_id.index, 3);
-    }
-
-    #[tokio::test]
-    async fn test_delete_conflict_logs_since() {
-        let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.db");
-        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-
-        // Append entries 1-5
-        let entries: Vec<_> = (1..=5)
-            .map(|i| Entry::<LedgerTypeConfig> {
-                log_id: make_log_id(1, i),
-                payload: EntryPayload::Blank,
-            })
-            .collect();
-        store.append_to_log(entries).await.expect("append");
-
-        // Delete from index 3 onward
-        store.delete_conflict_logs_since(make_log_id(1, 3)).await.expect("delete conflict");
-
-        // Only entries 1 and 2 should remain
-        let remaining = store.try_get_log_entries(1u64..6u64).await.expect("read logs");
-        assert_eq!(remaining.len(), 2);
-        assert_eq!(remaining[0].log_id.index, 1);
-        assert_eq!(remaining[1].log_id.index, 2);
-    }
-
-    #[tokio::test]
-    async fn test_append_empty_entries_is_noop() {
-        let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.db");
-        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
-
-        // Appending empty entries should succeed without error
-        store.append_to_log(Vec::<Entry<LedgerTypeConfig>>::new()).await.expect("append empty");
-
-        let log_state = store.get_log_state().await.expect("get log state");
-        assert!(log_state.last_log_id.is_none());
-    }
-
-    #[tokio::test]
     async fn test_last_applied_state_initial() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
-        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
         let (last_applied, _membership) = store.last_applied_state().await.expect("last applied");
         assert!(last_applied.is_none());
@@ -12611,14 +12282,14 @@ mod tests {
     async fn test_vote_round_trip_overwrites() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
-        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
-        let vote1 = Vote::new(1, 42);
+        let vote1 = Vote { term: 1, node_id: 42, committed: false };
         store.save_vote(&vote1).await.expect("save vote1");
         assert_eq!(store.read_vote().await.expect("read"), Some(vote1));
 
         // Overwrite with new vote
-        let vote2 = Vote::new(2, 42);
+        let vote2 = Vote { term: 2, node_id: 42, committed: false };
         store.save_vote(&vote2).await.expect("save vote2");
         assert_eq!(store.read_vote().await.expect("read"), Some(vote2));
     }
