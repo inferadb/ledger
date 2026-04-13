@@ -1775,7 +1775,7 @@ dependencies = [
  "proptest",
  "prost",
  "prost-types",
- "rand 0.10.0",
+ "rand 0.10.1",
  "seahash",
  "serde",
  "serde_json",
@@ -1815,7 +1815,7 @@ dependencies = [
  "proptest",
  "prost",
  "prost-types",
- "rand 0.10.0",
+ "rand 0.10.1",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1853,7 +1853,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "openraft",
  "parking_lot",
- "rand 0.10.0",
+ "rand 0.10.1",
  "schemars",
  "serde",
  "serde_json",
@@ -1894,7 +1894,7 @@ dependencies = [
  "proptest",
  "prost",
  "prost-types",
- "rand 0.10.0",
+ "rand 0.10.1",
  "seahash",
  "serde",
  "serde_json",
@@ -1930,7 +1930,7 @@ dependencies = [
  "parking_lot",
  "postcard",
  "proptest",
- "rand 0.10.0",
+ "rand 0.10.1",
  "seahash",
  "serde",
  "serde_json",
@@ -1958,7 +1958,7 @@ dependencies = [
  "moka",
  "parking_lot",
  "proptest",
- "rand 0.10.0",
+ "rand 0.10.1",
  "serde",
  "serde_json",
  "snafu",
@@ -1991,7 +1991,7 @@ dependencies = [
  "parking_lot",
  "postcard",
  "proptest",
- "rand 0.10.0",
+ "rand 0.10.1",
  "rayon",
  "rs_merkle",
  "schemars",
@@ -2397,7 +2397,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "quick-xml",
- "rand 0.10.0",
+ "rand 0.10.1",
  "reqwest",
  "ring",
  "rustls-pki-types",
@@ -2437,9 +2437,9 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openraft"
-version = "0.9.21"
+version = "0.9.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc22bb6823c606299be05f3cc0d2ac30216412e05352eaf192a481c12ea055fc"
+checksum = "cc2f40b0e23149ea8673591325bff055939f7a59f4f9a28476f0854282444ab3"
 dependencies = [
  "anyerror",
  "byte-unit",
@@ -3027,9 +3027,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc266eb313df6c5c09c1c7b1fbe2510961e5bcd3add930c1e31f7ed9da0feff8"
+checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
 dependencies = [
  "chacha20",
  "getrandom 0.4.2",
@@ -3867,7 +3867,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -3980,9 +3980,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.51.0"
+version = "1.51.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bd1c4c0fc4a7ab90fc15ef6daaa3ec3b893f004f915f2392557ed23237820cd"
+checksum = "f66bf9585cda4b724d3e78ab34b73fb2bbaba9011b9bfdf69dc836382ea13b8c"
 dependencies = [
  "bytes",
  "libc",
