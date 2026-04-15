@@ -376,7 +376,12 @@ impl LeaderChannelCache {
             Some(id) if id == this_node => return Ok(None),
             Some(id) => id,
             None => {
-                return Err(Status::unavailable("No leader available for forwarding"));
+                return Err(super::metadata::status_with_not_leader_hint(
+                    "No leader available for forwarding",
+                    None,
+                    None,
+                    None,
+                ));
             },
         };
 
@@ -391,15 +396,28 @@ impl LeaderChannelCache {
         }
 
         // Cache miss — find leader address and create a lazy channel
-        let leader_addr = nodes
-            .into_iter()
-            .find(|(id, _)| *id == leader_id)
-            .map(|(_, addr)| addr)
-            .ok_or_else(|| Status::unavailable("Leader address not found in membership"))?;
+        let leader_addr =
+            nodes.into_iter().find(|(id, _)| *id == leader_id).map(|(_, addr)| addr).ok_or_else(
+                || {
+                    super::metadata::status_with_not_leader_hint(
+                        "Leader address not found in membership",
+                        Some(leader_id),
+                        None,
+                        None,
+                    )
+                },
+            )?;
 
         let endpoint = format!("http://{}", leader_addr);
         let channel = Channel::from_shared(endpoint)
-            .map_err(|e| Status::unavailable(format!("Invalid leader endpoint: {e}")))?
+            .map_err(|e| {
+                super::metadata::status_with_not_leader_hint(
+                    format!("Invalid leader endpoint: {e}"),
+                    Some(leader_id),
+                    Some(&leader_addr),
+                    None,
+                )
+            })?
             .connect_lazy();
 
         debug!(leader_id, %leader_addr, "Cached new leader channel");
@@ -437,6 +455,62 @@ mod tests {
         let cache = LeaderChannelCache::new();
         let result = cache.get_or_connect(None, 1, std::iter::empty());
         assert!(result.is_err());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::disallowed_methods, clippy::panic)]
+    fn test_leader_channel_cache_no_leader_carries_not_leader_details() {
+        use inferadb_ledger_proto::proto;
+        use prost::Message;
+
+        let cache = LeaderChannelCache::new();
+        let status = match cache.get_or_connect(None, 1, std::iter::empty()) {
+            Err(s) => s,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        let details = proto::ErrorDetails::decode(status.details()).unwrap();
+        assert!(details.is_retryable);
+        // No leader info in scope — hint keys should be absent.
+        assert!(!details.context.contains_key("leader_id"));
+        assert!(!details.context.contains_key("leader_endpoint"));
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::disallowed_methods, clippy::panic)]
+    fn test_leader_channel_cache_missing_member_carries_leader_id_hint() {
+        use inferadb_ledger_proto::proto;
+        use prost::Message;
+
+        let cache = LeaderChannelCache::new();
+        // Leader is 2 but no member matches — triggers "Leader address not found in membership".
+        let status = match cache.get_or_connect(Some(2), 1, std::iter::empty()) {
+            Err(s) => s,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        let details = proto::ErrorDetails::decode(status.details()).unwrap();
+        assert_eq!(details.context.get("leader_id").unwrap(), "2");
+        assert!(!details.context.contains_key("leader_endpoint"));
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::disallowed_methods, clippy::panic)]
+    fn test_leader_channel_cache_bad_endpoint_carries_full_hints() {
+        use inferadb_ledger_proto::proto;
+        use prost::Message;
+
+        let cache = LeaderChannelCache::new();
+        // Address containing a NUL byte is invalid for `Channel::from_shared`.
+        let nodes = vec![(2, "bad\u{0}host:5000".to_string())];
+        let status = match cache.get_or_connect(Some(2), 1, nodes.into_iter()) {
+            Err(s) => s,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        let details = proto::ErrorDetails::decode(status.details()).unwrap();
+        assert_eq!(details.context.get("leader_id").unwrap(), "2");
+        assert_eq!(details.context.get("leader_endpoint").unwrap(), "bad\u{0}host:5000");
     }
 
     #[tokio::test]

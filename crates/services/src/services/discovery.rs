@@ -282,8 +282,14 @@ impl DiscoveryService {
         let state = self.handle.shard_state();
         let current_term = self.handle.current_term();
 
-        let leader_id =
-            state.leader.ok_or_else(|| Status::unavailable("No leader elected in this region"))?;
+        let leader_id = state.leader.ok_or_else(|| {
+            super::metadata::status_with_not_leader_hint(
+                "No leader elected in this region",
+                None,
+                None,
+                Some(current_term),
+            )
+        })?;
 
         let endpoint =
             self.peer_addresses.as_ref().and_then(|m| m.get(leader_id.0)).ok_or_else(|| {

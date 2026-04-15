@@ -8,6 +8,14 @@
 use std::collections::HashMap;
 
 use inferadb_ledger_proto::proto;
+use inferadb_ledger_types::DiagnosticCode;
+
+/// `ErrorDetails.context` key for the current Raft leader's node ID (numeric string).
+pub(crate) const LEADER_ID_KEY: &str = "leader_id";
+/// `ErrorDetails.context` key for the current Raft leader's endpoint URI.
+pub(crate) const LEADER_ENDPOINT_KEY: &str = "leader_endpoint";
+/// `ErrorDetails.context` key for the Raft term the leader was observed in (numeric string).
+pub(crate) const LEADER_TERM_KEY: &str = "leader_term";
 
 /// Builds an [`ErrorDetails`] proto message from error attributes.
 ///
@@ -29,6 +37,44 @@ pub(crate) fn build_error_details(
         retry_after_ms,
         context,
         suggested_action: suggested_action.map(String::from),
+    }
+}
+
+/// Builds an [`ErrorDetails`] proto for a `NotLeader` rejection, carrying the
+/// current known leader identity so the client can redirect without issuing
+/// a separate `ResolveRegionLeader` RPC.
+///
+/// Hint keys written into `context`:
+/// - `leader_id` — numeric string (u64)
+/// - `leader_endpoint` — full URI (e.g. `"http://10.0.2.5:5000"`)
+/// - `leader_term` — numeric string (u64)
+///
+/// Any argument may be `None` when the server has no information for that
+/// field; the key is simply omitted.
+pub(crate) fn build_not_leader_details(
+    leader_id: Option<u64>,
+    leader_endpoint: Option<&str>,
+    leader_term: Option<u64>,
+) -> proto::ErrorDetails {
+    let mut context = HashMap::new();
+    if let Some(id) = leader_id {
+        context.insert(LEADER_ID_KEY.to_owned(), id.to_string());
+    }
+    if let Some(ep) = leader_endpoint.filter(|s| !s.is_empty()) {
+        context.insert(LEADER_ENDPOINT_KEY.to_owned(), ep.to_owned());
+    }
+    if let Some(term) = leader_term {
+        context.insert(LEADER_TERM_KEY.to_owned(), term.to_string());
+    }
+
+    proto::ErrorDetails {
+        error_code: DiagnosticCode::ConsensusNotLeader.as_u16().to_string(),
+        is_retryable: true,
+        retry_after_ms: None,
+        context,
+        suggested_action: Some(
+            "Retry against the indicated leader; update your region leader cache".to_owned(),
+        ),
     }
 }
 
@@ -114,5 +160,49 @@ mod tests {
         assert_eq!(decoded.retry_after_ms, None);
         assert!(decoded.context.is_empty());
         assert_eq!(decoded.suggested_action, None);
+    }
+
+    #[test]
+    fn build_not_leader_details_all_fields() {
+        let details = build_not_leader_details(Some(42), Some("http://10.0.2.5:5000"), Some(7));
+        assert_eq!(details.error_code, "2000"); // ConsensusNotLeader
+        assert!(details.is_retryable);
+        assert_eq!(details.context.get("leader_id").unwrap(), "42");
+        assert_eq!(details.context.get("leader_endpoint").unwrap(), "http://10.0.2.5:5000");
+        assert_eq!(details.context.get("leader_term").unwrap(), "7");
+        assert!(details.suggested_action.as_deref().unwrap().contains("leader"));
+    }
+
+    #[test]
+    fn build_not_leader_details_partial_fields() {
+        let details = build_not_leader_details(Some(42), None, None);
+        assert!(details.context.contains_key("leader_id"));
+        assert!(!details.context.contains_key("leader_endpoint"));
+        assert!(!details.context.contains_key("leader_term"));
+    }
+
+    #[test]
+    fn build_not_leader_details_no_hints() {
+        let details = build_not_leader_details(None, None, None);
+        assert!(details.context.is_empty());
+        assert!(details.is_retryable);
+    }
+
+    #[test]
+    fn build_not_leader_details_empty_endpoint_omitted() {
+        let details = build_not_leader_details(Some(42), Some(""), Some(7));
+        assert!(!details.context.contains_key("leader_endpoint"));
+        assert!(details.context.contains_key("leader_id"));
+        assert!(details.context.contains_key("leader_term"));
+    }
+
+    #[test]
+    fn build_not_leader_details_encode_decode() {
+        let details = build_not_leader_details(Some(1), Some("http://x:5000"), Some(3));
+        let encoded = details.encode_to_vec();
+        let decoded = proto::ErrorDetails::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.context.get("leader_id").unwrap(), "1");
+        assert_eq!(decoded.context.get("leader_endpoint").unwrap(), "http://x:5000");
+        assert_eq!(decoded.context.get("leader_term").unwrap(), "3");
     }
 }

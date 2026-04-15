@@ -66,6 +66,23 @@ pub(crate) fn status_with_correlation(
     status
 }
 
+/// Builds a `NotLeader` `Status` with leader hints attached as `ErrorDetails`.
+///
+/// Prefer this over `Status::unavailable(message)` for any not-leader rejection
+/// so the client can update its region leader cache directly from the error
+/// path, without issuing a separate `ResolveRegionLeader` RPC.
+pub(crate) fn status_with_not_leader_hint(
+    message: impl Into<String>,
+    leader_id: Option<u64>,
+    leader_endpoint: Option<&str>,
+    leader_term: Option<u64>,
+) -> Status {
+    let details =
+        super::error_details::build_not_leader_details(leader_id, leader_endpoint, leader_term);
+    let encoded = details.encode_to_vec();
+    Status::with_details(tonic::Code::Unavailable, message, encoded.into())
+}
+
 /// Synthesizes a generic `ErrorDetails` from a gRPC status code.
 ///
 /// Maps each gRPC code to the most appropriate `DiagnosticCode`, retryability flag,
@@ -208,6 +225,33 @@ mod tests {
 
         let details = proto::ErrorDetails::decode(enriched.details()).unwrap();
         assert!(details.is_retryable);
+    }
+
+    #[test]
+    fn status_with_not_leader_hint_populates_details() {
+        let status = status_with_not_leader_hint(
+            "not leader for region us-east-va",
+            Some(42),
+            Some("http://10.0.2.5:5000"),
+            Some(7),
+        );
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+
+        let details = proto::ErrorDetails::decode(status.details()).unwrap();
+        assert!(details.is_retryable);
+        assert_eq!(details.context.get("leader_id").unwrap(), "42");
+        assert_eq!(details.context.get("leader_endpoint").unwrap(), "http://10.0.2.5:5000");
+        assert_eq!(details.context.get("leader_term").unwrap(), "7");
+    }
+
+    #[test]
+    fn status_with_not_leader_hint_survives_correlation() {
+        let status = status_with_not_leader_hint("not leader", Some(1), None, None);
+        let request_id = uuid::Uuid::new_v4();
+        let enriched = status_with_correlation(status, &request_id, "trace");
+
+        let details = proto::ErrorDetails::decode(enriched.details()).unwrap();
+        assert_eq!(details.context.get("leader_id").unwrap(), "1");
     }
 
     #[test]

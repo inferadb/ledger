@@ -289,18 +289,29 @@ impl ReadService {
     /// lazy-connected channel.
     fn get_leader_channel(&self, ctx: &RegionContext) -> Result<tonic::transport::Channel, Status> {
         let handle = &ctx.handle;
-        let leader_id =
-            handle.current_leader().ok_or_else(|| Status::unavailable("No leader available"))?;
+        let term = handle.current_term();
+        let leader_id = handle.current_leader().ok_or_else(|| {
+            super::metadata::status_with_not_leader_hint(
+                "No leader available",
+                None,
+                None,
+                Some(term),
+            )
+        })?;
 
         if leader_id == handle.node_id() {
             return Err(Status::internal("get_leader_channel called on leader node"));
         }
 
-        let leader_addr = self
-            .peer_addresses
-            .as_ref()
-            .and_then(|m| m.get(leader_id))
-            .ok_or_else(|| Status::unavailable("Leader address not found in peer registry"))?;
+        let leader_addr =
+            self.peer_addresses.as_ref().and_then(|m| m.get(leader_id)).ok_or_else(|| {
+                super::metadata::status_with_not_leader_hint(
+                    "Leader address not found in peer registry",
+                    Some(leader_id),
+                    None,
+                    Some(term),
+                )
+            })?;
 
         Ok(tonic::transport::Channel::from_shared(format!("http://{leader_addr}"))
             .map_err(|e| Status::internal(format!("invalid leader address: {e}")))?
