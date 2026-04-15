@@ -1410,6 +1410,15 @@ pub fn record_peer_send_queue_depth(peer: u64, depth: usize) {
     gauge!("ledger_peer_send_queue_depth", "peer" => peer.to_string()).set(depth_f64);
 }
 
+/// Records a consensus-stream reconnect attempt for a peer. Incremented
+/// whenever the drain loop (re)enters the stream-open path after a prior
+/// failure — either because the initial stream open failed or because a
+/// previously healthy stream broke and we are retrying.
+#[inline]
+pub fn record_peer_stream_reconnect(peer: u64) {
+    counter!("ledger_peer_stream_reconnects_total", "peer" => peer.to_string()).increment(1);
+}
+
 /// Records a node connection registry lifecycle event.
 ///
 /// `event` is one of:

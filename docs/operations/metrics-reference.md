@@ -369,6 +369,8 @@ default) and single-flight coalescing for concurrent miss resolutions.
 | `ledger_sdk_leader_cache_flaps_total`                    | Counter | `region` | Resolves that returned a different leader endpoint than the previously cached one — indicates a leader change.                 |
 | `ledger_sdk_region_resolve_singleflight_coalesced_total` | Counter | `region` | Concurrent resolvers that joined an in-flight resolve instead of launching their own RPC (thundering-herd defense).            |
 | `ledger_sdk_region_resolve_stale_served_total`           | Counter | `region` | Stale-but-usable entries served to a caller while a background refresh was kicked off.                                         |
+| `ledger_sdk_leader_watch_updates_total`                  | Counter | `region` | Leader updates received over the `WatchLeader` stream (includes the initial state pushed on stream open).                       |
+| `ledger_sdk_leader_watch_reconnects_total`               | Counter | `region` | `WatchLeader` stream reconnect attempts after error or server-initiated close. Exponential backoff caps at 30s between attempts.|
 
 **Labels:**
 

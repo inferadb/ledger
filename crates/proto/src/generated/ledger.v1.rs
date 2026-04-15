@@ -3827,6 +3827,26 @@ pub struct ResolveRegionLeaderResponse {
     #[prost(uint32, tag = "3")]
     pub ttl_seconds: u32,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WatchLeaderRequest {
+    #[prost(enumeration = "Region", tag = "1")]
+    pub region: i32,
+}
+/// Server-pushed leader update. Sent once immediately on stream open (current
+/// state, or empty if unknown), then on each leader change.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LeaderUpdate {
+    /// Full endpoint URL (e.g. "<http://10.0.1.5:5000">). Empty string indicates
+    /// no current leader is known (election in progress).
+    #[prost(string, tag = "1")]
+    pub endpoint: ::prost::alloc::string::String,
+    /// Raft term the leader was observed in.
+    #[prost(uint64, tag = "2")]
+    pub raft_term: u64,
+    /// Leader node ID. 0 when endpoint is empty.
+    #[prost(uint64, tag = "3")]
+    pub leader_node_id: u64,
+}
 /// Raft vote (term + node_id + committed flag).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RaftVote {
@@ -18835,6 +18855,35 @@ pub mod system_discovery_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Stream leader updates for a region. Server pushes an initial state
+        /// immediately, then sends updates whenever the region's Raft leader
+        /// changes. Stream lifetime is client-controlled; reconnect on disconnect.
+        pub async fn watch_leader(
+            &mut self,
+            request: impl tonic::IntoRequest<super::WatchLeaderRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::LeaderUpdate>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.SystemDiscoveryService/WatchLeader",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.SystemDiscoveryService", "WatchLeader"),
+                );
+            self.inner.server_streaming(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -18882,6 +18931,22 @@ pub mod system_discovery_service_server {
             request: tonic::Request<super::ResolveRegionLeaderRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ResolveRegionLeaderResponse>,
+            tonic::Status,
+        >;
+        /// Server streaming response type for the WatchLeader method.
+        type WatchLeaderStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::LeaderUpdate, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        /// Stream leader updates for a region. Server pushes an initial state
+        /// immediately, then sends updates whenever the region's Raft leader
+        /// changes. Stream lifetime is client-controlled; reconnect on disconnect.
+        async fn watch_leader(
+            &self,
+            request: tonic::Request<super::WatchLeaderRequest>,
+        ) -> std::result::Result<
+            tonic::Response<Self::WatchLeaderStream>,
             tonic::Status,
         >;
     }
@@ -19151,6 +19216,53 @@ pub mod system_discovery_service_server {
                                 max_encoding_message_size,
                             );
                         let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.SystemDiscoveryService/WatchLeader" => {
+                    #[allow(non_camel_case_types)]
+                    struct WatchLeaderSvc<T: SystemDiscoveryService>(pub Arc<T>);
+                    impl<
+                        T: SystemDiscoveryService,
+                    > tonic::server::ServerStreamingService<super::WatchLeaderRequest>
+                    for WatchLeaderSvc<T> {
+                        type Response = super::LeaderUpdate;
+                        type ResponseStream = T::WatchLeaderStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::WatchLeaderRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SystemDiscoveryService>::watch_leader(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = WatchLeaderSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.server_streaming(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)
@@ -19444,12 +19556,18 @@ pub mod raft_service_client {
                 .insert(GrpcMethod::new("ledger.v1.RaftService", "BatchSend"));
             self.inner.unary(req, path, codec).await
         }
-        /// Forward a consensus engine message to a peer node.
-        pub async fn forward_consensus(
+        /// Forward consensus engine messages to a peer node.
+        ///
+        /// Bidirectional stream: the client sends consensus messages and the server
+        /// acknowledges each one. The stream is long-lived (one per peer) to amortize
+        /// connection setup and enable HTTP/2 flow-controlled backpressure.
+        pub async fn forward_consensus_stream(
             &mut self,
-            request: impl tonic::IntoRequest<super::ConsensusForwardRequest>,
+            request: impl tonic::IntoStreamingRequest<
+                Message = super::ConsensusForwardRequest,
+            >,
         ) -> std::result::Result<
-            tonic::Response<super::ConsensusForwardResponse>,
+            tonic::Response<tonic::codec::Streaming<super::ConsensusForwardResponse>>,
             tonic::Status,
         > {
             self.inner
@@ -19462,12 +19580,14 @@ pub mod raft_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.RaftService/ForwardConsensus",
+                "/ledger.v1.RaftService/ForwardConsensusStream",
             );
-            let mut req = request.into_request();
+            let mut req = request.into_streaming_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("ledger.v1.RaftService", "ForwardConsensus"));
-            self.inner.unary(req, path, codec).await
+                .insert(
+                    GrpcMethod::new("ledger.v1.RaftService", "ForwardConsensusStream"),
+                );
+            self.inner.streaming(req, path, codec).await
         }
         /// Forward a regional proposal to the data region leader.
         /// Called when a node receives a write for a data region it doesn't lead.
@@ -19567,12 +19687,25 @@ pub mod raft_service_server {
             tonic::Response<super::BatchRaftResponse>,
             tonic::Status,
         >;
-        /// Forward a consensus engine message to a peer node.
-        async fn forward_consensus(
+        /// Server streaming response type for the ForwardConsensusStream method.
+        type ForwardConsensusStreamStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<
+                    super::ConsensusForwardResponse,
+                    tonic::Status,
+                >,
+            >
+            + std::marker::Send
+            + 'static;
+        /// Forward consensus engine messages to a peer node.
+        ///
+        /// Bidirectional stream: the client sends consensus messages and the server
+        /// acknowledges each one. The stream is long-lived (one per peer) to amortize
+        /// connection setup and enable HTTP/2 flow-controlled backpressure.
+        async fn forward_consensus_stream(
             &self,
-            request: tonic::Request<super::ConsensusForwardRequest>,
+            request: tonic::Request<tonic::Streaming<super::ConsensusForwardRequest>>,
         ) -> std::result::Result<
-            tonic::Response<super::ConsensusForwardResponse>,
+            tonic::Response<Self::ForwardConsensusStreamStream>,
             tonic::Status,
         >;
         /// Forward a regional proposal to the data region leader.
@@ -19934,25 +20067,32 @@ pub mod raft_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/ledger.v1.RaftService/ForwardConsensus" => {
+                "/ledger.v1.RaftService/ForwardConsensusStream" => {
                     #[allow(non_camel_case_types)]
-                    struct ForwardConsensusSvc<T: RaftService>(pub Arc<T>);
+                    struct ForwardConsensusStreamSvc<T: RaftService>(pub Arc<T>);
                     impl<
                         T: RaftService,
-                    > tonic::server::UnaryService<super::ConsensusForwardRequest>
-                    for ForwardConsensusSvc<T> {
+                    > tonic::server::StreamingService<super::ConsensusForwardRequest>
+                    for ForwardConsensusStreamSvc<T> {
                         type Response = super::ConsensusForwardResponse;
+                        type ResponseStream = T::ForwardConsensusStreamStream;
                         type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
+                            tonic::Response<Self::ResponseStream>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::ConsensusForwardRequest>,
+                            request: tonic::Request<
+                                tonic::Streaming<super::ConsensusForwardRequest>,
+                            >,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as RaftService>::forward_consensus(&inner, request).await
+                                <T as RaftService>::forward_consensus_stream(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
                             };
                             Box::pin(fut)
                         }
@@ -19963,7 +20103,7 @@ pub mod raft_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = ForwardConsensusSvc(inner);
+                        let method = ForwardConsensusStreamSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -19974,7 +20114,7 @@ pub mod raft_service_server {
                                 max_decoding_message_size,
                                 max_encoding_message_size,
                             );
-                        let res = grpc.unary(method, req).await;
+                        let res = grpc.streaming(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)

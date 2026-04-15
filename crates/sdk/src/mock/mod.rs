@@ -156,6 +156,12 @@ struct MockState {
     /// Peer info for discovery
     peers: RwLock<Vec<proto::PeerInfo>>,
 
+    /// Leader-update broadcast sender for `WatchLeader`. Lazily initialized
+    /// on first subscriber so tests that never touch the watch path incur
+    /// no cost. Capacity is 16 — watchers lagging beyond that are dropped
+    /// and expected to reconnect.
+    leader_watch: RwLock<Option<tokio::sync::broadcast::Sender<proto::LeaderUpdate>>>,
+
     /// User storage: user slug -> User proto
     users: RwLock<HashMap<u64, proto::User>>,
 
@@ -282,6 +288,24 @@ impl MockState {
             return Err(tonic::Status::unavailable("Injected error"));
         }
         Ok(())
+    }
+
+    /// Returns a receiver for leader watch updates. Initializes the broadcast
+    /// channel on first call.
+    pub(crate) fn subscribe_leader_watch(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<proto::LeaderUpdate> {
+        let mut slot = self.leader_watch.write();
+        let sender = slot.get_or_insert_with(|| tokio::sync::broadcast::channel(16).0);
+        sender.subscribe()
+    }
+
+    /// Returns the current broadcast sender, if a subscriber has been
+    /// registered. Tests use this to push updates to active watchers.
+    pub(crate) fn leader_watch_sender(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Sender<proto::LeaderUpdate>> {
+        self.leader_watch.read().clone()
     }
 }
 
@@ -493,6 +517,23 @@ impl MockLedgerServer {
     /// Sets to 0 to disable delay.
     pub fn inject_delay(&self, millis: u64) {
         self.state.delay_ms.store(millis, Ordering::SeqCst);
+    }
+
+    /// Pushes a leader update to all active `WatchLeader` subscribers.
+    ///
+    /// Returns `true` if at least one subscriber received the update.
+    /// No-op (returns `false`) when no client has subscribed yet.
+    pub fn push_leader_update(
+        &self,
+        endpoint: impl Into<String>,
+        raft_term: u64,
+        leader_node_id: u64,
+    ) -> bool {
+        let Some(sender) = self.state.leader_watch_sender() else {
+            return false;
+        };
+        let update = proto::LeaderUpdate { endpoint: endpoint.into(), raft_term, leader_node_id };
+        sender.send(update).is_ok()
     }
 
     /// Returns the total number of write requests received.

@@ -3,7 +3,9 @@
 //! This service handles incoming consensus protocol messages from peer nodes.
 //! The legacy openraft RPC methods (vote, append_entries, install_snapshot)
 //! are retained for proto compatibility but return `UNIMPLEMENTED`.
-//! Active consensus messaging uses `forward_consensus`.
+//! Active consensus messaging uses the bidirectional streaming
+//! `forward_consensus_stream` RPC — one long-lived stream per peer with
+//! HTTP/2 flow-controlled backpressure.
 
 use std::{str::FromStr, sync::Arc};
 
@@ -19,6 +21,7 @@ use inferadb_ledger_raft::{
     types::{LedgerRequest, RaftPayload},
 };
 use inferadb_ledger_types::{decode, encode};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 
 /// Handles incoming consensus RPCs from peer nodes.
@@ -142,89 +145,41 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         Ok(Response::new(ReadIndexResponse { committed_index, leader_term: handle.current_term() }))
     }
 
-    async fn forward_consensus(
+    type ForwardConsensusStreamStream = ReceiverStream<Result<ConsensusForwardResponse, Status>>;
+
+    async fn forward_consensus_stream(
         &self,
-        request: Request<ConsensusForwardRequest>,
-    ) -> Result<Response<ConsensusForwardResponse>, Status> {
-        let req = request.into_inner();
+        request: Request<tonic::Streaming<ConsensusForwardRequest>>,
+    ) -> Result<Response<Self::ForwardConsensusStreamStream>, Status> {
+        let mut inbound = request.into_inner();
+        // Bounded ack channel — bidi backpressure prevents unbounded fan-out.
+        // Capacity mirrors the peer-sender queue capacity (1024) so an active
+        // peer stream can have up to that many acks in flight before the
+        // server's write task parks on HTTP/2 flow control.
+        let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(1024);
 
-        // Resolve the target region from the request — None means GLOBAL,
-        // Some(invalid) is an error.
-        let region = match req.region {
-            None => inferadb_ledger_types::Region::GLOBAL,
-            Some(v) => {
-                let proto_region = inferadb_ledger_proto::proto::Region::try_from(v)
-                    .map_err(|_| Status::invalid_argument(format!("invalid region enum: {v}")))?;
-                inferadb_ledger_types::Region::try_from(proto_region)
-                    .map_err(|_| Status::invalid_argument(format!("unsupported region: {v}")))?
-            },
-        };
+        let manager = Arc::clone(&self.manager);
+        let peer_liveness = self.peer_liveness.clone();
 
-        let group = self
-            .manager
-            .get_region_group(region)
-            .map_err(|_| Status::not_found("region group not found"))?;
-
-        // Validate that the sender is a known cluster member (voter or learner).
-        // Skip validation when:
-        // - This node is the sole voter (freshly bootstrapped)
-        // - This node is NOT in the voter set (newly joined node with stale initial membership —
-        //   must accept messages to receive updated membership)
-        let from_node = inferadb_ledger_consensus::types::NodeId(req.from_node);
-        let local_node = inferadb_ledger_consensus::types::NodeId(group.handle().node_id());
-        let state = group.handle().shard_state();
-        let is_sole_voter = state.voters.len() == 1 && state.voters.contains(&local_node);
-        let is_non_member =
-            !state.voters.contains(&local_node) && !state.learners.contains(&local_node);
-        if !is_sole_voter
-            && !is_non_member
-            && !state.voters.contains(&from_node)
-            && !state.learners.contains(&from_node)
-        {
-            return Err(Status::permission_denied(format!(
-                "node {} is not a member of the cluster",
-                req.from_node
-            )));
-        }
-
-        // Auto-register the sender's transport channel if not yet known.
-        // This enables the return path: when the leader sends AppendEntries to a
-        // joining node, the joining node needs a channel back to the leader for
-        // AppendEntriesResponse.
-        if !req.from_address.is_empty() {
-            if let Some(transport) = group.consensus_transport()
-                && !transport.peers().contains(&req.from_node)
-                && let Err(e) =
-                    transport.set_peer_via_registry(req.from_node, &req.from_address).await
-            {
-                tracing::warn!(
-                    from_node = req.from_node,
-                    from_address = %req.from_address,
-                    error = %e,
-                    "Failed to auto-register sender via registry",
-                );
+        tokio::spawn(async move {
+            while let Some(msg) = inbound.next().await {
+                let ack = match msg {
+                    Ok(req) => handle_consensus_message(&manager, peer_liveness.as_ref(), req)
+                        .await
+                        .map(|_| ConsensusForwardResponse {}),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Consensus stream inbound error; closing");
+                        break;
+                    },
+                };
+                if ack_tx.send(ack).await.is_err() {
+                    // Client dropped the ack stream.
+                    break;
+                }
             }
-            // Also update the peer address map so future lookups work.
-            self.manager.peer_addresses().insert(req.from_node, req.from_address.clone());
-        }
+        });
 
-        // Deserialize the consensus message from postcard bytes.
-        let message: inferadb_ledger_consensus::Message = decode(&req.payload)
-            .map_err(|e| Status::invalid_argument(format!("deserialize: {e}")))?;
-
-        // Route to the consensus engine via the handle.
-        group
-            .handle()
-            .peer_message(req.from_node, message)
-            .await
-            .map_err(|e| Status::internal(format!("consensus: {e}")))?;
-
-        // Update peer liveness for the sender.
-        if let Some(ref liveness) = self.peer_liveness {
-            liveness.write().insert(req.from_node, std::time::Instant::now());
-        }
-
-        Ok(Response::new(ConsensusForwardResponse {}))
+        Ok(Response::new(ReceiverStream::new(ack_rx)))
     }
 
     async fn forward_regional_proposal(
@@ -278,6 +233,96 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
     }
 }
 
+/// Core per-message consensus handler, shared by the streaming RPC and tests.
+///
+/// Performs region resolution, membership validation, optional auto-registration
+/// of the sender's transport channel, postcard deserialization, delivery to the
+/// consensus engine, and peer liveness tracking. Returns `Ok(())` on successful
+/// delivery and a `tonic::Status` on any validation or engine failure.
+async fn handle_consensus_message(
+    manager: &Arc<RaftManager>,
+    peer_liveness: Option<
+        &Arc<parking_lot::RwLock<std::collections::HashMap<u64, std::time::Instant>>>,
+    >,
+    req: ConsensusForwardRequest,
+) -> Result<(), Status> {
+    // Resolve the target region from the request — None means GLOBAL,
+    // Some(invalid) is an error.
+    let region = match req.region {
+        None => inferadb_ledger_types::Region::GLOBAL,
+        Some(v) => {
+            let proto_region = inferadb_ledger_proto::proto::Region::try_from(v)
+                .map_err(|_| Status::invalid_argument(format!("invalid region enum: {v}")))?;
+            inferadb_ledger_types::Region::try_from(proto_region)
+                .map_err(|_| Status::invalid_argument(format!("unsupported region: {v}")))?
+        },
+    };
+
+    let group = manager
+        .get_region_group(region)
+        .map_err(|_| Status::not_found("region group not found"))?;
+
+    // Validate that the sender is a known cluster member (voter or learner).
+    // Skip validation when:
+    // - This node is the sole voter (freshly bootstrapped)
+    // - This node is NOT in the voter set (newly joined node with stale initial membership — must
+    //   accept messages to receive updated membership)
+    let from_node = inferadb_ledger_consensus::types::NodeId(req.from_node);
+    let local_node = inferadb_ledger_consensus::types::NodeId(group.handle().node_id());
+    let state = group.handle().shard_state();
+    let is_sole_voter = state.voters.len() == 1 && state.voters.contains(&local_node);
+    let is_non_member =
+        !state.voters.contains(&local_node) && !state.learners.contains(&local_node);
+    if !is_sole_voter
+        && !is_non_member
+        && !state.voters.contains(&from_node)
+        && !state.learners.contains(&from_node)
+    {
+        return Err(Status::permission_denied(format!(
+            "node {} is not a member of the cluster",
+            req.from_node
+        )));
+    }
+
+    // Auto-register the sender's transport channel if not yet known.
+    // This enables the return path: when the leader sends AppendEntries to a
+    // joining node, the joining node needs a channel back to the leader for
+    // AppendEntriesResponse.
+    if !req.from_address.is_empty() {
+        if let Some(transport) = group.consensus_transport()
+            && !transport.peers().contains(&req.from_node)
+            && let Err(e) = transport.set_peer_via_registry(req.from_node, &req.from_address).await
+        {
+            tracing::warn!(
+                from_node = req.from_node,
+                from_address = %req.from_address,
+                error = %e,
+                "Failed to auto-register sender via registry",
+            );
+        }
+        // Also update the peer address map so future lookups work.
+        manager.peer_addresses().insert(req.from_node, req.from_address.clone());
+    }
+
+    // Deserialize the consensus message from postcard bytes.
+    let message: inferadb_ledger_consensus::Message =
+        decode(&req.payload).map_err(|e| Status::invalid_argument(format!("deserialize: {e}")))?;
+
+    // Route to the consensus engine via the handle.
+    group
+        .handle()
+        .peer_message(req.from_node, message)
+        .await
+        .map_err(|e| Status::internal(format!("consensus: {e}")))?;
+
+    // Update peer liveness for the sender.
+    if let Some(liveness) = peer_liveness {
+        liveness.write().insert(req.from_node, std::time::Instant::now());
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
@@ -294,16 +339,16 @@ mod tests {
     use inferadb_ledger_types::{Region, encode};
     use tonic::Request;
 
-    use super::RaftService;
+    use super::{RaftService, handle_consensus_message};
 
-    fn create_basic_service() -> (RaftService, TestDir) {
+    fn create_basic_service() -> (RaftService, Arc<RaftManager>, TestDir) {
         let temp = TestDir::new();
         let config = RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::GLOBAL);
         let manager = Arc::new(RaftManager::new(
             config,
             Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new()),
         ));
-        (RaftService::new(manager), temp)
+        (RaftService::new(Arc::clone(&manager)), manager, temp)
     }
 
     async fn create_service_with_region() -> (RaftService, Arc<RaftManager>, TestDir) {
@@ -322,7 +367,7 @@ mod tests {
 
     #[tokio::test]
     async fn vote_returns_unimplemented() {
-        let (service, _temp) = create_basic_service();
+        let (service, _manager, _temp) = create_basic_service();
         let result = service
             .vote(Request::new(RaftVoteRequest { vote: None, last_log_id: None, region: None }))
             .await;
@@ -331,7 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_entries_returns_unimplemented() {
-        let (service, _temp) = create_basic_service();
+        let (service, _manager, _temp) = create_basic_service();
         let result = service
             .append_entries(Request::new(RaftAppendEntriesRequest {
                 vote: None,
@@ -346,7 +391,7 @@ mod tests {
 
     #[tokio::test]
     async fn install_snapshot_returns_unimplemented() {
-        let (service, _temp) = create_basic_service();
+        let (service, _manager, _temp) = create_basic_service();
         let result = service
             .install_snapshot(Request::new(RaftInstallSnapshotRequest {
                 vote: None,
@@ -360,24 +405,29 @@ mod tests {
         assert_eq!(result.unwrap_err().code(), tonic::Code::Unimplemented);
     }
 
-    // Byzantine fault tests for forward_consensus
+    // Byzantine fault tests for the streaming consensus handler.
+    // These target `handle_consensus_message` directly — the per-message
+    // core the streaming RPC loops over.
 
     /// A request targeting a region that has not been started returns NotFound.
     /// This prevents a rogue node from probing which regions exist before they
     /// are announced.
     #[tokio::test]
     async fn forward_consensus_unknown_region_returns_not_found() {
-        let (service, _temp) = create_basic_service();
-        let result = service
-            .forward_consensus(Request::new(ConsensusForwardRequest {
+        let (_service, manager, _temp) = create_basic_service();
+        let result = handle_consensus_message(
+            &manager,
+            None,
+            ConsensusForwardRequest {
                 shard_id: 0,
                 from_node: 1,
                 region: Some(ProtoRegion::Global as i32),
                 payload: vec![0xde, 0xad],
                 from_address: String::new(),
                 cluster_id: 0,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
     }
 
@@ -386,19 +436,20 @@ mod tests {
     /// but fails on payload deserialization (InvalidArgument for corrupt data).
     #[tokio::test]
     async fn forward_consensus_sole_voter_accepts_unknown_sender() {
-        let (service, _manager, _temp) = create_service_with_region().await;
-        // Node 99 is not in the cluster, but sole-voter bypass lets it through.
-        // The corrupt payload triggers InvalidArgument on deserialization.
-        let result = service
-            .forward_consensus(Request::new(ConsensusForwardRequest {
+        let (_service, manager, _temp) = create_service_with_region().await;
+        let result = handle_consensus_message(
+            &manager,
+            None,
+            ConsensusForwardRequest {
                 shard_id: 0,
                 from_node: 99,
                 region: Some(ProtoRegion::Global as i32),
                 payload: vec![0xde, 0xad],
                 from_address: String::new(),
                 cluster_id: 0,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
     }
 
@@ -406,17 +457,20 @@ mod tests {
     /// but fails on deserialization since the payload is corrupt.
     #[tokio::test]
     async fn forward_consensus_zero_node_id_sole_voter_accepts() {
-        let (service, _manager, _temp) = create_service_with_region().await;
-        let result = service
-            .forward_consensus(Request::new(ConsensusForwardRequest {
+        let (_service, manager, _temp) = create_service_with_region().await;
+        let result = handle_consensus_message(
+            &manager,
+            None,
+            ConsensusForwardRequest {
                 shard_id: 0,
                 from_node: 0,
                 region: Some(ProtoRegion::Global as i32),
                 payload: vec![0x01],
                 from_address: String::new(),
                 cluster_id: 0,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
     }
 
@@ -425,19 +479,20 @@ mod tests {
     /// reach the consensus engine.
     #[tokio::test]
     async fn forward_consensus_corrupt_payload_returns_invalid_argument() {
-        let (service, _manager, _temp) = create_service_with_region().await;
-        // Node 1 is the sole voter, so membership check passes.
-        // Payload is random bytes that cannot deserialize to `Message`.
-        let result = service
-            .forward_consensus(Request::new(ConsensusForwardRequest {
+        let (_service, manager, _temp) = create_service_with_region().await;
+        let result = handle_consensus_message(
+            &manager,
+            None,
+            ConsensusForwardRequest {
                 shard_id: 0,
                 from_node: 1,
                 region: Some(ProtoRegion::Global as i32),
                 payload: vec![0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
                 from_address: String::new(),
                 cluster_id: 0,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
     }
 
@@ -446,17 +501,20 @@ mod tests {
     /// malicious peer.
     #[tokio::test]
     async fn forward_consensus_empty_payload_returns_invalid_argument() {
-        let (service, _manager, _temp) = create_service_with_region().await;
-        let result = service
-            .forward_consensus(Request::new(ConsensusForwardRequest {
+        let (_service, manager, _temp) = create_service_with_region().await;
+        let result = handle_consensus_message(
+            &manager,
+            None,
+            ConsensusForwardRequest {
                 shard_id: 0,
                 from_node: 1,
                 region: Some(ProtoRegion::Global as i32),
                 payload: vec![],
                 from_address: String::new(),
                 cluster_id: 0,
-            }))
-            .await;
+            },
+        )
+        .await;
         assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
     }
 
@@ -467,19 +525,22 @@ mod tests {
     /// membership or deserialization rejection.
     #[tokio::test]
     async fn forward_consensus_valid_message_from_member_passes_validation() {
-        let (service, _manager, _temp) = create_service_with_region().await;
+        let (_service, manager, _temp) = create_service_with_region().await;
         let msg = Message::TimeoutNow;
         let payload = encode(&msg).expect("encode");
-        let result = service
-            .forward_consensus(Request::new(ConsensusForwardRequest {
+        let result = handle_consensus_message(
+            &manager,
+            None,
+            ConsensusForwardRequest {
                 shard_id: 0,
                 from_node: 1,
                 region: Some(ProtoRegion::Global as i32),
                 payload,
                 from_address: String::new(),
                 cluster_id: 0,
-            }))
-            .await;
+            },
+        )
+        .await;
         // The single-node cluster may return Ok or Internal depending on engine
         // state, but must not return NotFound, PermissionDenied, or
         // InvalidArgument — those indicate a validation failure, not an engine

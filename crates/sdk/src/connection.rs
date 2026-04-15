@@ -77,6 +77,31 @@ pub struct ConnectionPool {
 
     /// Gateway channel kept alive as fallback for region resolution.
     gateway_channel: Arc<RwLock<Option<Channel>>>,
+
+    /// Background leader-watch task handle and its cancellation token.
+    ///
+    /// Lazily populated on first `get_or_create_gateway_channel` call when
+    /// `region_cache` is `Some`. Shared across pool clones so the task
+    /// outlives any individual clone but is cancelled when the last clone
+    /// drops (`Arc` strong count reaches 1 in `Drop`).
+    leader_watcher: Arc<parking_lot::Mutex<Option<LeaderWatcherHandle>>>,
+}
+
+/// Background leader-watch task handle held by [`ConnectionPool`].
+#[derive(Debug)]
+struct LeaderWatcherHandle {
+    cancel: tokio_util::sync::CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for LeaderWatcherHandle {
+    fn drop(&mut self) {
+        // Cancel cooperatively first; if the task is blocked on an RPC that
+        // doesn't observe cancellation before the pool is dropped, abort
+        // as a fallback so we don't leak the task.
+        self.cancel.cancel();
+        self.handle.abort();
+    }
 }
 
 impl ConnectionPool {
@@ -108,6 +133,7 @@ impl ConnectionPool {
             circuit_breaker,
             region_cache,
             gateway_channel: Arc::new(RwLock::new(None)),
+            leader_watcher: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -138,6 +164,7 @@ impl ConnectionPool {
             circuit_breaker,
             region_cache,
             gateway_channel: Arc::new(RwLock::new(None)),
+            leader_watcher: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -369,13 +396,36 @@ impl ConnectionPool {
         {
             let existing = self.gateway_channel.read().clone();
             if let Some(channel) = existing {
+                self.ensure_leader_watcher(&channel);
                 return Ok(channel);
             }
         }
         // Create gateway channel using existing create_channel logic
         let channel = self.create_channel().await?;
         *self.gateway_channel.write() = Some(channel.clone());
+        self.ensure_leader_watcher(&channel);
         Ok(channel)
+    }
+
+    /// Spawns the leader-watch task on first use when a region cache is
+    /// configured. No-op when no region is preferred or the task is already
+    /// running.
+    fn ensure_leader_watcher(&self, gateway: &Channel) {
+        let Some(ref cache) = self.region_cache else {
+            return;
+        };
+        let mut slot = self.leader_watcher.lock();
+        if slot.is_some() {
+            return;
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let handle = crate::region_resolver::spawn_leader_watcher(
+            Arc::clone(cache),
+            gateway.clone(),
+            Arc::clone(self.config.metrics()),
+            cancel.clone(),
+        );
+        *slot = Some(LeaderWatcherHandle { cancel, handle });
     }
 
     /// Connects to a specific endpoint URL with the pool's TLS and timeout settings.
@@ -413,8 +463,11 @@ impl ConnectionPool {
     }
 
     /// Returns the currently cached region leader endpoint, if any.
-    #[cfg(test)]
-    pub(crate) fn region_cached_endpoint(&self) -> Option<Arc<str>> {
+    ///
+    /// Intended for tests and observability — returns `None` when no
+    /// `preferred_region` is configured or the cache is empty/expired.
+    #[must_use]
+    pub fn region_cached_endpoint(&self) -> Option<Arc<str>> {
         self.region_cache.as_ref().and_then(|c| c.cached_endpoint())
     }
 

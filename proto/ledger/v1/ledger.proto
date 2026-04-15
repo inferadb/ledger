@@ -3339,6 +3339,11 @@ service SystemDiscoveryService {
   // Any node can serve this — reads Raft membership state.
   // Used by SDKs to establish direct connections to regional leaders.
   rpc ResolveRegionLeader(ResolveRegionLeaderRequest) returns (ResolveRegionLeaderResponse);
+
+  // Stream leader updates for a region. Server pushes an initial state
+  // immediately, then sends updates whenever the region's Raft leader
+  // changes. Stream lifetime is client-controlled; reconnect on disconnect.
+  rpc WatchLeader(WatchLeaderRequest) returns (stream LeaderUpdate);
 }
 
 message GetPeersRequest {
@@ -3415,6 +3420,22 @@ message ResolveRegionLeaderResponse {
   uint32 ttl_seconds = 3; // Recommended cache TTL (default: 30)
 }
 
+message WatchLeaderRequest {
+  Region region = 1;
+}
+
+// Server-pushed leader update. Sent once immediately on stream open (current
+// state, or empty if unknown), then on each leader change.
+message LeaderUpdate {
+  // Full endpoint URL (e.g. "http://10.0.1.5:5000"). Empty string indicates
+  // no current leader is known (election in progress).
+  string endpoint = 1;
+  // Raft term the leader was observed in.
+  uint64 raft_term = 2;
+  // Leader node ID. 0 when endpoint is empty.
+  uint64 leader_node_id = 3;
+}
+
 // =============================================================================
 // Raft Internal Service (inter-node communication)
 // =============================================================================
@@ -3446,8 +3467,12 @@ service RaftService {
   // reducing per-message overhead for multi-group deployments.
   rpc BatchSend(BatchRaftRequest) returns (BatchRaftResponse);
 
-  // Forward a consensus engine message to a peer node.
-  rpc ForwardConsensus(ConsensusForwardRequest) returns (ConsensusForwardResponse);
+  // Forward consensus engine messages to a peer node.
+  //
+  // Bidirectional stream: the client sends consensus messages and the server
+  // acknowledges each one. The stream is long-lived (one per peer) to amortize
+  // connection setup and enable HTTP/2 flow-controlled backpressure.
+  rpc ForwardConsensusStream(stream ConsensusForwardRequest) returns (stream ConsensusForwardResponse);
 
   // Forward a regional proposal to the data region leader.
   // Called when a node receives a write for a data region it doesn't lead.

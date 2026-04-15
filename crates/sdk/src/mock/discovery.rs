@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use inferadb_ledger_proto::proto;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use super::MockState;
@@ -64,5 +65,33 @@ impl inferadb_ledger_proto::proto::system_discovery_service_server::SystemDiscov
         _request: Request<proto::ResolveRegionLeaderRequest>,
     ) -> Result<Response<proto::ResolveRegionLeaderResponse>, Status> {
         Err(Status::unimplemented("ResolveRegionLeader not available in mock"))
+    }
+
+    type WatchLeaderStream = ReceiverStream<Result<proto::LeaderUpdate, Status>>;
+
+    async fn watch_leader(
+        &self,
+        _request: Request<proto::WatchLeaderRequest>,
+    ) -> Result<Response<Self::WatchLeaderStream>, Status> {
+        let mut rx = self.state.subscribe_leader_watch();
+        let (tx, out_rx) = tokio::sync::mpsc::channel::<Result<proto::LeaderUpdate, Status>>(16);
+
+        // Initial state: empty update (no leader known yet). Tests push
+        // real updates via `MockState::leader_watch_sender`.
+        let initial =
+            proto::LeaderUpdate { endpoint: String::new(), raft_term: 0, leader_node_id: 0 };
+        if tx.send(Ok(initial)).await.is_err() {
+            return Ok(Response::new(ReceiverStream::new(out_rx)));
+        }
+
+        tokio::spawn(async move {
+            while let Ok(update) = rx.recv().await {
+                if tx.send(Ok(update)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(out_rx)))
     }
 }

@@ -5,9 +5,13 @@
 //! to make room for the new one — Raft semantics tolerate dropped
 //! heartbeats because retries arrive on the next heartbeat cycle.
 //!
-//! The drain task pulls batches off the queue and sends them via the
-//! existing gRPC path. A single task per peer preserves ordering and
-//! avoids unbounded tokio task spawning.
+//! The drain task holds one long-lived bidirectional gRPC stream
+//! (`ForwardConsensusStream`) per peer and feeds the queue's contents into
+//! it. A concurrent ack-reader discards server responses to keep the
+//! HTTP/2 flow-control window open. On any stream error we tear the stream
+//! down and reconnect with exponential backoff (100ms → cap 5s), resetting
+//! after a successful stream open. A single drain task per peer preserves
+//! ordering and avoids unbounded tokio task spawning.
 
 use std::{
     collections::VecDeque,
@@ -15,11 +19,13 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use inferadb_ledger_consensus::transport::OutboundMessage;
 use parking_lot::Mutex;
 use tokio::{sync::Notify, task::JoinHandle};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::transport::Channel;
 
 /// Default capacity of each peer's send queue. Chosen to absorb bursts
@@ -152,6 +158,68 @@ impl Drop for PeerSender {
     }
 }
 
+/// Initial reconnect backoff after a stream failure.
+const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Maximum reconnect backoff cap.
+const MAX_BACKOFF: Duration = Duration::from_secs(5);
+
+/// Build a protobuf request for a single outbound consensus message.
+///
+/// Returns `None` if postcard serialization fails — the message is
+/// dropped (logged at debug) rather than failing the whole stream,
+/// mirroring the fire-and-forget semantics of pre-streaming behavior.
+fn build_consensus_request(
+    msg: OutboundMessage,
+    from_node: u64,
+    from_address: &str,
+    region: inferadb_ledger_types::Region,
+) -> Option<inferadb_ledger_proto::proto::ConsensusForwardRequest> {
+    match postcard::to_allocvec(&msg.msg) {
+        Ok(payload) => Some(inferadb_ledger_proto::proto::ConsensusForwardRequest {
+            shard_id: msg.shard.0,
+            from_node,
+            region: Some(inferadb_ledger_proto::proto::Region::from(region) as i32),
+            payload,
+            from_address: from_address.to_string(),
+            cluster_id: 0,
+        }),
+        Err(e) => {
+            tracing::debug!(error = %e, "Failed to serialize consensus message; dropping");
+            None
+        },
+    }
+}
+
+/// Discards every queued message, attributing each to `reason` in drop metrics.
+/// Called when we have no live stream to deliver on — Raft will retransmit
+/// on the next heartbeat.
+fn drop_queue(inner: &Arc<Inner>, reason: &'static str) {
+    let dropped = {
+        let mut q = inner.queue.lock();
+        let n = q.len();
+        q.clear();
+        inner.depth.store(0, Ordering::Relaxed);
+        n
+    };
+    if dropped > 0 {
+        inner.dropped_count.fetch_add(dropped, Ordering::Relaxed);
+        for _ in 0..dropped {
+            crate::metrics::record_peer_send_drop(inner.peer_id, reason);
+        }
+        crate::metrics::record_peer_send_queue_depth(inner.peer_id, 0);
+    }
+}
+
+/// Wait for `d` or until the shutdown flag flips. Returns `true` if the
+/// shutdown was observed (caller should exit), `false` if the sleep elapsed.
+async fn wait_with_shutdown(inner: &Arc<Inner>, d: Duration) -> bool {
+    tokio::select! {
+        () = tokio::time::sleep(d) => inner.shutdown.load(Ordering::Acquire),
+        () = inner.notify.notified() => inner.shutdown.load(Ordering::Acquire),
+    }
+}
+
 async fn run_drain_loop(
     inner: Arc<Inner>,
     channel: Channel,
@@ -159,55 +227,172 @@ async fn run_drain_loop(
     from_node: u64,
     from_address: String,
 ) {
-    loop {
-        // Drain everything currently queued in one lock acquisition.
-        let drained: Vec<OutboundMessage> = {
-            let mut q = inner.queue.lock();
-            let out = q.drain(..).collect();
-            inner.depth.store(0, Ordering::Relaxed);
-            out
-        };
+    let mut backoff = INITIAL_BACKOFF;
 
-        if drained.is_empty() {
-            if inner.shutdown.load(Ordering::Acquire) {
-                break;
-            }
-            // Update gauge explicitly in case the last push left it nonzero
-            // (it shouldn't, but defensive).
-            crate::metrics::record_peer_send_queue_depth(inner.peer_id, 0);
-            inner.notify.notified().await;
-            continue;
+    'outer: loop {
+        if inner.shutdown.load(Ordering::Acquire) {
+            break;
         }
 
-        crate::metrics::record_peer_send_queue_depth(inner.peer_id, 0);
+        // Open a fresh bidi stream. A bounded mpsc provides our write side;
+        // tonic turns the ReceiverStream into an HTTP/2 request body.
+        let mut client = inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new(
+            channel.clone(),
+        );
+        let (req_tx, req_rx) = tokio::sync::mpsc::channel::<
+            inferadb_ledger_proto::proto::ConsensusForwardRequest,
+        >(inner.capacity);
+        let req_stream = ReceiverStream::new(req_rx);
 
-        for msg in drained {
-            let send_start = std::time::Instant::now();
-            let result = super::send_message(
-                channel.clone(),
-                msg.shard.0,
-                from_node,
-                &from_address,
-                region,
-                msg.msg,
-            )
-            .await;
-            let elapsed = send_start.elapsed().as_secs_f64();
-            crate::metrics::record_peer_send_latency(inner.peer_id, elapsed);
-
-            if let Err(e) = result {
+        let ack_stream = match client.forward_consensus_stream(req_stream).await {
+            Ok(resp) => resp.into_inner(),
+            Err(e) => {
                 tracing::debug!(
                     peer = inner.peer_id,
                     region = %region,
                     error = %e,
-                    "Consensus message send failed"
+                    "Failed to open consensus stream; backing off before reconnect",
                 );
-                // Continue draining remaining messages; don't break the batch
-                // just because one send failed. Raft retransmits on the next
-                // heartbeat anyway, and a persistent failure is handled via
-                // membership change (peer removal → task shutdown).
+                crate::metrics::record_peer_stream_reconnect(inner.peer_id);
+                // Drop any messages currently queued — we have no stream to
+                // deliver them on and Raft will retransmit from its own
+                // state on the next heartbeat. Leaving them queued would
+                // add head-of-line latency once we do reconnect, since
+                // those messages reference an older term/log window.
+                drop_queue(&inner, "stream_open_failed");
+                if wait_with_shutdown(&inner, backoff).await {
+                    break 'outer;
+                }
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            },
+        };
+
+        // Reset on each successful stream open.
+        backoff = INITIAL_BACKOFF;
+
+        // Spawn the ack-consumer. It discards every response (fire-and-forget
+        // semantics) while keeping the HTTP/2 flow-control window open. When
+        // the server closes its half or any transport error occurs, the task
+        // exits — the JoinHandle::await below observes this and drives
+        // reconnect.
+        let ack_peer = inner.peer_id;
+        let ack_task = tokio::spawn(async move {
+            let mut ack_stream = ack_stream;
+            while let Some(result) = ack_stream.next().await {
+                match result {
+                    Ok(_) => {}, // discard
+                    Err(e) => {
+                        tracing::debug!(
+                            peer = ack_peer,
+                            error = %e,
+                            "Consensus ack stream error",
+                        );
+                        break;
+                    },
+                }
             }
+        });
+        tokio::pin!(ack_task);
+
+        // Inner drain loop. Exits on shutdown (outer loop exit), ack-task
+        // completion (reconnect), or write-side error (reconnect).
+        let stream_broken = loop {
+            if inner.shutdown.load(Ordering::Acquire) {
+                break false; // full shutdown
+            }
+
+            // Snapshot the current queue. Holding the lock is momentary so
+            // producers (push) are not blocked.
+            let drained: Vec<OutboundMessage> = {
+                let mut q = inner.queue.lock();
+                let out = q.drain(..).collect();
+                inner.depth.store(0, Ordering::Relaxed);
+                out
+            };
+
+            if drained.is_empty() {
+                crate::metrics::record_peer_send_queue_depth(inner.peer_id, 0);
+
+                // Wait for either a push-notify, an ack-task completion
+                // (stream broken), or shutdown via notify.
+                tokio::select! {
+                    biased;
+                    () = inner.notify.notified() => continue,
+                    res = &mut ack_task => {
+                        // ack task exited — stream is broken.
+                        if let Err(e) = res {
+                            tracing::debug!(
+                                peer = inner.peer_id,
+                                error = %e,
+                                "Ack task join error",
+                            );
+                        }
+                        break true;
+                    }
+                }
+            }
+
+            crate::metrics::record_peer_send_queue_depth(inner.peer_id, 0);
+
+            let mut broke = false;
+            for msg in drained {
+                let send_start = std::time::Instant::now();
+                let Some(req) = build_consensus_request(msg, from_node, &from_address, region)
+                else {
+                    // Serialization failure — metric still useful for rate.
+                    crate::metrics::record_peer_send_latency(
+                        inner.peer_id,
+                        send_start.elapsed().as_secs_f64(),
+                    );
+                    continue;
+                };
+
+                if let Err(e) = req_tx.send(req).await {
+                    tracing::debug!(
+                        peer = inner.peer_id,
+                        region = %region,
+                        error = %e,
+                        "Consensus stream request channel closed; reconnecting",
+                    );
+                    broke = true;
+                    break;
+                }
+
+                crate::metrics::record_peer_send_latency(
+                    inner.peer_id,
+                    send_start.elapsed().as_secs_f64(),
+                );
+            }
+
+            if broke {
+                break true;
+            }
+        };
+
+        // Tear down write side; ack task will unwind next.
+        drop(req_tx);
+
+        if !stream_broken {
+            // Full shutdown path — abort the ack task and exit.
+            ack_task.abort();
+            break 'outer;
         }
+
+        // Stream-broken path: make sure ack task is finished (ignore result)
+        // before reconnecting so we don't stack multiple readers.
+        let _ = ack_task.await;
+
+        // Discard anything that was enqueued after we last drained but
+        // before the stream broke — those messages can't be delivered on
+        // this (dead) stream, and Raft will retransmit from its own state.
+        drop_queue(&inner, "stream_broken");
+
+        crate::metrics::record_peer_stream_reconnect(inner.peer_id);
+        if wait_with_shutdown(&inner, backoff).await {
+            break 'outer;
+        }
+        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 

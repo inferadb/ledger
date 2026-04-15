@@ -19,6 +19,8 @@
 //! | `ledger_sdk_retries_total` | Counter | `method`, `attempt`, `error_type` | Retry attempts by method |
 //! | `ledger_sdk_circuit_transitions_total` | Counter | `endpoint`, `state` | Circuit breaker state transitions |
 //! | `ledger_sdk_connections_total` | Counter | `endpoint`, `event` | Connection lifecycle events |
+//! | `ledger_sdk_leader_watch_updates_total` | Counter | `region` | Leader updates received over the WatchLeader stream |
+//! | `ledger_sdk_leader_watch_reconnects_total` | Counter | `region` | WatchLeader stream reconnect attempts |
 //!
 //! # Example
 //!
@@ -125,6 +127,12 @@ pub trait SdkMetrics: Send + Sync + fmt::Debug {
 
     /// Called when a stale-but-usable entry was served while a background refresh was triggered.
     fn region_resolve_stale_served(&self, _region: &str) {}
+
+    /// Called when the leader watch stream receives a push update.
+    fn leader_watch_update(&self, _region: &str) {}
+
+    /// Called when the leader watch stream reconnects after an error or EOF.
+    fn leader_watch_reconnect(&self, _region: &str) {}
 }
 
 /// No-op metrics implementation with zero overhead.
@@ -170,6 +178,10 @@ mod metric_names {
     /// Stale-but-usable entries served while a background refresh ran.
     pub const REGION_RESOLVE_STALE_SERVED_TOTAL: &str =
         "ledger_sdk_region_resolve_stale_served_total";
+    /// Leader watch stream pushed updates.
+    pub const LEADER_WATCH_UPDATES_TOTAL: &str = "ledger_sdk_leader_watch_updates_total";
+    /// Leader watch stream reconnect attempts.
+    pub const LEADER_WATCH_RECONNECTS_TOTAL: &str = "ledger_sdk_leader_watch_reconnects_total";
 }
 
 impl SdkMetrics for MetricsSdkMetrics {
@@ -234,6 +246,22 @@ impl SdkMetrics for MetricsSdkMetrics {
     fn region_resolve_stale_served(&self, region: &str) {
         metrics::counter!(
             metric_names::REGION_RESOLVE_STALE_SERVED_TOTAL,
+            "region" => region.to_owned(),
+        )
+        .increment(1);
+    }
+
+    fn leader_watch_update(&self, region: &str) {
+        metrics::counter!(
+            metric_names::LEADER_WATCH_UPDATES_TOTAL,
+            "region" => region.to_owned(),
+        )
+        .increment(1);
+    }
+
+    fn leader_watch_reconnect(&self, region: &str) {
+        metrics::counter!(
+            metric_names::LEADER_WATCH_RECONNECTS_TOTAL,
             "region" => region.to_owned(),
         )
         .increment(1);

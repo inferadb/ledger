@@ -12,9 +12,10 @@ use std::{
 
 use inferadb_ledger_proto::proto::{
     AnnouncePeerRequest, AnnouncePeerResponse, GetPeersRequest, GetPeersResponse,
-    GetSystemStateRequest, GetSystemStateResponse, NodeId, NodeInfo, OrganizationRegistry,
-    OrganizationSlug, PeerInfo, Region as ProtoRegion, ResolveRegionLeaderRequest,
-    ResolveRegionLeaderResponse, system_discovery_service_server::SystemDiscoveryService,
+    GetSystemStateRequest, GetSystemStateResponse, LeaderUpdate, NodeId, NodeInfo,
+    OrganizationRegistry, OrganizationSlug, PeerInfo, Region as ProtoRegion,
+    ResolveRegionLeaderRequest, ResolveRegionLeaderResponse, WatchLeaderRequest,
+    system_discovery_service_server::SystemDiscoveryService,
 };
 use inferadb_ledger_raft::{
     ConsensusHandle, log_storage::AppliedStateAccessor, peer_tracker::PeerTracker,
@@ -23,6 +24,7 @@ use inferadb_ledger_raft::{
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
 use parking_lot::RwLock;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 // =============================================================================
@@ -477,6 +479,68 @@ impl SystemDiscoveryService for DiscoveryService {
         let (endpoint, raft_term, ttl_seconds) = self.resolve_region_leader_impl(region)?;
 
         Ok(Response::new(ResolveRegionLeaderResponse { endpoint, raft_term, ttl_seconds }))
+    }
+
+    type WatchLeaderStream = ReceiverStream<Result<LeaderUpdate, Status>>;
+
+    async fn watch_leader(
+        &self,
+        request: Request<WatchLeaderRequest>,
+    ) -> Result<Response<Self::WatchLeaderStream>, Status> {
+        let req = request.into_inner();
+
+        // Validate region — reject unrecognized values.
+        let proto_region = ProtoRegion::try_from(req.region).unwrap_or(ProtoRegion::Unspecified);
+        let _region = inferadb_ledger_types::Region::try_from(proto_region)?;
+
+        // Currently all regions share a single consensus handle. The region
+        // parameter is validated and reserved for future multi-Raft routing,
+        // mirroring `resolve_region_leader`.
+        let mut state_rx = self.handle.state_watch();
+        let peer_addresses = self.peer_addresses.clone();
+
+        // Bounded channel — if the client cannot keep up we drop the stream
+        // and let the client reconnect. Capacity of 16 is generous for a
+        // push feed whose expected rate is at most a few updates per second
+        // even during rapid re-elections.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<LeaderUpdate, Status>>(16);
+
+        tokio::spawn(async move {
+            // Emit initial state immediately.
+            let initial = make_leader_update(&state_rx.borrow(), peer_addresses.as_ref());
+            if tx.send(Ok(initial)).await.is_err() {
+                return;
+            }
+
+            // Stream subsequent leader changes.
+            while state_rx.changed().await.is_ok() {
+                let update = make_leader_update(&state_rx.borrow(), peer_addresses.as_ref());
+                if tx.send(Ok(update)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+/// Builds a `LeaderUpdate` message from a shard state snapshot and the
+/// shared peer address map.
+fn make_leader_update(
+    state: &inferadb_ledger_consensus::leadership::ShardState,
+    peer_addresses: Option<&inferadb_ledger_raft::PeerAddressMap>,
+) -> LeaderUpdate {
+    match state.leader {
+        Some(leader) => {
+            let endpoint = peer_addresses
+                .and_then(|m| m.get(leader.0))
+                .map(|addr| format!("http://{addr}"))
+                .unwrap_or_default();
+            let leader_node_id = if endpoint.is_empty() { 0 } else { leader.0 };
+            LeaderUpdate { endpoint, raft_term: state.term, leader_node_id }
+        },
+        None => LeaderUpdate { endpoint: String::new(), raft_term: state.term, leader_node_id: 0 },
     }
 }
 

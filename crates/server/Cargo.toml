@@ -70,6 +70,7 @@ metrics-exporter-prometheus.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio-stream.workspace = true
 inferadb-ledger-test-utils.workspace = true
 futures.workspace = true
 uuid.workspace = true

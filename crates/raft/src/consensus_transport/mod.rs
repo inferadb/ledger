@@ -1,16 +1,16 @@
 //! gRPC network transport for the consensus engine.
 //!
-//! Implements [`NetworkTransport`] by serializing consensus messages
-//! to postcard bytes and sending them via the `ForwardConsensus` gRPC RPC.
+//! Implements [`NetworkTransport`] by serializing consensus messages to
+//! postcard bytes and shipping them over a long-lived bidirectional stream
+//! (`ForwardConsensusStream`) per peer. The stream amortizes connection
+//! setup across every message and leverages HTTP/2 flow control for
+//! transport-level backpressure.
 
 mod peer_sender;
 
 use std::{collections::HashMap, sync::Arc};
 
-use inferadb_ledger_consensus::{
-    Message,
-    transport::{NetworkTransport, OutboundMessage},
-};
+use inferadb_ledger_consensus::transport::{NetworkTransport, OutboundMessage};
 use parking_lot::RwLock;
 use tonic::transport::Channel;
 
@@ -138,37 +138,13 @@ impl NetworkTransport for GrpcConsensusTransport {
     }
 }
 
-pub(super) async fn send_message(
-    channel: Channel,
-    shard_id: u64,
-    from_node: u64,
-    from_address: &str,
-    region: inferadb_ledger_types::Region,
-    message: Message,
-) -> Result<(), tonic::Status> {
-    let payload = postcard::to_allocvec(&message)
-        .map_err(|e| tonic::Status::internal(format!("serialize consensus message: {e}")))?;
-
-    let mut client =
-        inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new(channel);
-
-    let request = inferadb_ledger_proto::proto::ConsensusForwardRequest {
-        shard_id,
-        from_node,
-        region: Some(inferadb_ledger_proto::proto::Region::from(region) as i32),
-        payload,
-        from_address: from_address.to_string(),
-        cluster_id: 0,
-    };
-
-    client.forward_consensus(request).await?;
-    Ok(())
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
-    use inferadb_ledger_consensus::types::{NodeId, ShardId};
+    use inferadb_ledger_consensus::{
+        Message,
+        types::{NodeId, ShardId},
+    };
 
     use super::*;
     use crate::node_registry::NodeConnectionRegistry;

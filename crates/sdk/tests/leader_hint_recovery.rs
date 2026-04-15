@@ -87,6 +87,28 @@ impl proto::system_discovery_service_server::SystemDiscoveryService for Counting
             ttl_seconds: 30,
         }))
     }
+
+    type WatchLeaderStream =
+        tokio_stream::wrappers::ReceiverStream<Result<proto::LeaderUpdate, Status>>;
+
+    async fn watch_leader(
+        &self,
+        _request: Request<proto::WatchLeaderRequest>,
+    ) -> Result<Response<Self::WatchLeaderStream>, Status> {
+        // Minimal stub: emit one initial empty update and hold the stream open
+        // until the client disconnects. The hint-recovery test does not rely
+        // on push updates.
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let initial =
+            proto::LeaderUpdate { endpoint: String::new(), raft_term: 0, leader_node_id: 0 };
+        let _ = tx.send(Ok(initial)).await;
+        // Keep `tx` alive for the stream's lifetime by spawning a parked task.
+        tokio::spawn(async move {
+            let _guard = tx;
+            std::future::pending::<()>().await;
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
 }
 
 struct TestGateway {

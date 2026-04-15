@@ -1792,6 +1792,7 @@ dependencies = [
  "snafu",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tower",
  "tracing",

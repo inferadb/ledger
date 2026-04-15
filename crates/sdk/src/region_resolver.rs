@@ -125,8 +125,24 @@ impl RegionLeaderCache {
     }
 
     /// Returns the region label as a string for metric tagging.
-    fn region_label(&self) -> String {
+    pub(crate) fn region_label(&self) -> String {
         self.region.to_string()
+    }
+
+    /// Applies a server-pushed leader update to the cache.
+    ///
+    /// Uses the default TTLs. Empty endpoint is treated as a no-op —
+    /// a leaderless update does not overwrite a usable cached entry.
+    pub(crate) fn apply_watch_update(&self, endpoint: &str) {
+        if endpoint.is_empty() {
+            return;
+        }
+        *self.cached.write() = Some(CachedLeader {
+            endpoint: Arc::from(endpoint),
+            resolved_at: Instant::now(),
+            soft_ttl: self.default_soft_ttl,
+            hard_ttl: self.default_hard_ttl,
+        });
     }
 
     /// Returns the cached leader endpoint if usable (fresh OR stale-but-usable).
@@ -358,6 +374,84 @@ impl RegionLeaderCache {
     }
 }
 
+/// Initial reconnect backoff for the leader watcher.
+const WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Maximum reconnect backoff for the leader watcher.
+const WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Spawns a background task that streams leader updates from the gateway and
+/// applies them to the given cache. The task runs until the provided
+/// cancellation token is triggered. On stream error or EOF, it reconnects
+/// with exponential backoff capped at [`WATCHER_MAX_BACKOFF`].
+///
+/// The TTL-based `resolve` path remains the cold-start and fallback: the
+/// watcher augments the cache with push updates but does not replace it.
+pub(crate) fn spawn_leader_watcher(
+    cache: Arc<RegionLeaderCache>,
+    gateway: Channel,
+    metrics: Arc<dyn crate::metrics::SdkMetrics>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut backoff = WATCHER_INITIAL_BACKOFF;
+        let label = cache.region_label();
+        let region_proto = region_to_proto_i32(cache.region());
+
+        loop {
+            if cancel.is_cancelled() {
+                return;
+            }
+
+            let mut client =
+                proto::system_discovery_service_client::SystemDiscoveryServiceClient::new(
+                    gateway.clone(),
+                );
+            let request = proto::WatchLeaderRequest { region: region_proto };
+
+            let stream_result = tokio::select! {
+                _ = cancel.cancelled() => return,
+                res = client.watch_leader(request) => res,
+            };
+
+            match stream_result {
+                Ok(resp) => {
+                    // Reset backoff on successful open.
+                    backoff = WATCHER_INITIAL_BACKOFF;
+                    let mut stream = resp.into_inner();
+
+                    loop {
+                        tokio::select! {
+                            _ = cancel.cancelled() => return,
+                            item = stream.message() => {
+                                match item {
+                                    Ok(Some(update)) => {
+                                        metrics.leader_watch_update(&label);
+                                        cache.apply_watch_update(&update.endpoint);
+                                    },
+                                    // Server closed or stream error — fall through to reconnect.
+                                    Ok(None) | Err(_) => break,
+                                }
+                            }
+                        }
+                    }
+                },
+                Err(_) => {
+                    // Open failed — fall through to backoff.
+                },
+            }
+
+            metrics.leader_watch_reconnect(&label);
+
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                () = tokio::time::sleep(backoff) => {},
+            }
+            backoff = (backoff * 2).min(WATCHER_MAX_BACKOFF);
+        }
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
@@ -395,6 +489,12 @@ mod tests {
         }
         fn region_resolve_stale_served(&self, region: &str) {
             self.bump("stale_served", region);
+        }
+        fn leader_watch_update(&self, region: &str) {
+            self.bump("watch_update", region);
+        }
+        fn leader_watch_reconnect(&self, region: &str) {
+            self.bump("watch_reconnect", region);
         }
     }
 
@@ -768,5 +868,49 @@ mod tests {
         });
 
         assert_eq!(metrics.get("flap", "us-east-va"), 0);
+    }
+
+    #[test]
+    fn apply_watch_update_writes_endpoint_with_default_ttls() {
+        let cache = RegionLeaderCache::new(Region::US_EAST_VA);
+        assert!(cache.cached_endpoint().is_none());
+
+        cache.apply_watch_update("http://leader:5000");
+
+        let got = cache.cached_endpoint().expect("cache populated by watch update");
+        assert_eq!(got.as_ref(), "http://leader:5000");
+    }
+
+    #[test]
+    fn apply_watch_update_empty_endpoint_is_noop() {
+        let cache = RegionLeaderCache::new(Region::US_EAST_VA);
+        // Seed a usable entry; a leaderless update must not evict it.
+        *cache.cached.write() = Some(CachedLeader {
+            endpoint: Arc::from("http://existing:5000"),
+            resolved_at: Instant::now(),
+            soft_ttl: Duration::from_secs(30),
+            hard_ttl: Duration::from_secs(120),
+        });
+
+        cache.apply_watch_update("");
+
+        let got = cache.cached_endpoint().expect("cache preserved");
+        assert_eq!(got.as_ref(), "http://existing:5000");
+    }
+
+    #[test]
+    fn apply_watch_update_overwrites_previous_entry() {
+        let cache = RegionLeaderCache::new(Region::US_EAST_VA);
+        *cache.cached.write() = Some(CachedLeader {
+            endpoint: Arc::from("http://old:5000"),
+            resolved_at: Instant::now(),
+            soft_ttl: Duration::from_secs(30),
+            hard_ttl: Duration::from_secs(120),
+        });
+
+        cache.apply_watch_update("http://new:5000");
+
+        let got = cache.cached_endpoint().expect("cache populated");
+        assert_eq!(got.as_ref(), "http://new:5000");
     }
 }
